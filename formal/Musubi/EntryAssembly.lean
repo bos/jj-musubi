@@ -1,7 +1,7 @@
 /-
-Ordered-record identity and custody of pending names derive an eligible node's empty pending
-list, and the packet algebra that keeps a noneligible node's answer from moving the hub once the
-records are fixed. Neither maintenance finiteness nor hub stabilization is assumed.
+Ordered-record identity and custody of pending names give an eligible node an empty pending
+list (`eligible_pending_empty`). The packet algebra keeps a noneligible node's answer from moving
+the hub once the records are fixed (`raw_noneligible_answer_frame`).
 
 The convergence proof uses `PendingOriginals` and `eligible_pending_empty` from this file. It does
 not use `raw_pending_empty_of_fixed_records` or `raw_noneligible_answer_frame`, which derive the
@@ -17,15 +17,18 @@ open Musubi NodeSettle EarlyEntry
 /-- Raw pending names can differ while describing the same original. Custody provides their
 immutable identities, and record matching removes an original already applied. -/
 structure PendingOriginals (s : Exec.SEState) (n : Nat) (σ : NS) (origin : Nat → Nat) : Prop where
+  /-- Custody: each pending name's original is among the node's drops. -/
   owned : ∀ p ∈ σ.pending, origin p ∈ s.nodeDF n
+  /-- Record matching: no pending name's original is in the applied records. -/
   unpublished : ∀ p ∈ σ.pending, origin p ∉ Exec.flat (s.appliedF n)
 
 /-- Native packet/record algebra, independent of an original-history executable step.
-Acceptance appends a record exactly when contraction has effective raw drops. Under current
-naming, each pending raw name is effective or its original is already recorded. Unchanged
-ordered records force the effective list empty; matching applied records and custody exclude
-the second alternative too. The naming coverage is an adapter law, not a consequence of raw
-`is_superseded` alone: a superseded raw name can also name a rewritten surviving original. -/
+Acceptance appends a record exactly when contraction has effective raw drops (`heffect`). Under
+current naming, each pending raw name is effective or its original is already recorded
+(`hcover`). Unchanged ordered records (`hfixed`) force the effective list empty; matching applied
+records and custody (`hmatch`, `hunpublished`) exclude the second alternative too. The naming
+coverage is an adapter law, not a consequence of raw `is_superseded` alone: a superseded raw name
+can also name a rewritten surviving original. -/
 theorem raw_pending_empty_of_fixed_records (before after applied : List Exec.Rec)
     (pending effective : List Nat) (origin : Nat → Nat)
     (heffect : after = if effective = [] then before else before ++ [effective.map origin])
@@ -45,13 +48,12 @@ theorem raw_pending_empty_of_fixed_records (before after applied : List Exec.Rec
   · simp [hempty] at he
   · exact hunpublished p hp (hmatch ▸ hr)
 
-/-- A fresh noneligible packet cannot move the hub after the record cut. Wrong offered
-records refuse first; only an actual acceptance needs current applied records. For that same
-decision, the native append effect and current naming coverage force its raw pending list
-empty. Complete custody would then make its original drop set the hub's, contrary to its
-noneligibility. This uses neither an original-history execution nor a noneligible embedding.
-The record effect and coverage concern this packet at this actual decision, not a different
-executable state with coincidentally equal head fields. -/
+/-- A fresh noneligible packet cannot move the hub after the record cut. Wrong offered records
+are refused first; only an actual acceptance needs current applied records. For that decision,
+the native append effect and current naming coverage force the packet's raw pending list empty.
+Complete custody then makes its original drop set the hub's, contradicting noneligibility. The
+record effect and coverage are about this packet at this actual decision, not another executable
+state with equal head fields. -/
 theorem raw_noneligible_answer_frame (h : RawPublish.Hub) (p : RawPublish.Push)
     (c : RawPublish.Checks) (before after applied : List Exec.Rec)
     (knownDrops effective : List Nat) (origin : Nat → Nat)
@@ -81,9 +83,9 @@ theorem raw_noneligible_answer_frame (h : RawPublish.Hub) (p : RawPublish.Push)
     simp
   simp [RawPublish.after, hno]
 
-/-- Decode opaque wire-record identities into original drop sets, rather than trying to
-encode those sets injectively as raw record identities: different raw records may describe
-the same originals. Current applied records and custody leave no pending RAW names. -/
+/-- Wire-record identities are decoded into original drop sets (`decode`), since different raw
+records may describe the same originals. Current applied records and custody leave no pending
+raw names. -/
 theorem eligible_pending_empty {s : Exec.SEState} {n : Nat} {σ : NS}
     (decode : Nat → List Exec.Rec) (R : Nat) (origin : Nat → Nat)
     (hsource : s.appliedF n = decode σ.ap) (hcurrent : σ.ap = R)

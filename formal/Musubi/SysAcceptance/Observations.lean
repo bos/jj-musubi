@@ -24,6 +24,7 @@ structure Schedule where
   sched : (node event : Nat) → Nat
   doneAt : (node time : Nat) → Nat
   latch : (node time : Nat) → Nat
+  /-- Identifies the round the event belongs to. -/
   roundId : (node time : Nat) → Nat
 
 /-! ## Node control -/
@@ -31,14 +32,23 @@ structure Schedule where
 /-- At a sampled event, `ctl` is the post-prelude reading; just after its batch completes,
 it is the state the step left. `active` says which events belong to a running round. -/
 structure Control where
+  /-- The control state, as described above. -/
   ctl : (node time : Nat) → EarlyEntry.Control.State
+  /-- The guard bits the core reads at the event. -/
   prims : (node time : Nat) → EarlyEntry.Control.Prims
+  /-- The kind of reply the event handles. -/
   reply : (node time : Nat) → EarlyEntry.Control.Reply
+  /-- The event is a core step. -/
   core : (node time : Nat) → Prop
+  /-- The event starts a round. -/
   starts : (node time : Nat) → Prop
+  /-- The event sends a fetch call. -/
   fetchCall : (node time : Nat) → Prop
+  /-- The hub drops the pushed head (its `is_dropped`). -/
   pushDropped : (node time : Nat) → Bool
+  /-- The node reopens (retires its live call slots). -/
   reopen : (node time : Nat) → Prop
+  /-- The event belongs to a running round. -/
   active : (node time : Nat) → Bool
 
 /-! ## Records and entry -/
@@ -46,12 +56,19 @@ structure Control where
 /-- Records heard, applied and announced are native identities of type `ρ`. The remaining
 readings describe the node's raw entry and the result of its publication checks. -/
 structure Records (ρ : Type) where
+  /-- The records last heard from the hub. -/
   heard : (node time : Nat) → Option ρ
+  /-- The records the node has applied. -/
   applied : (node time : Nat) → ρ
+  /-- The records the hub has announced to the node, which it has not yet taken. -/
   annc : (node time : Nat) → Option ρ
+  /-- The node holds receipts. -/
   receipts : (node time : Nat) → Bool
+  /-- The hub answered the node's push `Incomplete`. -/
   incomplete : (node time : Nat) → Bool
+  /-- The push expects the hub's head. -/
   expectedIsHead : (node time : Nat) → Bool
+  /-- The hub holds the closure of the node's push. -/
   closed : (node time : Nat) → Bool
 
 /-! ## Naming and the raw graph -/
@@ -60,16 +77,25 @@ structure Records (ρ : Type) where
 announcement) and retained work a preparation may make pending. `facts` is the metadata
 held then; `orig` identifies each raw operation's original. `images` names the known head's
 images. `prep` says the announced records are prepared again from scratch between events.
-`par` and `anc` are that node's graph readings, not a separately chosen history. -/
+`par` and `anc` are that node's graph readings. -/
 structure Naming (α : Type) where
+  /-- The raw closure. -/
   raw : (node time : Nat) → List Nat
+  /-- The metadata of an operation. -/
   facts : (node time op : Nat) → Option α
+  /-- The pending names. -/
   names : (node time : Nat) → List Nat
+  /-- The retained work a preparation may make pending. -/
   retained : (node time : Nat) → List Nat
+  /-- The original identity of an operation. -/
   orig : Nat → Nat
+  /-- The images of the known head. -/
   images : (node time : Nat) → List Nat
+  /-- The announced records are prepared again from scratch. -/
   prep : (node time : Nat) → Prop
+  /-- The parents of an operation in the node's graph. -/
   par : (node time op : Nat) → List Nat
+  /-- The ancestor test in the node's graph. -/
   anc : (node time op : Nat) → Nat → Bool
 
 /-! ## One immutable push and its handling -/
@@ -81,18 +107,31 @@ an identity fallback is insufficient. `nodeDrop` and `hubDrop` refer to original
 `valid` covers the hub's other validations. The two base lists are the sender's omitted
 operation and object bases, respectively. -/
 structure Publication where
+  /-- The hub's checks on the push. -/
   checks : (node time : Nat) → RawPublish.Checks
+  /-- The hub has named an operation. -/
   hubNamed : (node time op : Nat) → Bool
+  /-- An operation is a key of the hub's cached renamings. -/
   hubCached : (node time op : Nat) → Bool
+  /-- An operation is a complete canonical body. -/
   normal : (node time op : Nat) → Bool
+  /-- The node drops the original of an operation. -/
   nodeDrop : (node time op : Nat) → Bool
+  /-- The hub drops the original of an operation. -/
   hubDrop : (node time op : Nat) → Bool
+  /-- The hub's other validations pass. -/
   valid : (node time : Nat) → Bool
+  /-- The executable state the push reads. -/
   pushStore : (node time : Nat) → Exec.EState
+  /-- The actual packet sent. -/
   pushPacket : (node time : Nat) → Exec.PushPacket
+  /-- The sender's omitted operation bases. -/
   opBases : (node time : Nat) → List Nat
+  /-- The sender's omitted object bases. -/
   objectBases : (node time : Nat) → List Nat
+  /-- The event sends a push. -/
   pushes : (node time : Nat) → Prop
+  /-- The hive time at which the hub handles the push. -/
   answerAt : (node time : Nat) → Nat
 
 /-! ## Calls, replies and notifications -/
@@ -103,10 +142,15 @@ its call id and the capture time of its hub state, not its wire time. A `note` n
 state just after its publishing accept. `callAt` gives each call's start time. For a cut
 `c`, `oldNotes c` counts both in-flight and queued notices published before `c`. -/
 structure Transport where
+  /-- The shared request counter and live slots. -/
   inbox : (node time : Nat) → Retry.Inbox
+  /-- The head-bearing own reply handled: call id and hub-state time. -/
   own : (node time : Nat) → Option (Nat × Nat)
+  /-- The notice handled: the time of its hub state. -/
   note : (node time : Nat) → Option Nat
+  /-- The start time of a call. -/
   callAt : (node id : Nat) → Nat
+  /-- The in-flight and queued notices published before `cut`. -/
   oldNotes : (cut node time : Nat) → Retry.Notifications.State
 
 /-! ## Failures, object credit and semantic writes -/
@@ -117,9 +161,13 @@ haves (the implicit base included) are true, or recovery is under way and sends 
 before reopening. `lost` invalidates that credit: a remade hub, lost hub objects, local gc
 or a cached have becoming false. `ioFail` records ordinary I/O or transport failure. -/
 structure Environment where
+  /-- A `GetObjects` reply failed for lack of requested objects. -/
   objFail : (node time : Nat) → Prop
+  /-- Object credit is unspent. -/
   objReady : (node time : Nat) → Bool
+  /-- The environment loses something (see above). -/
   lost : Nat → Prop
+  /-- An ordinary I/O or transport failure. -/
   ioFail : Nat → Prop
   /-- Node `n`'s own code makes, at hive time `t`, a semantic write no protocol step accounts
   for: idle housekeeping (`when_idle`: `show_other_workspaces`,
@@ -127,10 +175,11 @@ structure Environment where
   (`before_sync`: `show_other_workspaces`); `advance_to`'s working-copy
   cleanup (`replace_abandoned_working_copies`, and `move_taken_workspaces` after a taking); the
   pass-on of a user's `jj op abandon` (`check_abandon`), which can come after the user's work;
-  and the reparenting of late operations after a renaming (`reparent_late`). Not the git export
-  copy (the same canonical form), the fix-up's write (`WriteRes`), a realization, a merge or
-  the taking of records, which the model's steps account for. -/
+  and the reparenting of late operations after a renaming (`reparent_late`). The git export
+  copy (the same canonical form), the fix-up's write (`WriteRes`), a realization, a merge and
+  the taking of records are excluded: the model's steps account for them. -/
   autoWrite : (node time : Nat) → Prop
+  /-- A user works in the node's repository. -/
   userWork : (node time : Nat) → Prop
 
 /-! ## Knowledge and accepted history -/
@@ -138,16 +187,19 @@ structure Environment where
 /-- The node's known pair and the hub history it refers to. `known` is a raw head and `seq`
 its sequence. `hist` indexes accepted heads in the hub's last generation. -/
 structure Knowledge where
+  /-- The known raw head. -/
   known : (node time : Nat) → Nat
+  /-- The known sequence. -/
   seq : (node time : Nat) → Nat
   /-- The root operation. -/
   root : Nat
+  /-- The accepted head at a sequence. -/
   hist : Nat → Nat
 
 end Observation
 
-/-- All views of one hive execution. Inheritance keeps each field directly accessible while
-its declaration lives with the observations that explain it. No view carries its own run. -/
+/-- All views of one hive execution. Each field is declared with the observation that explains
+it and is accessible directly through inheritance. -/
 structure HiveObs (ρ α : Type) extends Observation.Schedule, Observation.Control,
     Observation.Records ρ, Observation.Naming α, Observation.Publication,
     Observation.Transport, Observation.Environment, Observation.Knowledge
@@ -258,6 +310,7 @@ def pendingData (n p : Nat) (current : ρ) : PendingData ρ α where
   opBases := fun j => O.opBases n (O.sched n (p + j))
   objectBases := fun j => O.objectBases n (O.sched n (p + j))
 
+/-- A round active at its first sampled event is active at index 0. -/
 theorem roundActive_zero {n p : Nat} (h : O.active n (O.sched n p) = true) :
     O.roundActive n p 0 = true := by
   simp [roundActive, h]

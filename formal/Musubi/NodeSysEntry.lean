@@ -1,18 +1,22 @@
 /-
-Entry into the system simulation, derived rather than assumed.
+Entry into the system simulation. `node_sim` needs its invariant `SimInv` at some step; this
+file shows it holds just after the node's first fresh observation.
 
-`node_sim` starts from what it keeps (`SimInv`). Here that comes from what every run keeps from a
-well-formed start: slots and the hub's answers (`SysOK`), replies and notifications made in the
-past (`TimeOK`), a step that asks for objects being answered with them (`ObjsOK`), and the node's
-own state well formed and scoped, its wait an `Issue` from it (`NodeOK`, kept through `Learn` by
-its parents-first law). Once the hub has settled at `st` and the node takes no old reply and
-processes no old notification (root's old-effects cuts, as `node_sim` takes them; old ones may
-stay queued, never taken), the node's next step that learns a head, its first own fresh
+What every run keeps from a well-formed start:
+- slots and the hub's answers (`SysOK`);
+- replies and notifications made in the past (`TimeOK`);
+- a step that asks for objects is answered with them (`ObjsOK`);
+- the node's own state well formed and scoped, its wait an `Issue` from it (`NodeOK`, kept
+  through `Learn` by its parents-first law).
+
+Suppose the hub has settled at `st`, and the node takes no reply from before that point and
+processes no old notification (the cuts on old effects that `node_sim` takes; old ones may stay
+queued but are never taken). Then the node's next step that learns a head, its first fresh
 observation (`Observes`), teaches it `st` with its records, and the simulation starts just after
-it (`entry_of_obs`). A fair node makes one
-(`observes`): without one its known pair stays put, its round keeps running, since an idle node
-would start another with a `Fetch`, and every step of the round lowers NodeSettle's rank in a
-context whose pair it doesn't know.
+it (`entry_of_obs`). A fair node makes one (`observes`): otherwise its known pair stays put and
+its round keeps running (an idle node starts another round with a `Fetch`, whose reply would be
+an observation), and every step of the round lowers NodeSettle's rank in the context whose pair
+it doesn't know, which cannot go on forever.
 
 The convergence proof uses this file.
 -/
@@ -571,10 +575,12 @@ theorem quiet_frame {st : Snap} (hn : (g'.node n).ns = (g.node n).ns) (hb : a �
   ⟨by rw [hn], fun h => h.elim (fun e => absurd e hb) (fun e => absurd e hh),
     fun h => absurd h hi, fun _ _ _ _ => hn⟩
 
-/-- A step at which node `n` learns no head, the replies it takes being the stable hub's: its
-known pair stays; its own core step, or the replies it takes, is NodeSettle's `Busy` in the
-context whose pair it doesn't know (`bctx`); an idle round ends; anything else but
-housekeeping leaves the node's state alone. -/
+/-- A step at which node `n` learns no head, taking only the stable hub's replies, keeps its
+known pair, and:
+- its own core step, or the replies it takes, is NodeSettle's `Busy` in the context (`bctx`)
+  whose pair it doesn't know;
+- an idle round ends;
+- anything else, except housekeeping, leaves the node's state alone. -/
 theorem quiet_step {t0 : Nat} {st : Snap} (K : RunOK law D n g) (R : StableReps t0 st g)
     (hold : ∀ r ∈ g.reps, r ∉ g'.reps → r.node = n → t0 ≤ r.time)
     (hs : SysStep N D law a g g')
@@ -818,10 +824,12 @@ section Entry
 variable {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
 
 /-- Once the hub has settled at `st` and node `n` takes no old reply, a fair node makes a fresh
-observation. Without one its known pair stays put; its round keeps running, since an idle
-node starts a round with a `Fetch`, whose reply would be one; and every step of the round, its
-own core step or the replies to a request for objects or to a refused push, lowers NodeSettle's
-rank in the context whose pair it doesn't know. Housekeeping that writes is assumed to stop. -/
+observation. Housekeeping that writes is assumed to stop (`hmaint`).
+
+Without an observation the known pair stays put and the round keeps running, since an idle node
+starts a round with a `Fetch`, whose reply would be one. Every step of the round, its own core
+step or the replies to a request for objects or to a refused push, lowers NodeSettle's rank in
+the context whose pair it doesn't know, which cannot go on forever. -/
 theorem observes (ρ : Nat → Sys) (acts : Nat → Act) (n k k1 : Nat) (st : Snap)
     (hstep : ∀ i, k ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
     (hK : ∀ i, k ≤ i → RunOK law D n (ρ i)) (hk1 : k ≤ k1)
@@ -901,7 +909,7 @@ theorem observes (ρ : Nat → Sys) (acts : Nat → Act) (n k k1 : Nat) (st : Sn
   obtain ⟨d0, hd0⟩ := lex_stabilizes 11
     (fun d => rank (bctx st.recs (D n) ((ρ k1).node n).ns.known) ((ρ (k1 + kb + d)).node n).ns)
     (fun _ => rank_length _ _) (fun d => (mono (k1 + kb + d) (by omega)).1)
-  -- yet the running round's next own step, or the replies it waits on, comes
+  -- the running round's next own step, or the replies it waits on, comes
   have hev : ∃ j, k1 + kb + d0 ≤ j ∧ (acts j = .core n .busy ∨ acts j = .handle n) := by
     have hi : k1 ≤ k1 + kb + d0 := by omega
     have ha := act_true (k1 + kb + d0) hi

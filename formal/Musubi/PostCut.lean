@@ -1,22 +1,22 @@
 /-
 Hub acceptance once the record list is fixed, over the complete executable recovery relation
-`cexecAction`. Every hub movement then accepts a push against a ledgered supersede whose sent
-dropped set is the hub's whole dropped set, and moves the head strictly along original
-ancestry, with no new record. This classifies by what the push carried when it was sent, not
-by its sender's current dropped set: a stale push from a node that has dropped more since
-remains acceptable.
+`cexecAction`. From then on every hub movement accepts a push against a ledgered supersede
+whose sent dropped set is the hub's whole dropped set, and moves the head strictly along
+original ancestry, writing no new record. Pushes are classified by what they carried when sent,
+not by their sender's current dropped set, so a stale push from a node that has since dropped
+more is still acceptable.
 
 Two unledgered acceptance forms of the base model, `casAccept` and `hubPushAccept`, move the
-hub with no supersede at all. The shipping hub never takes them: `hub::Push::answer` refuses a
-push whose records are not the hub's before any acceptance, and the conformance harness maps
-every acceptance to `hubSupAccept`. They are excluded by an explicit premise, as is rollback.
+hub with no supersede. A premise excludes them, and rollback. The shipping hub takes neither:
+`hub::Push::answer` refuses a push whose records are not the hub's before any acceptance, and
+the conformance harness maps every acceptance to `hubSupAccept`.
 
-This is a statement about the finite original-operation model. Its native counterpart on the
-hub's raw store, without any version-to-original projection, is listed at the end.
+The theorems are about the finite original-operation model. The native counterpart on the hub's
+raw store, with no version-to-original projection, is listed at the end.
 
 The convergence proof uses only `execStep_hubPushAccept_guards` from this file. The rest, the
-strict-movement and old-ledger-target results for the executable recovery union, is not used by
-the assembly and stands alone.
+strict-movement and ledger-target results for the executable recovery union, is not used by the
+assembly and stands alone.
 -/
 import Musubi.ContractedRecordCut
 
@@ -26,6 +26,7 @@ open Musubi Contract
 
 /-! ## The base model's hub -/
 
+/-- A successful base step has a valid parent function. -/
 theorem execStep_parOK {N : Nat} {es es' : EState} {a : Action}
     (h : execStep N es a = .ok es') : es.parOK = true :=
   (req_ok h).1
@@ -52,6 +53,8 @@ theorem execStep_hub_fixed {N : Nat} {es es' : EState} {a : Action}
           EState.setNode, EState.hubStore, EState.hubStoreOps, EState.hubStoreObjs,
           EState.forget])
 
+/-- A successful `hubPushAccept` moves the hub's head from the expected head `e` to a new head
+`d` below it in ancestry, and the sequence up by one. -/
 theorem execStep_hubPushAccept_guards {N : Nat} {es es' : EState} {n : Nat}
     {S O : List Nat} {e d : Nat} (h : execStep N es (.hubPushAccept n S O e d) = .ok es') :
     es.hub.head ≠ d ∧ es.hub.head = e ∧ ancB es.parF e d = true ∧
@@ -92,6 +95,7 @@ inductive StepShape (N : Nat) (s t : SEState) : Prop
       (hrec : recEq A s.recs = true) (hpend : d ∉ pendingOf A D)
       (hcmp : Anc s.es.parF e d ∨ belowB s.es.parF (acceptDrops s A D).contains e d = true)
 
+/-- A successful ledger lookup yields a matching ledger entry. -/
 theorem ledger_of_any {s : SEState} {n d : Nat} {A : List Rec} {D : List Nat}
     (h : (s.sups.any fun p => p.node == n && recEq p.applied A && seteq p.dropped D && p.head == d)
       = true) :
@@ -101,6 +105,7 @@ theorem ledger_of_any {s : SEState} {n d : Nat} {A : List Rec} {D : List Nat}
   simp only [Bool.and_eq_true, beq_iff_eq] at hq
   exact ⟨p, hp, hq.1.1.1, hq.1.1.2, hq.1.2, hq.2⟩
 
+/-- A false `contains` is non-membership. -/
 theorem not_mem_of_contains_false {l : List Nat} {x : Nat} (h : (!l.contains x) = true) :
     x ∉ l := by
   intro hx
@@ -228,26 +233,29 @@ theorem step_shape {N : Nat} {s t : SEState} {a : CAction}
 
 /-! ## The invariant -/
 
-/-- What the classification needs of a state, and no more: record custody, a hub head the hub
-has not dropped, and ledger entries consistent with their sender's records when sent. -/
+/-- What the classification needs of a state: record custody, a hub head that is not dropped,
+and ledger entries consistent with their sender's records when sent. -/
 structure CutInv (s : SEState) : Prop where
   ok : SEOK s
   head : s.es.hub.head ∉ s.hubDL
   ledgerApplied : ∀ p ∈ s.sups, ∀ x, x ∈ flat p.applied → x ∈ p.dropped
   ledgerHead : ∀ p ∈ s.sups, p.head ∉ flat p.applied
 
+/-- The initial state satisfies `CutInv`. -/
 theorem cutInv_init : CutInv initSE where
   ok := seok_init
   head := by simp [initSE, initE, SEState.hubDL, flat]
   ledgerApplied := by simp [initSE]
   ledgerHead := by simp [initSE]
 
+/-- Equal record lists drop the same ids. -/
 theorem mem_flat_of_recEq {A B : List Rec} (h : recEq A B = true) (x : Nat) :
     x ∈ flat A ↔ x ∈ flat B := by
   have e := congrFun (recEq_flat h) x
   simp only [setP] at e
   exact Iff.of_eq e
 
+/-- Set-equal lists have the same members. -/
 theorem mem_of_seteq {a b : List Nat} (h : seteq a b = true) (x : Nat) : x ∈ a ↔ x ∈ b := by
   have e := congrFun (seteq_setP h) x
   simp only [setP] at e
@@ -362,6 +370,7 @@ variable {N : Nat} (run : Nat → SEState) (acts : Nat → CAction)
   (hu : ∀ i, (acts i).unledgeredAccept = false) (hr : ∀ i, (acts i).goesBack = false)
 
 include h0 hs hu hr in
+/-- `CutInv` holds at every step of a run of allowed steps. -/
 theorem cutInv_run : ∀ i, CutInv (run i)
   | 0 => h0
   | i + 1 => cutInv_step (cutInv_run i) (hs i) (hu i) (hr i)
@@ -387,12 +396,14 @@ theorem post_cut_run (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k)
   exact post_cut_step (cutInv_run run acts h0 hs hu hr i) (hs i) (hu i) (hr i) hfix
 
 include h0 hs hu hr in
+/-- After the record cut the hub's head never decreases. -/
 theorem post_cut_head_le (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k).recs)
     (i : Nat) (hi : k ≤ i) : (run i).es.hub.head ≤ (run (i + 1)).es.hub.head := by
   rcases post_cut_run run acts h0 hs hu hr k hrec i hi with h | h
   · exact Nat.le_of_eq h.1.symm
   · exact Nat.le_of_lt h.2.2.1
 
+/-- A member of a list of naturals is at most its sum. -/
 theorem le_sum_of_mem : ∀ {L : List Nat} {x : Nat}, x ∈ L → x ≤ L.sum
   | _ :: L, x, h => by
     rcases List.mem_cons.1 h with rfl | h
@@ -404,9 +415,9 @@ theorem le_sum_of_mem : ∀ {L : List Nat} {x : Nat}, x ∈ L → x ≤ L.sum
 include h0 hs hu hr in
 /-- **Stale accepts stop.** After the record cut, the hub accepts a new head that a ledger entry
 already present at the cut names only finitely often: the head only grows, strictly at each
-accept, and those entries name finitely many heads. A pushing node that has dropped more
-since its push still has that push accepted until then; this bounds such accepts without
-assuming the hub stops accepting or any node's dropped set is fixed. -/
+accept, and those entries name finitely many heads. A pushing node that has dropped more since
+its push still has that push accepted until then; this bounds such accepts. It needs only the
+record cut and the premises of `cutInv_run`. -/
 theorem stale_accepts_stop (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k).recs) :
     ∃ k', k ≤ k' ∧ ∀ i, k' ≤ i → (run (i + 1)).es.hub.head ≠ (run i).es.hub.head →
       ∀ p ∈ (run k).sups, p.head ≠ (run (i + 1)).es.hub.head := by
@@ -505,11 +516,11 @@ end Run
   head, not by request. `fresh_accept_aligned` speaks of the entries naming that new head, not
   of which request carried which entry; production request correlation does not follow from
   it.
-* The premises. No unledgered acceptance and no rollback, from the shipping hub's records check
-  and the end of rollback. The record cut itself, which `cexec_record_prefix_stabilizes`
-  provides under bounded drops. For alignment, a node dropped set fixed from the cut on.
-* What remains. A measure for accepts of fresh pushes, whose sender may have moved on since
-  sending; the alignment of nodes that do not hold the hub's records; and convergence.
+* The premises. No unledgered acceptance and no rollback (justified by the shipping hub's
+  records check and the end of rollback); the record cut itself (`cexec_record_prefix_stabilizes`
+  provides it under bounded drops); and, for alignment, a node dropped set fixed from the cut on.
+* Open. A measure for accepts of fresh pushes, whose sender may have moved on since sending; the
+  alignment of nodes that do not hold the hub's records; and convergence.
 -/
 
 end Musubi.Exec

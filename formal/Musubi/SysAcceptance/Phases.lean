@@ -1,6 +1,6 @@
 /-
-Derive the successive suffixes used by hive convergence: quiet records, persistent entry,
-fresh knowledge, a completed active sample, and eligibility on a stable hub.
+The successive suffixes used by hive convergence, derived from `HiveContracts`: quiet records,
+persistent entry, fresh knowledge, a completed active sample, and eligibility on a stable hub.
 See `Musubi.SysAcceptance` for the layers of the complete convergence argument.
 
 The convergence proof uses this file.
@@ -39,7 +39,8 @@ variable {ρ α : Type} [DecidableEq ρ] {N : Nat} {D : Nat → Nat → Nat → 
 /-- From any hive time `c`, a node stops handling own replies to calls it made before `c` and
 notices published before `c`: each old call has its slot, which a reply or a reopen retires
 (`Retry.old_slots_eventually_stop`, reopens allowed), and old notices are finitely many in
-flight and queued (`Retry.Notifications.old_notifications_stop`). No fair draining is assumed. -/
+flight and queued (`Retry.Notifications.old_notifications_stop`). Old traffic need not drain
+fairly. -/
 theorem old_effects_stop
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     (c n : Nat) (hn : n < N) :
@@ -79,7 +80,7 @@ theorem old_effects_stop
       rw [noticesStopped d (by omega)] at hb
       cases hb
 
-/-- So, for all nodes at once. -/
+/-- `old_effects_stop` for all nodes at once: from some `k ≥ c`, `OldGone N O c k`. -/
 theorem old_gone
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     (c : Nat) : ∃ k, c ≤ k ∧ OldGone N O c k := by
@@ -182,7 +183,7 @@ theorem knows_stable_head
 /-! ## Records and environmental recovery stop -/
 
 /-- Fixed native records and drops, followed by the old-effect cutoff, force adoptions and
-stale-plan failures to stop. No assumption of control stabilization is added. -/
+stale-plan failures to stop, giving a `CutAt`. -/
 theorem record_control_stabilizes
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O) :
     ∃ cut, CutAt N recs adopts fails cut := by
@@ -210,8 +211,8 @@ theorem record_control_stabilizes
   obtain ⟨atCut, dropsAtCut⟩ := fixed cut (by omega)
   exact ⟨records.trans atCut.symm, fun n hn x => (drops n hn x).trans (dropsAtCut n hn x).symm⟩
 
-/-- After the last environment loss, object credit can be spent only once per node.
-Consequently failed object replies stop, without assuming their cutoff. -/
+/-- After the last environment loss, object credit can be spent only once per node, so failed
+object replies stop. -/
 theorem object_failures_stop
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O) :
     ∃ cut, ∀ t, cut ≤ t → ∀ n, n < N → ¬ O.objFail n t := by
@@ -246,8 +247,8 @@ theorem recovering_reopens_stop {objectCut : Nat}
       (Nat.lt_of_not_le fun ht => noFailures t ht n hn failure) afterFailures
   · exact ⟨objectCut, fun i hi reopened => absurd ⟨i, hi, reopened⟩ hasReopen⟩
 
-/-- Join the derived record/recovery cutoffs with the explicit environment assumptions.
-Only incomplete pushes can reopen a node on the resulting suffix. -/
+/-- Join the derived record and recovery cutoffs with the environment assumptions. On the
+resulting suffix only an incomplete push can reopen a node. -/
 theorem entry_phase
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O) :
     ∃ cut, EntryPhase N recs adopts fails O cut := by
@@ -280,7 +281,7 @@ theorem entry_phase
 /-! ## Every node enters and completes an active sample -/
 
 /-- The entry laws give every node an actual completed entry event. Entry persists on the
-quiet suffix, and its closed push excludes further incomplete reopens. -/
+quiet suffix, and its closed push rules out further incomplete reopens. -/
 theorem entered_phase
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     {recordCut : Nat} (phase : EntryPhase N recs adopts fails O recordCut) :
@@ -322,7 +323,7 @@ theorem entered_phase
   cases notClosed
 
 /-- Past entry, each node learns a truthful pair and completes an active sample beyond
-the old-effects cutoff. These are the exact native boundaries required at the fine cut. -/
+the old-effects cutoff. These are the native boundaries `FineCut` requires. -/
 theorem fine_cut
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     {recordCut entryCut : Nat} (phase : EntryPhase N recs adopts fails O recordCut)
@@ -361,7 +362,7 @@ theorem fine_cut
   · exact fun n hn => known cut (by omega) n hn
 
 /-- A truthful latched pair at the fine cut is an honest snapshot of the loss-free hub history.
-This supplies the final premise that the eligible-system convergence theorem needs. -/
+This is the last premise `FineAt.converges` takes. -/
 theorem honest_latched_known
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     {recordCut cut : Nat} (quiet : QuietAt N O recordCut)

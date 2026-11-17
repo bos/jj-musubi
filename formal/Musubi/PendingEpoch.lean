@@ -1,20 +1,21 @@
 /-
-Once records are fixed, the raw names of a node's pending drops settle (`pending_names_settle`),
-which records being adopted no longer gives: a node renames a pending drop to the hub's version
-of its original (`name_pending_as`), and may do so after the record-adoption cut.
+Once records are fixed, the raw names of a node's pending drops settle (`pending_names_settle`).
+Record adoption does not settle them: a node renames a pending drop to the hub's version of its
+original (`name_pending_as`), and may do so after the record-adoption cut.
 
-Within the window the hub's history is a chain: the closure of each head contains the closure
-of each earlier one, and holds one version of each original at most. So two vertices of the
-history from the window on with one original are one raw vertex (`raw_alias_unique`): no record
-renames them any more. The node's identity normalizer renames a pending name to the version
-below the head it knows, if that has one and its body is here, and otherwise keeps it. It may
-normalize only some originals while other bodies are still arriving. Renaming an original
-normalizes all its remaining names together; every other event leaves the pending drops alone,
-or lets acknowledged ones leave. With no fresh pending originals, each original is renamed at
-most once, to that one vertex, and never back.
-The pending originals not yet named by a vertex of the history are finitely many, and each
-renaming spends one, so the renamings stop. Neither the known head nor how often a name changes
-is assumed to settle.
+- The window. The hub's history within it is a chain: the closure of each head contains the
+  closure of each earlier one, and holds at most one version of each original. So two vertices
+  of the history from the window on with one original are one raw vertex (`raw_alias_unique`),
+  and no record renames them.
+- Renaming. The node's identity normalizer renames a pending name to the version below the head
+  it knows, if that has one and its body is here, and otherwise keeps it. It may normalize only
+  some originals while other bodies are still arriving. Renaming an original normalizes all its
+  remaining names together; every other event leaves the pending drops alone, or lets
+  acknowledged ones leave.
+- Counting. With no fresh pending originals, each original is renamed at most once, to that one
+  vertex, and never back. The pending originals not yet named by a vertex of the history are
+  finitely many and each renaming spends one, so the renamings stop. The known head need not
+  settle, and the finiteness of renamings is a conclusion of this count.
 
 The convergence proof uses this file except `pending_names_settle_with_old_known`,
 `pending_names_settle_from_sources`, `finite_metadata_output_stabilizes` and their helpers, which
@@ -240,11 +241,11 @@ theorem PStep.head_eq {hist' : Nat → Nat} {k k' : Nat} {P P' : List Nat}
   · exact Or.inl h
   · exact Or.inr ⟨q, hq, by simpa only [NormTo, he] using hnorm⟩
 
-/-- After old observations and reopens stop, knowledge either stays at its initial pair
-or enters the current raw history window and stays there. Both possibilities have finite
-alias credit. No fair observation or eventual knowledge entry is assumed, avoiding a cycle
-with the later finite-local-work argument. The obsolete head needs only its own unique
-originals, not ancestry comparability with the new window. -/
+/-- After old observations and reopens stop, a node's knowledge either stays at its initial
+pair or enters the current raw history window and stays there; both cases have finite alias
+credit. Fair observation and eventual knowledge entry are not premises, so the later
+finite-local-work argument can use this theorem without a cycle. The obsolete head needs only
+its own unique originals; it need not be ancestry-comparable with the new window. -/
 theorem pending_names_settle_with_old_known (H : History par hist w orig)
     (P : Nat → List Nat) (known : Nat → Nat)
     (hsource : ∀ t, known (t + 1) = known t ∨ w ≤ known (t + 1))
@@ -301,7 +302,7 @@ def sourceHead (old : Nat) (heads : Nat → Nat) : Option Nat → Nat
 
 /-- A direct source-indexed form for the actual-time history: `none` is the
 unchanged old pair, and `some i` records a head observed at time `i` in the current window.
-No numerical comparison of the old native sequence with the current one is made. -/
+The old native sequence is never compared numerically with the current one. -/
 theorem pending_names_settle_from_sources (H : History par hist 0 orig)
     (old : Nat) (P : Nat → List Nat) (source : Nat → Option Nat)
     (hsource : ∀ t, source (t + 1) = source t ∨ ∃ i, source (t + 1) = some i)
@@ -338,8 +339,8 @@ end Pending
 
 section Metadata
 
-/-- Immutable metadata for a finite relevant closure eventually stops arriving. Nothing
-requires every missing body to arrive: after the cut, some inputs may remain absent. -/
+/-- Immutable metadata for a finite relevant closure eventually stops arriving. Some inputs
+may stay absent after the cut: not every missing body need arrive. -/
 theorem finite_metadata_stabilizes {α : Type} (L : List Nat) (facts : Nat → Nat → Option α)
     (hkeep : ∀ t x a, facts t x = some a → facts (t + 1) x = some a) :
     ∃ T, ∀ t, T ≤ t → ∀ x ∈ L, facts t x = facts T x := by
@@ -372,8 +373,8 @@ theorem finite_metadata_stabilizes {α : Type} (L : List Nat) (facts : Nat → N
   | succ d ih => exact (step (T + d) (by omega) x hx).trans (ih (by omega))
 
 /-- A deterministic computation with finite metadata support stabilizes with those inputs.
-For native normalization the support is the fixed raw ancestry and retained drop bodies;
-the support law is a separate code correspondence, not an assumed output cutoff. -/
+For native normalization the support is the fixed raw ancestry and retained drop bodies. That
+the output depends only on this support is a separate correspondence with the code. -/
 theorem finite_metadata_output_stabilizes {α β : Type} (L : List Nat)
     (facts : Nat → Nat → Option α) (compute : (Nat → Option α) → β)
     (hkeep : ∀ t x a, facts t x = some a → facts (t + 1) x = some a)

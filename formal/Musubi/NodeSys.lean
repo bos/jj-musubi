@@ -11,11 +11,12 @@ Another node's writes only grow the raw graph above every id in use: they never 
 node's component, and its embedding stays scoped (`scoped_raw`). So once the hub has settled and
 the node has labels for everything below its head, foreign growth is a literal frame of the node.
 
-The system is the hive after root's RecordEpoch cut (`record_disturbances_stop`): records are
-fixed, adoptions and stale-plan reopens have stopped, and a failed call is not an event. Its
-adoption steps (`Loc.adopt`, `Loc.advanceTake`) carry `GrowR`, which native record adoption is
-not shown to keep: they are in the model for its shape, unreachable in the tail it is used for,
-and not claimed for earlier runs.
+The system models the hive after the cut at which the records stop changing
+(`record_disturbances_stop`, in RecordEpoch): from there records are fixed, adoptions and
+stale-plan reopens have stopped, and a failed call is not an event. Its adoption steps
+(`Loc.adopt`, `Loc.advanceTake`) carry `GrowR`, which native record adoption is not shown to
+satisfy. They are in the model for its shape and unreachable after that cut; the model makes no
+claim about runs before it.
 
 A core step that sends requests (`Issue`) leaves the node's state as it was, recording the state
 after its writes and the immutable push it built from that state, until the replies to its
@@ -65,9 +66,9 @@ inductive Body
 each call of a step when the step issues them all (`Sys.slot`), not the transport's wire id,
 which the transport assigns as it sends each call. A projection of a native run maps the wire
 id of each call actually sent, and the call each reply answers, injectively to these slots
-(root's `CallBatch`); the map need not keep order, and a call not yet sent has no wire id. So
-a step's later call, as the `Objects` call a poll sends only once its `Fetch` has returned, has
-its slot from the start, while other nodes' calls take wire ids in between. -/
+(the `CallBatch` module); the map need not keep order, and a call not yet sent has no wire id.
+So a step's later call, such as the `Objects` call a poll sends only once its `Fetch` has
+returned, has its slot from the start, while other nodes' calls take wire ids in between. -/
 structure Req where
   node : Nat
   slot : Nat
@@ -159,13 +160,13 @@ structure Grow (g g' : Sys) (σ σ' : NS) (emb emb' : Nat → Nat) : Prop where
   parNew : ∀ x, σ.next ≤ x → x < σ'.next → g'.par (emb' x) = (σ'.par x).map emb'
   parOld : ∀ x, x < σ.next → σ'.par x = σ.par x
 
-/-- A node's own writes, where a write may COALESCE with an existing operation: identical
+/-- A node's own writes, where a write may coalesce with an existing operation: identical
 canonical content (an own merge another copy also wrote, `canonical_form`) is one raw vertex.
 Each new label stands for a raw id below `g'.next`: either one that did not exist (from
 `g.next` on), whose parents are the images of its parents, or an existing one with those same
 parents that no old label stands for. The new labels stand for distinct ids, and every newly
-existing raw id is one of them; nothing below moves. `Grow` is the case that reuses nothing
-(`Grow`). -/
+existing raw id is one of them; nothing below moves. `Grow` is the case that reuses no existing
+id. -/
 structure GrowR (g g' : Sys) (σ σ' : NS) (emb emb' : Nat → Nat) : Prop where
   next : σ.next ≤ σ'.next
   rawGrows : g.next ≤ g'.next
@@ -401,9 +402,9 @@ law for all history.
 supersede, or among the push's own drops. `Push.answer` refuses such a push even with the hub's
 records, as it refuses one with other records. It then answers a push of its own head with that
 head, unmoved, and a push from its head whose closure it lacks after the upload with
-`Incomplete`, which fails the node's round (`driver.rs`). There is no `Incomplete` here: the
-raw hub-side simulation shows that an honest push from the hub's head is closed once uploaded
-(`UploadCoversSplit`), so the hub never gives it. -/
+`Incomplete`, which fails the node's round (`driver.rs`). This law has no `Incomplete` answer:
+the raw hub-side simulation shows that an honest push from the hub's head is closed once
+uploaded (`UploadCoversSplit`), so the hub never gives it. -/
 structure HubLaw where
   accepts : Snap → (Nat → List Nat) → Pkt → Prop
   recsAfter : Nat → List Nat → Nat
@@ -437,7 +438,7 @@ structure Quiet (g g' : Sys) : Prop where
 
 /-- The hub's five answer cases: fetch, objects, accepted push, refused records/drops,
 and a head reply to a rejected push. This is the same law used by the transition and its
-invariant proofs; `AnswerEffect` later exposes only the snapshot facts they imply. -/
+invariant proofs; `AnswerEffect` exposes only the snapshot facts they imply. -/
 def AnswerLaw (N : Nat) (law : HubLaw) (g g' : Sys) (body : Body) (acc : Bool)
     (ans : Ans) : Prop :=
   (body = .fetch ∧ acc = false ∧ ans = .fetched g.hub ∧
@@ -459,8 +460,8 @@ def AnswerLaw (N : Nat) (law : HubLaw) (g g' : Sys) (body : Body) (acc : Bool)
 inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
     Act → Sys → Sys → Prop
   /-- A core step that sends nothing, with the node's writes, each new label a fresh raw id or
-  one that exists already (`GrowR`). For an adoption that is a law only after the RecordEpoch
-  cut, where there are none. -/
+  one that exists already (`GrowR`). An adoption step satisfies `GrowR` only as a law of the
+  model; after the record cut there are none. -/
   | busy {g g' : Sys} (n : Nat) (σ' : NS) (emb' : Nat → Nat)
       (hw : (g.node n).wait = none) (ha : (g.node n).ns.act = true)
       (hs : Loc (D n) (g.node n).ns σ')
@@ -503,9 +504,9 @@ inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
       (ht : g'.time = g.time + 1)
       (hnd : ∀ q ∈ rq, ∀ p, q.body = .push p → ¬ law.dropped p.recs p) :
       SysStep N D law (.issue n k) g g'
-  /-- The hub answers one request in flight, from its state now, which leaves the list: that
-  one copy, exactly (`List.erase`), as each call is answered once. An accepted push moves its
-  head and publishes a notification to every node. -/
+  /-- The hub answers one request in flight, from its state at that moment. The request leaves
+  the list: that one copy, exactly (`List.erase`), as each call is answered once. An accepted
+  push moves its head and publishes a notification to every node. -/
   | answer {g g' : Sys} (r : Req) (ans : Ans)
       (hr : r ∈ g.reqs) (hreqs : g'.reqs = g.reqs.erase r)
       (acc : Bool)
@@ -1946,7 +1947,7 @@ end Fair
 /-- In the system, once the hub has settled, a fair node settles at its head, or sends a push
 from the hub's head with the hub's records: an actual `issue n .push` labelled `emit`
 (`lab_emit`), from a state where it is `Emit` (`emit_packet`), which the stable hub would accept.
-Housekeeping that writes is assumed to stop; nothing assumes a round ends. -/
+The only stopping assumption is that housekeeping that writes eventually stops. -/
 theorem node_settles_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     (ρ : Nat → Sys) (acts : Nat → Act) (n k k' h : Nat) (st : Snap)
     (hstep : ∀ i, k ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
@@ -2023,9 +2024,9 @@ theorem node_settles_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
 replies are out, else the core's state. The core's state (`ns`) stays the step's pre-state
 until the replies, as NodeSettle's steps take them. Its op heads, labels and raw ids are the
 repository's own. Its known pair is logical: the pair at the exchange's start until the
-exchange's replies are taken, not the native one, which a poll's `Fetched` callback updates
-before the exchange's `Objects` call is even sent. Nothing in the system reads it meanwhile
-(`Handle`). -/
+exchange's replies are taken. The native pair differs meanwhile: a poll's `Fetched` callback
+updates it before the exchange's `Objects` call is sent. Nothing in the system reads the native
+pair meanwhile (`Handle`). -/
 def NodeC.repo (x : NodeC) : NS :=
   match x.wait with
   | some w => w.post
@@ -2069,9 +2070,9 @@ theorem issue_quiet {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : 
 
 /-- A node with no pending drops has in its repository the op heads, logical known pair and
 raw ids of its core's state, whether replies are outstanding or not. Empty pending is a premise
-of this local lemma; `NativeEvents.RecordView.pending_empty` derives it for eligible nodes in
-the assembly. A fix-up or tip can appear in the repository before its reply, while the core
-still holds the step's pre-state. The known pair is the logical one
+of this lemma; the assembly gets it for eligible nodes from
+`NativeEvents.RecordView.pending_empty`. A fix-up or tip can appear in the repository before its
+reply, while the core still holds the step's pre-state. The known pair is the logical one
 (`NodeC.repo`), not the native one in the middle of an exchange. -/
 theorem repo_agrees {D : Nat → Nat → Nat → Prop} {n : Nat} {g : Sys} (I : NodeOK D n g)
     (hp : (g.node n).ns.pending = []) :

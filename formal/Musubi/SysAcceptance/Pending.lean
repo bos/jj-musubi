@@ -1,7 +1,7 @@
 /-
 Raw control cannot remain pending once the hub and its records have settled. The interfaces
-live in `Pending.Contracts`; the proof here separates publication impossibility from the
-control argument that eventually forces a push.
+are in `Pending.Contracts`. The proof has two parts: a push from a pending round would move the
+stable hub (publication), and the control argument shows the round eventually pushes.
 
 The convergence proof uses this file.
 -/
@@ -11,20 +11,21 @@ namespace Musubi.SysAcceptance
 
 open Musubi NodeSettle EarlyEntry NodeSys NodeSysEntry SysFreshCuts EarlyEntry.Control
 
-/-- The hub does not drop the head a push sends: it is no dropped name, no cached renaming key,
-and not among the push's own drops. -/
+/-- The hub drops nothing of the head a push sends when the head is no dropped name, no cached
+renaming key, and not among the push's own drops. -/
 theorem not_dropped_of {named cached : Nat → Bool} {x : Nat} {dropped : List Nat}
     (hnn : named x = false) (hnc : cached x = false) (hnot : x ∉ dropped) :
     ((named x || cached x) || decide (x ∈ dropped)) = false := by
   simpa [hnn, hnc] using hnot
 
 /-- No round remains pending on a stable hub. A push would pass the publication checks and
-move the hub; every other allowed action continues the round. Naming therefore stabilizes
-inside that round, after which the checked calls force a push, giving a contradiction.
+move the hub; every other allowed action continues the round. So naming stabilizes inside the
+round, after which the checked calls force a push, a contradiction.
 
-The survival interface is derived from native naming at the application boundary. Stability
-through actual pushes and successful object replies are supplied separately, after their cuts.
-The abstract round keeps the generality of independent raw and executable packet readings. -/
+`survival` and the other interfaces are premises here; `PendingLaws.absurd` derives survival
+from native naming. `hstable` (the hub stable through its pushes) and `hserve` (successful
+object replies) hold after their cuts. The abstract round reads raw and executable packets
+independently. -/
 theorem no_forever_pending {ρ α : Type} [DecidableEq ρ] {hub : RawPublish.Hub}
     {R : PendingRun ρ α} (control : PendingControl hub R)
     (publication : PendingPublication hub R) (survival : PendingSurvival hub R)
@@ -144,9 +145,9 @@ theorem no_forever_pending {ρ α : Type} [DecidableEq ρ] {hub : RawPublish.Hub
   exact nopush (T + j) (hall _) hpush
 
 
-/-- Native source laws supply the control and publication interfaces, and derive survival.
-On a hub stable through its actual pushes, with successful object replies, the round cannot
-remain pending. -/
+/-- On a hub stable through its actual pushes, with successful object replies, the round cannot
+remain pending. The native source laws supply the control and publication interfaces and
+survival. -/
 theorem PendingLaws.absurd {ρ α : Type} [DecidableEq ρ] {hub : RawPublish.Hub}
     {d : PendingData ρ α} (L : PendingLaws hub d) (h0 : d.active 0 = true)
     (hstable : ∀ i, d.pushes i → RawPublish.after hub (d.pkt i) (d.checks i) = hub)

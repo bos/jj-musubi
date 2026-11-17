@@ -1,6 +1,6 @@
 /-
 Raw closure and frontier ranks for a frozen-known local burst. These contracts describe field
-changes; the rank decrease is proved from them, never assumed of the native core.
+changes; the rank decrease is proved from them (`step_rank`).
 
 The convergence proof uses this file except `no_infinite_burst`, `localFromImages` and
 `local_grows_after_inputs`, which are not used by the assembly and stand alone.
@@ -16,8 +16,11 @@ open Musubi NodeSettle
 ancestry reads the node-space images and heads. The known head and its images are never
 identified. Native conformance places both among distinct vertices of one raw DAG. -/
 structure State where
+  /-- Whether a raw name has a local realization. -/
   loc : Nat → Bool
+  /-- The op heads. -/
   heads : List Nat
+  /-- The queued plan; dequeuing an entry spends plan length. -/
   plan : List Nat
 
 def covered (anc : Nat → Nat → Bool) (heads : List Nat) (i : Nat) : Bool :=
@@ -41,9 +44,9 @@ theorem localFromImages_mono (images : List Nat) {mapped mapped' : Nat → Bool}
   simp only [localFromImages, Bool.and_eq_true, List.all_eq_true] at h ⊢
   exact ⟨h.1, fun x hx => hm x (h.2 x hx)⟩
 
-/-- Partial naming may change when another ancestor body arrives. Finite immutable input
-support derives a naming cutoff, without assuming complete metadata or a naming cutoff.
-Thereafter append-only local realizations imply the burst's locality-monotonicity law.
+/-- Partial naming may change when another ancestor body arrives. Finite immutable input support
+gives a step past which naming stays fixed (`PendingEpoch.finite_metadata_output_stabilizes`).
+From there on, append-only local realizations give the burst's locality-monotonicity law.
 `normalize` returns images only for the fixed relevant names; other names may map to []. -/
 theorem local_grows_after_inputs {α : Type} (inputs : List Nat)
     (facts : Nat → Nat → Option α)
@@ -62,8 +65,8 @@ theorem local_grows_after_inputs {α : Type} (inputs : List Nat)
   exact localFromImages_mono _ (hmapped t) h
 
 /-- Native core branches before the next request or idle. A queued entry can already be
-local because the adapter realizes batches; dequeuing it still spends plan length. A NEW
-survey's first entry was nonlocal when surveyed and becomes local after successful realize.
+local because the adapter realizes batches; dequeuing it still spends plan length. A new
+survey's first entry was nonlocal when surveyed and becomes local after a successful realize.
 Merge and advance describe frontier effects, not a promised rank decrease. -/
 inductive Step (rawClosure images : List Nat) (anc : Nat → Nat → Bool) :
     State → State → Prop
@@ -144,9 +147,8 @@ theorem step_rank {rawClosure images : List Nat} {anc : Nat → Nat → Bool}
       List.mem_filter.2 ⟨hi, by simp [covered, hh, hm]⟩
     exact List.length_pos_iff.2 (fun hnil => by rw [hnil] at present; cases present)
 
-/-- Frozen knowledge and finite raw closure cannot support infinitely many own core
-branches without another RPC or idle. This prefix argument does not need complete metadata,
-an original-label realization trace, or a fair round-completion premise. -/
+/-- With knowledge frozen and the raw closure finite, the core cannot take infinitely many
+branches with no RPC or idle between: `step_rank` makes the rank decrease at every branch. -/
 theorem no_infinite_burst (rawClosure images : List Nat) (anc : Nat → Nat → Bool)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
     (run : Nat → State)

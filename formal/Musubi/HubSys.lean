@@ -1,11 +1,15 @@
 /-
-The hub-side view of the joint system. Node fields are read from the SAME NodeC, using the
-post-write repository heads while calls are outstanding. Control knowledge is the batch's
-logical snapshot until its replies are handled, so it is not asserted to equal physical
-mid-batch knowledge. The call-batch correspondence must justify that delayed bookkeeping.
-Parent lists outside the created raw universe are normalized to empty: changes to those unused
-function values are not graph changes. Store/object fields not observed by HubSuffix are left
-abstract here; packet closure is checked separately by PacketAcceptance.
+The hub-side view of the joint system `Sys`, as a `Musubi.State` that `HubSuffix` reasons about.
+
+- Each node's `heads` and `known` are read from its `NodeC` record, the one the joint system
+  steps, using the repository heads as written, including while calls are outstanding.
+- The hub's control knowledge is the batch's logical snapshot until its replies are handled.
+  Mid-batch it can differ from the repository's physical knowledge; the call-batch
+  correspondence must justify that delayed bookkeeping.
+- Parent lists of ids at or above `next` (outside the created raw universe) read as empty, so
+  changes to those unused function values are not graph changes.
+- Store and object fields that `HubSuffix` does not observe stay abstract here. Packet closure
+  is checked in `PacketAcceptance`.
 
 The convergence proof uses this file.
 -/
@@ -20,31 +24,41 @@ namespace Musubi.Recovery.HubSys
 
 open Musubi NodeSys NodeSettle HubSuffix
 
+/-- Parents of raw id `x`; empty for `x` outside the created universe. -/
 def parents (g : Sys) (x : Nat) : List Nat := if x < g.next then g.par x else []
 
+/-- `x` is the raw image of one of node `n`'s repository heads. -/
 def heads (g : Sys) (n x : Nat) : Prop :=
   ∃ y ∈ (g.node n).repo.heads, (g.node n).repoEmb y = x
 
+/-- Node `n`'s known hub position: its repository's sequence number and the raw image of its
+known head. -/
 def known (g : Sys) (n : Nat) : Known :=
   ⟨(g.node n).repo.known.seq, (g.node n).repoEmb (g.node n).repo.known.head⟩
 
+/-- The `Musubi.State` of `g`: raw universe, hub head, sequence and history `hist`, and each
+node's `heads` and `known`. -/
 def state (g : Sys) (hist : Nat → Nat) : Musubi.State :=
   { init with
     U := { init.U with next := g.next, par := parents g }
     hub := { init.hub with head := g.hub.head, seq := g.hub.seq, hist := hist }
     node := fun n => { initNode with heads := heads g n, known := known g n } }
 
+/-- The generation of each node satisfying `E`; zero for the others. -/
 noncomputable def generations (E : Nat → Prop) (g : Sys) : Nat → Nat := by
   classical
   exact fun n => if E n then (g.node n).gen else 0
 
+/-- The `GState` of `g` over eligible nodes `E`, history `hist` and packets `pk`. -/
 noncomputable def view (E : Nat → Prop) (g : Sys) (hist : Nat → Nat)
     (pk : List Packet) : GState :=
   ⟨state g hist, generations E g, pk⟩
 
+/-- The `Packet` with the fields of `p` and the given tag. -/
 def packet (p : Pkt) (tag : Option Nat) : Packet :=
   ⟨p.node, tag, p.knownSeq, p.expected, p.new⟩
 
+/-- Equal `next` and equal parents below it give equal `parents`. -/
 theorem parents_same {g g' : Sys} (hn : g'.next = g.next)
     (hp : ∀ x, x < g.next → g'.par x = g.par x) : parents g' = parents g := by
   funext x
@@ -54,16 +68,19 @@ theorem parents_same {g g' : Sys} (hn : g'.next = g.next)
   · exact hp x ‹x < g.next›
   · rfl
 
+/-- Steps that keep `next` and the parents below it keep the raw universe of `state`. -/
 theorem state_usame {g g' : Sys} {hist hist' : Nat → Nat}
     (hn : g'.next = g.next) (hp : ∀ x, x < g.next → g'.par x = g.par x) :
     USame (state g hist) (state g' hist') :=
   ⟨parents_same hn hp, hn⟩
 
+/-- An unchanged hub and history leave the hub part of `state` unchanged. -/
 theorem state_hub_same {g g' : Sys} {hist hist' : Nat → Nat}
     (hh : g'.hub = g.hub) (hi : hist' = hist) :
     HubSame (state g hist) (state g' hist') := by
   exact ⟨congrArg Snap.head hh, congrArg Snap.seq hh, hi⟩
 
+/-- An unchanged node record leaves that node's part of `state` unchanged. -/
 theorem state_node_same {g g' : Sys} {hist hist' : Nat → Nat} {n : Nat}
     (hn : g'.node n = g.node n) : NodeSame (state g hist) (state g' hist') n := by
   constructor
@@ -75,9 +92,9 @@ theorem state_node_same {g g' : Sys} {hist hist' : Nat → Nat} {n : Nat}
     unfold known
     rw [hn]
 
-/-- Once empty pending has been derived, the hub-side sender fields and the node-control
-fields are consistent even during an outstanding request. The general waiting state may
-already contain a fix-up, so that simplification would be false without this premise. -/
+/-- When node `n`'s pending list is empty, its hub-side `heads` and `known` equal its control
+fields `ns.heads` and `ns.known`, translated by `emb`, even while a request is outstanding.
+The pending premise is needed because a waiting state can already hold a fix-up. -/
 theorem state_repo_agrees {D : Nat → Nat → Nat → Prop} {g : Sys} {n : Nat}
     (hi : NodeSys.NodeOK D n g) (hp : (g.node n).ns.pending = []) :
     (∀ x, heads g n x ↔ ∃ y ∈ (g.node n).ns.heads, (g.node n).emb y = x) ∧
@@ -95,6 +112,7 @@ theorem state_repo_agrees {D : Nat → Nat → Nat → Prop} {g : Sys} {n : Nat}
   · unfold known
     rw [hk, he _ hi.inv.knownLt]
 
+/-- Every `SysStep` only grows the raw universe, keeping existing parents. -/
 theorem step_raw_grows {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeSys.HubLaw}
     {act : Act} {g g' : Sys} (hs : SysStep N D law act g g') : RawGrow g g' := by
   cases hs with
@@ -113,6 +131,7 @@ theorem step_raw_grows {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeS
     exact ⟨Nat.le_of_eq hr.2.2.2.2.1.symm, fun x _ => congrFun hr.2.2.2.2.2 x⟩
   | env hr _ _ _ => exact hr
 
+/-- Equal generations on the eligible nodes give equal `generations`. -/
 theorem generations_same {E : Nat → Prop} {g g' : Sys}
     (h : ∀ n, E n → (g'.node n).gen = (g.node n).gen) :
     generations E g' = generations E g := by
@@ -120,9 +139,10 @@ theorem generations_same {E : Nat → Prop} {g g' : Sys}
   funext n
   by_cases he : E n <;> simp [generations, he, h]
 
-/-- A foreign node's step, including a finite write batch, preserves every eligible node's
-observable policy fields by the joint system's own node update rule. Only raw DAG validity
-is supplied as a native graph contract; no abstract progress membership is assumed. -/
+/-- A step that is not about any eligible node, including a finite write batch, leaves each
+eligible node's record unchanged, so the view moves by an `Expansion.Path` of `HubSuffix.Step`.
+The step is not a hub answer (`act ≠ .answer`), and the only graph premise is raw DAG validity
+of the new state (`hdag`). -/
 theorem foreign_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop}
     {law : NodeSys.HubLaw} {E : Nat → Prop} {w : Nat} {act : Act} {g g' : Sys}
     (hs : SysStep N D law act g g') (ha : act ≠ .answer)

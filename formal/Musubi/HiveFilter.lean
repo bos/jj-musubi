@@ -13,24 +13,28 @@ open Musubi Musubi.NodeSettle Musubi.EarlyEntry Musubi.NodeSys
 
 /-! ## The eligible nodes' system, filtered from the hive's run
 
-The observation starts at the entry cut, not at the record cut: a finite cut after it by which
-every eligible node has handled a fresh head from after the record cut and taken the current
-records, so that its known head is named in the current records' namespace and its embedding is
-scoped. Before it, an eligible node may still know an old raw head whose node-space image the
-current drops have changed, and its steps are not claimed to be the fine system's. From the entry
-cut on, the hive's run is observed coarsely (`HiveStep`): an eligible node's events, the
-environment's, and the hub's answers to requests eligible nodes sent or that were in flight at the
-entry cut (`old`, finitely many, which may still move the hub) are steps of the fine system; a
-node that is not eligible is raw. What it writes only grows the raw graph; it may send requests,
-which take no virtual slot from the system's counter (the projection maps each call it actually
-sends injectively, apart from the system's); the replies and notifications it takes stay in the
-observation as ghosts, its state being unmodelled; and the hub answers its fresh requests without
-moving (`answerRaw`'s `hhub`). That is a law of the native run, from the records alone once they
-are fixed: an accepted push whose record effect leaves the records as they were has its sender's
-raw pending originals among what they drop, which its custody excludes
-(`Recovery.raw_pending_empty_of_fixed_records`, from `Recovery.PendingOriginals.unpublished`). It
-needs no original history and no embedding. So the observation is not every field of the native
-run: it is what the fine system reads of it.
+The observation starts at the entry cut, a finite cut after the record cut. By it, every
+eligible node has handled a fresh head from after the record cut and taken the current records,
+so its known head is named in the current records' namespace and its embedding is scoped.
+Before it, an eligible node may still know an old raw head whose node-space image the current
+drops have changed, so its steps are not claimed to be the fine system's.
+
+From the entry cut on, the hive's run is observed coarsely (`HiveStep`):
+- An eligible node's events, the environment's, and the hub's answers to requests that eligible
+  nodes sent or that were in flight at the entry cut are steps of the fine system. Those
+  requests (`old`) are finitely many and may still move the hub.
+- A node that is not eligible is raw. Its writes only grow the raw graph. Its requests take no
+  virtual slot from the system's counter; the projection maps each call it sends injectively,
+  apart from the system's calls. The replies and notifications it takes stay in the observation
+  as ghosts, since its state is unmodelled. The hub answers its fresh requests without moving
+  (`answerRaw`'s `hhub`).
+
+That last point is a law of the native run, from the records alone once they are fixed. An
+accepted push whose record effect leaves the records as they were has its sender's raw pending
+originals among those the records drop, and its custody excludes them
+(`Recovery.raw_pending_empty_of_fixed_records`, from `Recovery.PendingOriginals.unpublished`).
+It needs no original history and no embedding. The observation covers only the fields of the
+native run that the fine system reads.
 
 The eligible nodes' system is a function of that observation (`filt`): the other nodes' slots
 frozen, their fresh requests and the replies to them left out. Each observed step is a step of
@@ -310,8 +314,8 @@ theorem filt_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {a
     · simp only [filt, hreps, List.filter_append, List.filter_cons, hkrep, List.filter_nil]
       simp
 
-/-- The same, for a run observed from the entry cut `k` on, read from there: the steps before
-`k` are not claimed. -/
+/-- The same, for a run observed from the entry cut `k` on, read from there. It says nothing
+of the steps before `k`. -/
 theorem filt_run_from {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     (run : Nat → Sys) (acts : Nat → Act) (k : Nat)
     (hs : ∀ i, k ≤ i → HiveStep N D law E old (acts i) (run i) (run (i + 1))) :
@@ -322,11 +326,10 @@ theorem filt_run_from {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw
 /-! ### Where the eligible nodes' system starts
 
 A node that is not eligible stands in it as an inactive dummy on the raw root, waiting for
-nothing:
-none of its core steps ever runs, so its drop relation never matters, and the requests of it in
+nothing. None of its core steps ever runs, so its drop relation never matters. Its requests in
 flight at the entry cut, and their replies, are orphans that only the initial budget counts.
-What the system's run keeps (`RunOK`) holds of its start from what the observation has there:
-the eligible nodes' own invariants and the global ones of the requests, replies and
+What the system's run keeps (`RunOK`) holds at its start: the eligible nodes' own invariants
+come from the observation, and so do the global invariants of the requests, replies and
 notifications, which filtering only thins (`runOK_filt_init`). -/
 
 /-- The dummy's core state: one label, `0`, its known head and only op head, and inactive. -/

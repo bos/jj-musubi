@@ -11,8 +11,8 @@ The primitive boundaries have separate owners:
 - `hive_converges_observed`: native record identity and custody (`views`), the hub's records
   at the cut (`hubRecs`), and their change only with native records or pruning (`hubRecsStep`).
 
-Entry, old-effect cutoffs and stabilization are derived. Eventual handling and restarts remain
-source obligations, as does the termination of automatic native writes (`autoWritesStop`).
+Entry, old-effect cutoffs and stabilization are derived. Eventual handling and restarts are
+source obligations, as is the termination of automatic native writes (`autoWritesStop`).
 
 The convergence proof uses this file.
 -/
@@ -72,12 +72,16 @@ theorem FineSource.steps {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
   rw [S.replayActs j, S.replay j, show k + j + 1 = k + (j + 1) from rfl, S.replay (j + 1)]
   exact observed_hs (run k) S.events (fun _ => dummy S.rawRoot) h0 hb j
 
-/-- The fine system's premises, from the replay and the laws `FineSource` names, given that no
-eligible node makes an automatic write (`hnoAuto`), so each advance's cleanup writes nothing, the
-hub's records stay (`hr`), no eligible node has pending drops (`pending`), adopts (`applied`) or
-does housekeeping (`hm`), the clock is not before `t0` at the cut (`time`), and an eligible node
-takes only head-bearing replies answered, and notifications naming a state, from `t0` on
-(`takes`, `notes`). -/
+/-- The fine system's premises, from the replay and the laws `FineSource` names. Assumes, from
+the cut on:
+* no eligible node makes an automatic write (`hnoAuto`), so each advance's cleanup writes
+  nothing;
+* the hub's records stay (`hr`);
+* no eligible node has pending drops (`pending`), adopts (`applied`) or does housekeeping
+  (`hm`);
+* the clock is at least `t0` at the cut (`time`);
+* an eligible node takes only head-bearing replies answered from `t0` on, and only
+  notifications naming a state from `t0` on (`takes`, `notes`). -/
 def fineAt_of {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} [DecidablePred E] {run : Nat → Sys} {acts : Nat → Act} {k w : Nat}
     {initial : Nat → Nat} {t0 : Nat} {auto : Nat → Nat → Prop}

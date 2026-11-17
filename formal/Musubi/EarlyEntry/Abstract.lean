@@ -13,11 +13,17 @@ open Musubi Musubi.NodeSettle
 
 /-- What NodeSettle's steps need of a state, wherever the hub's head is. -/
 structure LInv (σ : NS) : Prop where
+  /-- Parents come before their children. -/
   parLt : ParLt σ.par
+  /-- The known head is below the next fresh id. -/
   knownLt : σ.known.head < σ.next
+  /-- There is at least one op head. -/
   headsNe : σ.heads ≠ []
+  /-- Every op head is below the next fresh id. -/
   headsLt : ∀ y ∈ σ.heads, y < σ.next
+  /-- The known head has at least one node-space image. -/
   imgNe : σ.img ≠ []
+  /-- Every image is below the next fresh id. -/
   imgLt : ∀ i ∈ σ.img, i < σ.next
 
 /-- NodeSettle's context for a burst with known pair `K`: the hub's records `R`, and a pair that

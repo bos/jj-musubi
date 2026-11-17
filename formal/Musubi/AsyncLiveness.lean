@@ -1,7 +1,9 @@
 /-
-Progress at the asynchronous boundaries hidden by the atomic policy exchanges. These lemmas
-do not yet prove the retry bridge: fix-up creation and stale ordered-record adoption need a
-separate stabilization argument before the record-aware policy theorem can apply.
+Progress at the asynchronous boundaries inside the atomic policy exchanges: delayed replies
+and acceptance before the acknowledgement arrives. The main results are
+`settling_decreases` and `settling_hub_stabilizes`: on a run made of `SettlingStep`s, which
+create no fix-ups and never adopt records from an obsolete history, the hub's head and
+sequence number stop changing. That a concrete run has this form is shown elsewhere.
 
 The convergence proof uses only `nat_trace_stabilizes` from this file. The rest, such as
 `settling_hub_stabilizes`, is not used by the assembly and stands alone as a progress result.
@@ -12,9 +14,9 @@ namespace Musubi
 
 variable {N : Nat}
 
-/-- An honest delayed reply can improve a consistent node without naming the hub's latest
-head. The reply must belong to the current history; recovery from an obsolete history is
-outside this lemma. Network, staging and hub stores are deliberately unconstrained. -/
+/-- A delayed reply that is honest can improve a consistent node even if it does not name the
+hub's latest head. The reply must belong to the current history: `hhist` says its head is the
+hub's head at `sq`. Network, staging and hub stores are unconstrained. -/
 theorem measureR_delayed_learn {s t : State} {n sq hd : Nat}
     (hn : n < N) (hc : Consistent s n) (hsq : sq ≤ s.hub.seq)
     (hhist : s.hub.hist sq = hd) (hlt : (s.node n).known.seq < sq)
@@ -50,9 +52,9 @@ theorem measureR_delayed_learn {s t : State} {n sq hd : Nat}
     omega
   · intro i _ hi; exact f.staleR_ne hi
 
-/-- Acceptance makes the pusher good before it receives the acknowledgement. This is the
-hub-only effect, so a lost reply does not erase the decrease. It relies on the pusher still
-having the single head it sent, and its old knowledge belonging to the current history. -/
+/-- Acceptance makes the pusher good before it receives the acknowledgement, so a lost reply
+does not undo the decrease. It requires the pusher to have exactly the head it sent and its
+knowledge to belong to the current history. -/
 theorem bad_accept_before_reply {s : State} (hI : InvR N s) {n hd : Nat}
     (hn : n < N) (hc : Consistent s n)
     (hh : ∀ y, (s.node n).heads y ↔ y = hd)
@@ -99,7 +101,8 @@ theorem measureR_accept_before_reply {s : State} (hI : InvR N s) {n hd : Nat}
     Lex6 (rmeasure N (s.hubAccept hd)) (rmeasure N s) :=
   Prod.Lex.left _ _ (bad_accept_before_reply hI hn hc hh hne hdesc)
 
-/-- Stores, staging and message bookkeeping do not affect whether a node is good. -/
+/-- States that agree on the graph, the hub's head, sequence number and history, and every
+node's heads and knowledge. Whether a node is good depends on nothing else. -/
 structure HeadAgreement (s t : State) : Prop where
   U : s.U = t.U
   head : s.hub.head = t.hub.head
@@ -119,10 +122,9 @@ theorem lex6_first_le {a b : Nat × Nat × Nat × Nat × Nat × Nat} (h : Lex6 a
   | left _ _ h => exact Nat.le_of_lt h
   | right => exact Nat.le_refl _
 
-/-- The nonincreasing first component after operation-creating disturbances stop. Local
-merges remain allowed: they cannot make a good node bad. A real advance/merge is two steps.
-The relation deliberately excludes fix-up creation, hub regression, and obsolete-history
-recovery; proving that a concrete run eventually has this form is a separate obligation. -/
+/-- A step on which the count of bad nodes does not increase. Local merges are allowed, since
+they cannot make a good node bad. The relation excludes fix-up creation, hub regression and
+recovery from an obsolete history. -/
 inductive SettlingStep (N : Nat) : State → State → Prop
   | policy {s t : State} (hp : PStepR N s t)
       (hh : t.hub.head = s.hub.head) (hs : t.hub.seq = s.hub.seq) : SettlingStep N s t
@@ -137,7 +139,8 @@ inductive SettlingStep (N : Nat) : State → State → Prop
       (ha : HeadAgreement t (s.hubAccept hd)) : SettlingStep N s t
   | bookkeeping {s t : State} (ha : HeadAgreement t s) : SettlingStep N s t
 
-/-- Acceptance is the only hub-head change in this suffix, and pays for it immediately. -/
+/-- A settling step never increases the bad count, and strictly lowers it whenever the hub's
+head or sequence number changes. -/
 theorem settling_decreases {s t : State} (hr : RReachable N s) (hs : SettlingStep N s t) :
     mBad N t ≤ mBad N s ∧
       ((t.hub.seq, t.hub.head) ≠ (s.hub.seq, s.hub.head) → mBad N t < mBad N s) := by
@@ -155,8 +158,8 @@ theorem settling_decreases {s t : State} (hr : RReachable N s) (hs : SettlingSte
     rw [ha.bad_eq]
     exact ⟨Nat.le_refl _, fun h => False.elim (h (by rw [ha.seq, ha.head]))⟩
 
-/-- A natural-valued nonincreasing trace eventually has its least attained value. This
-does not require a bound on the time between changes. -/
+/-- A nonincreasing trace of naturals is eventually constant, at its least value. No bound on
+the time between changes is needed. -/
 theorem nat_trace_stabilizes (f : Nat → Nat) (hf : ∀ i, f (i + 1) ≤ f i) :
     ∃ k, ∀ i, k ≤ i → f i = f k := by
   obtain ⟨v, ⟨k, rfl⟩, hmin⟩ := exists_min (fun v => ∃ k, f k = v) ⟨0, rfl⟩
@@ -168,10 +171,8 @@ theorem nat_trace_stabilizes (f : Nat → Nat) (hf : ∀ i, f (i + 1) ≤ f i) :
   have hnot : ¬ f i < f k := fun h => hmin (f i) h ⟨i, rfl⟩
   omega
 
-/-- On a suffix with no fix-up creation or obsolete-history recovery, hub acceptance
-cannot continue forever. This proves hub stabilization from the primitive acceptance
-effect, rather than assuming the hub stops accepting. Establishing such a suffix for the
-implementation still requires the finite-fix-up/record and transport arguments. -/
+/-- On a run of settling steps, the hub eventually stops accepting: its sequence number and
+head are constant from some point on. -/
 theorem settling_hub_stabilizes (run : Nat → State)
     (hr : ∀ i, RReachable N (run i))
     (hs : ∀ i, SettlingStep N (run i) (run (i + 1))) :

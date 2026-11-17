@@ -9,19 +9,22 @@ open Musubi NodeSettle
 
 /-! ### Taking the hub's records after a fresh `Fetch`
 
-Right after an eligible node handles a fresh `Fetch` it has the hub's current records announced
-unless it has applied them already and holds no receipts, and every operation below the hub's
-head that it does not have locally has its body and objects there: the reply brought them, the
-node's drops being the hub's, so that the head's images are the head. Then, in its round, nothing
-is missing: so long as the announcement stands, the core adopts it, or (if it drops an op head)
-merges, realizes and finally advances taking it (`fresh_fetch_takes`). Past the cut after which
-the node takes no more records, the announcement cannot stand, so the node has the hub's
-records applied and no receipts (`fresh_fetch_current`). The hub need not be stable; the node's
-own round keeps its known head. -/
+Right after an eligible node handles a fresh `Fetch`:
+* it has the hub's current records announced, unless it has applied them already and holds no
+  receipts;
+* every operation below the hub's head that it does not have locally has its body and objects
+  there: the reply brought them, the node's drops being the hub's, so that the head's images
+  are the head.
+
+Nothing is then missing in its round. So long as the announcement stands, the core adopts it or,
+if it drops an op head, merges, realizes and finally advances, taking it (`fresh_fetch_takes`).
+Past the cut after which the node takes no more records, the announcement cannot stand, so the
+node has the hub's records applied and no receipts (`fresh_fetch_current`). The hub may change
+meanwhile; the node's own round keeps its known head. -/
 
 /-- Every raw operation below the known head `H` has a body here (`stg`: staged, or its
 canonical body in the node's store), local or not: what a fresh `Fetch` leaves, its objects
-aside. Naming does not enter it, so it lasts while bodies are kept, as naming changes. -/
+aside. Naming does not enter it, so it lasts while bodies are kept, even as naming changes. -/
 def RawBodies (par : Nat → List Nat) (H : Nat) (s : State) : Prop :=
   ∀ x, Anc par x H → s.stg x = true
 
@@ -43,18 +46,17 @@ theorem missOpsB_bodies {raw : List Nat} {par : Nat → List Nat} {H : Nat} {s :
 
 /-- After a fresh `Fetch` that brought the bodies of the known head's raw closure, an
 announcement does not stand through the node's round: with no adoption and no taking advance,
-it would have the core merge, realize and ask for objects forever. `active` marks the round's
-own core steps from the reply on, the known head frozen: the first step is the round's, and a
-step of it that merges, realizes or asks for objects, sending no `Fetch`, is followed by
-another (the `GetObjects` reply comes, and the next core step, fairly); every law is asked of
-those steps only, and the run past the round's end is arbitrary. Bodies are kept through the
-round, but objects need not have come with the `Fetch`: a `GetObjects` brings what the survey
-finds missing, or its reply lacks them (`failed`), and the round fails. That no `GetObjects` of
-the round fails is no law of the round: `hserve` is to be derived from the hub keeping what it
-can serve (the `SerialReply` credit), not assumed as an ordinary failure cutoff. Naming may
-change in the round; it settles there (`Naming.settles`), and the checked burst and objects
-laws are asked only of steps it does not change across. A round already settled ends at once;
-none is assumed to go on. -/
+the core would merge, realize and ask for objects forever. Premises:
+* `active` marks the round's own core steps from the reply on, the known head frozen. The first
+  step is the round's, and a step of it that merges, realizes or asks for objects, sending no
+  `Fetch`, is followed by another (the `GetObjects` reply comes, and the next core step,
+  fairly). Every law is asked of those steps only; the run past the round's end is arbitrary.
+* Bodies are kept through the round. Objects may not have come with the `Fetch`: a `GetObjects`
+  brings what the survey finds missing, or its reply lacks them (`failed`) and the round fails.
+* `hserve`: no `GetObjects` of the round fails. This is not a law of the round; it is to be
+  derived from the hub keeping what it can serve (the `SerialReply` credit).
+* Naming may change in the round; it settles there (`Naming.settles`), and the checked burst
+  and objects laws are asked only of steps it does not change across. -/
 theorem fresh_fetch_takes {α : Type} (raw : List Nat) (nm : Naming α) (par : Nat → List Nat)
     (anc : Nat → Nat → Bool)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
@@ -159,7 +161,7 @@ theorem fresh_fetch_takes {α : Type} (raw : List Nat) (nm : Naming α) (par : N
       | succ i ih =>
         obtain ⟨-, ha', hact', hb'⟩ := step i ih.1 ih.2.1 ih.2.2
         exact ⟨hact', ha', hb'⟩
-    -- the round goes on forever with its known head, so naming settles, at a step derived here
+    -- the round goes on forever with its known head, so naming settles
     obtain ⟨T, hT⟩ := nm.settles hnaming fun i => (hall i).1
     apply no_infinite_framed raw (nm.images T) anc trans (fun j => run (T + j))
       (fun j => after (T + j)) _
@@ -235,28 +237,36 @@ theorem fresh_fetch_current {ρ α : Type} (raw : List Nat) (nm : Naming α) (pa
     · rw [hnote.2 (Or.inr hr)] at h; cases h
 
 /-- What the round right after a fresh `Fetched` reply reads, sampled from the node's actual
-events: its raw closure, naming (whose images of the known head may change), raw graph and known
-head (the fresh one), its core states and reads at its successive steps, which of those are the
-round's own (`active`), its core states right after each step's calls complete (`after`), which of
-its `GetObjects` replies lacked what they were asked for (`failed`), and the node's receipts after
-the reply. Data only: its laws are `FetchLaws`. -/
+events. Data only: its laws are `FetchLaws`. -/
 structure FetchData (α : Type) where
+  /-- The raw closure. -/
   raw : List Nat
+  /-- The core's naming; its images of the known head may change. -/
   naming : Naming α
+  /-- The raw graph: each operation's parents. -/
   par : Nat → List Nat
+  /-- The raw ancestry test. -/
   anc : Nat → Nat → Bool
+  /-- The known raw head (the fresh one). -/
   H : Nat
+  /-- The core state at each sampled step. -/
   run : Nat → State
+  /-- The core state right after the step's calls complete. -/
   after : Nat → State
+  /-- What the core reads at the step. -/
   prims : Nat → Prims
+  /-- Whether the step is the round's own. -/
   active : Nat → Bool
+  /-- Whether the step's `GetObjects` reply lacked what it was asked for. -/
   failed : Nat → Prop
+  /-- Whether the node holds receipts at the round's first reading (`prims 0`). That includes
+  at least the receipts held right after the reply; the prelude may add some. -/
   receipts : Bool
 
 /-- The native laws of that round, as `fresh_fetch_current` takes them, `ap` being the records the
 node had applied when it handled the reply. They are asked of the round's own steps only, so a
-round that ends at once has them. That no `GetObjects` of the round fails is not one of them:
-`FetchLaws.current` takes it apart. -/
+round that ends at once has them. `hserve` (no `GetObjects` of the round fails) is not among
+them: `FetchLaws.current` takes it as a separate argument. -/
 structure FetchLaws {ρ α : Type} (ap R : ρ) (d : FetchData α) : Prop where
   trans : ∀ a b c, d.anc a b = true → d.anc b c = true → d.anc a c = true
   hlt : ParLt d.par

@@ -16,8 +16,8 @@ open Musubi NodeSettle NodeSys NodeSysEntry SysAcceptance NativeEvents Recovery.
 A reply the hub gives carries its snapshot then, and a notification the snapshot its accept
 leaves; the history the suffix reads (`histories`) records the hub's head at each sequence and
 changes only at a new, higher one. So the replies and notifications answered from a time on are
-honest snapshots of that history for as long as they are in flight. Replies to other nodes'
-calls (`answerRaw`) are not read. -/
+honest snapshots of that history for as long as they are in flight. Replies to calls of nodes
+that are not eligible (`answerRaw`) are not read. -/
 
 /-- From time `t0` on, the hub's head is the history's at its sequence, past the window's start,
 and the replies answered to eligible nodes carry honest snapshots, and so do the notifications

@@ -1,23 +1,25 @@
 /-
-The driver's finite request list is sent sequentially, not allocated as one physical-id
-batch. Virtual slots identify its already planned calls; wire ids are attached only when
-each call starts, and other callers or subscriptions may allocate between them. Correlation
-needs an injective relabelling of the actual live ids, not order preservation or equality of
-the physical and virtual counters. A finite batch completes from fairness of starting and
-finishing each individual call; no sync-round completion is assumed.
+The driver's finite request list is sent as calls one after another. Virtual slots name the
+planned calls; a wire id is attached when a call starts, and other callers or subscriptions may
+allocate ids between calls. Matching a reply to its call needs an injective relabelling of the
+live ids; order preservation and equal physical and virtual counters are not needed. A finite
+batch completes from fairness of starting and finishing each call; no sync-round completion is
+assumed.
 
-The convergence proof does not use this file; it justifies modelling a driver's sequential native
-calls and their wire ids, which stands alone.
+The convergence proof does not use this file. It justifies modelling the driver's sequential
+native calls and their wire ids.
 -/
 import Musubi.RetryControl
 
 namespace Musubi.Retry.Batch
 
-/-- Injectivity is required only on actual bound calls plus the reply being checked.
-Unsent virtual slots have no wire id and need not extend to a global counter renaming. -/
+/-- `f` is injective on `xs`. Required only on the live bound calls plus the reply being
+checked: unsent virtual slots have no wire id, so `f` need not extend to a renaming of the
+whole counter. -/
 def InjectiveOn (f : Nat → Nat) (xs : List Nat) : Prop :=
   ∀ a ∈ xs, ∀ b ∈ xs, f a = f b → a = b
 
+/-- Removing a finished id commutes with relabelling by `f`. -/
 theorem finish_relabel (f : Nat → Nat) (xs : List Nat) (id : Nat)
     (hinj : InjectiveOn f (id :: xs)) :
     (xs.filter (· != id)).map f = (xs.map f).filter (· != f id) := by
@@ -37,6 +39,7 @@ theorem finish_relabel (f : Nat → Nat) (xs : List Nat) (id : Nat)
     · have hf : f x ≠ f id := fun h => hx (he.1 h)
       simp [hx, hf, ih ht]
 
+/-- Whether a reply's id matches a live call is the same before and after relabelling. -/
 theorem match_relabel (f : Nat → Nat) (xs : List Nat) (id : Nat)
     (hinj : InjectiveOn f (id :: xs)) : (xs.map f).contains (f id) = xs.contains id := by
   apply Bool.eq_iff_iff.2
@@ -48,11 +51,13 @@ theorem match_relabel (f : Nat → Nat) (xs : List Nat) (id : Nat)
   · intro hi
     exact ⟨id, hi, rfl⟩
 
+/-- A batch: calls not yet finished, and whether one is in flight. -/
 structure State where
   remaining : Nat
   active : Bool
   deriving DecidableEq, Repr
 
+/-- An in-flight call is one of the remaining calls. -/
 def Inv (s : State) : Prop := s.active = true → 0 < s.remaining
 
 inductive Event
@@ -61,6 +66,7 @@ inductive Event
   | wait
   deriving DecidableEq
 
+/-- `start` puts the next call in flight, `finish` completes it, `wait` changes nothing. -/
 inductive Step : Event → State → State → Prop
   | start (left : Nat) : Step .start ⟨left + 1, false⟩ ⟨left + 1, true⟩
   | finish (left : Nat) : Step .finish ⟨left + 1, true⟩ ⟨left, false⟩
@@ -85,8 +91,9 @@ theorem start_active {s t : State} (h : Step .start s t) : t.active = true := by
   cases h
   rfl
 
-/-- The list may contain one or two calls in the driver, but any finite initial count
-works. Completing one call enables starting the next. Shared wire-id interleaving is free. -/
+/-- A batch of any finite count completes, given fairness of starting and finishing calls (the
+driver's lists have one or two calls). Finishing a call enables starting the next. Interleaved
+wire-id allocation by others does not matter. -/
 theorem finite_batch_completes (run : Nat → State) (events : Nat → Event)
     (hs : ∀ i, Step (events i) (run i) (run (i + 1)))
     (hstart : ∀ i, 0 < (run i).remaining → (run i).active = false →

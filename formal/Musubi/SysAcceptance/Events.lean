@@ -19,15 +19,15 @@ open Musubi Musubi.NodeSettle Musubi.EarlyEntry Musubi.NodeSys Musubi.NodeSysEnt
 
 /-! ## Native events, projected
 
-A native event is observed by its own physical data, and its projection into the hive's `Sys`
-is built from that data by a theorem, never assumed as a `SysStep`. The first events projected
-are the hub's answers. To a `Fetch` and to a `GetObjects`, `handle` answers one request at a
-time per hive (hub.rs:1-4), from the hub's `(seq, head)` and records then (`storage.head()`,
-`storage.records()`, hub.rs:154-188), and changes nothing the system reads (its `report` of what
-the machine took is kept in memory only, and an objects answer only exports). To a `Push`, the
-hub first writes (what the push uploads, and contraction bodies it generates), a raw step, unless
-it refuses the push first, which writes nothing, then decides from the state that leaves
-(`HubAnswer.push_handled`). -/
+A native event is observed by its own physical data, and a theorem builds its projection into
+the hive's `Sys` from that data, proving it is a `SysStep`. The first events projected are the
+hub's answers. `handle` (`crates/musubi-core/src/hub.rs`) answers one request at a time per
+hive. To a `Fetch` and to a `GetObjects` it answers from the hub's `(seq, head)` and records
+then (`storage.head()`, `storage.records()`), and changes nothing the system reads (its `report`
+of what the machine took is kept in memory only, and an objects answer only exports). To a
+`Push`, the hub first writes (what the push uploads, and contraction bodies it generates), a raw
+step, unless it refuses the push first, which writes nothing; it then decides from the state
+that leaves (`HubAnswer.push_handled`). -/
 
 /-- The hub answering one call, as observed: the call, by node, virtual slot (the call batch's
 injective map of its wire id) and body, and the hub's `(seq, head, records)` when it answers,
@@ -85,9 +85,9 @@ theorem HubAnswer.hive_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : 
 `o`, from the state its writes left (`HubAnswer.stored`): an accepted push moves the hub's
 `(seq, head)` and records (`set_head`), and publishes the new head to every node; a refused one
 gets the hub's records; any other gets the hub's head. The call leaves the requests, its reply
-joins the replies, and the clock ticks. The notifications to every node are GHOSTS, potential
-notifications: the native hub publishes to its subscribers only, and a node not subscribed
-never consumes the one the model sends it (no step needs it to). -/
+joins the replies, and the clock ticks. The notifications to every node are potential ones: the
+native hub publishes to its subscribers only, and a node not subscribed never consumes the one
+the model sends it, since no step needs it. -/
 def pushAfter (N : Nat) (law : HubLaw) (g : Sys) (r : Req) (p : Pkt) (o : RawPublish.Outcome) :
     Sys :=
   if o = .accepted then
@@ -151,12 +151,14 @@ theorem answer_ne_incomplete {h : RawPublish.Hub} {q : RawPublish.Push} {c : Raw
         exact absurd h3.2 (by decide)
       · split <;> simp
 
-/-- The hub's DECISION on a push, projected, from the native decision on that very packet, in
-the state after the hub's writes for it (`HubAnswer.push_handled` composes the two): the hub's
-checks of it (`RawPublish.Checks`), its records compared and `is_dropped` bound to the law's, its
-closure stored in the one branch that consults it (so never `Incomplete`; a refused push is
-asked nothing of its closure), and the law accepting exactly when `Push::answer` accepts.
-Whatever the outcome, the step is the system's `answer`. -/
+/-- The hub's decision on a push, projected from the native decision on that very packet, in the
+state after the hub's writes for it (`HubAnswer.push_handled` composes the two), is never
+`Incomplete`, and for every outcome is the system's `answer` step. Premises:
+* `hrec`, `hdrop`: the checks (`RawPublish.Checks`) compare records and bind `is_dropped` as the
+  law does;
+* `hclosed`: the closure is stored in the one branch that consults it (a refused push is asked
+  nothing of its closure);
+* `hacc`: the law accepts exactly when `Push::answer` accepts. -/
 theorem HubAnswer.push_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {g : Sys}
     {r : Req} {p : Pkt} {c : RawPublish.Checks}
     (hr : r ∈ g.reqs) (hb : r.body = .push p)
@@ -212,7 +214,7 @@ theorem HubAnswer.push_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : 
 /-- The hub's writes before it decides a push, projected: `store_ops`, `store_objects` and the
 contraction bodies it generates itself (`with_contracted`), which it writes even for a push it
 then rejects or finds idempotent. A push it refuses (other records, or a dropped head) is refused
-before them (hub.rs:264-272): no growth, `next' = g.next` and `par' = g.par`. The raw graph grows
+before them (`Push::answer`): no growth, `next' = g.next` and `par' = g.par`. The raw graph grows
 by ids above every one in use, the parents of those in use unchanged; nothing else moves. -/
 def HubAnswer.stored (g : Sys) (next' : Nat) (par' : Nat → List Nat) : Sys :=
   { g with next := next', par := par', time := g.time + 1 }
@@ -347,9 +349,9 @@ data: the kind of step and the state its writes leave, its batch of calls by vir
 body, the replies by slot, and the structural projection of its labels into raw ids. A raw id
 names one canonical body, so a write that coincides with an operation that exists takes no fresh
 raw id, and one the node holds already takes no new label. The projection is checked on the
-observation (`NodeSys.Exec.growB`); what is not read off the data is a named law of the native
-call that does it, a correspondence obligation: the decision relations (`Issue`, `Handle`, `Loc`,
-`Idle`, `HeadRep`) have no checker of their own yet. A label a reply teaches is structure only:
+observation (`NodeSys.Exec.growB`). What is not read off the data is a named law of the native
+call that does it, a correspondence obligation; the decision relations (`Issue`, `Handle`,
+`Loc`, `Idle`, `HeadRep`) have no checker. A label a reply teaches is structure only:
 its parents and raw id. What the node holds of it is what it held of that label before, which is
 nothing for a state holding nothing above its labels (`Bare`, `learn_new_bare`): a label is new
 only for an operation the node did not hold. -/
@@ -386,9 +388,9 @@ def NodeIssue.apply (g : Sys) (e : NodeIssue) (next' : Nat) (par' : Nat → List
 /-- What the observation of the step must bind, each a law of the native call that does it:
 - `idle`: the node has no calls out, the core taking a step only once the last one's replies are
   handled (`NodeCore`);
-- `decide`: it is a step the core takes, with its writes (`NodeCore::step`, `Issue`): a
-  correspondence obligation of that call, which no checker of this exact relation tests (the
-  existing tests cover the core's behaviour in parts) and nothing here proves;
+- `decide`: it is a step the core takes, with its writes (`NodeCore::step`, `Issue`): an
+  assumed correspondence with that call; no test checks this exact relation (the existing tests
+  cover the core's behaviour in parts);
 - `grow`: the structural check of its writes passes (`Exec.growB`: each new label a fresh raw id
   or an operation that exists already, labels and raw ids below unmoved);
 - `bodies`: the calls are the ones the step returns (`Bodies`);
@@ -537,8 +539,8 @@ law of the native call that does it:
   its state as its state after;
 - `drops`, `fits`: the context they teach is the replies' (the head's label, sequence and
   records), with the node's drops;
-- `handle`: the core's handling of the replies (`Handle`), a correspondence obligation of that
-  handling, which no checker of this exact relation tests;
+- `handle`: the core's handling of the replies (`Handle`), an assumed correspondence with that
+  handling; no test checks this exact relation;
 - `reps`: the replies leave the ones in flight, nothing else. -/
 structure NodeHandle.Binds (D : Nat → Nat → Nat → Prop) (e : NodeHandle) (g : Sys) (w : Wait)
     (reps' : List Rep) : Prop where
@@ -597,8 +599,8 @@ def NodeCore.apply (g : Sys) (e : NodeCore) (next' : Nat) (par' : Nat → List N
     time := g.time + 1 }
 
 /-- What the observation of a core step that sends nothing must bind: the node has no calls out
-and its round runs (`NodeCore`); the step is one the core takes (`NodeCore::step`, `Loc`), a
-correspondence obligation of that call, which no checker of this exact relation tests; and the
+and its round runs (`NodeCore`); the step is one the core takes (`NodeCore::step`, `Loc`), an
+assumed correspondence with that call that no test checks exactly; and the
 structural check of its writes passes (`Exec.growB`). -/
 structure NodeCore.Binds (D : Nat → Nat → Nat → Prop) (e : NodeCore) (g : Sys) (next' : Nat)
     (par' : Nat → List Nat) : Prop where
@@ -682,8 +684,8 @@ def NodeNotice.apply (g : Sys) (e : NodeNotice) : Sys :=
 running; the notification is its own and in flight; it names a newer pair than the node knows (the
 filter of `NotificationControl`); what it teaches passes the structural check (`Exec.growB`) and
 the adapter's laws, as for a reply; its context is the notification's, with the node's drops; and
-the core takes it (`HeadRep`), a correspondence obligation of that handling, which no checker of
-this exact relation tests. -/
+the core takes it (`HeadRep`), an assumed correspondence with that handling that no test checks
+exactly. -/
 structure NodeNotice.Binds (D : Nat → Nat → Nat → Prop) (e : NodeNotice) (g : Sys) : Prop where
   idle : (g.node e.node).wait = none
   between : (g.node e.node).ns.act = false

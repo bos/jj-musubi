@@ -1,8 +1,8 @@
 /-
-The system's cuts on old replies and notifications, derived from its own steps rather than
-assumed (`old_replies_stop`, `old_notes_stop`): from some point on, every reply a node takes
-and every notification it processes was made at or after a given step. Old ones may stay in
-flight forever, never taken: the cuts are on what is taken.
+The system's cuts on old replies and notifications, proved from its own steps
+(`old_replies_stop`, `old_notes_stop`): from some point on, every reply a node takes and every
+notification it processes was made at or after a given step. Old ones may stay in flight
+forever; the cuts bound only what is taken.
 
 Replies: at the cut every reply in flight has a slot below the slot counter `B` then
 (`SysOK`), and a reply made since has a later time. A node waits on one step at a time; a step
@@ -113,8 +113,8 @@ theorem credit_le {n B : Nat} {g g' : Sys} (h : Old n B g' → Old n B g) :
   · simp [credit, h', h h']
   · simp [credit, h']
 
-/-- A wait issued before the cut is one there was before the step: a step issued after it,
-the slot counter at `B` or above, takes slots from the counter on. -/
+/-- A wait with a slot below `B` after a step was already one before it, when `B ≤ g.slot`: a
+step issued after the cut takes slots from the counter on, at `B` or above. -/
 theorem old_step {n B : Nat} (hs : SysStep N D law a g g') (hB : B ≤ g.slot) :
     Old n B g' → Old n B g := by
   rintro ⟨w, hw, s, hs', hsB⟩
@@ -150,8 +150,8 @@ theorem old_step {n B : Nat} (hs : SysStep N D law a g g') (hB : B ≤ g.slot) :
   · rw [node_unchanged hs hab] at hw
     exact ⟨w, hw, s, hs', hsB⟩
 
-/-- Taking a reply with a slot below `B` spends node `n`'s credit: the reply is one of the
-step's it waits on, and once taken it waits on none. -/
+/-- Taking a reply with a slot below `B` spends node `n`'s credit: the reply's slot is one of
+the slots of the step it waits on, and once taken it waits on none. -/
 theorem take_old {n B : Nat} (hs : SysStep N D law a g g') {r : Rep} (hr : r ∈ g.reps)
     (hr' : r ∉ g'.reps) (hrn : r.node = n) (hB : r.slot < B) : Old n B g ∧ ¬ Old n B g' := by
   cases hs with

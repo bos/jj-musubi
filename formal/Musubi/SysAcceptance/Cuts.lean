@@ -29,12 +29,16 @@ instance (N : Nat) (recs : Nat → Exec.SEState) (k : Nat) :
     DecidablePred (EligibleAt N recs k) := fun n => by
   unfold EligibleAt; infer_instance
 
-/-- From `k` on, no ordinary I/O or transport failure, no node's own code makes an automatic
-write (`autoWrite`: idle housekeeping, the prelude's, `advance_to`'s cleanup, a `jj op abandon`
-passed on, a late reparenting), no user works in a node's repository, no `GetObjects` reply
-lacks what it asked for (so no batch fails on one), and the environment loses nothing (`lost`:
-no hub remade, no hub losing objects, no node's own gc, no cached have no longer true), so no
-per-cut law has a hub regression to face. -/
+/-- From `k` on the environment is quiet and loses nothing, so no per-cut law faces a hub
+regression. Each field covers one kind of event:
+* `noIOFailure`: no ordinary I/O or transport failure.
+* `noAutomaticWrite`: no node's own code makes an automatic write (`autoWrite`: idle
+  housekeeping, the prelude's, `advance_to`'s cleanup, a `jj op abandon` passed on, a late
+  reparenting).
+* `noUserWork`: no user works in a node's repository.
+* `noObjectFailure`: no `GetObjects` reply lacks what it asked for, so no batch fails on one.
+* `noLoss`: the environment loses nothing (`lost`: no hub remade, no hub losing objects, no
+  node's own gc, no cached have that has stopped being true). -/
 structure QuietAt {ρ α : Type} (N : Nat) (O : HiveObs ρ α) (k : Nat) : Prop where
   noIOFailure : ∀ t, k ≤ t → ¬ O.ioFail t
   noAutomaticWrite : ∀ n, n < N → ∀ t, k ≤ t → ¬ O.autoWrite n t
@@ -52,8 +56,7 @@ def OldGone {ρ α : Type} (N : Nat) (O : HiveObs ρ α) (c k : Nat) : Prop :=
 def KnownTrue {ρ α : Type} (run : Nat → Sys) (O : HiveObs ρ α) (k n i : Nat) : Prop :=
   ∃ a, k ≤ a ∧ a ≤ i ∧ (⟨O.seq n i, O.known n i⟩ : Known) = ⟨(run a).hub.seq, (run a).hub.head⟩
 
-/-- Moving a record/control cut forward preserves its guarantees. The frozen snapshot is
-rebased to the later cut. -/
+/-- A record/control cut holds at every later time, with the frozen snapshot rebased to it. -/
 theorem CutAt.mono {N : Nat} {recs : Nat → Exec.SEState}
     {adopts fails : Nat → Nat → Bool} {k later : Nat}
     (cut : CutAt N recs adopts fails k) (afterCut : k ≤ later) :
@@ -67,7 +70,7 @@ theorem CutAt.mono {N : Nat} {recs : Nat → Exec.SEState}
   control := fun n hn i hi => cut.control n hn i (by omega)
 
 /-- At the entry phase, records are fixed, the environment is quiet, and only `Incomplete`
-can reopen a node. Recovering reopens have already spent their last object-failure credit. -/
+can reopen a node. Recovering reopens have spent their last object-failure credit. -/
 structure EntryPhase {ρ α : Type} (N : Nat) (recs : Nat → Exec.SEState)
     (adopts fails : Nat → Nat → Bool) (O : HiveObs ρ α) (time : Nat) : Prop where
   cut : CutAt N recs adopts fails time
@@ -75,8 +78,8 @@ structure EntryPhase {ρ α : Type} (N : Nat) (recs : Nat → Exec.SEState)
   reopenIncomplete : ∀ n, n < N → ∀ i, time ≤ i →
     O.reopen n i → O.incomplete n i = true
 
-/-- Every node has entered and stays entered. Its closed push excludes the only remaining
-reason for reopening. `recordCut` identifies the frozen records; `cut` starts this suffix. -/
+/-- Every node has entered and stays entered. Its closed push rules out the only reason left
+for reopening. `recordCut` identifies the frozen records; `cut` starts this suffix. -/
 structure EnteredPhase {ρ α : Type} (N : Nat) (Rof : Nat → ρ) (wOf : Nat → Nat)
     (O : HiveObs ρ α) (recordCut cut : Nat) : Prop where
   afterRecord : recordCut ≤ cut
@@ -85,8 +88,8 @@ structure EnteredPhase {ρ α : Type} (N : Nat) (Rof : Nat → ρ) (wOf : Nat �
   noReopen : ∀ n, n < N → ∀ i, cut ≤ i → ¬ O.reopen n i
 
 /-- The observed boundary supplied to native replay: every node is entered and has completed
-an active sample after old effects stopped. Activity alone does not identify a core event or
-prove normalized heads; `FineStart` separately supplies the snapshot correspondence laws. -/
+an active sample after old effects stopped. The snapshot correspondence laws are in
+`FineStart`; activity alone identifies no core event and proves no normalized heads. -/
 structure FineCut {ρ α : Type} (N : Nat) (Rof : Nat → ρ) (wOf : Nat → Nat)
     (O : HiveObs ρ α) (recordCut cut : Nat) : Prop where
   afterRecord : recordCut ≤ cut

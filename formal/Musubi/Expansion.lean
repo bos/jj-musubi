@@ -1,11 +1,11 @@
 /-
-An implementation that refines a model only after expanding steps: one actual step stands for a
-finite, nonempty path of model steps, as an advance that publishes a merge stands for an advance
-and a merge, or a write of several operations for several. A step that changes nothing the model
-sees is a path of one frame. Concatenating the paths gives a model run whose states at strictly
-increasing indices are the actual ones (`concat`), so whatever the model run settles to, the
-actual run settles to as well (`stabilizes_of_expansion`), and whatever holds of every model step
-from some path on holds of every model step from that path's index on (`concat_tail`).
+Refinement by expansion: one actual step stands for a finite, nonempty path of model steps.
+An advance that publishes a merge stands for an advance and a merge; a write of several
+operations stands for several; a step that changes nothing the model sees is a path of one
+frame. Concatenating the paths gives a model run whose states at strictly increasing indices
+are the actual ones (`concat`). So the actual run settles to whatever the model run settles
+to (`stabilizes_of_expansion`), and a property of every model step from some path on holds of
+every model step of the concatenation from that path's index on (`concat_tail`).
 
 The convergence proof uses this file.
 -/
@@ -153,8 +153,8 @@ theorem place_ge (K : Nat) : ∀ j, index p K ≤ j → K ≤ (place p j).1 := b
   | succ d ih =>
     exact Nat.le_trans (ih (Nat.le_add_right _ _)) (place_mono p _)
 
-/-- What every step of every path from the `K`th on satisfies, every model step from that
-path's index on satisfies. -/
+/-- If `S` holds of every step of every path from the `K`th on, it holds of every model step
+from index `index K` on. -/
 theorem concat_tail (S : G → G → Prop) (K : Nat)
     (hS : ∀ i, K ≤ i → ∀ j, j < (p i).len → S ((p i).st j) ((p i).st (j + 1))) :
     ∀ j, index p K ≤ j → S (concat p j) (concat p (j + 1)) :=

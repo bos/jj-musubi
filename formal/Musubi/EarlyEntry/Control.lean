@@ -11,23 +11,29 @@ import Musubi.ExecSound
 After the record and receipt cuts, with the hub's raw head `H` stable, its records current and
 the known closure and images fixed, a node with pending drops reaches its pending push
 (`pending_push_reached`). Each core step is chosen as `NodeCore::step` chooses it (`choose`),
-from what it reads; with nothing announced, records current, drops pending and no concurrent
-change of the op head, it never adopts, idles or polls (`choose_guarded`), the one idle a
-survey could give being ruled out by NodeSettle's survey completeness, read on the raw survey
-graph (`raw_survey_guard`). Every other step lowers one rank: a burst step Burst's, and a call,
-with the reply the core waits for, the count of raw operations it lacks or lacks the objects
-of (`call_rank`). Raw ids throughout: no original is identified with a raw id. -/
+from what it reads.
+
+* With nothing announced, records current, drops pending and no concurrent change of the op
+  head, the core never adopts, idles or polls (`choose_guarded`). The one idle a survey could
+  give is ruled out by NodeSettle's survey completeness, read on the raw survey graph
+  (`raw_survey_guard`).
+* Every other step lowers one rank: a burst step Burst's, and a call, with the reply the core
+  waits for, the count of raw operations it lacks or lacks the objects of (`call_rank`).
+
+Ids are raw throughout: no original is identified with a raw id. -/
 
 namespace Musubi.EarlyEntry.Control
 
 open Musubi NodeSettle
 
-/-- What a node's control reads after the cuts, raw: the burst's state; which raw operations
-it has a body for to realize from (`stg`: staged, or its canonical body; realizing one does not
-take it away); and which have their objects here. -/
+/-- What a node's control reads after the cuts, raw. -/
 structure State where
+  /-- The burst's state. -/
   burst : Burst.State
+  /-- Which raw operations it has a body for to realize from (staged, or its canonical body;
+  realizing one does not take it away). -/
   stg : Nat → Bool
+  /-- Which raw operations have their objects here. -/
   obj : Nat → Bool
 
 /-- Nothing in the raw known closure that is local, has a body or has its objects stops being
@@ -44,6 +50,7 @@ def missOps (raw : List Nat) (s : State) : Nat :=
 def missObjs (raw : List Nat) (s : State) : Nat :=
   (raw.filter fun x => !s.burst.loc x && !s.obj x).length
 
+/-- The control rank: missing bodies, then missing objects, then Burst's rank. -/
 def rank (raw images : List Nat) (anc : Nat → Nat → Bool) (s : State) : List Nat :=
   missOps raw s :: missObjs raw s :: Burst.rank raw images anc s.burst
 
@@ -138,18 +145,21 @@ theorem lexLt_of_le_lt {x y z : List Nat} (h1 : LexLe x y) (h2 : LexLt y z) : Le
   · exact h2
 
 /-- What may happen to a node's control state between its step's calls completing and its next
-step's reading, after that step's prelude, in the same round, with no automatic write of the node
-(the prelude's own writers, `before_sync`'s `show_other_workspaces` and a `jj op abandon` passed
-on, are such, and the frame is asked only past their cut, `QuietAt`):
-nothing in the raw closure stops being local, having a body or its objects (the prelude's
-`prepare_records` writes rewrites beside what is there; nothing is removed), and the CANONICAL op
-heads and the plan the core reads are the same. The prelude may move the physical heads
-(`canonical_heads`, `check_abandon` and `realign_heads`, `reparent_late`), but their canonical
-readings, under naming that does not change and once any recovery's own prelude has completed
-before the readings, are unchanged (that completion, not entry: `fresh_head_reached` uses frames
-before entry is derived, so entry is no premise of a frame); notices are handled between rounds
-and user work is past. Locality is read through naming, which may change, so a frame is asked only
-across steps naming does not change across (`Naming.Still`). -/
+step's reading, after that step's prelude, in the same round:
+* nothing in the raw closure stops being local, having a body or having its objects (the
+  prelude's `prepare_records` writes rewrites beside what is there; nothing is removed);
+* the canonical op heads and the plan the core reads are the same.
+
+The prelude may move the physical heads (`canonical_heads`, `check_abandon` and `realign_heads`,
+`reparent_late`), but their canonical readings are unchanged, provided naming does not change and
+any recovery's own prelude has completed before the readings. That completion is what is needed,
+not entry: `fresh_head_reached` uses frames before entry is derived.
+
+A frame is asked only past the cut after which the node makes no automatic write of its own
+(`QuietAt`); the prelude's own writers, `before_sync`'s `show_other_workspaces` and a passed-on
+`jj op abandon`, are such writes. Notices are handled between rounds and user work is past.
+Locality is read through naming, which may change, so a frame is asked only across steps naming
+does not change across (`Naming.Still`). -/
 def Frame (raw : List Nat) (s t : State) : Prop :=
   Grows raw s t ∧ t.burst.heads = s.burst.heads ∧ t.burst.plan = s.burst.plan
 
@@ -177,24 +187,33 @@ theorem no_infinite_framed (raw images : List Nat) (anc : Nat → Nat → Bool)
 
 /-! ### The core's choice -/
 
-/-- What `NodeCore::step` reads to choose: records announced and not taken; whether taking
-them drops an op head (`prepare_records`); two op heads or more; whether the known head is
-local; a plan left; the survey's plan, missing operations and missing objects; whether an op
-head descends from the known one; whether its records differ from the hub's as heard; pending
-drops; the op head the known one; and the fix-up's new head the known one. -/
+/-- What `NodeCore::step` reads to choose. -/
 structure Reads where
+  /-- Records are announced and not taken. -/
   announced : Bool
+  /-- Taking them drops an op head (`prepare_records`). -/
   dropHead : Bool
+  /-- There are two op heads or more. -/
   heads2 : Bool
+  /-- The known head is local. -/
   knownLocal : Bool
+  /-- A plan is left. -/
   planNe : Bool
+  /-- The survey finds something ready. -/
   ready : Bool
+  /-- The survey finds an operation missing. -/
   missOps : Bool
+  /-- The survey finds objects missing. -/
   missObjs : Bool
+  /-- An op head descends from the known one. -/
   descends : Bool
+  /-- Its records differ from the hub's as heard. -/
   differ : Bool
+  /-- Drops are pending. -/
   pending : Bool
+  /-- The op head is the known one. -/
   headIsKnown : Bool
+  /-- The fix-up's new head is the known one. -/
   newIsKnown : Bool
 
 inductive Choice
@@ -405,7 +424,7 @@ theorem objects_call {raw images : List Nat} {anc : Nat → Nat → Bool} {base 
 
 /-- A node with pending drops, after the cuts, reaches its pending push: given at each core
 step the guards `choose_guarded` takes, and the effect of the step it chooses (a burst step,
-or a call with its reply), it pushes at some step. No step is assumed to push. -/
+or a call with its reply), it pushes at some step. -/
 theorem pending_push_reached (raw images : List Nat) (anc : Nat → Nat → Bool)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
     (run after : Nat → State) (reads : Nat → Reads)
@@ -439,9 +458,9 @@ What the survey finds is computed from the raw graph and the native bits alone, 
 known closure: the walk is ancestry through the parents of operations neither local nor
 without a body (`walk_iff`), so `Exec.ancB` decides it, and readiness and what is missing are
 found among the closure's operations (`readyB_iff`, `missOpsB_iff`, `missObjsB_iff`). So the
-survey's guard is derived (`rawReads_survey`), not assumed, and `rawControl` computes the core's
-choice from a state before a step and the primitive bits the native core reports, never from
-the choice it made. `callB` checks a call's effect, soundly (`callB_sound`). -/
+survey's guard follows (`rawReads_survey`). `rawControl` computes the core's choice from the
+state before a step and the primitive bits the native core reports, not from the choice it made.
+`callB` checks a call's effect and is sound (`callB_sound`). -/
 
 /-- The parents the survey walks through: an operation's own, if it is neither local nor
 without a body; none otherwise. -/
@@ -562,15 +581,20 @@ theorem missObjsB_iff {base : NS} {raw : List Nat} {par : Nat → List Nat}
     exact ⟨⟨⟨(walkB_iff hlt).2 hw, by simpa [rawSurvey] using hl⟩, hs⟩,
       by simpa [rawSurvey] using ho⟩
 
-/-- The primitive bits the native core reports at a step: records announced and not taken,
-whether taking them drops an op head, whether its records differ from the hub's as heard,
-pending drops, the op head the known one, and the fix-up's new head the known one. -/
+/-- The primitive bits the native core reports at a step; each is the `Reads` field of the same
+name. -/
 structure Prims where
+  /-- Records are announced and not taken. -/
   announced : Bool
+  /-- Taking them drops an op head. -/
   dropHead : Bool
+  /-- Its records differ from the hub's as heard. -/
   differ : Bool
+  /-- Drops are pending. -/
   pending : Bool
+  /-- The op head is the known one. -/
   headIsKnown : Bool
+  /-- The fix-up's new head is the known one. -/
   newIsKnown : Bool
 
 /-- What the core reads at a step, computed from the state before it: the survey on the raw
@@ -604,7 +628,7 @@ def surveyBase : NS :=
   ⟨⟨0, 0⟩, [], none, none, 0, [], false, [], [], fun _ => [], 0, fun _ => False,
     fun _ => False, fun _ => False, false⟩
 
-/-- The survey's guard, derived: on the raw graph, with the closure holding the known head's
+/-- The survey's guard: on the raw graph, with the closure holding the known head's
 ancestry, a known head that is not local has something ready or something missing. -/
 theorem rawReads_survey {raw images : List Nat} {par : Nat → List Nat}
     {anc : Nat → Nat → Bool} {H : Nat} {s : State} {q : Prims} (hlt : ParLt par)
@@ -680,13 +704,12 @@ theorem callB_sound {raw images : List Nat} {anc : Nat → Nat → Bool} {kind :
     obtain ⟨⟨hl, ho⟩, ht⟩ := hb
     exact .objects x hx hl ho ht hh hp hg
 
-/-- Before a first fresh observation, even an eligible node can know an old raw head whose
-node-space images differ. Its raw local burst still reaches an RPC or idle, without a
-single embedding, current records, or a stable hub. `run` samples its successive scheduled
-core steps during one frozen-known round. The finite record-disturbance cut excludes adoption
-and prepared record-taking advances; local steps supply their checked raw field effects.
-Idle ends the round, whose next start fetches; fairness of that start and of its call is a
-separate driver obligation, not an assumed completed round here. -/
+/-- Before a first fresh observation, even an eligible node can know a raw head whose node-space
+images differ. Its raw local burst reaches an RPC or idle. `run` samples its successive
+scheduled core steps during one frozen-known round. The premises are the finite
+record-disturbance cut (`hrecord`: no adoption and no prepared record-taking advance) and the
+checked raw field effects of local steps (`hburst`). Idle ends the round, whose next start
+fetches; fairness of that start and of its call is a separate driver obligation. -/
 theorem raw_round_yields (raw images : List Nat) (par : Nat → List Nat)
     (anc : Nat → Nat → Bool) (H : Nat)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)

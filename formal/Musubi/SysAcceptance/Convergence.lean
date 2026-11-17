@@ -1,6 +1,6 @@
 /-
 Convergence of the actual hive run, composed from the derived phases. The fine-system
-interface is supplied at the native boundary; `FineAssembly` builds it from event replay.
+interface is a premise at the native boundary; `FineAssembly` builds it from event replay.
 
 The convergence proof uses this file.
 -/
@@ -10,13 +10,16 @@ namespace Musubi.SysAcceptance
 
 open Musubi Musubi.NodeSettle Musubi.NodeSys Musubi.NodeSysEntry
 
-/-- The hive converges on its loss-free suffix. Records and recovery settle, every node enters
-and completes an active sample, and the eligible system stabilizes the hub. The native pending
-laws then rule out ineligible nodes, so every node settles at the same raw head.
+/-- Every node of the hive settles at the same raw head on the loss-free suffix of the run.
 
-`fine` supplies the eligible-system interface at the derived fine cut. It remains separate
-from `HiveContracts`; `FineAssembly.hive_converges_observed` constructs it from native replay.
-Completion, fairness and automatic-write termination remain explicit source obligations. -/
+The proof: records and recovery settle, every node enters and completes an active sample, and
+the eligible system stabilizes the hub. The native pending laws then rule out ineligible nodes.
+
+Assumptions:
+* `C : HiveContracts`: the source, completion and scheduling contracts, including fairness and
+  termination of automatic writes.
+* `fine`: the eligible-system interface at the derived fine cut, separate from `HiveContracts`;
+  `FineAssembly.hive_converges_observed` constructs it from native replay. -/
 theorem hive_converges {ρ α : Type} [DecidableEq ρ] {N : Nat} {D : Nat → Nat → Nat → Prop}
     {law : HubLaw} {run : Nat → Sys} {acts : Nat → Act} {recs : Nat → Exec.SEState} {B : Nat}
     {epoch : Nat → Nat → Retry.Records.State} {adopts fails : Nat → Nat → Bool}

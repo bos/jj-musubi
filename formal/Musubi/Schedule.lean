@@ -1,6 +1,6 @@
 /-
-Time bounds shared by sampled-event proofs. A strictly increasing schedule cannot lag its
-index; completing each batch before the next sample also orders events by completion time.
+Time bounds shared by sampled-event proofs. A strictly increasing schedule is at least its
+index; if each batch completes before the next sample, events are ordered by completion time.
 
 The convergence proof uses this file.
 -/
@@ -15,7 +15,7 @@ theorem index_le (increasing : ∀ p, sched p < sched (p + 1)) : ∀ p, p ≤ sc
   | 0 => Nat.zero_le _
   | p + 1 => Nat.succ_le_of_lt (Nat.lt_of_le_of_lt (index_le increasing p) (increasing p))
 
-/-- Event order is preserved by the schedule. -/
+/-- The schedule is monotone. -/
 theorem monotone (increasing : ∀ p, sched p < sched (p + 1)) {p q : Nat} (h : p ≤ q) :
     sched p ≤ sched q := by
   obtain ⟨d, rfl⟩ := Nat.exists_eq_add_of_le h

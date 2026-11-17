@@ -1,7 +1,10 @@
 /-
-Every issued push names a raw operation already created by the SAME node exchange.
-The bound is derived from Issue, WriteRes and the scoped post-write graph, and is retained
-by all actual request-list changes. It is not an extra bound on future accepted packets.
+Every push a node issues names a raw operation that exists once the issuing exchange is done:
+`p.new < g.next` (`RequestBounds`). The bound follows from `Issue`, `WriteRes` and the scoped
+post-write graph, and every step of the request list preserves it.
+
+The file also proves hub stabilization for the joint system (`hub_stabilizes_sys`) and for the
+hive's run (`hub_stabilizes_hive`).
 
 The convergence proof uses this file except `hub_stabilizes_hive`, which is not used by the
 assembly: it states the hub's stability for a whole hive observation, a result in its own right.
@@ -14,6 +17,7 @@ namespace Musubi.Recovery.HubSys
 
 open Musubi NodeSys NodeSettle EarlyEntry
 
+/-- Every push in flight names a raw operation that exists. -/
 def RequestBounds (g : Sys) : Prop :=
   ∀ r ∈ g.reqs, ∀ p, r.body = .push p → p.new < g.next
 
@@ -92,9 +96,9 @@ namespace Musubi.Recovery.HubSys
 
 open Musubi NodeSys NodeSysEntry NodeSettle HubSuffix HubNodeSteps
 
-/-- The native laws used at one actual event. No suffix step, decreasing rank, finite
-acceptance count or stable hub is a field of this contract. Pending drops are already empty
-for eligible nodes; EntryAssembly supplies that fact at their entry cut. -/
+/-- The native laws that hold at one actual event. The fields are laws of the nodes and the hub's
+answers only: none is a suffix step, a rank, a bound on acceptances, or hub stability. Pending
+drops are empty for eligible nodes; EntryAssembly supplies that at their entry cut. -/
 structure SuffixStepLaws (E : Nat → Prop) (D : Nat → Nat → Nat → Prop) (law : HubLaw)
     (old : List Req) (w : Nat) (hist : Nat → Nat) (act : Act) (g g' : Sys) : Prop where
   pending : ∀ n, E n → (g.node n).ns.pending = []
@@ -103,16 +107,17 @@ structure SuffixStepLaws (E : Nat → Prop) (D : Nat → Nat → Nat → Prop) (
   advance : ∀ n, E n → act = .core n .busy → AdvGuard (g.node n).ns →
     FullAdv (g.node n).ns (g'.node n).ns
   maintain : ∀ n, E n → act = .core n .maint → MaintLaw (g.node n).ns (g'.node n).ns
-  /-- A housekeeping step writes new operations, in order: a premise of the model, not a claim
-  about native housekeeping, whose writes can coincide with operations that exist. The hive
-  derives it vacuously, its suffix having no housekeeping step (`suffixStepLaws_filt`). -/
+  /-- A housekeeping step writes new operations, in order. This is a premise of the model, not
+  a claim about native housekeeping, whose writes can coincide with existing operations. It
+  holds vacuously for the hive, whose suffix has no housekeeping step (`suffixStepLaws_filt`). -/
   maintFresh : ∀ n, E n → act = .core n .maint →
     Grow g g' (g.node n).ns (g'.node n).ns (g.node n).emb (g'.node n).emb
   replies : ∀ n, E n → ∀ r ∈ g.reps, r ∉ g'.reps → r.node = n → ∀ s,
     (r.ans = .fetched s ∨ r.ans = .head s) → HonestSnap w hist g s
   notices : ∀ n, E n → ∀ nt, act = .notice n nt → HonestSnap w hist g nt.snap
-  /-- Only the request chosen by an actual moving answer needs alignment. Old requests
-  remain in the finite initial ledger, including requests from ineligible senders. -/
+  /-- A push accepted by the hub is an eligible node's, or was in flight at the cut. Requests
+  in flight at the cut stay in the finite initial ledger, including those of ineligible
+  senders. -/
   accepted : act = .answer → ∀ r ∈ g.reqs, g'.reqs = g.reqs.erase r →
     ∀ p, r.body = .push p → law.accepts g.hub g.par p → g'.hub.seq = g.hub.seq + 1 →
     E p.node ∨ r ∈ old
@@ -125,8 +130,9 @@ theorem nextLedger_foreign {E : Nat → Prop} {g g' : Sys} {act : Act} (pk : Lis
     have hn : ¬ E n := fun he => hf n he rfl
     simp [nextLedger, hn]
 
-/-- Every actual system event expands using its own packet ledger and saved history.
-The sender case, the hub's answer, and an event of another node exhaust the system. -/
+/-- Every system event expands into hub-suffix steps, using the packet ledger and the saved
+history. An event is the hub's answer, the step of an eligible node, or the step of another
+node; these cases are exhaustive. -/
 theorem sys_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w : Nat} {old : List Req} {act : Act} {g g' : Sys}
     (hist : Nat → Nat) (pk : List Packet)
@@ -160,7 +166,7 @@ theorem sys_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
       rw [nextLedger_foreign pk hf]
       exact foreign_step_expansion hs ha hf hd hist pk
 
-/-- With no pending drops, even publication writes no new operation. -/
+/-- With no pending drops, an issue writes no new operation, even a publication. -/
 theorem issue_next_same {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : Nat}
     (hi : Issue d σ k post new) (hp : σ.pending = []) : post.next = σ.next := by
   by_cases hk : k = .push
@@ -173,8 +179,8 @@ theorem issue_next_same {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {ne
       exact False.elim (hne hp)
     · rw [post_same hi hk hw]
 
-/-- Actual generations stop changing when eligible nodes have no pending drops and no
-housekeeping event occurs. Other nodes may continue writing and exchanging requests. -/
+/-- Generations do not change when eligible nodes have no pending drops and no housekeeping
+step occurs. Other nodes may keep writing and exchanging requests. -/
 theorem generations_quiet {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {g g' : Sys} {act : Act} (hs : SysStep N D law act g g')
     (hp : ∀ n, E n → (g.node n).ns.pending = [])
@@ -213,8 +219,8 @@ theorem step_bk_mono {E : Nat → Prop} {w : Nat} {a b : GState}
   cases hs <;> simp_all [upd]
   split <;> simp_all
 
-/-- A positive expansion cannot hide maintenance between equal endpoint generations:
-every intermediate generation lies between them. -/
+/-- If a path's two endpoints have equal generations, every step on it leaves them unchanged,
+since generations never decrease. -/
 theorem path_bk_quiet {E : Nat → Prop} {w : Nat} {a b : GState}
     (p : Expansion.Path (HubSuffix.Step E w) a b) (hb : b.bk = a.bk) :
     ∀ j, j < p.len → (p.st (j + 1)).bk = (p.st j).bk := by
@@ -246,8 +252,9 @@ theorem initial_packets_bound {g : Sys} (hb : RequestBounds g) :
     exact ⟨hb r hr q hbody, rfl⟩
   | fetch | objs => simp [hbody] at he
 
-/-- Initial suffix invariants are just the saved raw history, truthful entry knowledge,
-and the actual node and request bounds. Initial packets receive no current generation. -/
+/-- The suffix invariant holds at the start, given the history window, the eligible nodes'
+honest knowledge, and the node and request bounds. Initial packets carry no current
+generation. -/
 theorem sys_suffix_entry {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {w : Nat}
     {g : Sys} {hist : Nat → Nat} (hi : HistoryWindow w (state g hist))
     (hk : ∀ n, E n → NodeSys.NodeOK D n g)
@@ -263,8 +270,8 @@ theorem sys_suffix_entry {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {
     exact (hk n hn).scope.lt y ((hk n hn).inv.headsLt y hy)
   · exact initial_packets_bound hb
 
-/-- Local settling at the hub's current sequence identifies the actual raw head, using
-the suffix's truthful knowledge invariant rather than an unretained entry-time label. -/
+/-- A node settled at the hub's current sequence has the hub's raw head as its only head. This
+uses the suffix invariant's truthful knowledge. -/
 theorem settled_raw_head {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {w n H R : Nat}
     {g : Sys} {hist : Nat → Nat} {pk : List Packet}
     (hi : HubSuffix.Inv E w (view E g hist pk)) (hn : E n) (hk : NodeSys.NodeOK D n g)
@@ -281,9 +288,13 @@ theorem settled_raw_head {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {
   rw [agree.1 x, hs.heads]
   simp [raw, eq_comm]
 
-/-- Hub stabilization of the actual joint system, rather than a separately supplied
-suffix run. All model steps, packet coverage and finite maintenance of the expansion are
-derived here. Entry knowledge and native per-event laws remain explicit boundaries. -/
+/-- The hub's head and sequence number are eventually constant in the joint system, and the
+hub-suffix invariant holds throughout. The system's steps, run invariants and request bounds
+(`hs`, `hk`, `hd`, `hb`), the history window (`hi`), the entry knowledge (`hknown`), the native
+per-event laws (`hl`), a bound on the nodes (`hN`) and `hm` are premises: `hm` says no eligible
+node takes a maintenance step from `kb` on, so that housekeeping stopping is assumed, not
+derived. The expansion's model steps and packet coverage are derived from the system, and so is
+the finiteness of the expansion that the stability argument needs. -/
 theorem hub_stabilizes_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w : Nat} (run : Nat → Sys) (acts : Nat → Act) (initial : Nat → Nat)
     (hs : ∀ i, SysStep N D law (acts i) (run i) (run (i + 1)))
@@ -342,14 +353,17 @@ theorem hub_stabilizes_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
 /-! ## The hub settles in the hive's actual run
 
 The hive's run, observed from the entry cut (`NodeSysEntry.HiveStep`), is read as the eligible
-nodes' system (`NodeSysEntry.filt`), every node that is not eligible a dummy on the raw root
-and the requests in flight at the cut kept as the initial budget. That system is a run of the
-fine system with the actual acts (`NodeSysEntry.filt_run_from`), has the actual hub, raw graph
-and eligible nodes, and starts as a run should (`NodeSysEntry.runOK_filt_init`), so
-`hub_stabilizes_sys` applies to it, and the actual hub settles (`hub_stabilizes_hive`). The
-eligible nodes' laws are taken on the actual steps (`NodeStepLaws`); that only an eligible
-node's push, or one in flight at the cut, moves the hub is derived on the filtered run from what
-it keeps and from packets naming their senders (`OwnersOrOld`), not assumed. -/
+nodes' system (`NodeSysEntry.filt`): every node that is not eligible becomes a dummy on the raw
+root, and the requests in flight at the cut are kept as the initial budget. That system:
+- is a run of the fine system with the actual acts (`NodeSysEntry.filt_run_from`);
+- has the actual hub, raw graph and eligible nodes;
+- starts as a run should (`NodeSysEntry.runOK_filt_init`).
+So `hub_stabilizes_sys` applies to it, and the actual hub settles (`hub_stabilizes_hive`).
+
+The eligible nodes' laws are premises on the actual steps (`NodeStepLaws`). That only an
+eligible node's push, or one in flight at the cut, moves the hub is derived on the filtered
+run (`OwnersOrOld`): the run keeps only those, and every packet in flight names its sender or
+is old. -/
 
 /-- Every push in flight is its sender's packet, or was in flight at the entry cut. -/
 def OwnersOrOld (old : List Req) (g : Sys) : Prop :=
@@ -388,10 +402,10 @@ theorem ownersOrOld_run {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubL
   | zero => exact h0
   | succ i ih => exact ownersOrOld_step ih (hs i)
 
-/-- The eligible nodes' laws at one actual event: `SuffixStepLaws` but for which pushes move
-the hub, which the filtered run derives; distinct op heads at a merge (`unique`), which it derives
-from distinct op heads at its start (`heads_nodup_step`); and `maintFresh`, vacuous with no
-housekeeping step. -/
+/-- The eligible nodes' laws at one actual event: the fields of `SuffixStepLaws` except three.
+Which pushes move the hub (`accepted`) is derived on the filtered run. Distinct op heads at a
+merge (`unique`) is derived from distinct op heads at the start (`heads_nodup_step`).
+`maintFresh` is vacuous with no housekeeping step. -/
 structure NodeStepLaws (E : Nat → Prop) (D : Nat → Nat → Nat → Prop) (w : Nat)
     (hist : Nat → Nat) (act : Act) (g g' : Sys) : Prop where
   pending : ∀ n, E n → (g.node n).ns.pending = []
@@ -422,10 +436,11 @@ theorem nodeStepLaws_filt {D : Nat → Nat → Nat → Prop} {w : Nat} {hist : N
     exact List.mem_filter.2 ⟨h', keepRep_of (by rw [hn]; exact hE)⟩
   notices := fun n hE nt ha => h.notices n hE nt ha
 
-/-- The filtered run's laws: the eligible nodes' from the actual ones; distinct op heads at a
-merge (`huniq`); `maintFresh` vacuously, as no eligible node does housekeeping (`hnm`); and that
-an accepted push is an eligible node's or was in flight at the entry cut, since the run keeps
-only those and every packet in flight names its sender or is old. -/
+/-- The filtered run satisfies `SuffixStepLaws`. The eligible nodes' laws come from the actual
+ones. Distinct op heads at a merge is `huniq`. `maintFresh` holds vacuously, since no eligible
+node does housekeeping (`hnm`). An accepted push is an eligible node's or was in flight at the
+entry cut, since the run keeps only those and every packet in flight names its sender or is
+old. -/
 theorem suffixStepLaws_filt {D : Nat → Nat → Nat → Prop} {law : HubLaw} {w : Nat}
     {hist : Nat → Nat} {act : Act} {g g' : Sys} {initial : List Req}
     (h : NodeStepLaws E D w hist act g g')
@@ -466,11 +481,12 @@ noncomputable def hiveSys (E : Nat → Prop) [DecidablePred E] (rawRoot : Nat) (
     (k : Nat) : Nat → Sys :=
   fun j => filt E (fun _ => dummy rawRoot) (run k).reqs (run (k + j))
 
-/-- What the eligible nodes' system has of `hub_stabilizes_sys`'s premises, from what the
-observation has at the entry cut (with the eligible nodes' op heads distinct, `hnodup`) and the
-eligible nodes' laws at each actual event, none of them housekeeping from the cut: it is a run of
-the fine system with the actual acts, starts as a run should, and its laws hold, distinct op
-heads at a merge among them, kept from the cut by every step (`heads_nodup_step`). -/
+/-- The eligible nodes' system satisfies the premises of `hub_stabilizes_sys`. It follows from
+what the observation has at the entry cut (with the eligible nodes' op heads distinct,
+`hnodup`) and the eligible nodes' laws at each actual event, none of which is housekeeping
+from the cut. The system is a run of the fine system with the actual acts, starts as a run
+should, and its laws hold; distinct op heads at a merge is kept from the cut by every step
+(`heads_nodup_step`). -/
 theorem hive_filtered {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} [DecidablePred E] {w : Nat} (run : Nat → Sys) (acts : Nat → Act)
     (initial : Nat → Nat) (k rawRoot : Nat)
@@ -546,14 +562,14 @@ theorem hive_filtered {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw
     rw [hn] at h1
     exact h1
 
-/-- The hive's actual hub settles. Observed from the entry cut `k` (`HiveStep`, the requests in
-flight there the initial budget), read as the eligible nodes' system (`hiveSys`): given what the
-observation has at the cut (the eligible nodes' invariants, the global ones of requests, replies
-and notifications, the root, request bounds, the hub's history window, and the eligible nodes'
-honest knowledge and distinct op heads) and the eligible nodes' laws at each actual event, none of
-them housekeeping from the cut, the actual hub's head and sequence are eventually constant; and
-the hub suffix's invariant holds throughout of the eligible nodes' system. No filtered trace, no
-invariant of the other nodes and no stable hub is assumed. -/
+/-- The hive's hub eventually stops changing: its head and sequence number are constant, and
+the hub-suffix invariant holds throughout of the eligible nodes' system (`hiveSys`). The run is
+observed from the entry cut `k` (`HiveStep`), with the requests in flight there as the initial
+budget. Premises:
+- at the cut: the eligible nodes' invariants, the global invariants of requests, replies and
+  notifications, the root, the request bounds, the hub's history window, and the eligible
+  nodes' honest knowledge and distinct op heads;
+- at each actual event: the eligible nodes' laws, none of them housekeeping from the cut. -/
 theorem hub_stabilizes_hive {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} [DecidablePred E] {w : Nat} (run : Nat → Sys) (acts : Nat → Act)
     (initial : Nat → Nat) (k rawRoot : Nat)

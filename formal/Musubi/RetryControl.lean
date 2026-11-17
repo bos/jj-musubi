@@ -1,9 +1,11 @@
 /-
-Finite retry-control debt under explicit epoch constraints. Request ids are never reused.
-Completing or retiring a request removes its slot; once a finite cut is chosen, new calls
-cannot create old slots. Fix-ups are cached across retries. The fix-up bound additionally
-requires pending drops, named by immutable originals, to shrink after a first alignment.
-The tests check slot consumption and cached writes, not eventual entry into such an epoch.
+Retry control as finite debt, within epochs that satisfy explicit constraints. Request ids
+are never reused. Completing or retiring a request removes its slot, and calls made after a
+cut `cut` get ids at or above it, so they never add to the finitely many slots below it.
+Fix-ups are cached across retries. The fix-up bound also requires the pending drops, named by
+their immutable original operations, to shrink after a first alignment. The theorems here
+bound slot consumption and cached writes within such an epoch; they do not show that a run
+eventually enters one.
 
 The convergence proof uses this file except the fix-up write bounds (`fixup_writes_le_one`,
 `fixups_eventually_stop`) and the publication facts (`publication_retry`,
@@ -40,7 +42,8 @@ theorem project_other_start (s : Inbox) (owns : Nat → Bool) (h : owns s.next =
     s.start.1.project owns = (s.project owns).reserve := by
   simp [Inbox.start, Inbox.project, Inbox.reserve, h]
 
-/-- Both delivery and timeout retire a slot. Delivery succeeds only for a live slot. -/
+/-- Finishing `id`, by delivery or timeout, retires its slot. The flag is true only if the
+slot was live. -/
 def Inbox.finish (s : Inbox) (id : Nat) : Inbox × Bool :=
   (⟨s.next, s.pending.filter (· != id)⟩, s.pending.contains id)
 
@@ -89,8 +92,8 @@ theorem finish_old_decreases (s : Inbox) (id cut : Nat)
     (s.finish id).1.old cut < s.old cut := by
   exact filter_remove_lt s.pending id cut (by simpa [Inbox.finish] using hm) hc
 
-/-- A step of an inbox. The flag says the step finished a pending call whose id is below
-`cut`. -/
+/-- A step of an inbox. The flag is true when the step finished a pending call whose id is
+below `cut`. -/
 inductive InboxStep (cut : Nat) : Inbox → Inbox → Bool → Prop
   | start (s : Inbox) : InboxStep cut s s.start.1 false
   | reserve (s : Inbox) : InboxStep cut s s.reserve false
@@ -123,8 +126,8 @@ theorem inbox_old_credit {cut : Nat} {s t : Inbox} {old : Bool}
   | disconnect => simp [Inbox.disconnect, Inbox.old]
   | wait => simp
 
-/-- Even if the network duplicates old frames forever, only finitely many can consume
-pre-cut request slots. New ids cannot recharge the old-slot budget. -/
+/-- Even if the network duplicates frames forever, only finitely many consume request slots
+below the cut. Ids allocated later are at or above it. -/
 theorem old_slots_eventually_stop (cut : Nat) (run : Nat → Inbox) (old : Nat → Bool)
     (hc : cut ≤ (run 0).next)
     (hs : ∀ i, InboxStep cut (run i) (run (i + 1)) (old i)) :
@@ -144,14 +147,17 @@ theorem old_slots_eventually_stop (cut : Nat) (run : Nat → Inbox) (old : Nat �
   rw [hk i hi, hk (i + 1) (by omega)] at hp
   cases he : old i <;> simp_all <;> omega
 
-/-- The successful, unbroken portion of a fix-up retry epoch. `aligned` records that a
-current-epoch adoption has happened; that first adoption may change pending arbitrarily.
-Later adoptions must only remove pending drops. New abandonments, obsolete-prefix adoption
-and interrupted writes end the epoch and are not silently treated as retries here. -/
+/-- The unbroken portion of a fix-up retry epoch. The first adoption in the epoch may change
+`pending` arbitrarily; later adoptions may only remove pending drops. A new abandonment, an
+adoption of an obsolete prefix, or an interrupted write ends the epoch, so no step here
+models one. -/
 structure Fixup where
-  /-- Immutable original-operation names, not the hub ids that adoption can re-key. -/
+  /-- Pending drops, named by their original operations, which stay fixed when adoption
+  re-keys the hub's ids. -/
   pending : List Nat
+  /-- The restoring write has been made and its cache is still held. -/
   written : Bool
+  /-- A current-epoch adoption has happened. -/
   aligned : Bool
   deriving Repr, DecidableEq
 
@@ -231,9 +237,10 @@ theorem fixup_writes_le_one (run : Nat → Fixup) (emits : Nat → Bool)
   have := fixup_credit_le (run 0)
   omega
 
-/-- At most one completed restoring-payload invocation per node in such an epoch. Clearing
-the cache requires empty pending after alignment, which later adoptions cannot recharge. The
-invocation writes its finite saved work list and final operation. Retries are unbounded. -/
+/-- Restoring writes eventually stop in such an epoch; `fixup_writes_le_one` shows there is at
+most one. The cache is cleared only once `pending` is empty after alignment, and later
+adoptions cannot refill it. A write is a finite saved work list plus a final operation. The
+number of retries is unbounded. -/
 theorem fixups_eventually_stop (run : Nat → Fixup) (emits : Nat → Bool)
     (hs : ∀ i, FixupStep (run i) (run (i + 1)) (emits i)) :
     ∃ k, ∀ i, k ≤ i → emits i = false := by
@@ -247,22 +254,22 @@ theorem fixups_eventually_stop (run : Nat → Fixup) (emits : Nat → Bool)
   rw [hk i hi, hk (i + 1) (by omega)] at hstep
   cases he : emits i <;> simp_all <;> omega
 
-/-- Restoring saved state and giving pending drops a new publication id are separate work.
-The cached restoring write is still bounded above; a neutral tip is needed when the hub
-already has the current head without its pending drops. `headKnown` is the equality checked
-at this write boundary, not a promise that future replies cannot change it. -/
+/-- A publication keeps two kinds of work apart: restoring saved state, and giving pending
+drops a new publication id. The cached restoring write is bounded as for `Fixup`. A neutral
+tip is needed when the hub already has the current head but not the pending drops. -/
 structure Publication where
   cache : Fixup
+  /-- The node's head equals the hub's, as checked at this write; later replies can change it. -/
   headKnown : Bool
   deriving Repr, DecidableEq
 
-/-- The second and third results distinguish restoring work from a neutral publication tip.
-Either writes a child of the head, and the result reads the head as no longer the known one
-(`headKnown` false). That is this abstract model's reading, not a fact of the actual state
-after: canonical content has no nonce, so a restoring fix-up can be identical to the known head
-(NodeSettle's `write_known`), leaving the head known, and the next write is then a neutral tip
-with no new learned head. NodeSettle reads only the decision and the cache (`pubOf`), not this
-field. -/
+/-- One write. The second and third results say whether it was restoring work or a neutral
+publication tip. Either writes a child of the head, so the result state has `headKnown` false.
+That is this model's reading, not a fact about the real state afterwards: canonical content
+has no nonce, so a restoring fix-up can be identical to the known head (NodeSettle's
+`write_known`), leaving the head known, and the next write is then a neutral tip that
+teaches no new head. NodeSettle reads only the decision and the cache (`pubOf`), not
+`headKnown`. -/
 def Publication.write (s : Publication) : Publication × Bool × Bool :=
   let (cache, restoring) := s.cache.write
   let tip := !restoring && !cache.pending.isEmpty && s.headKnown
@@ -279,8 +286,9 @@ theorem publication_progress (s : Publication) (hp : s.cache.pending ≠ [])
       | cons x xs =>
         cases written <;> simp_all [Publication.write, Fixup.write]
 
-/-- Once an eligible node has the hub's current ordered records, its empty pending set
-disables both kinds of core publication write, regardless of its current known head. -/
+/-- If the cache's pending list is empty, `write` makes neither a restoring write nor a neutral
+tip and leaves the state unchanged, whatever head is known. An eligible node's pending list is
+empty once it has the hub's current ordered records (`EntryAssembly.eligible_pending_empty`). -/
 theorem publication_empty_pending (s : Publication) (hp : s.cache.pending = []) :
     s.write = (s, false, false) := by
   cases s with
@@ -291,10 +299,9 @@ theorem publication_empty_pending (s : Publication) (hp : s.cache.pending = []) 
       subst pending
       cases headKnown <;> simp [Publication.write, Fixup.write]
 
-/-- Retrying the result state (`s.write.1`, whose head reads as not known) repeats neither work.
-This is not a bound on tips across arbitrarily many changes of knowledge, nor a claim about the
-actual state after a write: a restoring fix-up identical to the known head leaves it known, and a
-neutral tip follows (`Publication.write`'s doc). -/
+/-- Writing again from the result state (`s.write.1`, whose head reads as not known) does
+neither kind of work. This bounds one repeat only, not tips across arbitrarily many changes
+of knowledge, and says nothing about the real state after a write (see `Publication.write`). -/
 theorem publication_retry (s : Publication) :
     s.write.1.write.2 = (false, false) := by
   cases s with

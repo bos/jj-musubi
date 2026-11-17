@@ -2,19 +2,18 @@
 A node settles once the hub does (`node_settles`). The hub's head `H`, sequence `S` and records
 `R` stay fixed (HubSuffix and the record cut): every reply says so. One node's control follows
 `NodeCore::step` branch by branch, each step with the replies to the requests it sends, as
-`driver.sync` handles them before the next step. Nothing assumes a round of steps completes,
-nor that fix-ups, neutral tips or merges are finitely many: an eleven-part lexicographic rank
-falls at every step that neither idles nor sends a push the stable hub would accept, so a round
-that starts runs to `Idle`, and an `Idle` at the stable hub is the goal.
+`driver.sync` handles them before the next step. An eleven-part lexicographic rank falls at
+every step that neither idles nor sends a push the stable hub would accept, so a round that
+starts runs to `Idle`, and an `Idle` at the stable hub is the goal. The premises are listed in
+the last section.
 
 Ids are raw hub-space ones, as the core compares them; nothing projects versions to originals.
 What the adapter and the replies do is stated as algebraic contracts, scoped to the head the
 node knows and the records the hub announces: `FetchedRep`, `HeadRep`, `ObjRep`, `Take`, `Ext`
 (with `Adv` and `FreshOn`), and `WriteRes`, which follows RetryControl's `Publication.write`.
 The last section lists them, and what each must be tied to. Once the known head is local,
-the core advances when `prepare_records` said the records drop an op
-head, as well as when no head descends from the known one, so no invariant of the hub's
-dropped operations is needed.
+the core advances both when `prepare_records` says the records drop an op head and when no head
+descends from the known one, so the proof tracks no invariant of the hub's dropped operations.
 
 The convergence proof uses this file.
 -/
@@ -150,9 +149,13 @@ theorem cnt_pt_of_eq {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → Q x �
 /-- The stable hub: its sequence, head and records, and which node operations the records
 of each state drop (`prepare_records`' `taking.dropped`, read through canonical names). -/
 structure Ctx where
+  /-- The hub's sequence. -/
   S : Nat
+  /-- The hub's head. -/
   H : Nat
+  /-- The hub's records. -/
   R : Nat
+  /-- `drops A x`: the records `A` drop node operation `x`. -/
   drops : Nat → Nat → Prop
 
 /-- What `NodeCore` holds (`known`, `plan`, `hub_records`, `announced`) and what it reads
@@ -161,20 +164,35 @@ known head (`to_node`), the operation graph, and which operations are local, sta
 their objects; and whether the cached fix-up is written (`fixup_written`). `act` is whether a
 `sync` round is running. -/
 structure NS where
+  /-- The known pair: the hub's sequence and head, as last learned (`known`). -/
   known : Known
+  /-- The core's plan (`plan`). -/
   plan : List Nat
+  /-- The hub's records, as noted (`hub_records`). -/
   hubRecs : Option Nat
+  /-- The records announced and not yet taken (`announced`). -/
   annc : Option Nat
+  /-- The applied records. -/
   ap : Nat
+  /-- The pending drops. -/
   pending : List Nat
+  /-- Whether the cached fix-up is written (`fixup_written`). -/
   written : Bool
+  /-- The op heads. -/
   heads : List Nat
+  /-- What stands for the known head: its node-space images (`to_node`). -/
   img : List Nat
+  /-- The operation graph: each operation's parents. -/
   par : Nat → List Nat
+  /-- The next fresh id. -/
   next : Nat
+  /-- Which operations are local. -/
   loc : Nat → Prop
+  /-- Which operations are staged. -/
   stg : Nat → Prop
+  /-- Which operations have their objects here. -/
   obj : Nat → Prop
+  /-- Whether a `sync` round is running. -/
   act : Bool
 
 /-- The first test of `step`: announced records equal to the applied ones are dropped. -/
@@ -194,7 +212,7 @@ def realize (σ : NS) (x : Nat) (rest : List Nat) : NS :=
   { σ with loc := fun y => σ.loc y ∨ y = x, plan := rest }
 
 /-- The op heads merged into an operation the node already has, labelled `m` (the same canonical
-content, written by another copy or before), now local here and the only op head after. No new
+content, written by another copy or before), local here and the only op head after. No new
 operation is written. -/
 def mergeTo (σ : NS) (m : Nat) : NS :=
   { σ with heads := [m], loc := fun y => σ.loc y ∨ y = m }
@@ -592,8 +610,8 @@ def extraHeads (σ : NS) : Nat := σ.heads.length - 1
 noncomputable def unnotedRecords (c : Ctx) (σ : NS) : Nat :=
   ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ σ.annc ≠ some c.R)
 
-/-- Pending drops whose restoring fix-up is not written (`Fixup.credit`). Natively,
-`repair_received_work` can clear the cache before a write; the model takes no such step (the
+/-- Pending drops whose restoring fix-up is not written (`Fixup.credit`). The model
+has no step for the native `repair_received_work`, which can clear the cache before a write (an
 obligation under `WriteRes` in the last section). -/
 noncomputable def unwrittenFixup (σ : NS) : Nat := ind (σ.written = false ∧ σ.pending ≠ [])
 
@@ -1642,10 +1660,15 @@ theorem settles_from (c : Ctx) (run : Nat → NS) (lab : Nat → Lab) (k0 : Nat)
 
 /-- Once the hub is stable, a node settles at its head, or sends a push from the hub's head with
 the hub's records (`emit_packet`), which the stable hub would accept and so cannot have been
-sent. Premises: the run's events from `k0` on, with no failed call (a failure reopens the node,
-which root's RecordEpoch shows eventually stops); the invariant at `k0`; housekeeping that writes
-(`when_idle`) eventually stops; a round starts whenever none is running; and a running round's
-next step happens, its calls completing. A round is never assumed to finish. -/
+sent. Premises:
+* the run's events from `k0` on, with no failed call (a failure reopens the node, which
+  `Musubi.RecordEpoch` shows eventually stops);
+* the invariant at `k0`;
+* housekeeping that writes (`when_idle`) eventually stops;
+* a round starts whenever none is running, and a running round's next step happens, its calls
+  completing.
+
+A round's end is derived. -/
 theorem node_settles (c : Ctx) (run : Nat → NS) (lab : Nat → Lab) (k0 : Nat)
     (hev : ∀ i, k0 ≤ i → Ev c (lab i) (run i) (run (i + 1)))
     (h0 : SInv c (run k0))
@@ -1687,14 +1710,14 @@ theorem node_settles (c : Ctx) (run : Nat → NS) (lab : Nat → Lab) (k0 : Nat)
 - `hev`: every event is one of `Ev`'s. This is where the hub's stability enters: every reply
   carries `(S, H, R)` (HubSuffix and the record cut), the node's knowledge is truthful
   (`hub_went_back` never fires), and there are no user operations, abandonments, crashes or
-  arbitrary external writes. Maintenance remains an allowed `Ev.maint` event.
-- `hmaint`: maintenance writes eventually stop; they need not have stopped at `k0`.
+  arbitrary external writes. Maintenance is an allowed `Ev.maint` event.
+- `hmaint`: maintenance writes eventually stop; they may still run at `k0`.
 - `h0`: `SInv` at `k0`.
 - `hstart`, `hcore`: a round starts whenever none is running, and a running round's next step
-  happens, its calls completing. Nothing says a round ends; that is derived.
+  happens, its calls completing. A round's end is derived.
 
 The contracts, each to be tied to the native code or a primitive model for this `H` and these
-records, not to a projection of versions onto originals:
+records, over raw ids:
 - `FetchedRep`: a `Fetched` reply stages every operation below `H` that is neither local nor
   staged (transfer), and `note_announced` notes `R` and announces it unless applied
   (announcement completion: its `held` mismatch and `lacks_pruned` paths are not taken).
@@ -1711,26 +1734,28 @@ records, not to a projection of versions onto originals:
   (no nonce), taking no new label. The new head is the known one only when the restoring fix-up
   is identical to it (`write_known`, from `publication_progress`): the branch that polls instead
   (`writePoll`), whose write sets the cache, lowering the rank's last component
-  (`unwrittenFixup`). A write
-  only makes operations local (`Ext.locOld`), a reused chain included. OBLIGATION: before it
-  decides, `write_fixup_until` runs `repair_received_work` (`node/supersede/fixup.rs`). For received
-  work whose operations the pending records removed, this may rewrite the fix-up and clear
-  `fixup_written`, a new restoring obligation. `WriteRes` reads the cache as it was, taking no
-  such repair: a correspondence obligation past the input cut (received work being finite
-  input), vacuous with no pending drops (it returns at once), as in the fine tail. Before that,
-  a repair would raise `unwrittenFixup` with no other component falling.
+  (`unwrittenFixup`). A write only makes operations local (`Ext.locOld`), a reused chain
+  included.
+
+  Obligation: before it decides, `write_fixup_until` runs `repair_received_work`
+  (`node/supersede/fixup.rs`). For received work whose operations the pending records removed,
+  this may rewrite the fix-up and clear `fixup_written`, a new restoring obligation. `WriteRes`
+  reads the cache as it was, with no such repair. That is a correspondence obligation past the
+  input cut (received work being finite input); it is vacuous with no pending drops (the
+  function returns at once), as in the fine tail. Before that cut, a repair would raise
+  `unwrittenFixup` with no other component falling.
 - `realize` makes a freshly surveyed ready operation local, and the front of a plan kept from
   before an adoption too, once failed calls have stopped. A failed call, a stale plan entry the
   records taken since rename or drop, ends `driver.sync` in an error, which reopens the node and
-  restarts its core: not an event here. Root's RecordEpoch proves such failures stop, adoptions
+  restarts its core: not an event here. `Musubi.RecordEpoch` proves such failures stop, adoptions
   being finite; `k0` is after that.
 - `when_idle`: housekeeping that writes keeps the round going (`maint`); that it eventually stops
   writing is the premise `hmaint`, the idle-maintenance assumption HubSuffix makes too.
 
-Not given here: that the stable hub accepts what `Emit` sends, which root's packet coupling
-and the hub's guards give, and which contradicts its stability; so the composition takes the
-right disjunct. Eligibility is a separate condition about dropped originals, rather than
-applied-record identity. Once the hub is stable, `SysAcceptance.all_eligible` uses the native
+Outside this file: that the stable hub accepts what `Emit` sends. The packet coupling
+(`Musubi.PacketCoupling`) and the hub's guards give that, and it contradicts stability, so the
+composition takes the right disjunct. Eligibility is a condition on dropped originals, separate
+from applied-record identity. Once the hub is stable, `SysAcceptance.all_eligible` uses the native
 pending-round laws: an ineligible node would force a push whose handling moves the stable hub,
 contradicting stability (`PendingLaws.absurd`).
 -/

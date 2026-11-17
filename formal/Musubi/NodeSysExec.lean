@@ -1,7 +1,8 @@
 /-
 Executable checks of structural node observations. A raw id names one canonical body, even
-when another copy writes the same body again. These checks read labels, embeddings and parents;
-they do not infer body, object or local availability from a ghost structural label.
+when another copy writes the same body again. The checks read labels, embeddings and parents
+only; they say nothing about body, object or local availability, which a ghost structural label
+does not determine.
 -/
 import Musubi.NodeSys
 
@@ -9,6 +10,7 @@ namespace Musubi.NodeSys.Exec
 
 open Musubi.NodeSettle
 
+/-- What the checks observe: raw and label universes, their parents, and the embedding. -/
 structure GrowObs where
   rawNext : Nat
   labelNext : Nat
@@ -16,6 +18,7 @@ structure GrowObs where
   labelPar : Nat → List Nat
   emb : Nat → Nat
 
+/-- The observation of raw state `g`, label state `s` and embedding `emb`. -/
 def observe (g : Sys) (s : NS) (emb : Nat → Nat) : GrowObs :=
   ⟨g.next, s.next, g.par, s.par, emb⟩
 
@@ -72,11 +75,14 @@ theorem growB_sound {g g' : Sys} {s s' : NS} {emb emb' : Nat → Nat}
     · exact False.elim (Nat.not_lt_of_ge h1 h)
     · exact ⟨x, hnew, hx, heq⟩
 
-/-- A complete normal head cannot be a remembered dropped name or a cached renaming key
-when the hub drops a subset of the node's originals. A raw remembered name only implies
-its original is dropped; other versions of that original need not be remembered names.
-The cache's cause is a dropped original in the key's immutable raw ancestry, rather than
-an assumed equality between a cached lookup and full normalization. -/
+/-- A complete normal head is neither a remembered dropped name nor a cached renaming key,
+when the hub drops only originals the node drops.
+
+- `hnormal`: no ancestor of `head` has a dropped original at the node.
+- `hsub`: every original dropped at the hub is dropped at the node.
+- `hnamed`: a remembered name implies its own original is dropped at the hub. Other versions
+  of that original need not be remembered names.
+- `hcached`: a cached key has a dropped original among its raw ancestors. -/
 theorem unsuperseded_of_normal {par : Nat → List Nat} {orig : Nat → Nat}
     {nodeD hubD named cached : Nat → Bool} {head : Nat}
     (hnormal : ∀ x, Anc par x head → nodeD (orig x) = false)

@@ -1,8 +1,9 @@
 /-
-The hub's actual answer event in the joint system, using the packet that request carried.
-The ledger's coverage theorem supplies that same packet; the hub's guards supply expected,
-different target and raw ancestry. No abstract acceptance or progress event is a premise.
-Coverage of the actual accepted request and the target's raw bound remain boundary laws.
+The hub's answer event in the joint system, expanded into hub-suffix steps. An accepted push
+is an `accept` step using the packet carried by the request itself: the ledger's coverage
+theorem supplies that packet, and the hub's guards supply the expected head, a target
+different from the current head, and raw ancestry. Two facts are taken as boundary laws:
+coverage of the accepted request by the ledger, and the raw bound on the pushed target.
 
 The convergence proof uses this file.
 -/
@@ -12,6 +13,8 @@ namespace Musubi.Recovery.HubSys
 
 open Musubi NodeSys HubSuffix
 
+/-- The history after a step: if the hub's sequence number advanced, record the new head at
+it; otherwise unchanged. -/
 def nextHistory (g g' : Sys) (hist : Nat → Nat) : Nat → Nat :=
   if g.hub.seq < g'.hub.seq then upd hist g'.hub.seq g'.hub.head else hist
 
@@ -32,8 +35,8 @@ theorem nextHistory_accept {law : HubLaw} {g g' : Sys} (hist : Nat → Nat) {p :
     nextHistory g g' hist = upd hist (g.hub.seq + 1) p.new := by
   simp [nextHistory, h]
 
-/-- All nonaccepting decisions are frames of this view, including refusing a push with
-different records. Their actual reply and queue effects are retained in the system. -/
+/-- Every answer that leaves the hub unchanged, including refusing a push with different
+records, is a frame step of this view. -/
 theorem answer_frame {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w : Nat} {g g' : Sys}
     (hs : SysStep N D law .answer g g') (hh : g'.hub = g.hub)
@@ -48,11 +51,11 @@ theorem answer_frame {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     · exact generations_same (fun n _ => congrArg NodeC.gen (congrFun hr.1 n))
     · rfl
 
-/-- The actual accepted request, rather than a later reading of its sender, determines
-the suffix's accept step. Coverage is the invariant derived from issue and request removal.
-Coverage includes old packets regardless of their sender. For a fresh accepted packet,
-record/drop coupling identifies the sender as eligible and the issue invariant covers it.
--/
+/-- An answer step expands into a single hub-suffix step: `accept` if the hub accepted a push,
+otherwise a frame. The packet of the accept step is the one the request carried. `hcovered`
+says the ledger holds a packet for each accepted request. It covers pre-cut packets whatever
+their sender; for a fresh packet, record/drop coupling shows the sender is eligible and the
+issue invariant covers it. -/
 theorem answer_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w : Nat} {g g' : Sys}
     (hs : SysStep N D law .answer g g') (hist : Nat → Nat) (pk : List Packet)

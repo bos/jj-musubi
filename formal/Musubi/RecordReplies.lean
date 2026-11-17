@@ -1,10 +1,12 @@
 /-
 Pruned-prefix custody for the extended recovery model, and reconstruction of a fresh reply's
-ordered records. A dropped-set cut alone does not imply that a node can read a pruned prefix;
-that fact must survive the added prepared-adoption and survivor-acceptance transitions too.
+ordered records. Custody (`SEHeld`: every node holds a copy of the pruned prefix) is preserved
+by the prepared-adoption and survivor-acceptance transitions as well as the base ones. A
+dropped-set cut alone would not give it.
 
-The convergence proof does not use this file; it proves held-prefix custody and the reconstruction
-of fresh ordered-record replies in the executable recovery union, which stands alone.
+The convergence proof does not use this file. It proves held-prefix custody and the
+reconstruction of fresh ordered-record replies in the executable recovery union, which stands
+alone.
 -/
 import Musubi.NodeReconcile
 import Musubi.SerialReply
@@ -99,8 +101,8 @@ theorem recEq_append_same {A B : List Rec} (h : recEq A B = true) (C : List Rec)
       simp only [recEq, Bool.and_eq_true] at h
       simpa only [List.cons_append, recEq, Bool.and_eq_true] using ⟨h.1, ih h.2⟩
 
-/-- The exact held prefix, followed by the hub's remaining records, reconstructs the hub's
-ordered list. Records stay ordered; equality of flattened dropped sets is not substituted. -/
+/-- A held copy of the pruned prefix, followed by the hub's remaining records, reconstructs
+the hub's ordered list. The comparison is of ordered lists, not of their dropped sets. -/
 theorem held_prefix_reconstructs {s : SEState} {n p : Nat} {R : List Rec}
     (h : s.heldPrefix n R p = true) :
     ∃ L ∈ s.heldF n, recEq (L.take p ++ R.drop p) R = true := by
@@ -109,8 +111,8 @@ theorem held_prefix_reconstructs {s : SEState} {n p : Nat} {R : List Rec}
   simpa only [List.take_append_drop] using recEq_append_same hprefix (R.drop p)
 
 /-- In every extended reachable state, a current full reply starting at the pruned boundary
-has a reconstructible prefix for every participant, even if it took an obsolete list since.
-This rules out missing-pruned-prefix refusal of that fresh reply in the model. -/
+has a reconstructible prefix for every participant, even one whose own list is obsolete. So
+a fresh reply is never refused for a missing pruned prefix. -/
 theorem current_pruned_reply_reconstructs {N : Nat} {s : SEState}
     (h : CExecReachable N s) {n : Nat} (hn : n < N) :
     ∃ L ∈ s.heldF n,
@@ -118,8 +120,10 @@ theorem current_pruned_reply_reconstructs {N : Nat} {s : SEState}
   held_prefix_reconstructs ((cexec_reachable_held h).now n hn)
 
 /-- The two reconstruction branches in `note_announced`. Equality here stands for the
-count and digest check, under the same collision-free record identity assumption as `recEq`.
- The response body supplies `R.drop offset`; it need not resend an already matching prefix. -/
+count and digest check, assuming record identity is collision-free, as for `recEq`. The
+response body carries only `R.drop offset`. Branch one keeps the node's own first `offset`
+records when they match; branch two, when `offset` is the pruned boundary, takes a held copy
+of the pruned prefix. -/
 def completeRecordReply (A : List Rec) (held : List (List Rec))
     (R : List Rec) (pruned offset : Nat) : Option (List Rec) :=
   let direct := A.take offset ++ R.drop offset
@@ -130,9 +134,9 @@ def completeRecordReply (A : List Rec) (held : List (List Rec))
     | none => none
   else none
 
-/-- A fresh request's applied records match the chosen hub prefix, or `records_since`
-falls back to the pruning boundary. Either branch completes: the old-response branch that
-silently ignores a candidate cannot recur for fresh serialized requests. -/
+/-- For a fresh request, either the node's applied records match the hub's first `offset`
+records, or `records_since` has fallen back to the pruning boundary. In both cases
+`completeRecordReply` returns the hub's list, so the reply is never silently ignored. -/
 theorem fresh_record_reply_completes {N : Nat} {s : SEState} {n offset : Nat}
     (h : CExecReachable N s) (hn : n < N)
     (hoffset : (offset = (s.appliedF n).length ∧
@@ -167,9 +171,9 @@ theorem fresh_record_reply_completes {N : Nat} {s : SEState} {n offset : Nat}
     exact ⟨_, by simp [completeRecordReply, he], he⟩
   · exact fallback hf
 
-/-- `records_since` chooses its offset from the request snapshot. Serialization supplies
-the missing identity with the receiver's current records; taking records between calls
-cannot invalidate the live call's prefix while it is outstanding. -/
+/-- `records_since` chooses its offset from the request snapshot. Serialization shows that
+snapshot equals the receiver's current records: taking records between calls cannot change
+the live call's prefix while it is outstanding. -/
 theorem serialized_record_reply_completes {N : Nat} {s : SEState} {n offset : Nat}
     {control : Retry.Serial.State} {call : Retry.Serial.Call}
     (h : CExecReachable N s) (hn : n < N)

@@ -3,21 +3,20 @@ The hub settles in the asynchronous suffix after the record and node-drop cuts
 (`hub_suffix_stabilizes`). Its vertices are hub-space raw operations, read through
 `Model.State`'s `U.par`; the universe may grow by merges, maintenance writes and other nodes'
 operations. Eligible nodes `E` are fixed. The window `w` is where the hub's history is a strict
-ancestry chain: before it, history need not be comparable at all.
+ancestry chain; before it, history may be incomparable.
 
-The suffix keeps the hub's head and sequence still except to accept a push: any packet in a
+In the suffix the hub's head and sequence change only by accepting a push: any packet in a
 list, from an eligible node or not, whose expected head is the hub's head and whose new head
-is above it. Nothing here assumes the hub stops accepting, that ranks descend, that a sender
-still holds its pushed head when the hub accepts it, or that accepts are finitely many. The
-sender's state at an accept is derived (`Inv.pushInv`) for packets of its current maintenance
-generation. Other packets, sent before the suffix, by another node, or before a maintenance
+is above it. There may be infinitely many accepts. For a packet of its current maintenance
+generation, the sender's state at an accept is given by `Inv.pushInv`: it still holds its
+pushed head. Other packets, sent before the suffix, by another node, or before a maintenance
 write, form a finite list once maintenance writes stop, and the strict chain pays for them:
 each moves the hub's head at most once.
 
-Eligible nodes' knowledge must already be truthful within the window when the suffix starts
-(`inv_entry`): the caller must show they learned an honest reply from the window after the
-cut. A known pair whose head is the hub's head under a wrong sequence number is not
-consistent, and is not assumed to be.
+At the start of the suffix, eligible nodes' knowledge must be truthful within the window
+(`inv_entry`): the caller shows that each learned an honest reply from the window after the cut.
+A known pair whose head is the hub's head under a wrong sequence number is not consistent; the
+caller must show the pair is.
 
 The convergence proof uses this file.
 -/
@@ -33,17 +32,25 @@ open Musubi
 it sent it, or `none` for one sent before the suffix or of no generation; the sequence number
 and head the sender knew; and its single head. -/
 structure Packet where
+  /-- The sender. -/
   node : Nat
+  /-- The sender's maintenance generation when it sent the push, or `none`. -/
   tag : Option Nat
+  /-- The sequence number the sender knew. -/
   ksq : Nat
+  /-- The head the sender knew: the head the push expects. -/
   exp : Nat
+  /-- The sender's single head: the push's new head. -/
   new : Nat
 
 /-- The model's state, each node's maintenance generation, and every push the hub can still
 accept. -/
 structure GState where
+  /-- The model's state. -/
   s : State
+  /-- Each node's maintenance generation. -/
   bk : Nat → Nat
+  /-- Every push the hub can still accept. -/
   pk : List Packet
 
 /-- The hub's head, sequence and history are as they were. -/
@@ -104,8 +111,8 @@ inductive Step (E : Nat → Prop) (w : Nat) : GState → GState → Prop
       (hheads : ∀ y, (g'.s.node n).heads y ↔ y = g.s.U.next)
       (hknown : (g'.s.node n).known = (g.s.node n).known)
       (hbk : g'.bk = g.bk) (hpk : g'.pk = g.pk) : Step E w g g'
-  /-- An eligible node's merge of its heads, two or more, leaves one operation that EXISTS
-  already: the same canonical merge another copy wrote (identical content, one raw vertex), or
+  /-- An eligible node's merge of its heads, two or more, leaves one operation that already
+  exists: the same canonical merge another copy wrote (identical content, one raw vertex), or
   the one head jj keeps, the others its ancestors. The universe does not grow. -/
   | mergeExisting {g g' : GState} (n y : Nat) (hE : E n)
       (h2 : ∃ a b, (g.s.node n).heads a ∧ (g.s.node n).heads b ∧ a ≠ b)
@@ -135,28 +142,40 @@ inductive Step (E : Nat → Prop) (w : Nat) : GState → GState → Prop
 /-! ## The invariant -/
 
 /-- What the suffix needs of a state: the hub's history a strict ancestry chain from the
-window on, eligible nodes' knowledge truthful within the window, and of each current packet
-from an eligible node that the hub could accept now, its expected head the hub's head and its
-new head descending from it, that its sender still holds exactly the pushed head (`pushInv`).
-That last is kept, not assumed: a sender moves on only by advancing, impossible while its head
+window on; eligible nodes' knowledge truthful within the window; and, of each current packet
+from an eligible node that the hub could accept now (its expected head the hub's head, its new
+head descending from it), that its sender still holds exactly the pushed head (`pushInv`).
+Every step keeps `pushInv`: a sender moves on only by advancing, impossible while its head
 descends from the hub's head and so from what it knows; by merging, impossible with one head;
-or by a maintenance write, which ends the packet's generation. No original-history chain
-before the window, and no creator ownership. -/
+or by a maintenance write, which ends the packet's generation. The state carries no
+original-history chain before the window and no creator ownership. -/
 structure Inv (E : Nat → Prop) (w : Nat) (g : GState) : Prop where
+  /-- Parents have smaller ids. -/
   parLt : ParLt g.s.U.par
+  /-- The hub's head is an operation of the universe. -/
   headLt : g.s.hub.head < g.s.U.next
+  /-- The history at the hub's sequence is its head. -/
   histHead : g.s.hub.hist g.s.hub.seq = g.s.hub.head
+  /-- The window starts at or before the hub's sequence. -/
   window : w ≤ g.s.hub.seq
+  /-- From the window on, each history entry is an ancestor of the later ones. -/
   chain : ∀ i j, w ≤ i → i ≤ j → j ≤ g.s.hub.seq →
     Anc g.s.U.par (g.s.hub.hist i) (g.s.hub.hist j)
+  /-- From the window on, history ids strictly increase. -/
   strict : ∀ i j, w ≤ i → i < j → j ≤ g.s.hub.seq → g.s.hub.hist i < g.s.hub.hist j
+  /-- An eligible node's known pair is in the window and truthful. -/
   known : ∀ n, E n → w ≤ (g.s.node n).known.seq ∧ (g.s.node n).known.seq ≤ g.s.hub.seq ∧
     g.s.hub.hist (g.s.node n).known.seq = (g.s.node n).known.head
+  /-- An eligible node's heads are operations of the universe. -/
   headsLt : ∀ n, E n → ∀ y, (g.s.node n).heads y → y < g.s.U.next
+  /-- Every listed push's new head is an operation of the universe. -/
   pkLt : ∀ p ∈ g.pk, p.new < g.s.U.next
+  /-- A packet's generation is at most its sender's current one. -/
   tagLe : ∀ p ∈ g.pk, ∀ k, p.tag = some k → k ≤ g.bk p.node
+  /-- A current packet from an eligible node carries a truthful known pair in the window. -/
   pkExp : ∀ p ∈ g.pk, E p.node → p.current g →
     w ≤ p.ksq ∧ p.ksq ≤ g.s.hub.seq ∧ g.s.hub.hist p.ksq = p.exp
+  /-- The sender of a packet the hub could accept still holds exactly the pushed head. -/
   pushInv : ∀ p ∈ g.pk, E p.node → p.current g → p.exp = g.s.hub.head →
     Anc g.s.U.par p.exp p.new → ∀ y, (g.s.node p.node).heads y ↔ y = p.new
 
@@ -859,9 +878,10 @@ theorem pk_run {E : Nat → Prop} {w : Nat} (run : Nat → GState)
 
 /-! ## The hub settles -/
 
-/-- In the suffix, once maintenance writes stop, the hub's head and sequence stop moving. Accepts
-are not assumed finite: each current eligible packet makes its sender good for good, each other
-packet was listed when maintenance writes stopped and moves the hub's head at most once. -/
+/-- In the suffix, once maintenance writes stop, the hub's head and sequence stop moving. The
+measure (the bad count plus the credit) bounds the accepts: each current eligible packet makes
+its sender good for good, and each other packet was listed when maintenance writes stopped and
+moves the hub's head at most once. -/
 theorem hub_suffix_stabilizes {N : Nat} {E : Nat → Prop} {w : Nat} (run : Nat → GState)
     (h0 : Inv E w (run 0)) (hs : ∀ i, Step E w (run i) (run (i + 1)))
     (hN : ∀ n, E n → n < N) (kb : Nat)
@@ -896,35 +916,36 @@ theorem hub_suffix_stabilizes {N : Nat} {E : Nat → Prop} {w : Nat} (run : Nat 
 
 /-! ## What this rests on
 
-Each `Step` constructor must be matched, on hub-space raw operation ids and with no projection
-to originals, by PostCut or by the native code:
+Each `Step` constructor must be matched, on hub-space raw operation ids, by PostCut or by the
+native code:
 
 - `accept`: after the cuts, an accept moves the hub from `e` to `d` with `Anc e d` and `e ≠ d`
-  in the hub store's raw parent graph (PostCut's `post_cut_step` in the model; natively R1, no
-  renamed version once records stop, and R2, `descends` is raw ancestry). `pk` holds every
-  push that can still move the hub. PacketCoupling's `packet_sender_aligned`, coupled to
-  the fixed node-drop sets, identifies the actual sender of each new move-capable packet
-  as eligible (`send` needs `E n`). Other nodes may append ledger entries and send packets
-  forever; those packets cannot move the hub and need not enter `pk`. Idempotent acceptance
+  in the hub store's raw parent graph (PostCut's `post_cut_step` in the model; natively PostCut's
+  R1: once records stop, no renamed version is written; and R2: `descends` is raw ancestry).
+  `pk` holds every push that can still move the hub. PacketCoupling's `packet_sender_aligned`,
+  coupled to the fixed node-drop sets, identifies the actual sender of each new move-capable
+  packet as eligible (`send` needs `E n`). Other nodes may append ledger entries and send
+  packets forever; those packets cannot move the hub and are not in `pk`. Idempotent acceptance
   replies that leave the head and sequence unchanged are quiet steps too.
 - `learn`: a node takes only replies the hub sent from the window. A reply newer than what it
   knows is one, by `Inv.known`; an older one must be checked to be.
 - `advance`, `merge`, `send`: the policy's guards. Advance only when no head descends from the
   known head; merge only with two heads; push only a single head, naming the known head as
-  expected (root's `sourceMatchesB`). That the pushed head descends from the known head is not
-  needed: the hub's own guard refuses a push that doesn't.
+  expected (`PushPacket.sourceMatchesB` in PacketCoupling). The model asks nothing about whether
+  the pushed head descends from the known head: the hub's own guard refuses a push that doesn't.
 - `maintain`: an idle maintenance write leaves one fresh head. `kb` says they stop: an
   assumption, since endless maintenance legitimately keeps moving the hub.
 - `frame`, `grow`: every other step leaves eligible nodes' heads and knowledge and the hub's
   head, sequence and history alone, and the universe only gains operations whose parents it
-  has. Ids need only be a topological order of that growth, not the store's order, which an
-  import need not keep parent-first: R3 is that the accepted closure is finite and acyclic.
+  has. Ids are a topological order of that growth, which need not be the store's order (an
+  import need not keep parents first); PostCut's R3 is that the accepted closure is finite and
+  acyclic.
 - A packet's generation tag and `ksq`, and every node's generation `bk`, are ghost state.
 
-Not given here: that misaligned nodes align, since `E` is fixed (a node joining `E` restarts
-the argument, at most `N` times, and must enter with truthful knowledge); that knowledge is
-truthful when the suffix starts (`inv_entry`); and fairness, which the hub needs not to
-settle, only for its settled head to be every node's.
+Outside this file: aligning misaligned nodes (`E` is fixed; a node joining `E` restarts the
+argument, at most `N` times, and must enter with truthful knowledge); truthful knowledge when
+the suffix starts (`inv_entry`); and fairness, which is needed only for the settled head to be
+every node's, not for the hub to settle.
 -/
 
 end Musubi.HubSuffix

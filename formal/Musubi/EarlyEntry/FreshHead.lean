@@ -11,31 +11,33 @@ open Musubi NodeSettle
 /-! ### Naming, settling inside a frozen round
 
 The core reads its known head's node-space images, and which raw operations are local, through
-its naming (`to_node`), which changes as metadata arrives and as pending names normalize, past
-the record cut too: no images are fixed for good. But with the known head fixed, naming reads
-the metadata of finitely many raw operations only, the head's raw closure and the pending
-names (with what a preparation of the announced records may make pending), which only
-arrives, and which names are pending, which, past the one preparation from scratch, are renamed
-against that one head at most once per original. So inside any round that goes on forever with
-its known head fixed, naming settles (`Naming.settles`), at a step derived there, not
-assumed. -/
+its naming (`to_node`). Naming changes as metadata arrives and as pending names normalize, even
+past the record cut, so no image is fixed for good. With the known head fixed, though, naming
+reads the metadata of finitely many raw operations only: the head's raw closure and the pending
+names, including whatever a preparation of the announced records makes pending. Metadata only
+arrives, and, past the one preparation from scratch, pending names are renamed against that one
+head at most once per original. So in any round that goes on forever with its known head fixed,
+naming settles (`Naming.settles`) at some step. -/
 
-/-- What the core's naming reads at its successive steps, each read after the step's prelude:
-the metadata it holds of each raw operation (`facts`), and the raw names its naming takes as
-pending drops (`names`: the operands `to_node` reads, a preparation's `Taking.pending`
-included), with every raw operation's original (`orig`); the known head's node-space images then
-(`images`, the native `to_node` of the known head); the finite raw operations whose metadata
-the naming reads (`inputs`); whether, between a step's reading and the next step's, the
-announced records are prepared again from scratch (`prep`: `prepare_again_if_moved` does so
-whenever the op heads moved, as the core's own merge moves them); and whether the step's reading
-has two op heads or more (`multi`). -/
+/-- What the core's naming reads at its successive steps, each read after the step's prelude. -/
 structure Naming (α : Type) where
+  /-- The finite set of raw operations whose metadata the naming reads. -/
   inputs : List Nat
+  /-- `facts i x`: the metadata the core holds of raw operation `x` at step `i`. -/
   facts : Nat → Nat → Option α
+  /-- `names i`: the raw names naming takes as pending drops at step `i`: the operands `to_node`
+  reads, a preparation's `Taking.pending` included. -/
   names : Nat → List Nat
+  /-- Every raw operation's original. -/
   orig : Nat → Nat
+  /-- `images i`: the known head's node-space images at step `i` (the native `to_node` of the
+  known head). -/
   images : Nat → List Nat
+  /-- `prep i`: between the readings of steps `i` and `i + 1`, the announced records are
+  prepared again from scratch (`prepare_again_if_moved` does so whenever the op heads moved, as
+  the core's own merge moves them). -/
   prep : Nat → Prop
+  /-- `multi i`: the reading of step `i` has two op heads or more. -/
   multi : Nat → Bool
 
 namespace Naming
@@ -46,19 +48,23 @@ variable {α : Type} (N : Naming α)
 def Still (i : Nat) : Prop :=
   (∀ x ∈ N.inputs, N.facts (i + 1) x = N.facts i x) ∧ ∀ x, x ∈ N.names (i + 1) ↔ x ∈ N.names i
 
-/-- Naming's native laws over the steps `P` holds of, the known raw head `H` fixed: metadata only
-arrives; at two of those steps that agree on the metadata of `inputs` and on which names are
-pending, the images agree (the naming's actual dependence, on the actual metadata); the known
-head's raw closure holds one version of each original (the hub refuses a push that repeats one);
-from a step to the next, both of them `P`'s, with no preparation from scratch between, the
-pending names are renamed only to the version of their original below the known head, if it has
-one, or leave (`PendingEpoch.PStep`, `name_pending_as`): the announcement being the same
-throughout, its first preparation is in the first reading already; a step from one op head or
-none leaves one or none (realizing is detached, calls do not move the op heads, an ordinary
-advance leaves one, a taking advance and user work are excluded); and a preparation from scratch
-comes only where the op heads moved, which, the announcement standing, only the core's merge of
-two op heads or more does, leaving one. So such preparations come once at most
-(`Naming.settles`), not assumed. -/
+/-- Naming's laws over the steps `P` holds of, with the known raw head `H` fixed:
+* `keep`: metadata only arrives.
+* `support`: two steps that agree on the metadata of `inputs` and on which names are pending have
+  the same images.
+* `unique`: the known head's raw closure holds one version of each original (the hub refuses a
+  push that repeats one).
+* `rename`: from one step to the next, both in `P`, with no preparation from scratch between,
+  pending names are renamed only to the version of their original below the known head, if it
+  has one, or leave (`PendingEpoch.PStep`, `name_pending_as`). The announcement is the same
+  throughout, so its first preparation is already in the first reading.
+* `single`: a step from one op head or none leaves one or none (realizing is detached, calls
+  do not move the op heads, an ordinary advance leaves one; a taking advance and user work are
+  excluded).
+* `prepMerge`: a preparation from scratch comes only where the op heads moved, which, the
+  announcement standing, only the core's merge of two op heads or more does, leaving one.
+
+So such preparations come once at most (`Naming.settles`). -/
 structure Laws (N : Naming α) (par : Nat → List Nat) (H : Nat) (P : Nat → Prop) : Prop where
   keep : ∀ i, P i → ∀ x a, N.facts i x = some a → N.facts (i + 1) x = some a
   support : ∀ i j, P i → P j → (∀ x ∈ N.inputs, N.facts i x = N.facts j x) →
@@ -77,10 +83,10 @@ theorem names_below {T : Nat} (hleave : ∀ i, T ≤ i → ∀ x ∈ N.names (i 
   | d + 1 => fun x h => names_below hleave d x (hleave (T + d) (by omega) x h)
 
 /-- Inside a round that goes on forever, its known head fixed, naming settles: past some step,
-nothing it reads changes, so neither do the images. Derived from the pointwise laws: past the
-one preparation from scratch, if any, renaming against the one known head stops
-(`PendingEpoch.pending_names_settle`), then the names only leave, and metadata stops arriving for
-the finite inputs (`PendingEpoch.finite_metadata_stabilizes`). No cutoff is assumed. -/
+nothing it reads changes, so neither do the images. Proof: past the one preparation from scratch,
+if any, renaming against the one known head stops (`PendingEpoch.pending_names_settle`), then the
+names only leave, and metadata stops arriving for the finite inputs
+(`PendingEpoch.finite_metadata_stabilizes`). -/
 theorem settles {par : Nat → List Nat} {H : Nat} {P : Nat → Prop} (L : N.Laws par H P)
     (hP : ∀ i, P i) :
     ∃ T, ∀ i, T ≤ i → N.Still i ∧ N.images i = N.images T := by
@@ -146,24 +152,28 @@ end Naming
 
 /-! ### A first fresh head
 
-Before the node first observes a fresh head (a reply from after the record cut naming the hub's
-current head, `Head` or `Fetched`; an `Incomplete` answer to a push counts, since the driver
-hands it to the core before failing the round, though nothing here says what follows that
-failure), its known head, raw closure and offered records stay as they are; its images of that
-head may change, as naming does, until naming settles inside the hypothetical frozen round
-(`Naming.settles`). Each of its core steps is then chosen as computed (`rawControl`), from the
-images then. A step that fetches or polls sends a
-`Fetch`, and one that idles is followed by a round that starts with one (fair start); a `Fetch`
-completes, naming the hub's head (fair individual call), so either brings a fresh head
-(`idle_brings_fresh`). A push gets a `Head` reply, which names it too, when its records are the
-hub's and the hub does not drop its new head (`is_dropped`, which is `is_superseded` of that
-head as the hub's records name it, rewrites included: a primitive of an honest push, not a
-consequence of matching records); one with other records is refused, and the node then hears
-the hub's records, which differ from those it offers, so it never pushes again. So, with no
-fresh head, the node pushes at most once, and every other step is a burst step or an objects
-call, which lower the control rank (`no_infinite_calls`) from where naming settles on: a fresh
-head comes (`fresh_head_reached`). No completed round, no eventual fresh head and no naming
-cutoff is assumed. -/
+A fresh head is a reply from after the record cut naming the hub's current head: `Head` or
+`Fetched`. An `Incomplete` answer to a push counts, since the driver hands it to the core before
+failing the round; what follows that failure is not modelled here.
+
+Until the node first observes a fresh head, its known head, raw closure and offered records stay
+as they are. Its images of that head may change, as naming does, until naming settles inside the
+hypothetical frozen round (`Naming.settles`). Each core step is chosen as computed
+(`rawControl`) from the images at that step:
+
+* A step that fetches or polls sends a `Fetch`. One that idles is followed by a round that
+  starts with one (fair start). A `Fetch` completes, naming the hub's head (fair individual
+  call). So either brings a fresh head (`idle_brings_fresh`).
+* A push whose records are the hub's gets a `Head` reply, which names the head too, provided the
+  hub does not drop its new head (`is_dropped`, which is `is_superseded` of that head as the
+  hub's records name it, rewrites included: a primitive of an honest push, not a consequence of
+  matching records).
+* A push with other records is refused. The node then hears the hub's records, which differ from
+  those it offers, so it never pushes again.
+
+So with no fresh head the node pushes at most once, and every other step is a burst step or an
+objects call, which lower the control rank (`no_infinite_calls`) once naming settles. Hence a
+fresh head comes (`fresh_head_reached`). -/
 
 /-- What a step's calls bring back, as far as a fresh head goes. -/
 inductive Reply
@@ -184,25 +194,29 @@ theorem idle_brings_fresh {reply : Nat → Reply} {starts fetchCall : Nat → Pr
   obtain ⟨j, hj, hs⟩ := hstart
   exact ⟨j, hj, hfetchCall j (hstartFetch j hs)⟩
 
-/-- A node observes a fresh head. Its events are core steps (`core`) and round starts (`starts`);
-before a fresh head: the record-credit cut (no adoption, no prepared taking advance); `differ` as
-the core computes it against the records last heard, which, across a core step that does not idle,
-change only by a refusal's (between rounds a notification may change them, but an idle is followed
-by a fresh `Fetch` reply anyway); a core step's law by its computed choice (a burst step as
-checked; an objects call bringing the objects, or locality, of the walked operations with a body
-but not their objects, the op heads and plan as they were and nothing lost, or else, its reply
-lacking them, failing the round, so that a round starts after it (the adapter's `stage_objects`
-checks they are here, and the driver reopens and starts a round with an initial `Fetch`); a fetch
-or poll sending a `Fetch`; an idle followed by a round start); a round starting with a `Fetch`; a
-`Fetch` completing fresh; and a push whose reply is refused unless it has the hub's records `R`,
-and is fresh when it has them and the hub does not drop it (`pushDropped`, its `is_dropped`). Each
-step's law relates its reading to its state right after its calls complete (`after`), and that
-state to the next step's reading by a frame (`Frame`: nothing lost, the canonical op heads and the
-plan as they were), not one reading to the next directly. That primitive is asked only of a push
-with the hub's records: one with other records is refused first, even if its head is newly
-superseded at the hub. Naming's laws hold of the steps (metadata only arrives, and the images read
-only that of finitely many raw operations) and pending names only leave; the checked burst and
-objects laws are asked only of steps naming does not change across. -/
+/-- A node observes a fresh head. Its events are core steps (`core`) and round starts (`starts`).
+Until a fresh head, assumed of every step:
+* `hnaming`: naming's laws hold (metadata only arrives, the images read only that of finitely
+  many raw operations, pending names only leave).
+* `hrecord`: the record-credit cut: no adoption, no prepared taking advance.
+* `hdiffer`, `hheard`: `differ` is as the core computes it against the records last heard. Across
+  a core step that does not idle, those records change only by a refusal. (Between rounds a
+  notification may change them, but an idle is followed by a fresh `Fetch` reply anyway.)
+* `hburst`, `hobjects`: a core step's law follows from its computed choice, asked only of steps
+  across which naming does not change. A burst step is as checked. An objects call brings the
+  objects, or locality, of the walked operations with a body but not their objects, with the op
+  heads and plan as they were and nothing lost; or its reply lacks them and fails the round, so
+  that a round starts after it (the adapter's `stage_objects` checks they are here, and the
+  driver reopens and starts a round with an initial `Fetch`).
+* `hframe`: each step's law relates its reading to its state right after its calls complete
+  (`after`), and that state to the next step's reading by a frame (`Frame`: nothing lost, the
+  canonical op heads and the plan as they were).
+* `hpoll`, `hstart`, `hstartFetch`, `hfetchCall`: a fetch or poll sends a `Fetch`; an idle is
+  followed by a round start; a round starts with a `Fetch`; a `Fetch` completes fresh.
+* `hnd`, `hpush`: a push is refused unless it has the hub's records `R`, and is fresh when it
+  has them and the hub does not drop it (`pushDropped`, its `is_dropped`). That primitive is
+  asked only of a push with the hub's records: one with other records is refused first, even if
+  its head is newly superseded at the hub. -/
 theorem fresh_head_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm : Naming α)
     (par : Nat → List Nat) (anc : Nat → Nat → Bool)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
@@ -260,7 +274,7 @@ theorem fresh_head_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm 
     rcases hkind i (hall i) with h | h
     · exact h
     · exact absurd ⟨i, hfetchCall i (hall i) (hstartFetch i (hall i) h)⟩ hno
-  -- the known head stays, so naming settles, at a step derived here
+  -- the known head stays, so naming settles
   obtain ⟨T, hT⟩ := nm.settles hnaming hall
   have hcall : ∀ i, T ≤ i → rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .push →
       Call raw (nm.images T) anc (run i) (after i) := by

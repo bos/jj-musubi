@@ -1,8 +1,9 @@
 /-
-Hub record stabilization is independent of original-head ancestry. After regressions stop,
-`takeRecs` appends only a nonempty difference. If all original drops are below a finite cut,
-each changed record list spends an unseen original; pruning then spends a bounded prefix.
-This does not assume that the hub stops accepting heads, or that nodes have reconciled yet.
+Stabilization of the hub's record list, which does not depend on ancestry between original
+heads. Once rollbacks stop, `takeRecs` appends only a nonempty difference. If every original
+drop is below a finite bound `B`, each change of the record list spends an original drop not
+yet seen, so the list stops changing; pruning then spends a bounded prefix. The hub may keep
+accepting heads, and nodes need not have reconciled.
 
 The convergence proof uses this file except `sexec_record_prefix_stabilizes`,
 `adopt_pending_subset` and their helpers, which are not used by the assembly and stand alone.
@@ -12,11 +13,12 @@ import Musubi.ContractOrder
 
 namespace Musubi.Exec
 
+/-- The number of original drops below `B` that the hub has not yet seen. -/
 noncomputable def unseenDrops (B : Nat) (s : SEState) : Nat :=
   cnt B (fun x => x ∉ s.hubDL)
 
-/-- The rollback-free executable record rules append a difference or keep the list, and
-never move the pruned prefix backwards. No head-ancestry invariant is used here. -/
+/-- A step that is not a rollback either keeps the record list or replaces it by `takeRecs`
+(an append of the difference), and never moves the pruned prefix backwards. -/
 theorem sexec_record_control {N : Nat} {s t : SEState} {a : SAction}
     (h : sexecStep N s a = .ok t) (hnr : a.goesBack = false) :
     (t.recs = s.recs ∨ ∃ D, t.recs = s.takeRecs D) ∧ s.pruned ≤ t.pruned := by
@@ -92,8 +94,8 @@ theorem takeRecs_changes {s : SEState} {D : List Nat}
   have hm := (mem_newRec s D x).1 hx
   exact ⟨x, (mem_takeRecs s D x).2 (Or.inr hm.1), hm.2⟩
 
-/-- Once the record list is fixed, any accepted payload contains only already known
-original drops. A delayed or repeated acceptance cannot evade this by changing order. -/
+/-- `takeRecs D` leaves the record list unchanged exactly when every original drop in `D` is
+already in the hub's drops. Order does not matter. -/
 theorem takeRecs_eq_iff (s : SEState) (D : List Nat) :
     s.takeRecs D = s.recs ↔ ∀ x ∈ D, x ∈ s.hubDL := by
   constructor
@@ -109,8 +111,8 @@ theorem takeRecs_eq_iff (s : SEState) (D : List Nat) :
       exact hm.2 (hsub x hm.1)
     simp [SEState.takeRecs, hn]
 
-/-- Every record-changing acceptance spends a previously unseen original. This uses the
-actual record constructor, without the old model's original-ancestry acceptance guard. -/
+/-- Every acceptance that changes the record list adds an original drop not previously seen;
+no step removes one. This follows from the record constructor `takeRecs` alone. -/
 theorem unseenDrops_step {B : Nat} {s t : SEState}
     (hs : t.recs = s.recs ∨ ∃ D, t.recs = s.takeRecs D)
     (hb : ∀ x ∈ t.hubDL, x < B) :
@@ -131,8 +133,8 @@ theorem unseenDrops_step {B : Nat} {s t : SEState}
       exact cnt_lt (fun y _ hnt hy => hnt (hg y hy))
         ⟨x, hb x hxt', hxs, fun h => h hxt'⟩
 
-/-- With no record rollback and only bounded original drops, the full ordered record list
-eventually stops changing, even if head acceptances and duplicate requests continue. -/
+/-- With no record rollback and original drops bounded by `B`, the ordered record list
+eventually stops changing, though head acceptances and duplicate requests may continue. -/
 theorem records_eventually_stabilize (B : Nat) (run : Nat → SEState)
     (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
       ∃ D, (run (i + 1)).recs = (run i).takeRecs D)
@@ -153,10 +155,10 @@ theorem records_eventually_stabilize (B : Nat) (run : Nat → SEState)
       exact Nat.lt_irrefl _ hlt
     simpa [Nat.add_assoc] using he.trans (ih (by omega))
 
-/-- Record stabilization gives an original-ancestry epoch even when earlier accepted heads
-do not form such a chain. `par` is the immutable birth-parent graph of the whole run; the
-step premise is the contracted comparison under the resulting hub drops, not the old
-original-ancestry guard. Its physical-store projection is a separate obligation. -/
+/-- Record stabilization gives a point from which the hub's heads form an ancestry chain in
+`par`, even if earlier accepted heads do not. `par` is the immutable birth-parent graph of the
+whole run. The step premise `hstep` is the contracted comparison (`Contract.Below`) under the
+hub's drops. Projecting this onto the physical stores is not covered here. -/
 theorem eventual_original_chain (B : Nat) (run : Nat → SEState)
     (hlt : ParLt par)
     (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
@@ -190,8 +192,8 @@ theorem eventual_original_chain (B : Nat) (run : Nat → SEState)
   obtain ⟨b, rfl⟩ := Nat.exists_eq_add_of_le (show k ≤ j by omega)
   exact hc a b (by omega)
 
-/-- Pruning can continue after the last append, but only through the finite record prefix.
-The full modeled record list and its pruned-prefix count therefore eventually stabilize. -/
+/-- Pruning can continue after the last append, but only through the finite record prefix. So
+the record list and its pruned-prefix count both eventually stop changing. -/
 theorem record_prefix_eventually_stabilizes (B : Nat) (run : Nat → SEState)
     (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
       ∃ D, (run (i + 1)).recs = (run i).takeRecs D)
@@ -221,8 +223,9 @@ theorem record_prefix_eventually_stabilizes (B : Nat) (run : Nat → SEState)
     omega
   exact Prod.ext ((hk (k + d) (by omega)).trans (hk (k + j) (by omega)).symm) hp'
 
-/-- The executable rules discharge the record-step and pruning premises. Only the finite
-original-drop bound and cessation of rollback remain as trace assumptions. -/
+/-- The executable rules give the record-step and pruning premises of the previous theorem.
+The remaining assumptions on the trace are that original drops are bounded by `B` and that no
+step is a rollback. -/
 theorem sexec_record_prefix_stabilizes (N B : Nat) (run : Nat → SEState)
     (actions : Nat → SAction) (hok : SEOK (run 0))
     (hs : ∀ i, sexecStep N (run i) (actions i) = .ok (run (i + 1)))
@@ -239,14 +242,15 @@ theorem sexec_record_prefix_stabilizes (N B : Nat) (run : Nat → SEState)
     (fun i => (sexec_record_control (hs i) (hnr i)).1) hb
     (fun i => (sexec_record_control (hs i) (hnr i)).2) (fun i => (hi i).pruned)
 
-/-- Pending is a difference in immutable original-operation names. -/
+/-- Pending is the difference of the original-operation names `D` and those in the records
+`R`. -/
 theorem mem_pendingOf (R : List Rec) (D : List Nat) (x : Nat) :
     x ∈ pendingOf R D ↔ x ∈ D ∧ x ∉ flat R := by
   simp [pendingOf]
 
-/-- Once a node has aligned to the current record epoch, adopting an extension cannot
-introduce a pending original. This derives the retry budget's shrink premise from adoptR,
-rather than imposing a test on the resulting progress rank. -/
+/-- Once a node has aligned to the current record epoch, adopting an extension `R` of its
+applied records introduces no new pending original. This gives the retry budget's shrink
+premise (`Fixup.adopt`) from `adoptR`. -/
 theorem adopt_pending_subset (s : SEState) (n : Nat) (R : List Rec)
     (he : ∀ x, x ∈ flat (s.appliedF n) → x ∈ flat R) :
     ∀ x, x ∈ pendingOf R ((s.adoptR n R).nodeDF n) →
@@ -260,8 +264,8 @@ theorem adopt_pending_subset (s : SEState) (n : Nat) (R : List Rec)
   have ho : x ∈ s.nodeDF n := (mem_union.1 hm.1).resolve_right hm.2
   exact (mem_pendingOf _ _ x).2 ⟨ho, fun h => hm.2 (he x h)⟩
 
-/-- The existing cache epoch accepts every such adoption, for either cache flag. The
-first adoption of a different epoch remains unrestricted by that model. -/
+/-- Within the current cache epoch, `Fixup.adopt` accepts every such adoption, whatever the
+cache flags. The first adoption of a different epoch is unrestricted in the `Fixup` model. -/
 theorem retry_adopt_of_extension (s : SEState) (n : Nat) (R : List Rec)
     (cache : Musubi.Retry.Fixup)
     (hc : cache.pending = pendingOf (s.appliedF n) (s.nodeDF n))
@@ -317,10 +321,10 @@ theorem node_drop_sets_eventually_stabilize (N B : Nat) (run : Nat → SEState)
     · exact (hk i (by omega) n (by omega) x).trans
         (hk (max k j) (by omega) n (by omega) x).symm
 
-/-- The record and original-drop cut needs only their own field effects. Local raw
-realization may contract parents, so it need not simulate an original-history `cexecAction`
-to use this cut. An implementation supplies record append/prune effects and persistent
-original-drop custody independently of how its raw repository operations are represented. -/
+/-- The record list, pruned prefix and every node's original-drop set eventually stop changing
+together. Only the field effects are assumed: record append and prune, and nodes keeping the
+original drops they have learned. Local raw operations may contract parents, so they need not
+simulate an original-history `cexecAction` for this theorem to apply. -/
 theorem record_and_drop_sets_stabilize (N B : Nat) (run : Nat → SEState)
     (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
       ∃ D, (run (i + 1)).recs = (run i).takeRecs D)

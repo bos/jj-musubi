@@ -65,14 +65,13 @@ theorem lawful_filt {M : Nat} {decode : Nat → List Exec.Rec} {g g' : Sys} {P :
 end Hive
 
 open Musubi.Recovery.HubSys in
-/-- The eligible system's starting snapshot at `k`: the raw root `rawRoot`, which is data, and
-invariants that the actual observation at `k` must satisfy; raw entry alone does not establish
-them.
+/-- The eligible system's starting snapshot at `k`: the raw root `rawRoot` (plain data) and
+invariants that the actual observation at `k` must satisfy; raw entry alone does not give them.
 
-`distinctHeads` is a supplied snapshot obligation: native prelude realignment and a completed
-merge establish it, while an active sampled event alone does not. `heads_nodup_step` preserves
-it afterwards. The remaining fields describe the snapshot's
-well-formed state, root, request bounds and supplied history window. -/
+`distinctHeads` is a snapshot obligation, established by native prelude realignment and a
+completed merge; an active sampled event alone does not. `heads_nodup_step` preserves it
+afterwards. The other fields give the snapshot's well-formed state, root, request bounds and
+history window. -/
 structure FineStart (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
     (run : Nat → Sys) (k w : Nat) (initial : Nat → Nat) where
   rawRoot : Nat
@@ -88,11 +87,11 @@ structure FineStart (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat �
 
 open Musubi.Recovery.HubSys in
 /-- The eligible system after the fine cut. `FineStart` holds the snapshot; the fields here
-hold its subsequent steps, graph law, fixed records, quiet maintenance, decisions and fairness.
+hold its later steps, graph law, fixed records, quiet maintenance, decisions and fairness.
 `FineAssembly.fineAt_of` builds this interface from native event replay.
 
-The known pair's honesty and eligibility's node bound are derived separately and supplied to
-`converges`. Completion and scheduling (`fair`, `pushFair`) remain explicit assumptions. -/
+`FineAt.converges` takes the known pair's honesty and eligibility's node bound as separate
+hypotheses. Completion and scheduling (`fair`, `pushFair`) are assumed. -/
 structure FineAt (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
     [DecidablePred E] (run : Nat → Sys) (acts : Nat → Act) (k w : Nat) (initial : Nat → Nat)
     extends FineStart D law E run k w initial where

@@ -1,10 +1,10 @@
 /-
-The node-side entry to the stable-record suffix. A node that has already dropped every
-current hub drop can take the current record list immediately: none of its surviving heads
-can block adoption. This does not require the hub's head to have stabilized.
+The node-side entry to the stable-record suffix. A node that has dropped every current hub
+drop can adopt the current record list at once, whatever the hub's head: none of its heads can
+block adoption.
 
-The convergence proof does not use this file; it proves that every reachable node head of the
-executable recovery union survives its dropped set, which stands alone.
+The convergence proof does not use this file. It proves that every reachable node head of the
+executable recovery union survives its dropped set.
 -/
 import Musubi.PacketCoupling
 
@@ -12,6 +12,7 @@ namespace Musubi.Exec
 
 open Musubi Contract
 
+/-- No node head of `s` is in that node's dropped set. -/
 def HeadsSurvive (s : SState) : Prop :=
   ∀ n x, (s.s.node n).heads x → ¬ s.nodeD n x
 
@@ -37,6 +38,7 @@ theorem srstep_heads_survive {N : Nat} {s t : SState}
     | prune => exact h
   · simpa only [HeadsSurvive, SState.regress, State.regress] using h
 
+/-- `HeadsSurvive` for the executable state: no node head is in its node's drop set. -/
 def NodeHeadsSurvive (s : SEState) : Prop :=
   ∀ n x, x ∈ (s.es.nodeOf n).heads → x ∉ s.nodeDF n
 
@@ -112,8 +114,9 @@ theorem cexec_reachable_heads_survive {N : Nat} {s : SEState}
   | step reach _ hs ih =>
     exact contracted_heads_survive ih (cexec_reachable_step reach hs)
 
-/-- A current announcement cannot block on an operation head of a node that already
-holds all its drops. The native policy checks this adoption before merge, transfer or push. -/
+/-- A node that holds every drop in the announced records `R`, and none of whose heads is
+dropped, can adopt `R`: `cexecAction` accepts the adoption. The native policy checks this
+adoption before merge, transfer or push. -/
 theorem current_adoption_enabled {N : Nat} {s : SEState} {n : Nat} {R : List Rec}
     (hpar : s.es.parOK = true) (hn : n < N) (hheads : NodeHeadsSurvive s)
     (hheld : ∀ x, x ∈ flat R → x ∈ s.nodeDF n)
@@ -126,8 +129,9 @@ theorem current_adoption_enabled {N : Nat} {s : SEState} {n : Nat} {R : List Rec
     simpa [sexecStep, sexecCore, req, hpar, hn, hmsg] using hnone
   simp only [cexecAction, cexecStep, hadopt, legacyOutcomeB, ite_true]
 
-/-- Eligibility plus current ordered records leaves no unpublished drops. The core's
-fix-up and neutral-tip guards are both false in this state, before the hub head settles. -/
+/-- A node whose applied records equal the current records and whose drops equal the hub's has
+no pending (unpublished) drops, whatever the hub head. So the core's fix-up and neutral-tip
+guards are both false. -/
 theorem aligned_records_no_pending {s : SEState} {n : Nat}
     (hrec : recEq (s.appliedF n) s.recs = true)
     (hdrop : ∀ x, x ∈ s.nodeDF n ↔ x ∈ s.hubDL) :

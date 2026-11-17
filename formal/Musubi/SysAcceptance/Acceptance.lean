@@ -1,21 +1,19 @@
 /-
-The push a fair node sends from the settled hub's head is accepted, so the hub could not have
-settled, and the node settles (`node_settles_accepted`). Acceptance is not a premise. It comes
-from the executable hub's checks (`packet_checks_force_accept`) on the very packet the node's
-actual push step built, taken from its request (`Bodies`), not from some packet that `Emit`
-would allow.
+A fair node that pushes from the settled hub's head has its push accepted, which contradicts
+the hub having settled; so the node settles (`node_settles_accepted`). Acceptance is derived
+from the executable hub's checks (`packet_checks_force_accept`) on the packet the node's actual
+push step built, read from its request (`Bodies`).
 
-The bridge to the executable hub is explicit and per request: for each push request the hub
-answers, a decision of the executable hub (`HubDecision`), its state before and after bound to
-the system's hub (sequence, head, records) and its packet to the request's. Records are bound by
-decoding: the system's records are an opaque identity of the native ordered list, which `decode`
-reads as the executable hub's records. Nothing is encoded, and no injectivity is assumed, since
-two native lists may name the same records. The binding is the adapter's correspondence, not a
-success: every outcome is a decision, refusals and rejections included. The packet's primitive
+The bridge to the executable hub is per request. For each push request the hub answers, a
+`HubDecision` of the executable hub binds its state before and after to the system's hub
+(sequence, head, records) and its packet to the request's. Records are bound by decoding: the
+system's records are an opaque identity of the native ordered list, which `decode` reads as the
+executable hub's records. No injectivity is assumed, since two native lists may name the same
+records. Every outcome is a decision, refusals and rejections included. The packet's primitive
 laws (`PacketPrimitives`: ancestry, survival, upload closure) are native laws of a push from the
-hub's head with its records, stated as such. Requests are answered fairly one by one. With the
-system's own facts at the push (the node's invariant at its first push, its write, its scoped
-embedding), the checks hold, the hub's only decision is to accept, and its sequence would move.
+hub's head with its records. Requests are answered fairly one by one. Given the system's own
+facts at the push (the node's invariant at its first push, its write, its scoped embedding), the
+checks hold, the hub's only decision is to accept, and its sequence would move.
 
 The convergence proof uses this file.
 -/
@@ -34,8 +32,8 @@ open Musubi Musubi.NodeSettle Musubi.EarlyEntry Musubi.NodeSys Musubi.NodeSysEnt
 
 /-- The executable hub's decision on the push `P` that a system step answered: its state
 before and after, the executable packet and its decision, the packet bound to `P` and the
-hub's states to the system's hub before and after, records read through `decode`. Any
-decision: none is assumed to accept. -/
+hub's states to the system's hub before and after, records read through `decode`. The decision
+may be any outcome, including a refusal. -/
 structure HubDecision (M : Nat) (decode : Nat → List Exec.Rec) (g g' : Sys) (P : Pkt) where
   before : Exec.SEState
   after : Exec.SEState
@@ -49,8 +47,9 @@ structure HubDecision (M : Nat) (decode : Nat → List Exec.Rec) (g g' : Sys) (P
   seqBefore : before.es.hub.seq = g.hub.seq
   seqAfter : after.es.hub.seq = g'.hub.seq
 
-/-- The adapter's actual decision and the conditional primitive laws of that same decision.
-Other executable states with matching sequence fields are not adapter decisions. -/
+/-- A `HubDecision` together with the conditional primitive laws of that same decision.
+(`primitives`: for a push from the hub's head with its records and a new head, the packet
+satisfies `Exec.PacketPrimitives`.) -/
 structure LawfulDecision (M : Nat) (decode : Nat → List Exec.Rec) (g g' : Sys) (P : Pkt)
     extends HubDecision M decode g g' P where
   primitives : P.expected = g.hub.head → P.recs = g.hub.recs → P.new ≠ g.hub.head →
@@ -60,8 +59,8 @@ section Accept
 
 variable {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
 
-/-- Only a newly issued push call must finish. Orphan requests from an earlier client
-session may stay in the network forever; they are not a fairness obligation. -/
+/-- Every push call newly issued at or after `k` is eventually answered. Orphan requests from an
+earlier client session may stay in the network forever and are not covered. -/
 def PushFair (ρ : Nat → Sys) (acts : Nat → Act) (n k : Nat) : Prop :=
   ∀ i, k ≤ i → acts i = .issue n .push → ∀ q ∈ (ρ (i + 1)).reqs,
     q ∉ (ρ i).reqs → q.node = n →
@@ -186,12 +185,18 @@ theorem no_accepting_emit (ρ : Nat → Sys) (acts : Nat → Act) (n k i h M : N
     rw [decision.seqAfter, decision.seqBefore, hhubJ, hhubJ'] at hseq
     omega
 
-/-- Node `n` in the system, from a well-formed start, once the hub has settled at `st`, settles at
-the stable hub's head under a label `H` of it. Fair scheduling of its events and of the hub's
-answers to its requests, housekeeping that writes stopping, the executable hub deciding each push
-request the system's hub answers, and the primitive laws of a push from the hub's head with its
-records are assumed; records are read through `decode`, with no injectivity. No acceptance, and no
-cut on old replies or notifications. -/
+/-- Node `n`, from a well-formed start, once the hub has settled at `st`, settles at the stable
+hub's head under a label `H` of it.
+
+Assumptions:
+* fair scheduling of the node's events and of the hub's answers to its requests (`hfair`,
+  `hreqfair`);
+* the node's maintenance writes eventually stop (`hmaint`);
+* the executable hub decides each push request the system's hub answers, with the primitive
+  laws of a push from the hub's head with its records (`hdecide`, records read through
+  `decode`, no injectivity).
+
+Old replies and notifications are shown to stop within the proof. -/
 theorem node_settles_accepted (ρ : Nat → Sys) (acts : Nat → Act) (n k0 k kf M : Nat) (st : Snap)
     (decode : Nat → List Exec.Rec)
     (hstep : ∀ i, k0 ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
@@ -254,9 +259,10 @@ def Converges (D : Nat → Nat → Nat → Prop) (P : Nat → Prop) (run : Nat �
       ((run i).node n).emb H = (run K).hub.head ∧
       ∀ x, Recovery.HubSys.heads (run i) n x ↔ x = (run K).hub.head
 
-/-- Composition for eligible nodes of the same joint system: hub stabilization is proved
-from its events, then a proper push would contradict it. This is a suffix theorem; deriving
-entry and making every surviving native node eligible are separate obligations. -/
+/-- Composition for eligible nodes of one joint system: the hub stabilizes (proved from its
+events), then a proper push would contradict that, so each eligible node settles. A suffix
+theorem: it takes entry as given, and that every surviving native node is eligible is shown
+elsewhere. -/
 theorem eligible_system_converges {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w : Nat} (ρ : Nat → Sys) (acts : Nat → Act) (initial : Nat → Nat)
     (M : Nat) (decode : Nat → List Exec.Rec)

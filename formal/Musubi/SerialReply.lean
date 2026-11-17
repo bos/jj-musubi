@@ -1,7 +1,7 @@
 /-
-The driver's serialized call boundary. Notifications are applied between calls; a matching
-response consumes its exact live slot. This connects the finite old-slot budget to actual
-head-control effects without assuming that an entire sync loop terminates.
+The driver's serialized call boundary. Notifications are applied between calls, and a
+matching response consumes its own live slot. This ties the finite budget of pre-cut slots to
+the effects of calls on the known head. It does not assume that a whole sync loop terminates.
 
 The convergence proof uses `handleHead`, `filteredLearn`, `own_reply_learns`,
 `object_recoveries_stop` and `wentBack` from this file. The serialized-call model and its
@@ -11,20 +11,24 @@ import Musubi.RetryControl
 
 namespace Musubi.Retry.Serial
 
+/-- The reply is older than the known pair, or has the same sequence number and a different
+head. -/
 def wentBack (known reply : Known) : Bool :=
   decide (reply.seq < known.seq ∨ (reply.seq = known.seq ∧ reply.head ≠ known.head))
 
+/-- Learn `reply` only if its sequence number is later than the known one. -/
 def filteredLearn (known reply : Known) : Known :=
   if known.seq < reply.seq then reply else known
 
-/-- `handle_reply` restarts on an older or changed own reply, then uses the same filtered
-learn as `handle`. Notifications are never interpreted as answers to a call. -/
+/-- `handle_reply` restarts at `⟨0, root⟩` on an own reply that went back, then learns as
+`handle` does. A notification is never read as the answer to a call. -/
 def handleHead (root : Nat) (own notify : Bool) (known reply : Known) : Known :=
   let before := if own && !notify && wentBack known reply then ⟨0, root⟩ else known
   filteredLearn before reply
 
-/-- The first fresh own response repairs even a pre-window or obsolete known pair. The
-zero-sequence reply is the actual root; a positive sequence is learned after any reset. -/
+/-- An own reply sets the known pair to the reply, whatever the known pair was, even one from
+before the window or from an obsolete history. A reply with sequence 0 names the root; a
+positive sequence is learned after any reset. -/
 theorem own_reply_learns (root : Nat) (known reply : Known)
     (hroot : reply.seq = 0 → reply.head = root) :
     handleHead root true false known reply = reply := by
@@ -69,16 +73,26 @@ theorem handleHead_notice_or (r : Nat) (P q : Known) :
   · exact Or.inr rfl
   · exact Or.inl rfl
 
+/-- A call outstanding on the driver. -/
 structure Call where
+  /-- The request id of the call. -/
   id : Nat
+  /-- The known head when the call was sent. -/
   before : Known
+  /-- The applied records when the call was sent. -/
   beforeRecords : List (List Nat)
 
+/-- The driver's call state. -/
 structure State where
+  /-- The root vertex. -/
   root : Nat
+  /-- The hub head and sequence number the driver knows. -/
   known : Known
+  /-- The ordered record lists applied so far. -/
   applied : List (List Nat)
+  /-- The next request id. -/
   next : Nat
+  /-- The outstanding call, if any; at most one. -/
   active : Option Call
 
 def State.inbox (s : State) : Inbox :=
@@ -93,8 +107,8 @@ def State.start (s : State) : Option (State × Nat) :=
 
 def State.reserve (s : State) : State := { s with next := s.next + 1 }
 
-/-- Repository adoption runs between calls on this driver. Its own request's applied
-record snapshot therefore remains unchanged until that call returns or is retired. -/
+/-- Repository adoption runs between calls on this driver, so the applied-records snapshot of
+the outstanding call stays unchanged until that call returns or is retired. -/
 def State.takeRecords (s : State) (records : List (List Nat)) : Option State :=
   match s.active with
   | some _ => none
@@ -172,8 +186,8 @@ inductive Step (cut : Nat) : State → State → Bool → Prop
   | disconnect (s : State) : Step cut s s.disconnect false
   | wait (s : State) : Step cut s s false
 
-/-- Every control step refines the existing slot model; a notification cannot consume a
-request or recharge the old-slot budget. -/
+/-- Every control step is a step of the inbox model: a notification consumes no request and
+adds to no slot budget. -/
 theorem step_inbox {cut : Nat} {s t : State} {old : Bool} (h : Step cut s t old) :
     InboxStep cut s.inbox t.inbox old := by
   cases h with
@@ -231,8 +245,8 @@ theorem active_records_unchanged {s : State} {call : Call}
     (hi : Inv s) (hc : s.active = some call) : call.beforeRecords = s.applied :=
   (hi call hc).2.1
 
-/-- Even endlessly duplicated old frames cause only finitely many matched old-call effects.
-The result neither drains notifications nor assumes that a sync round completes. -/
+/-- Even if old frames are duplicated forever, only finitely many matched pre-cut calls have
+any effect. Notifications need not stop, and no sync round is assumed to complete. -/
 theorem old_call_effects_stop (cut : Nat) (run : Nat → State) (old : Nat → Bool)
     (hc : cut ≤ (run 0).next)
     (hs : ∀ i, Step cut (run i) (run (i + 1)) (old i)) :
@@ -240,9 +254,10 @@ theorem old_call_effects_stop (cut : Nat) (run : Nat → State) (old : Nat → B
   old_slots_eventually_stop cut (fun i => (run i).inbox) old hc
     (fun i => step_inbox (hs i))
 
-/-- An honest response processed after a call was sent cannot look like rollback once
-the hub's sequence is monotone and its history is stable. Its send-time snapshot is still
-current at receipt by `Inv`; intervening hub acceptances remain allowed. -/
+/-- An honest response handled after the call was sent does not look like a rollback, given
+that the hub's sequence number only grows and its history `hist` is stable. By `Inv` the
+send-time snapshot is still the known pair at receipt; the hub may have accepted heads in
+between. -/
 theorem fresh_reply_no_restart {s : State} {call : Call} {reply : Known}
     (hi : Inv s) (hc : s.active = some call) (hist : Nat → Nat) (sentSeq : Nat)
     (hknown : hist call.before.seq = call.before.head)
@@ -259,8 +274,8 @@ theorem fresh_reply_no_restart {s : State} {call : Call} {reply : Known}
     exact hknown
 
 /-- The daemon awaits an entire `driver.sync` before handling another notification. The
-per-call model above deliberately permits more interleavings; this wrapper records the
-stronger shipping scheduling boundary needed to finish a finite local burst. -/
+per-call model above permits more interleavings; this wrapper adds that scheduling rule, which
+a finite local burst of work needs in order to finish. -/
 structure RoundState where
   calls : State
   running : Bool
@@ -308,8 +323,8 @@ theorem round_old_effects_stop (cut : Nat) (run : Nat → RoundState) (old : Nat
   old_call_effects_stop cut (fun i => (run i).calls) old hc
     (fun i => round_step_serial (hs i))
 
-/-- Local repository work between the round's own RPCs cannot chase notifications by
-changing the known head. Only a matched response can change it inside a running round. -/
+/-- Adopting records leaves the known head unchanged, so local repository work between a
+round's own RPCs cannot change it. Inside a running round only a matched response can. -/
 theorem takeRecords_known {s t : State} {records : List (List Nat)}
     (h : s.takeRecords records = some t) : t.known = s.known := by
   cases hc : s.active with
@@ -319,12 +334,13 @@ theorem takeRecords_known {s t : State} {records : List (List Nat)}
     cases h
     rfl
 
-/-- After obsolete effects cease, one unsatisfied old object request can still fail: a
-successful earlier head reply need not have completed the rest of its request batch. The
-native invariant `ready` includes the batch's targets and truthful object-have claims, not
-only the known head. A recovery clears the batch and reopens at the root; thereafter fresh
-heads are closed on the healthy hub, whose raw objects are retained. Given those pointwise
-source laws, object-recovery failures stop; they are not assumed ordinary I/O failures. -/
+/-- Object-recovery failures eventually stop. Even after pre-cut effects cease, one object
+request left over from before may still fail, because an earlier successful head reply need
+not have completed the rest of its request batch. The native invariant `ready` covers the
+batch's targets and truthful object-have claims, not only the known head. A recovery clears
+the batch and reopens at the root; after that, fresh heads are closed on a healthy hub, which
+retains its raw objects. The premises `hkeep` and `hfail` state these two facts: once ready it
+stays ready, and a failure happens only when not ready, after which it is ready. -/
 theorem object_recoveries_stop (ready failed : Nat → Bool)
     (hkeep : ∀ i, ready i = true → ready (i + 1) = true)
     (hfail : ∀ i, failed i = true → ready i = false ∧ ready (i + 1) = true) :

@@ -1,28 +1,29 @@
 /-
-Finite record adoptions and stale-plan restarts once the hub's ordered records stop changing
-and obsolete callbacks stop. A carried old announcement or persistent receipt may still
-require reconciliation; every subsequent fresh Fetched announces the fixed list. Adoption may
-invalidate a retained realization plan. A stale-plan error reopens the daemon, clearing its
-plan and announcement, and resetting knowledge in the full control state. This projection
-forgets knowledge, so it does not pretend that restart preserves the local progress rank.
+A node's record adoptions and stale-plan restarts are finite once the hub's ordered record
+list `R` stops changing and obsolete callbacks stop. A carried-over old announcement or a
+persistent receipt may still need reconciling; every fresh Fetched announces `R`. Adopting
+records may invalidate the node's retained realization plan. A stale-plan error reopens the
+daemon, clearing its plan and announcement; in the full control state it also resets the
+node's knowledge. This projection omits knowledge, so it makes no claim that a restart
+preserves the local progress rank.
 
-The convergence proof uses this file except `exec_sound` and the `Guard` facts, which are not
-used by the assembly.
+The convergence proof uses this file except `exec_sound` and the `Guard` facts.
 -/
 import Musubi.RetryControl
 
 namespace Musubi.Retry.Records
 
-/-- The core's effective announcement guard, including custody when the ordered lists are
-equal. Its input is the stored announcement, before `NodeCore::step` takes it. -/
+/-- The core's effective announcement guard: an announcement needs action if it differs from
+the applied list, or if receipts are held even when the lists are equal. It reads the stored
+announcement, before `NodeCore::step` takes it. -/
 def needsRecords {α : Type} [DecidableEq α] (applied : α) (announced : Option α)
     (receipts : Bool) : Bool :=
   match announced with
   | none => false
   | some A => decide (A ≠ applied) || receipts
 
-/-- In an active round, receipt custody has an announcement. A quiet effective guard then
-means no receipts, even when the announced records equal the applied records. -/
+/-- In an active round, receipts are held only with an announcement. So if the guard is false,
+no receipts are held, even when the announced records equal the applied ones. -/
 theorem no_receipts_when_quiet {α : Type} [DecidableEq α] (applied : α)
     (announced : Option α) (receipts : Bool)
     (hguard : receipts = true → announced ≠ none)
@@ -33,13 +34,17 @@ theorem no_receipts_when_quiet {α : Type} [DecidableEq α] (applied : α)
     | none => exact False.elim (hguard hr ha)
     | some A => simp [needsRecords, ha, hr] at hquiet
 
-/-- Record identities stand for complete ordered lists, rather than flattened drop sets.
-`stalePlan` is conservative: adoption can invalidate a retained plan; a fresh survey under
-unchanged records cannot. Other failures may reset control without spending stale-plan debt. -/
+/-- A node's record state. A `Nat` identifies a complete ordered record list. `stalePlan` is
+conservative: adoption can invalidate a retained plan, and a fresh survey under unchanged
+records cannot. Other failures may reset control without spending stale-plan debt. -/
 structure State where
+  /-- The record list the node has applied. -/
   applied : Nat
+  /-- The list the hub last announced to the node, if any. -/
   announced : Option Nat
+  /-- The retained realization plan may be invalid. -/
   stalePlan : Bool
+  /-- The node holds custody of a prepared adoption (a persistent receipt). -/
   receipts : Bool
   deriving DecidableEq, Repr
 
@@ -67,14 +72,15 @@ inductive Step (R : Nat) : State → State → Bool → Bool → Prop
       Step R s (s.adopt A) true false
   | staleFailure (s : State) (hp : s.stalePlan = true) :
       Step R s s.reopen false true
-  /-- An ordinary failure or an unsatisfied object reply can reopen without a stale plan.
-  It does not recharge debt and is not counted as a stale-plan failure. -/
+  /-- An ordinary failure or an unsatisfied object reply can reopen with no stale plan. It
+  never raises the debt and is not counted as a stale-plan failure. -/
   | reopen (s : State) : Step R s s.reopen false false
   | clearPlan (s : State) : Step R s { s with stalePlan := false } false false
   | wait (s : State) : Step R s s false false
 
-/-- Executable control at the native receipt boundary, including an equal-record adoption.
-The flags count actual adoptions and stale-plan failures. -/
+/-- Executable control actions at the native receipt boundary, including adoption of an equal
+record list. `exec` reports whether an action adopted records and whether it was a stale-plan
+failure. -/
 inductive Action
   | fetched | keepReceipt (records : Nat) | adopt (records : Nat)
   | staleFailure | reopen | clearPlan | wait
@@ -122,9 +128,9 @@ theorem adopt_record_credit {R A : Nat} {s : State}
   by_cases hA : A = R <;> by_cases hap : s.applied = R <;> cases hr : s.receipts <;>
     simp [State.recordCredit, State.adopt, ha, hA, hap, hr] at * <;> omega
 
-/-- Adoption and stale-plan errors spend finite debt. Other reopens can leave the debt as
-it was, but never recharge it; their eventual cessation needs its own argument. A reopen
-may reset known and discard the whole plan; no unchanged-known premise is used. -/
+/-- Adoptions and stale-plan failures each spend one unit of a finite credit. Other reopens may
+leave it as it was but never raise it; that they eventually stop is not shown here. A reopen
+may reset knowledge and discard the whole plan. -/
 theorem step_credit {R : Nat} {s t : State} {adopts fails : Bool}
     (h : Step R s t adopts fails) :
     t.credit R + (if adopts then 1 else 0) + (if fails then 1 else 0) ≤ s.credit R := by
@@ -166,9 +172,9 @@ theorem step_credit {R : Nat} {s t : State} {adopts fails : Bool}
     split <;> omega
   | wait => simp
 
-/-- The finite prefix may leave an old announcement and an invalid retained plan. Fresh
-replies cannot recharge that old-record debt, and each stale-plan reopen clears its cause.
-Consequently both kinds of disturbance stop, without assuming any sync round completes. -/
+/-- Adoptions and stale-plan failures both eventually stop. The finite prefix before the cut
+may leave an old announcement and an invalid plan. Fresh replies cannot add to that debt, and
+each stale-plan reopen clears its cause. No sync round is assumed to complete. -/
 theorem record_disturbances_stop (R : Nat) (run : Nat → State)
     (adopts fails : Nat → Bool)
     (hs : ∀ i, Step R (run i) (run (i + 1)) (adopts i) (fails i)) :
@@ -183,8 +189,9 @@ theorem record_disturbances_stop (R : Nat) (run : Nat → State)
   rw [hk i hi, hk (i + 1) (by omega)] at h
   cases ha : adopts i <;> cases hf : fails i <;> simp_all <;> omega
 
-/-- A reopened core is inactive until its first Fetch reply. Once active, it cannot hold a
-receipt without an announcement: preparing retains it until taking consumes its custody. -/
+/-- A reopened core is inactive until its first Fetch reply. Once active, it holds a receipt
+only with an announcement: preparing keeps the announcement until taking consumes the
+receipt. -/
 def State.Guard (s : State) (active : Bool) : Prop :=
   active = true → s.receipts = true → s.announced ≠ none
 
@@ -195,9 +202,9 @@ theorem State.guard_fetched (s : State) (R : Nat) (active : Bool) :
   simp [hr]
 
 /-- The native round-phase law: a round activates only after its first Fetch, and a reopen
-is inactive. The action identifies a reopen, since its output can equal that of a quiet wait;
-state equality alone cannot distinguish them. Other replies and local steps preserve the
-guard; no eventual callback or record adoption is assumed. -/
+leaves it inactive. The premise `hreopen` is stated on the action, because a reopen's output
+state can equal that of a quiet wait, so states alone cannot tell them apart. Every other
+reply and local step preserves the guard. -/
 theorem step_guard {R : Nat} {s t : State} {a : Action} {adopts fails active active' : Bool}
     (hs : exec R s a = some (t, adopts, fails)) (hi : s.Guard active)
     (hactivate : active' = true → active = true ∨ t = s.fetched R)

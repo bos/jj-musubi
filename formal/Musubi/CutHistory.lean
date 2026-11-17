@@ -1,11 +1,12 @@
 /-
-Entry to the rollback-free record suffix. The current head's survival is not a consequence
-of SEOK alone: rollback must restore a head with the records saved at that same sequence.
-This invariant keeps that fact for every saved slot, without requiring the old model's
-original-ancestry history chain, which contracted acceptance does not preserve.
+Entry to the rollback-free record suffix. That the current head survives its records does not
+follow from SEOK alone: rollback restores a head together with the records saved at the same
+sequence. `CutHistory` records, for every saved slot, that the head saved there is not dropped
+by the records saved there. It needs no original-ancestry chain through the history, which
+contracted acceptance does not preserve.
 
-The convergence proof does not use this file; it proves the saved-head invariant of the
-executable recovery union, which stands alone.
+The convergence proof does not use this file. It proves the saved-head invariant of the
+executable recovery union.
 -/
 import Musubi.PostCut
 
@@ -13,18 +14,21 @@ namespace Musubi.Exec
 
 open Musubi
 
+/-- `CutInv`, the saved head at the current sequence is the current head, and every saved
+head survives the records saved at its sequence. -/
 structure CutHistory (s : SEState) : Prop where
   cut : CutInv s
   atSeq : s.es.hub.histF s.es.hub.seq = s.es.hub.head
   savedHead : ∀ i, i ≤ s.es.hub.seq → s.es.hub.histF i ∉ flat (s.recHistF i)
 
+/-- The initial state satisfies `CutHistory`. -/
 theorem cutHistory_init : CutHistory initSE := by
   refine ⟨cutInv_init, rfl, ?_⟩
   intro i _
   simp [initSE, SEState.recHistF, logAt, flat]
 
-/-- Apart from acceptance, the base actions leave the saved head history alone, including
-rollback, which selects a slot rather than modifying one. -/
+/-- Base actions other than acceptance leave the saved head history unchanged. Rollback is
+included: it selects a slot and does not modify one. -/
 theorem execStep_hist_fixed {N : Nat} {es es' : EState} {a : Action}
     (h : execStep N es a = .ok es')
     (hc : ∀ n e d, a ≠ .casAccept n e d)
@@ -44,6 +48,7 @@ theorem execStep_hist_fixed {N : Nat} {es es' : EState} {a : Action}
           EState.setNode, EState.hubStore, EState.hubStoreOps, EState.hubStoreObjs,
           EState.forget, EState.regress])
 
+/-- A `hubPushAccept` saves the new head at the next sequence number. -/
 theorem execStep_accept_hist {N : Nat} {es es' : EState} {n : Nat}
     {S O : List Nat} {e d : Nat}
     (h : execStep N es (.hubPushAccept n S O e d) = .ok es') :
@@ -200,6 +205,7 @@ theorem cexec_history {N : Nat} {s t : SEState} {a : SAction}
       · contradiction
     | _ => contradiction
 
+/-- A non-rollback allowed step updates the histories as `HistoryUpdate` says. -/
 theorem cexecAction_history {N : Nat} {s t : SEState} {a : CAction}
     (hat : s.es.hub.histF s.es.hub.seq = s.es.hub.head)
     (h : cexecAction N s a = .ok t)
@@ -217,6 +223,7 @@ theorem cexecAction_history {N : Nat} {s t : SEState} {a : CAction}
     · exact base_history h rfl rfl
     · contradiction
 
+/-- `CutHistory` survives every allowed step that is not a rollback. -/
 theorem CutHistory.nonrollback {N : Nat} {s t : SEState} {a : CAction}
     (hi : CutHistory s) (h : cexecAction N s a = .ok t)
     (hu : a.unledgeredAccept = false) (hr : a.goesBack = false) : CutHistory t := by
@@ -234,6 +241,7 @@ theorem CutHistory.nonrollback {N : Nat} {s t : SEState} {a : CAction}
       rw [hh, hr]
       exact hi.savedHead i (by omega)
 
+/-- `CutHistory` survives a rollback to slot `i`. -/
 theorem CutHistory.rollback {N : Nat} {s t : SEState} {i : Nat}
     (hi : CutHistory s) (h : cexecAction N s (.old (.base (.hubRegress i))) = .ok t) :
     CutHistory t := by
@@ -260,8 +268,8 @@ theorem CutHistory.rollback {N : Nat} {s t : SEState} {i : Nat}
             omega)⟩
     · contradiction
 
-/-- Shipping runs never use the base model's unledgered acceptances. Rollbacks are allowed
-throughout this prefix; each restored head still survives its restored record list. -/
+/-- `CutHistory` survives every allowed step that is not an unledgered acceptance, rollbacks
+included: each restored head survives its restored record list. -/
 theorem cutHistory_step {N : Nat} {s t : SEState} {a : CAction}
     (hi : CutHistory s) (h : cexecAction N s a = .ok t)
     (hu : a.unledgeredAccept = false) : CutHistory t := by
@@ -277,6 +285,7 @@ theorem cutHistory_step {N : Nat} {s t : SEState} {a : CAction}
       | _ => simp [CAction.goesBack, SAction.goesBack] at hr
     | _ => simp [CAction.goesBack] at hr
 
+/-- `CutHistory` holds at every step of a run of allowed steps with no unledgered acceptance. -/
 theorem cutHistory_run {N : Nat} (run : Nat → SEState) (actions : Nat → CAction)
     (h0 : CutHistory (run 0))
     (hs : ∀ i, cexecAction N (run i) (actions i) = .ok (run (i + 1)))

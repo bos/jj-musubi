@@ -1,8 +1,8 @@
 /-
 Expand the finite operations written by one housekeeping call. Each new operation is a
-maintenance generation; the final published head is the last one. The graph may contain
-arbitrary parent lists within that finite batch, provided they are acyclic. This structural
-lemma supplies the multi-operation case of the hub-side simulation.
+maintenance generation; the final published head is the last one. The batch may use
+any acyclic parent lists. This lemma gives the multi-operation case of the hub-side
+simulation.
 
 The convergence proof uses this file.
 -/
@@ -16,6 +16,8 @@ theorem upd_current {α : Type} (f : Nat → α) (n : Nat) : upd f n (f n) = f :
   funext m
   by_cases hm : m = n <;> simp [upd, hm]
 
+/-- Stage `j` of the batch: the first `j` new vertices exist and node `n` has published the
+`j`th as its only head (at `j = 0`, its heads are unchanged); its `bk` has advanced by `j`. -/
 def maintenanceStage (a b : GState) (n j : Nat) : GState :=
   let g := rawLimit b (a.s.U.next + j)
   let H := if j = 0 then (a.s.node n).heads else (· = a.s.U.next + j - 1)
@@ -34,6 +36,9 @@ theorem maintenanceStage_last {a b : GState} {n d : Nat} (hd : 0 < d)
   rw [← hh, ← hk, ← hbk]
   rw [upd_current, upd_current]
 
+/-- One housekeeping call by eligible node `n` writes a finite batch of vertices and ends with
+the last as its only head. It refines into a frame step followed by one maintain step per
+new vertex. -/
 theorem raw_maintenance_expansion {E : Nat → Prop} {w : Nat} {a b : GState} {n : Nat}
     (hE : E n) (hn : a.s.U.next < b.s.U.next)
     (hold : ∀ x, x < a.s.U.next → b.s.U.par x = a.s.U.par x)

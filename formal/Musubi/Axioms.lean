@@ -423,7 +423,7 @@ open Musubi
 #assert_axioms Exec.reconcile_executable
 #assert_axioms Exec.record_progress_at_convergence
 #assert_axioms Exec.record_finish
--- Split asynchronous exchanges (the full retry bridge is still open)
+-- Split asynchronous exchanges
 #assert_axioms measureR_delayed_learn
 #assert_axioms bad_accept_before_reply
 #assert_axioms measureR_accept_before_reply
@@ -440,7 +440,7 @@ open Musubi
 #assert_axioms Retry.publication_progress
 #assert_axioms Retry.publication_retry
 #assert_axioms Retry.publication_tip_cached
--- Stabilization of records, without assuming head stabilization
+-- Stabilization of records
 #assert_axioms Exec.sexec_record_control
 #assert_axioms Exec.takeRecs_eq_iff
 #assert_axioms Exec.eventual_original_chain
@@ -449,7 +449,7 @@ open Musubi
 #assert_axioms Exec.adopt_pending_subset
 #assert_axioms Exec.retry_adopt_of_extension
 #assert_axioms Exec.node_drop_sets_eventually_stabilize
--- Contracted expected heads; the original-history embedding is still incomplete
+-- Contracted expected heads
 #assert_axioms Contract.below_survivor_iff
 #assert_axioms Contract.below_contracted_iff
 #assert_axioms Contract.below_two_step

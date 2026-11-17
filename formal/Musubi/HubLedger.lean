@@ -1,8 +1,8 @@
 /-
-The packet ledger of the joint system. It retains immutable request fields, not a later
-reading of a sender's state. Initial requests have no current generation. Every later
-eligible push is recorded with its actual send generation; noneligible requests need not
-be recorded once the record/drop cut excludes their acceptance.
+The packet ledger of the joint system: a list of packets, each holding the fixed fields of a
+push request as sent. Requests in flight at the start have no current generation. Every later
+push by an eligible node is recorded with the generation it was sent in. Pushes by other
+nodes are not recorded, because the record/drop cut excludes their acceptance.
 
 The convergence proof uses this file.
 -/
@@ -12,6 +12,7 @@ namespace Musubi.Recovery.HubSys
 
 open Musubi NodeSys HubSuffix
 
+/-- The packets of the push requests in `reqs`, each tagged with `tag` of its payload. -/
 def collectPackets (tag : Pkt → Option Nat) (reqs : List Req) : List Packet :=
   reqs.filterMap fun r => match r.body with
     | .push p => some (packet p (tag p))
@@ -22,6 +23,7 @@ theorem collect_has (tag : Pkt → Option Nat) {reqs : List Req} {r : Req} {p : 
   apply List.mem_filterMap.2
   exact ⟨r, hr, by simp [hp]⟩
 
+/-- Every push request in `g` from an eligible node has a packet in `pk`. -/
 def Covers (E : Nat → Prop) (g : Sys) (pk : List Packet) : Prop :=
   ∀ r ∈ g.reqs, ∀ p, r.body = .push p → E p.node → ∃ tag, packet p tag ∈ pk
 
@@ -47,6 +49,8 @@ theorem bodies_push_owner {n gen : Nat} {post σ : NodeSettle.NS} {emb : Nat →
     exact congrArg Pkt.node he
   · rw [hb] at hm; simp at hm
 
+/-- The ledger after a step: an issue by an eligible node adds packets for its new push
+requests, tagged with their send generation; every other step leaves it unchanged. -/
 noncomputable def nextLedger (E : Nat → Prop) (g g' : Sys) (act : Act)
     (pk : List Packet) : List Packet := by
   classical
@@ -74,8 +78,8 @@ theorem covers_issue {E : Nat → Prop} {g g' : Sys} {n gen : Nat}
     · exact hc r hm p hp he
     · exact False.elim (hn ((bodies_push_owner hb hm hp) ▸ he))
 
-/-- Coverage is derived from the actual request-list changes of every system event. It is
-not a premise that an accepted packet happens to occur in an unrelated abstract ledger. -/
+/-- Every system step preserves coverage, by how it changes the request list: issues add
+requests that `nextLedger` records, and all other steps only remove or keep requests. -/
 theorem covers_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeSys.HubLaw}
     {E : Nat → Prop} {g g' : Sys} {act : Act} {pk : List Packet}
     (hc : Covers E g pk) (hs : SysStep N D law act g g') :
@@ -98,6 +102,7 @@ theorem covers_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeSys.
   | ignore _ _ _ _ _ _ _ _ _ hr _ =>
     exact covers_subset hc (fun r hm => hr.2.1 ▸ hm)
 
+/-- The ledger along a run, starting from the packets of its initial requests, untagged. -/
 noncomputable def ledger (E : Nat → Prop) (run : Nat → Sys) (acts : Nat → Act) :
     Nat → List Packet
   | 0 => collectPackets (fun _ => none) (run 0).reqs
@@ -121,6 +126,7 @@ theorem ledger_keeps_initial (E : Nat → Prop) (run : Nat → Sys) (acts : Nat 
   | zero => exact collect_has (fun _ => none) hr hp
   | succ i ih => exact nextLedger_keeps ih
 
+/-- Along any run of system steps, the ledger covers the current requests. -/
 theorem ledger_covers {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeSys.HubLaw}
     (E : Nat → Prop) (run : Nat → Sys) (acts : Nat → Act)
     (hs : ∀ i, SysStep N D law (acts i) (run i) (run (i + 1))) :

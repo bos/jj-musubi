@@ -12,32 +12,40 @@ open Musubi NodeSettle
 
 /-! ### A raw entry
 
-From the common finite cut, a node's first fresh reply leaves it with the hub's records applied,
-no record receipts, a known pair from after the cut, and nothing announced but the hub's records,
-and it is no `Incomplete` answer, after which the driver would reopen the node
-(`raw_entry_reached`). A fresh `Fetched` reply does so through the round after it
-(`FetchLaws.current`). A fresh `Head` reply answers a push, which is refused unless it offers the
-hub's records, and it offers those it has applied; a push is made with the core's record test
-quiet (`choose_push_announced`), so, receipts having an announcement in an active round, with none
-(`Retry.Records.no_receipts_when_quiet`), and the reply leaves them so; and an honest push from
-the hub's head with the hub's records is closed once uploaded, so it is not answered `Incomplete`.
+From the common finite cut, a node's first fresh reply leaves it entered (`raw_entry_reached`):
+the hub's records applied, no record receipts, a known pair from after the cut, and nothing
+announced but the hub's records. The reply is not an `Incomplete` answer, after which the driver
+would reopen the node.
+
+* After a fresh `Fetched` reply this holds through the round after it (`FetchLaws.current`).
+* A fresh `Head` reply answers a push. The push is refused unless it offers the hub's records,
+  and it offers those the node has applied. It is made with the core's record test quiet
+  (`choose_push_announced`), and receipts have an announcement in an active round, so it is made
+  with no receipts (`Retry.Records.no_receipts_when_quiet`), and the reply leaves them so.
+* An honest push from the hub's head with the hub's records is closed once uploaded, so it is not
+  answered `Incomplete`.
+
 Nothing before the entry is read as NodeSettle's state. -/
 
 /-- A node enters, raw: its first fresh reply leaves it with the hub's records `R` applied, no
-record receipts, a known sequence from the cut's `w` on and nothing announced but `R`, and is no
-`Incomplete` answer. Given what `fresh_head_reached` takes, and: a fresh reply comes only from a
-`Fetch` or a push; the round after a fresh `Fetch`'s reply (`FetchLaws` of its sampled data
-`round`, holding receipts if the node did right after the reply: its prelude may add some),
-which is never `Incomplete`; a push offers the records the node has applied (`ap`); the core's
-first test is `Retry.Records.needsRecords` of what it has applied, what is announced (`annc`) and
-its receipts, and receipts have an announcement in an active round
-(`Retry.Records.State.Guard`), so a push, made with that test quiet, is made with no receipts
-(`Retry.Records.no_receipts_when_quiet`), and a `Head` reply leaves them so;
-`Push::answer` answers `Incomplete` only from its head and to a push whose closure it lacks, and
-an honest push with the hub's records from its head is closed once uploaded (the conditional
-closure law); and a fresh reply names a head from after the cut and announces only the hub's
-records. And, not as a law of the run, that no `GetObjects` fails in the round after a fresh
-`Fetch` (`hroundServe`). -/
+record receipts, a known sequence from the cut's `w` on and nothing announced but `R`, and is not
+an `Incomplete` answer. Assumes what `fresh_head_reached` takes, and:
+* A fresh reply comes only from a `Fetch` or a push.
+* The round after a fresh `Fetch` reply obeys `FetchLaws` of its sampled data `round`, holding
+  receipts if the node did right after the reply (its prelude may add some), and is never
+  `Incomplete`.
+* A push offers the records the node has applied (`ap`).
+* The core's first test is `Retry.Records.needsRecords` of the records applied, those announced
+  (`annc`) and the receipts. Receipts have an announcement in an active round
+  (`Retry.Records.State.Guard`), so a push, made with that test quiet, is made with no receipts
+  (`Retry.Records.no_receipts_when_quiet`), and a `Head` reply leaves them so.
+* `Push::answer` answers `Incomplete` only from its head and to a push whose closure it lacks,
+  and an honest push with the hub's records from its head is closed once uploaded (the
+  conditional closure law).
+* A fresh reply names a head from after the cut and announces only the hub's records.
+
+`hroundServe` is a separate premise, not a law of the run: no `GetObjects` fails in the round
+after a fresh `Fetch`. -/
 theorem raw_entry_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm : Naming α)
     (par : Nat → List Nat) (anc : Nat → Nat → Bool)
     (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
@@ -146,12 +154,15 @@ theorem raw_entry_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm :
     refine ⟨j, hj, by rw [hoffer j hb hc hp, hoR], ?_, hinc', hseq j hj, hannc j hj⟩
     rw [hheadReceipts j hb hc hp, hrec]
 
-/-- What a node's entry reads of it, raw: the records it has applied, its known sequence, the
-records announced to it, and whether it holds record receipts. -/
+/-- What a node's entry reads of it, raw. -/
 structure RawNode (ρ : Type) where
+  /-- The records it has applied. -/
   applied : ρ
+  /-- Its known sequence. -/
   seq : Nat
+  /-- The records announced to it. -/
   annc : Option ρ
+  /-- Whether it holds record receipts. -/
   receipts : Bool
 
 /-- A node has entered, raw: the hub's records applied, a known sequence from the cut's `w` on,
@@ -159,14 +170,17 @@ nothing announced but the hub's records, no receipts. -/
 def RawEntry {ρ : Type} (R : ρ) (w : Nat) (e : RawNode ρ) : Prop :=
   e.applied = R ∧ w ≤ e.seq ∧ (e.annc = none ∨ e.annc = some R) ∧ e.receipts = false
 
-/-- Entry, once reached, lasts: given that each step keeps it unless the driver reopens the node
-(no adoption past the credit cut, the known sequence never going back without a reopen,
-announcements only of the hub's records, no receipts without taking), that the driver reopens
-the node only after an `Incomplete` answer in the successful suffix, after ordinary I/O and
-transport failures and their reopens have ceased. `Incomplete` comes only from the hub's head
-to a push whose closure it lacks; an entered node's push from that head is closed once uploaded
-(the conditional closure law: it offers the hub's records). Protocol-caused failure is ruled
-out by that law rather than treated as an ordinary failure assumed to stop. -/
+/-- Entry, once reached, lasts. Assumes:
+* each step keeps entry unless the driver reopens the node (no adoption past the credit cut, the
+  known sequence never going back without a reopen, announcements only of the hub's records, no
+  receipts without taking);
+* the driver reopens the node only after an `Incomplete` answer, in the successful suffix after
+  ordinary I/O and transport failures and their reopens have ceased;
+* `Incomplete` comes only from the hub's head to a push whose closure it lacks, and an entered
+  node's push from that head is closed once uploaded (the conditional closure law: it offers the
+  hub's records).
+
+So an entered node is never reopened. -/
 theorem raw_entry_persists {ρ : Type} (R : ρ) (w : Nat) (state : Nat → RawNode ρ)
     (reopen incomplete : Nat → Prop) (expectedIsHead closed : Nat → Bool) (j : Nat)
     (hj : RawEntry R w (state j))
@@ -189,43 +203,64 @@ theorem raw_entry_persists {ρ : Type} (R : ρ) (w : Nat) (state : Nat → RawNo
       cases hc
     exact hkeep (j + d) (by omega) he hnr
 
-/-- What a node's pre-entry raw run reads, sampled from its actual events: the round's raw
-closure, naming, raw graph and known head, and at each of its sampled steps its core state (and
-right after the step's calls complete, `after`), reads, reply, kind of event, push packet bits,
-records heard, applied and announced, receipts and `Push::answer` bits, and the data of the round
-after each fresh `Fetched` reply. Data only: its laws are `EntryLaws`. -/
+/-- What a node's pre-entry raw run reads, sampled from its actual events. Data only: its laws are
+`EntryLaws`. -/
 structure EntryData (ρ α : Type) where
+  /-- The round's raw closure. -/
   raw : List Nat
+  /-- The core's naming. -/
   naming : Naming α
+  /-- The raw graph: each operation's parents. -/
   par : Nat → List Nat
+  /-- The raw ancestry test. -/
   anc : Nat → Nat → Bool
+  /-- The known raw head. -/
   H : Nat
+  /-- The core state at each sampled step. -/
   run : Nat → State
+  /-- The state right after the step's calls complete. -/
   after : Nat → State
+  /-- What the core reads at the step. -/
   prims : Nat → Prims
+  /-- What the step's calls bring back. -/
   reply : Nat → Reply
+  /-- The step is a core step. -/
   core : Nat → Prop
+  /-- The step is a round start. -/
   starts : Nat → Prop
+  /-- The step's call is a `Fetch`. -/
   fetchCall : Nat → Prop
+  /-- `is_dropped` of a push's new head. -/
   pushDropped : Nat → Bool
+  /-- The records the node offers. -/
   offered : ρ
+  /-- The records last heard, at each step. -/
   heard : Nat → Option ρ
+  /-- The records applied, at each step. -/
   ap : Nat → ρ
+  /-- The known sequence right after the step. -/
   seqAfter : Nat → Nat
+  /-- The records announced, right after the step. -/
   anncAfter : Nat → Option ρ
+  /-- Whether the node holds record receipts at the step. -/
   receipts : Nat → Bool
+  /-- Whether it holds record receipts right after the step. -/
   receiptsAfter : Nat → Bool
+  /-- A `Push::answer` bit: the answer is `Incomplete`. -/
   incomplete : Nat → Bool
+  /-- A `Push::answer` bit: the push's expected head is the hub's head. -/
   expectedIsHead : Nat → Bool
+  /-- A `Push::answer` bit: the hub holds the push's closure. -/
   closed : Nat → Bool
+  /-- The data of the round after a fresh `Fetched` reply. -/
   round : Nat → FetchData α
+  /-- The records announced, at each step. -/
   annc : Nat → Option ρ
 
 /-- The native per-call laws of that run, as `raw_entry_reached` takes them, each asked before
 its first fresh reply only. The objects laws rest on a valid base: a node advertises as haves
 only objects it holds, so a reply brings what it lacks, or the round fails and another starts.
-That no `GetObjects` fails in the round after a fresh `Fetch` is not one of them:
-`EntryLaws.enters` takes it apart. -/
+`hroundServe` is not among them: `EntryLaws.enters` takes it as a separate argument. -/
 structure EntryLaws {ρ α : Type} [DecidableEq ρ] (R : ρ) (w : Nat) (d : EntryData ρ α) :
     Prop where
   trans : ∀ a b c, d.anc a b = true → d.anc b c = true → d.anc a c = true

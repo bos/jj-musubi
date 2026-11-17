@@ -1,8 +1,8 @@
 /-
-Expand a finite batch of raw graph growth into one-vertex model steps. The batch may have
-zero new vertices, and its length need not have a uniform bound. Unused parent-function
-values outside next are normalized to empty. This is a structural simulation, not a premise
-that a progress measure decreases or that a sync finishes.
+Expand a finite batch of raw graph growth into one-vertex model steps. A batch may add any
+finite number of vertices, including zero. Parent lists of vertices at or above `next` are
+normalized to empty. The result is a structural simulation of the batch by model steps; it
+says nothing about progress measures or about a sync finishing.
 
 The convergence proof uses this file.
 -/
@@ -13,6 +13,7 @@ namespace Musubi.Recovery
 
 open Musubi HubSuffix
 
+/-- `g` cut back to its first `next` vertices; parent lists above that are emptied. -/
 def rawLimit (g : GState) (next : Nat) : GState :=
   let u := { g.s.U with next := next, par := fun x => if x < next then g.s.U.par x else [] }
   { g with s := { g.s with U := u } }
@@ -40,8 +41,8 @@ theorem rawLimit_ext (g : GState) (n : Nat)
     · simp [hb, show ¬ x < n + 1 by omega]
   · simpa [rawLimit] using hp
 
-/-- Other nodes may write arbitrarily many finite batches. Their growth preserves the
-eligible nodes' heads/knowledge and the hub, and hence refines grow/frame model steps. -/
+/-- Growth by other nodes, in a batch of any finite size, leaves the hub and the eligible
+nodes' heads and knowledge unchanged, so it refines into grow and frame model steps. -/
 theorem raw_growth_expansion {E : Nat → Prop} {w : Nat} {a b : GState}
     (hn : a.s.U.next ≤ b.s.U.next)
     (hold : ∀ x, x < a.s.U.next → b.s.U.par x = a.s.U.par x)

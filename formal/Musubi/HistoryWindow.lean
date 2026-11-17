@@ -1,6 +1,7 @@
 /-
-The strict raw-head history window that begins at the record cut, before eligible nodes have
-learned from it, and how it enters the hub suffix. The convergence proof uses this file.
+A window of the hub's history, from sequence number `w` to the current one, in which the
+raw head strictly increases along ancestry; and how such a window yields the hub-suffix
+invariant. The convergence proof uses this file.
 -/
 import Musubi.HubSuffix
 
@@ -16,9 +17,10 @@ structure HistoryWindow (w : Nat) (s : State) : Prop where
   chain : ∀ i j, w ≤ i → i ≤ j → j ≤ s.hub.seq → Anc s.U.par (s.hub.hist i) (s.hub.hist j)
   strict : ∀ i j, w ≤ i → i < j → j ≤ s.hub.seq → s.hub.hist i < s.hub.hist j
 
-/-- EarlyEntry supplies the window lower bound; the serialized honest response gives the
-truthful pair and sequence upper bound. At their common cut, all pre-entry packets get no
-current generation, so the strong sender invariant is initially vacuous. -/
+/-- A history window plus the eligible nodes' knowledge gives the hub-suffix invariant at `w`.
+EarlyEntry supplies the lower bound `w ≤ known.seq`; the serialized honest response supplies
+`known.seq ≤ hub.seq` and the matching head. Packets from before the cut carry no current
+generation, so the sender invariant holds vacuously at the cut. -/
 theorem history_window_enters_suffix {E : Nat → Prop} {w : Nat} {g : GState}
     (h : HistoryWindow w g.s)
     (hk : ∀ n, E n → w ≤ (g.s.node n).known.seq ∧ (g.s.node n).known.seq ≤ g.s.hub.seq ∧

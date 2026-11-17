@@ -1,25 +1,34 @@
 /-
-An eligible node's own steps in the joint system refine the hub's suffix on the hub-side view
-read from the same system (`own_step_expansion`): each is a positive finite path of
-`HubSuffix.Step`, with no hub progress, rank or `HubSuffix.Step` assumed.
+Each step of an eligible node in the joint system is a positive finite path of
+`HubSuffix.Step` on the hub-side view read from the same system (`own_step_expansion`). The
+proof assumes no hub progress and no rank.
 
-The node's core steps that write nothing the view reads (realization, idling, a request that
-pushes nothing, the replies to a request for objects or to a refused push, an ignored
-notification) are frames. A merge is the suffix's `merge`. An advance is the suffix's `advance`,
-then its `merge` when the native advance writes one merge of the whole frontier. Housekeeping
-that writes is one maintenance generation per operation (`raw_maintenance_expansion`), the
-node's generation counting the raw operations written, as `Grow` makes it. A push with no
-pending drops writes nothing and is the suffix's `send`, its packet the ledger's. A reply or
-notification that names a head teaches the node an honest pair of the hub's history: `learn`.
+How each node step maps to suffix steps:
+- Steps that write nothing the view reads are frames: realization, idling, a request that
+  pushes nothing, the replies to a request for objects or to a refused push, and an ignored
+  notification.
+- A merge is the suffix's `merge`.
+- An advance is the suffix's `advance`, followed by `merge` when the native advance writes one
+  merge of the whole frontier.
+- Housekeeping that writes is one maintenance generation per operation
+  (`raw_maintenance_expansion`). The node's generation counts the raw operations written, as
+  `Grow` defines it.
+- A push with no pending drops writes nothing and is the suffix's `send`, with the packet the
+  ledger records.
+- A reply or notification that names a head teaches the node an honest pair of the hub's
+  history: `learn`.
 
 The view's raw ancestry is the node's, through its scoped embedding (`anc_up`, `anc_down`).
-Primitive laws, explicit and per step, not derived: the native full-frontier advance
-(`FullAdv`, stronger than NodeSettle's `Adv`), whose known head stands for itself; housekeeping
-that writes ending at a single head, its last operation (`MaintLaw`); no adoption after the
-record-adoption cut (the applied records stay); the raw graph's acyclicity; no pending drops at
-a step that sends calls (under audit); and the hub's answers honest within the window of root's
-history (`HonestSnap`). Distinct op heads at a merge are a premise here too, which the hive
-derives (`heads_nodup_step`).
+
+Laws taken as premises, each stated per step:
+- `FullAdv`: the native full-frontier advance. It is stronger than NodeSettle's `Adv`; its
+  known head stands for itself.
+- `MaintLaw`: housekeeping that writes ends at a single head, its last operation.
+- No record adoption after the record-adoption cut: the applied records stay.
+- The raw graph is acyclic.
+- A step that sends calls has no pending drops.
+- `HonestSnap`: the hub's answers are honest within the window of the history from root.
+- Distinct op heads at a merge. The hive derives this (`heads_nodup_step`).
 
 The convergence proof uses this file.
 -/
@@ -88,19 +97,23 @@ def Frontier (σ : NS) : Nat → Prop := maxSet σ.par (fun y => y ∈ σ.heads 
 def AdvGuard (σ : NS) : Prop :=
   σ.heads.length < 2 ∧ σ.loc σ.known.head ∧ (¬ ∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none
 
-/-- The native full-frontier advance, a primitive law of an `advance_to(known)` call that makes no
-other semantic write (its working-copy cleanup, `replace_abandoned_working_copies`, writing
-nothing; the hive asks it only where no automatic write of the node happens, its cut excluding
-them), stronger than NodeSettle's `Adv`: the known head stands for itself (no record drops or
-renames it), and the op heads move to the frontier of the heads and the known head. Either nothing
-is written, the frontier becoming the op heads, or, the frontier having two operations or more,
-one merge of the whole frontier is written and is the only op head after: a new operation, or one
-the node holds already (the same canonical content, written by another copy or before), which
-takes no new label and becomes local. Never a write when the frontier is a single operation
-already present. With nothing written, the op heads are distinct canonical operations: two
-physical op heads with one canonical form (an alias) arise only from an interrupted export, a
-failure. -/
+/-- The native full-frontier advance: a primitive law for an `advance_to(known)` call that makes
+no other semantic write. Its working-copy cleanup, `replace_abandoned_working_copies`, writes
+nothing; the hive applies the law only where the node makes no automatic write, which its cut
+ensures. It is stronger than NodeSettle's `Adv`. The op heads move to the frontier of the op
+heads and the known head. Exactly one of three things happens (`out`):
+- Nothing is written, and the frontier becomes the op heads.
+- The frontier has two operations or more, and one new merge of the whole frontier is written;
+  it is the only op head after.
+- The frontier has two operations or more, and the merge is one the node already holds (the
+  same canonical content, written by another copy or earlier); it takes no new label. It is an
+  existing operation `x < σ.next` whose parents are the frontier, and the op heads after are
+  `[x]`.
+A frontier of one operation that is already present writes nothing. When nothing is written,
+the op heads are distinct canonical operations: two physical op heads with one canonical form
+(an alias) arise only from an interrupted export, which is a failure. -/
 structure FullAdv (σ σ' : NS) : Prop where
+  /-- The known head stands for itself: no record drops or renames it. -/
   img : σ.img = [σ.known.head]
   out : (σ'.next = σ.next ∧ (∀ y, y ∈ σ'.heads ↔ Frontier σ y) ∧ σ'.heads.Nodup) ∨
     ((∃ a b, Frontier σ a ∧ Frontier σ b ∧ a ≠ b) ∧ σ'.next = σ.next + 1 ∧
@@ -353,7 +366,7 @@ theorem idle_same {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') :
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl⟩
   | goal _ _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl⟩
 
-/-- Replies leave the op heads of the step's state after its writes. -/
+/-- After the replies, the op heads are those of the step's state after its writes. -/
 theorem handle_heads {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ' : NS} {k : Kind}
     {new : Nat} {as : List Ans} (hi : Issue d σ k post new) (hci : σi.heads = σ.heads)
     (hcp : posti.heads = post.heads) (hh : Handle c σi k posti as σ') : σ'.heads = post.heads := by
@@ -384,7 +397,8 @@ theorem handle_heads {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ'
     · rw [A.heads, hcp]
   | writePoll => rw [hh.heads, hcp]
 
-/-- Replies leave the known pair, or teach the context's, as a reply naming a head says. -/
+/-- After the replies, the known pair is the step's own, or else the context's `(c.S, c.H)`,
+which a reply naming a head teaches. -/
 theorem handle_known {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ' : NS} {k : Kind}
     {new : Nat} {as : List Ans} (hi : Issue d σ k post new) (hck : σi.known = σ.known)
     (hcp : posti.known = post.known) (hh : Handle c σi k posti as σ') :
@@ -437,18 +451,22 @@ theorem collect_nil {tag : Pkt → Option Nat} {rq : List Req}
 
 /-! ## An eligible node's own steps refine the hub's suffix -/
 
-/-- Each of eligible node `n`'s own steps in the joint system is a positive finite path of the
-hub's suffix on the hub-side view of the same system, the ledger recording its push. Premises, all
-per step and explicit: the system's invariants from a well-formed start (`RunOK`); the raw graph
-acyclic (a native contract); no adoption after the record-adoption cut (the applied records stay,
-which excludes `adopt` and `advanceTake`); distinct op heads at a merge (`huniq`, which the hive
-derives, `heads_nodup_step`); the native full-frontier advance (`FullAdv`); housekeeping that
-writes ending at its last operation (`MaintLaw`), its writes new operations in order
-(`hmaintFresh`, a premise of the model, not a claim about native housekeeping: the hive takes this
-only past its housekeeping cut, where no housekeeping step is left); no pending drops at a step
-that sends calls (provisional, under audit); and the replies the node takes and the notification
-it processes honest within the window of root's history (`HonestSnap`). No hub progress, rank or
-suffix step is assumed. -/
+/-- Each own step of eligible node `n` in the joint system is a positive finite path of the
+hub's suffix on the hub-side view of the same system, with the ledger recording its push.
+Premises, all per step:
+- `RunOK`: the system's invariants, from a well-formed start.
+- `hdag`: the raw graph is acyclic, a native contract.
+- `hap`: no adoption after the record-adoption cut, so the applied records stay; this excludes
+  `adopt` and `advanceTake`.
+- `huniq`: distinct op heads at a merge. The hive derives it (`heads_nodup_step`).
+- `hadv`: the native full-frontier advance (`FullAdv`).
+- `hmaint`: housekeeping that writes ends at its last operation (`MaintLaw`).
+- `hmaintFresh`: housekeeping writes new operations in order. This is a premise of the model,
+  not a claim about native housekeeping; the hive takes it only past its housekeeping cut,
+  where no housekeeping step is left.
+- `hpend`: a step that sends calls has no pending drops.
+- `hrep`, `hnote`: the replies the node takes and the notification it processes are honest
+  within the window of the history from root (`HonestSnap`). -/
 theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} {w n : Nat} {act : Act} {g g' : Sys} (hist : Nat → Nat) (pk : List Packet)
     (hE : E n) (hs : SysStep N D law act g g') (hab : act.about n) (K : RunOK law D n g)
@@ -917,9 +935,9 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
 A node's canonical op heads can repeat: an interrupted export leaves two physical op heads with
 one canonical form (an alias), and the core's merge of `[m, m]` writes a child of `m` alone
 (`Busy.merge` with `M = [m]`). The suffix needs distinct heads at a merge, to read it as the
-hub-side merge of two raw heads, so they are derived, not assumed of each step: distinct once,
-and then kept by every step, each leaving the op heads as they were or one, but for the native
-advance that writes nothing (`FullAdv`), whose op heads are the frontier's. -/
+hub-side merge of two raw heads. Distinctness holds at the start and every step keeps it: a
+step leaves the op heads as they were or as one head, except the native advance that writes
+nothing (`FullAdv`), whose op heads are the frontier's. -/
 
 /-- Node `n`'s op heads are distinct, and so are those of the step whose calls are out. -/
 def HeadsNodup (g : Sys) (n : Nat) : Prop :=

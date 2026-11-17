@@ -1,8 +1,8 @@
 /-
-The packet's acceptance boundary. Metadata identity is not enough: the actual packet must
-also upload the complete closure and satisfy the adapter's scoped contracted comparison.
-Given these primitive checks, acceptance and the exact head/sequence effect follow from
-the executable hub, rather than being an assumed implementation progress event.
+The packet's acceptance boundary. Matching metadata is not enough: the packet must also upload
+the complete closure and satisfy the adapter's scoped contracted comparison. Given these
+primitive checks, acceptance and its exact head and sequence effect are theorems about the
+executable hub.
 
 The last section takes a node's pending drops on raw ids, as `Push::answer` sees them, with no
 original identified with a raw id (`Musubi.RawPublish`).
@@ -19,27 +19,30 @@ namespace Musubi.Exec
 
 open Musubi Contract
 
-/-- Sufficient upload coverage without renaming the base. Native ops_between instead
-excludes the union of its actual to_node(base) images when pending drops rename that base;
-that case uses UploadCoversBases after server-generated contraction bodies are present. -/
+/-- The packet uploads every op and object reachable from `new` but not from `expected`.
+When pending drops rename the base, native `ops_between` instead excludes the union of the
+`to_node(base)` images; that case is `UploadCoversBases`, once server-generated contraction
+bodies are present. -/
 structure UploadCovers (es : EState) (p : PushPacket) : Prop where
   ops : ∀ x, Anc es.parF x p.new → ¬ Anc es.parF x p.expected → x ∈ p.ops
   objs : ∀ o, (∃ x, Anc es.parF x p.new ∧ o ∈ es.objsF x) →
     (¬ ∃ x, Anc es.parF x p.expected ∧ o ∈ es.objsF x) → o ∈ p.objs
 
-/-- The exact base frontier used by the sender's cache, in the graph after this packet's
-contraction. The scoped native law must identify the SAME images at sender and hub and
-establish their generated closure. This does not project arbitrary canonical versions. -/
+/-- The packet uploads every op and object reachable from `new` but not from `bases`, the base
+frontier the sender's cache uses, in the graph after this packet's contraction. The scoped
+native law must identify the same images at sender and hub and establish their generated
+closure. It does not project arbitrary canonical versions. -/
 structure UploadCoversBases (es : EState) (p : PushPacket) (bases : List Nat) : Prop where
   ops : ∀ x, Anc es.parF x p.new →
     (¬ ∃ b ∈ bases, Anc es.parF x b) → x ∈ p.ops
   objs : ∀ o, (∃ x, Anc es.parF x p.new ∧ o ∈ es.objsF x) →
     (¬ ∃ b ∈ bases, ∃ x, Anc es.parF x b ∧ o ∈ es.objsF x) → o ∈ p.objs
 
-/-- The native upload can use different exclusions for bodies and objects: ops_between
-uses the current base images, while objects_attachment also uses objects reachable from
-the raw expected head. Those old objects remain stored even when contraction drops its
-body. Generated image-base closure and those separately retained objects cover the rest. -/
+/-- `UploadCoversBases` with separate exclusions for bodies and objects. `ops_between` excludes
+the current base images (`opBases`); `objects_attachment` also excludes objects reachable from
+the raw expected head (`objectBases`). Those older objects stay stored even when contraction
+drops their body, so they are already at the hub (`hobjects` in `packet_upload_closes_split`).
+The generated image-base closure covers the rest. -/
 structure UploadCoversSplit (es : EState) (p : PushPacket)
     (opBases objectBases : List Nat) : Prop where
   ops : ∀ x, Anc es.parF x p.new →
@@ -48,6 +51,7 @@ structure UploadCoversSplit (es : EState) (p : PushPacket)
     (¬ ∃ b ∈ opBases, ∃ x, Anc es.parF x b ∧ o ∈ es.objsF x) →
     (¬ ∃ b ∈ objectBases, ∃ x, Anc es.parF x b ∧ o ∈ es.objsF x) → o ∈ p.objs
 
+/-- The packet's upload closes `new` at the hub, given `UploadCoversSplit`. -/
 theorem packet_upload_closes_split {es : EState} {p : PushPacket}
     {opBases objectBases : List Nat} (hpar : ParLt es.parF)
     (hclosed : ∀ b ∈ opBases, ClosedAt (abs es) b)
@@ -75,6 +79,7 @@ theorem packet_upload_closes_split {es : EState} {p : PushPacket}
         exact mem_union.2 (.inl (hobjects b hb y hy o ho))
       · exact mem_union.2 (.inr (hc.objs o ⟨x, hx', ho'⟩ he old))
 
+/-- The packet's upload closes `new` at the hub, given `UploadCoversBases`. -/
 theorem packet_upload_closes_from_bases {es : EState} {p : PushPacket} {bases : List Nat}
     (hpar : ParLt es.parF) (hclosed : ∀ b ∈ bases, ClosedAt (abs es) b)
     (hc : UploadCoversBases es p bases) :
@@ -96,6 +101,7 @@ theorem packet_upload_closes_from_bases {es : EState} {p : PushPacket} {bases : 
       exact mem_union.2 (.inl ((hclosed b hb y hy).2 o ho))
     · exact mem_union.2 (.inr (hc.objs o ⟨x, hx', ho'⟩ he))
 
+/-- The packet's upload closes `new` at the hub, given `UploadCovers`. -/
 theorem packet_upload_closes {es : EState} {p : PushPacket}
     (hpar : ParLt es.parF) (hclosed : ClosedAt (abs es) p.expected)
     (hc : UploadCovers es p) : (es.hubStore p.ops p.objs).closedB p.new = true := by
@@ -115,9 +121,10 @@ theorem packet_upload_closes {es : EState} {p : PushPacket}
       exact mem_union.2 (.inl ((hclosed y hy).2 o ho))
     · exact mem_union.2 (.inr (hc.objs o ⟨x, hx', ho'⟩ he))
 
-/-- The native boundary laws for the SAME immutable packet. Record equality and expected
-head come from Emit and the stable hub; custody comes from its actual send. The adapter
-supplies survival, comparison and closure, not a successful outcome or rank decrease. -/
+/-- The native boundary laws for one immutable packet `p` sent from `s`. Record equality and
+the expected head come from `Emit` and the stable hub; custody comes from the actual send. The
+adapter supplies survival, comparison and closure. The fields are checks: neither a successful
+outcome nor a rank decrease is one of them. -/
 structure PacketPrimitives (s : SEState) (p : PushPacket) : Prop where
   par : s.es.parOK = true
   ledger : (s.sups.any fun q => q.node == p.node && recEq q.applied p.applied &&
@@ -130,14 +137,17 @@ structure PacketPrimitives (s : SEState) (p : PushPacket) : Prop where
   closed : (s.es.hubStore p.ops p.objs).closedB p.new = true
   wellFormed : imageAcceptSafeB s p.ops p.new p.applied p.allDrops = true
 
+/-- `PacketPrimitives`, plus: the packet's records are the hub's, its new head differs from the
+hub's head, and its expected head is the hub's head. -/
 structure PacketChecks (s : SEState) (p : PushPacket) : Prop extends PacketPrimitives s p where
   records : recEq p.applied s.recs = true
   different : s.es.hub.head ≠ p.new
   expected : s.es.hub.head = p.expected
 
-/-- The source and hub use the same ordered-record identity, and the packet is the actual
-post-write packet. Emit supplies matching metadata, expected head and a distinct new head;
-the remaining primitive laws are deliberately not disguised as a liveness premise. -/
+/-- `PacketChecks` for a packet built from the sender's state `σ`. Source and hub use the same
+ordered-record identity, and the packet is the actual post-write packet. `Emit` supplies the
+matching records, the expected head and a new head distinct from the hub's; the remaining
+primitive laws are the hypothesis `hnative`. -/
 theorem packet_checks_of_emit {c : NodeSettle.Ctx} {σ σ1 : NodeSettle.NS} {new : Nat}
     {s : SEState} {p : PushPacket} (hi : NodeSettle.SInv c σ)
     (hem : NodeSettle.Emit c σ σ1 new) (hnative : PacketPrimitives s p)
@@ -153,12 +163,14 @@ theorem packet_checks_of_emit {c : NodeSettle.Ctx} {σ σ1 : NodeSettle.NS} {new
     exact Ne.symm hne
   · rw [hhead, hexpected, hk]
 
+/-- `PacketChecks` imply the executable acceptance guard `imageAcceptB`. -/
 theorem packet_checks_acceptB {s : SEState} {p : PushPacket} (h : PacketChecks s p) :
     imageAcceptB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = true := by
   simp only [imageAcceptB, Bool.and_eq_true, decide_eq_true_eq]
   exact ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h.par, h.ledger⟩, h.records⟩, h.survives⟩, h.pending⟩,
     h.sent⟩, h.different⟩, h.expected⟩, h.descends⟩, h.closed⟩, h.wellFormed⟩
 
+/-- An accepted packet moves the hub to the packet's new head, with sequence plus one. -/
 theorem packet_accept_effect {N : Nat} {s t : SEState} {p : PushPacket}
     (h : cexecAction N s p.accept = .ok t) :
     t.es.hub.head = p.new ∧ t.es.hub.seq = s.es.hub.seq + 1 := by
@@ -190,9 +202,8 @@ theorem packet_accept_effect {N : Nat} {s t : SEState} {p : PushPacket}
         EState.hubStore, EState.hubStoreOps, EState.hubStoreObjs]
     · contradiction
 
-/-- A proper packet enables the checked acceptance transition, in both the ordinary and
-surviving-image paths. The resulting move is for this packet's new head, not some unrelated
-sequence increase elsewhere in the run. -/
+/-- `PacketChecks` make `cexecAction` accept the packet, by either the ordinary or the
+surviving-image path, and the hub moves to the packet's new head with sequence plus one. -/
 theorem packet_checks_accept {N : Nat} {s : SEState} {p : PushPacket}
     (h : PacketChecks s p) :
     ∃ t, cexecAction N s p.accept = .ok t ∧
@@ -208,14 +219,14 @@ theorem packet_checks_accept {N : Nat} {s : SEState} {p : PushPacket}
   obtain ⟨t, ht⟩ := hex
   exact ⟨t, ht, packet_accept_effect ht⟩
 
-/-- The packet-specific rejection guard cannot reject those same primitive checks. -/
+/-- `PacketChecks` make the packet's rejection guard false. -/
 theorem packet_checks_no_reject {s : SEState} {p : PushPacket} (h : PacketChecks s p) :
     imageRejectB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = false := by
   simp [imageRejectB, h.expected, h.descends]
 
-/-- An actual hub decision for this immutable packet. The refusal guard is checked before
-idempotence, ancestry or closure, as in Push::answer. The relation permits every unsuccessful
-outcome; the primitive checks below, rather than an assumed success, rule them out. -/
+/-- Every decision the hub can make on this packet: acceptance, refusal, idempotence, rejection
+or incompleteness. The refusal guard is checked before idempotence, ancestry or closure, as in
+`Push::answer`. `packet_checks_force_accept` shows that `PacketChecks` leave only acceptance. -/
 inductive PacketHandled (N : Nat) (s : SEState) (p : PushPacket) : SEState → Prop
   | accept {t : SEState} (h : cexecAction N s p.accept = .ok t) : PacketHandled N s p t
   | refused (t : SEState) (h : (!recEq p.applied s.recs || s.remDL.contains p.new ||
@@ -227,6 +238,8 @@ inductive PacketHandled (N : Nat) (s : SEState) (p : PushPacket) : SEState → P
   | incomplete (t : SEState) (h : (s.es.hubStore p.ops p.objs).closedB p.new = false) :
       PacketHandled N s p t
 
+/-- Under `PacketChecks`, any hub decision on the packet is acceptance, moving the hub to the
+new head with sequence plus one. -/
 theorem packet_checks_force_accept {N : Nat} {s t : SEState} {p : PushPacket}
     (hc : PacketChecks s p) (hh : PacketHandled N s p t) :
     cexecAction N s p.accept = .ok t ∧

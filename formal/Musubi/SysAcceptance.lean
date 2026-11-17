@@ -13,9 +13,9 @@ obligations visible alongside the facts derived from them:
 * `SysAcceptance.Convergence`: composition of those phases in `hive_converges`.
 
 Importing this module exposes every layer. `FineAssembly.hive_converges_observed` supplies the
-fine-system premise by replaying observed events. The contracts still include eventual handling,
-restart and scheduling obligations, and the separate `autoWritesStop` assumption; the assembly
-does not derive termination of automatic native writes.
+fine-system premise by replaying observed events. The contracts assume eventual handling,
+restart and scheduling, and a separate `autoWritesStop` (automatic native writes eventually
+stop); termination of those writes is not derived.
 
 The convergence proof uses this file.
 -/

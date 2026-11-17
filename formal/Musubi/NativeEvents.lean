@@ -1,8 +1,8 @@
 /-
-Compose observations of individual native events into a run of the eligible system. The
-semantic effects of one native call remain explicit boundary obligations; a whole SysStep or
-HiveStep trace is not an input. The node invariants needed to handle replies are carried by
-the constructed filtered run, rather than assumed again at each event.
+Compose observations of individual native events into a run of the eligible system. The input
+is per-event data, each event with an explicit boundary obligation for the semantic effect of
+its native call. The node invariants needed to handle replies come from the constructed
+filtered run.
 
 The convergence proof uses this file.
 -/
@@ -43,7 +43,7 @@ section
 omit [DecidablePred E]
 
 /-- The eligible observer keeps another node's raw writes and newly sent calls. Its hidden
-control slot can change freely; retired replies of hidden nodes need not be collected. -/
+control slot can change freely, and it leaves retired replies of hidden nodes uncollected. -/
 def foreignAfter (g : Sys) (n : Nat) (node : NodeC) (next' : Nat) (par' : Nat → List Nat)
     (calls : List Req) : Sys :=
   { g with
@@ -79,8 +79,8 @@ def Event.act : Event → Act
   | .read _ _ | .push _ _ _ => .answer
   | .store _ _ | .foreign _ _ _ _ _ | .foreignAnswer _ _ _ => .env
 
-/-- Replay writes only the fields the observed event changes. In particular a reply does
-not overwrite another node or replace the global graph with an arbitrary snapshot. -/
+/-- Replay writes only the fields the observed event changes: a reply leaves other nodes
+and the global graph as they are. -/
 def Event.apply (e : Event) (N : Nat) (law : HubLaw) (g : Sys) : Sys :=
   match e with
   | .issue e nx sl par => e.apply g nx par sl
@@ -100,7 +100,7 @@ def Event.apply (e : Event) (N : Nat) (law : HubLaw) (g : Sys) : Sys :=
     { g with hub := after, reqs := g.reqs.erase r, reps := g.reps ++ [rep], time := g.time + 1 }
 
 /-- The boundary obligation for this event's exact data variant at its replay state.
-The request a read removes must be a read; a push decision cannot be disguised as one. -/
+The request a read removes must be a read. -/
 def Event.Binds (e : Event) (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw)
     (E : Nat → Prop) (old : List Req) (g : Sys) : Prop :=
   match e with
@@ -134,7 +134,7 @@ def Event.Binds (e : Event) (N : Nat) (D : Nat → Nat → Nat → Prop) (law : 
     (rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body) ∧ after = g.hub
 
 /-- The event's exact bindings and the eligible nodes' current invariants give its system
-step. Replay derives those invariants inductively, rather than assuming them per event. -/
+step. Replay derives those invariants by induction. -/
 theorem Event.step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {e : Event} {g : Sys} (B : e.Binds N D law E old g)
     (K : ∀ n, E n → NodeSys.NodeOK D n g) :
@@ -205,8 +205,8 @@ theorem pushAfter_reqs (N : Nat) (law : HubLaw) (g : Sys) (r : Req) (p : Pkt)
   · split <;> rfl
 
 /-- An eligible push request can leave the replay only through the decision event on
-that exact request and packet. In particular a read or another node's answer cannot remove
-it. This connects per-decision packet witnesses to the run's removal quantifier. -/
+that exact request and packet. A read or another node's answer leaves
+it in place. This connects per-decision packet witnesses to the run's removal quantifier. -/
 theorem Event.removed_eligible_push {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {e : Event} {g : Sys} {q : Req} {P : Pkt} (B : e.Binds N D law E old g)
     (hq : q ∈ g.reqs) (hne : q ∉ (e.apply N law g).reqs) (hE : E q.node)
@@ -245,8 +245,8 @@ def observedRun (N : Nat) (law : HubLaw) (initial : Sys) (events : Nat → Event
   | i + 1 => (events i).apply N law (observedRun N law initial events i)
 
 
-/-- Local and transport invariants follow the replay. A handling event obtains its NodeOK
-from this induction, so it cannot hide a separate invariant premise at every callback. -/
+/-- Local and transport invariants follow the replay. A handling event gets its NodeOK
+from this induction, so no callback carries a separate invariant premise. -/
 theorem observed_invariants {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     (initial : Sys) (events : Nat → Event) (frozen : Nat → NodeC)
     (h0 : ∀ n, RunOK law D n (filt E frozen old initial))
@@ -261,7 +261,7 @@ theorem observed_invariants {N : Nat} {D : Nat → Nat → Nat → Prop} {law : 
     exact fun n => runOK_step (ih n) (filt_step hs)
 
 /-- Every replay event is a HiveStep, derived from the individual call bindings and the
-initial snapshot. No model run is a premise of this construction. -/
+initial snapshot; the construction takes no model run as input. -/
 theorem observed_hs {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     (initial : Sys) (events : Nat → Event) (frozen : Nat → NodeC)
     (h0 : ∀ n, RunOK law D n (filt E frozen old initial))
@@ -323,8 +323,7 @@ theorem RecordView.applied_current {ρ α : Type} {N k : Nat} {run : Nat → Sys
   (V.applied n i hn hi).trans (congrArg label he.1)
 
 /-- Once records and original drops are fixed, an entered eligible node has no pending
-raw names. The conclusion is derived from custody and unpublished originals, not a per-step
-empty-pending assumption. -/
+raw names. It follows from custody and unpublished originals. -/
 theorem RecordView.pending_empty {ρ α : Type} {N k c : Nat} {run : Nat → Sys}
     {recs : Nat → Exec.SEState} {O : HiveObs ρ α} {label : ρ → Nat}
     {decode : Nat → List Exec.Rec} {origin : Nat → Nat → Nat → Nat}
@@ -345,7 +344,7 @@ theorem RecordView.pending_empty {ρ α : Type} {N k c : Nat} {run : Nat → Sys
   simpa only [Exec.setP, Exec.SEState.hubDL, hr] using Iff.of_eq hx
 
 /-- After raw entry persists, the applied-record effect of an eligible core step is
-equality, without a separate assumption that adoption cannot happen at that step. -/
+equality: the applied record `ap` is unchanged. -/
 theorem RecordView.applied_stays {ρ α : Type} {N k : Nat} {run : Nat → Sys}
     {recs : Nat → Exec.SEState} {O : HiveObs ρ α} {label : ρ → Nat}
     {decode : Nat → List Exec.Rec} {origin : Nat → Nat → Nat → Nat}

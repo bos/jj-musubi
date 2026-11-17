@@ -72,73 +72,14 @@ def MsgR (s : State) : Msg → Prop
   | .head _ _ _ h => h < s.U.next
   | _ => True
 
-/-- The invariant of the extended system: `Inv` without what relates nodes to the hub's
-history. -/
-structure InvR (N : Nat) (s : State) : Prop where
-  -- universe
-  parLt : ParLt s.U.par
-  nextPos : 0 < s.U.next
-  rootAnc : ∀ x, x < s.U.next → Anc s.U.par root x
-  creatorSome : ∀ x, 0 < x → x < s.U.next → ∃ n, n < N ∧ s.U.creator x = some n
-  creatorRoot : s.U.creator root = none
+/-- The invariant of the extended system: `Core`, with the stored, known, staged and in-flight
+operations bounded by the universe, and without what relates nodes to the hub's history. -/
+structure InvR (N : Nat) (s : State) : Prop extends Core N s where
   objsRoot : s.U.objs root = []
-  -- hub
-  headLt : s.hub.head < s.U.next
-  histHead : s.hub.hist s.hub.seq = s.hub.head
-  hist0 : s.hub.hist 0 = root
-  histStep : ∀ i, i < s.hub.seq →
-    Anc s.U.par (s.hub.hist i) (s.hub.hist (i + 1)) ∧ s.hub.hist i ≠ s.hub.hist (i + 1)
-  hubClosed : ClosedAt s s.hub.head
   hubOpsLt : ∀ x, s.hub.ops x → x < s.U.next
-  -- nodes
-  lroot : ∀ n, (s.node n).lops root
-  lLt : ∀ n x, (s.node n).lops x → x < s.U.next
-  lParents : ∀ n x p, (s.node n).lops x → p ∈ s.U.par x → (s.node n).lops p
-  lObjs : ∀ n x o, (s.node n).lops x → o ∈ s.U.objs x → (s.node n).lobj o
-  headsLocal : ∀ n x, (s.node n).heads x → (s.node n).lops x
-  headsAnti : ∀ n x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y
-  headsNonempty : ∀ n, ∃ h, (s.node n).heads h
-  ownInHeads : ∀ n x, x < s.U.next → s.U.creator x = some n →
-    ∃ h, (s.node n).heads h ∧ Anc s.U.par x h
   knownLt : ∀ n, (s.node n).known.2 < s.U.next
   stagedLt : ∀ n x, (s.node n).sops x → x < s.U.next
-  -- messages
   msgs : ∀ m, s.net m → MsgR s m
-
-namespace InvR
-
-variable {s : State}
-
-theorem chain (hI : InvR N s) {i j : Nat} (hij : i ≤ j) (hj : j ≤ s.hub.seq) :
-    Anc s.U.par (s.hub.hist i) (s.hub.hist j) := by
-  induction j with
-  | zero =>
-    have : i = 0 := by omega
-    subst this; exact Anc.refl
-  | succ j ih =>
-    by_cases h : i = j + 1
-    · subst h; exact Anc.refl
-    · exact (ih (by omega) (by omega)).trans (hI.histStep j (by omega)).1
-
-theorem histAnc (hI : InvR N s) {i : Nat} (hi : i ≤ s.hub.seq) :
-    Anc s.U.par (s.hub.hist i) s.hub.head := by
-  have := hI.chain hi (Nat.le_refl _)
-  rwa [hI.histHead] at this
-
-theorem accLt (hI : InvR N s) {x : Nat} (h : Anc s.U.par x s.hub.head) : x < s.U.next :=
-  Nat.lt_of_le_of_lt (h.le hI.parLt) hI.headLt
-
-theorem histLt (hI : InvR N s) {i : Nat} (hi : i ≤ s.hub.seq) : s.hub.hist i < s.U.next :=
-  hI.accLt (hI.histAnc hi)
-
-theorem headsLt (hI : InvR N s) {n x : Nat} (h : (s.node n).heads x) : x < s.U.next :=
-  hI.lLt n x (hI.headsLocal n x h)
-
-theorem lopsAnc (hI : InvR N s) {n x a : Nat} (hx : (s.node n).lops x)
-    (ha : Anc s.U.par a x) : (s.node n).lops a :=
-  Anc.closed (S := (s.node n).lops) (fun y p hy hp => hI.lParents n y p hy hp) ha hx
-
-end InvR
 
 theorem MsgR.grow {s s' : State} (hn : s.U.next ≤ s'.U.next) {m : Msg} (h : MsgR s m) :
     MsgR s' m := by
@@ -158,22 +99,10 @@ theorem MsgR.grow {s s' : State} (hn : s.U.next ≤ s'.U.next) {m : Msg} (h : Ms
   | fetch => trivial
 
 theorem invR_init (N : Nat) : InvR N init := by
-  have anc0 : ∀ a x, Anc init.U.par a x → a = x := by
-    intro a x h
-    cases h with
-    | refl => rfl
-    | step hp _ => simp [init] at hp
   refine
-    { parLt := ?_, nextPos := ?_, rootAnc := ?_, creatorSome := ?_, creatorRoot := ?_,
-      objsRoot := ?_, headLt := ?_, histHead := ?_, hist0 := ?_, histStep := ?_,
-      hubClosed := ?_, hubOpsLt := ?_, lroot := ?_, lLt := ?_, lParents := ?_,
-      lObjs := ?_, headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_,
-      ownInHeads := ?_, knownLt := ?_, stagedLt := ?_, msgs := ?_ }
-  all_goals simp [init, initNode, ClosedAt, HubHas]
-  · intro y p hp; simp at hp
-  · exact Anc.refl
-  · intro x hx h; omega
-  · intro y h; exact anc0 _ _ h
+    { toCore := core_init N, objsRoot := ?_, hubOpsLt := ?_, knownLt := ?_, stagedLt := ?_,
+      msgs := ?_ }
+  all_goals simp [init, initNode]
 
 /-! ## Preservation -/
 
@@ -187,51 +116,22 @@ theorem InvR.send {s : State} {m : Msg} (hI : InvR N s) (hm : MsgR s m) :
       · subst h; exact hm }
 
 /-- The per-node part of `InvR`, for a candidate new state `nd` of node `n`. -/
-structure NodeR (s : State) (n : Nat) (nd : Node) : Prop where
-  lroot : nd.lops root
-  lLt : ∀ x, nd.lops x → x < s.U.next
-  lParents : ∀ x p, nd.lops x → p ∈ s.U.par x → nd.lops p
-  lObjs : ∀ x o, nd.lops x → o ∈ s.U.objs x → nd.lobj o
-  headsLocal : ∀ x, nd.heads x → nd.lops x
-  headsAnti : ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x y → x = y
-  headsNonempty : ∃ h, nd.heads h
-  ownInHeads : ∀ x, x < s.U.next → s.U.creator x = some n →
-    ∃ h, nd.heads h ∧ Anc s.U.par x h
+structure NodeR (s : State) (n : Nat) (nd : Node) : Prop extends CoreNode s n nd where
   knownLt : nd.known.2 < s.U.next
   stagedLt : ∀ x, nd.sops x → x < s.U.next
 
 theorem InvR.nodeR {s : State} (hI : InvR N s) (n : Nat) : NodeR s n (s.node n) where
-  lroot := hI.lroot n
-  lLt := hI.lLt n
-  lParents := hI.lParents n
-  lObjs := hI.lObjs n
-  headsLocal := hI.headsLocal n
-  headsAnti := hI.headsAnti n
-  headsNonempty := hI.headsNonempty n
-  ownInHeads := hI.ownInHeads n
+  toCoreNode := hI.coreNode n
   knownLt := hI.knownLt n
   stagedLt := hI.stagedLt n
 
 theorem invR_setNode {s : State} {n : Nat} {nd : Node} (hI : InvR N s) (h : NodeR s n nd) :
-    InvR N (s.setNode n nd) := by
-  refine
-    { hI with
-      lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_, headsLocal := ?_,
-      headsAnti := ?_, headsNonempty := ?_, ownInHeads := ?_, knownLt := ?_,
-      stagedLt := ?_ }
-  all_goals
-    intro i
-    by_cases hi : i = n
-    · subst hi; simp only [setNode_self, setNode_U]
-      first
-        | exact h.lroot | exact h.lLt | exact h.lParents | exact h.lObjs
-        | exact h.headsLocal | exact h.headsAnti | exact h.headsNonempty
-        | exact h.ownInHeads | exact h.knownLt | exact h.stagedLt
-    · rw [setNode_ne hi]
-      first
-        | exact hI.lroot i | exact hI.lLt i | exact hI.lParents i | exact hI.lObjs i
-        | exact hI.headsLocal i | exact hI.headsAnti i | exact hI.headsNonempty i
-        | exact hI.ownInHeads i | exact hI.knownLt i | exact hI.stagedLt i
+    InvR N (s.setNode n nd) :=
+  { hI with
+    toCore := hI.toCore.setNode h.toCoreNode
+    knownLt := forall_setNode (P := fun _ nd => nd.known.2 < s.U.next) hI.knownLt h.knownLt
+    stagedLt := forall_setNode (P := fun _ nd => ∀ x, nd.sops x → x < s.U.next)
+      hI.stagedLt h.stagedLt }
 
 /-- The general preservation lemma for creating an operation on node `n`. -/
 theorem invR_createOp {s : State} {n : Nat} {L O : List Nat} {mg : Bool} {H' : OSet}
@@ -243,137 +143,15 @@ theorem invR_createOp {s : State} {n : Nat} {L O : List Nat} {mg : Bool} {H' : O
     (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
       ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h') :
     InvR N (s.createOp n L O mg H') := by
-  have hLlt : ∀ p ∈ L, p < s.U.next := fun p hp => hI.lLt n p (hL p hp)
-  have T : ∀ {a x : Nat}, x < s.U.next →
-      (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
-    fun hx => anc_upd_iff hI.parLt hLlt hx
-  have hlt' := parLt_upd hI.parLt hLlt
   have hne0 : s.U.next ≠ root := Nat.ne_of_gt hI.nextPos
   refine
-    { parLt := hlt', nextPos := by simp, rootAnc := ?_, creatorSome := ?_,
-      creatorRoot := ?_, objsRoot := ?_, headLt := ?_, histHead := hI.histHead,
-      hist0 := hI.hist0, histStep := ?_, hubClosed := ?_, hubOpsLt := ?_, lroot := ?_,
-      lLt := ?_, lParents := ?_, lObjs := ?_, headsLocal := ?_, headsAnti := ?_,
-      headsNonempty := ?_, ownInHeads := ?_, knownLt := ?_, stagedLt := ?_, msgs := ?_ }
-  · -- rootAnc
-    intro x hx
-    simp only [createOp_U, create_next, create_par] at hx ⊢
-    by_cases hxo : x = s.U.next
-    · rw [hxo, anc_upd_new hI.parLt hLlt]
-      right
-      obtain ⟨q, hq⟩ := List.exists_mem_of_ne_nil L hLne
-      exact ⟨q, hq, hI.rootAnc q (hLlt q hq)⟩
-    · have hx' : x < s.U.next := by omega
-      exact (T hx').2 (hI.rootAnc x hx')
-  · -- creatorSome
-    intro x hx0 hx
-    simp only [createOp_U, create_next, create_creator] at hx ⊢
-    by_cases hxo : x = s.U.next
-    · rw [hxo, upd_same]; exact ⟨n, hn, rfl⟩
-    · rw [upd_ne _ _ hxo]; exact hI.creatorSome x hx0 (by omega)
-  · simp only [createOp_U, create_creator]
-    rw [upd_ne _ _ (Ne.symm hne0)]; exact hI.creatorRoot
+    { toCore := Core.createOp hI.toCore hn hL hLne hHo hHsub hHanti hHmono, objsRoot := ?_,
+      hubOpsLt := ?_, knownLt := ?_, stagedLt := ?_, msgs := ?_ }
   · simp only [createOp_U, create_objs]
     rw [upd_ne _ _ (Ne.symm hne0)]; exact hI.objsRoot
-  · simp; have := hI.headLt; omega
-  · intro i hi
-    have hi' : i < s.hub.seq := hi
-    obtain ⟨h1, h2⟩ := hI.histStep i hi'
-    exact ⟨(T (hI.histLt (by omega))).2 h1, h2⟩
-  · -- hubClosed
-    intro y hy
-    simp only [HubHas, createOp_U, createOp_hub, create_par, create_objs] at hy ⊢
-    have hy' := (T hI.headLt).1 hy
-    obtain ⟨h1, h2⟩ := hI.hubClosed y hy'
-    refine ⟨h1, ?_⟩
-    rw [upd_lt _ _ (hI.accLt hy')]
-    exact h2
   · intro x hx
     have := hI.hubOpsLt x hx
     simp; omega
-  · intro i
-    by_cases hi : i = n
-    · subst hi; simp; exact Or.inl (hI.lroot i)
-    · rw [createOp_node_ne hi]; exact hI.lroot i
-  · intro i x hx
-    simp only [createOp_U, create_next]
-    by_cases hi : i = n
-    · subst hi
-      simp only [createOp_lops] at hx
-      rcases hx with hx | hx
-      · have := hI.lLt i x hx; omega
-      · omega
-    · rw [createOp_node_ne hi] at hx; have := hI.lLt i x hx; omega
-  · -- lParents
-    intro i x p hx hp
-    simp only [createOp_U, create_par] at hp
-    by_cases hi : i = n
-    · subst hi
-      simp only [createOp_lops] at hx ⊢
-      rcases hx with hx | rfl
-      · have hxl := hI.lLt i x hx
-        rw [upd_ne _ _ (Nat.ne_of_lt hxl)] at hp
-        exact Or.inl (hI.lParents i x p hx hp)
-      · rw [upd_same] at hp; exact Or.inl (hL p hp)
-    · rw [createOp_node_ne hi] at hx ⊢
-      have hxl := hI.lLt i x hx
-      rw [upd_ne _ _ (Nat.ne_of_lt hxl)] at hp
-      exact hI.lParents i x p hx hp
-  · -- lObjs
-    intro i x o hx ho
-    simp only [createOp_U, create_objs] at ho
-    by_cases hi : i = n
-    · subst hi
-      simp only [createOp_lops, createOp_lobj] at hx ⊢
-      rcases hx with hx | rfl
-      · have hxl := hI.lLt i x hx
-        rw [upd_ne _ _ (Nat.ne_of_lt hxl)] at ho
-        exact Or.inl (hI.lObjs i x o hx ho)
-      · rw [upd_same] at ho; exact Or.inr ho
-    · rw [createOp_node_ne hi] at hx ⊢
-      have hxl := hI.lLt i x hx
-      rw [upd_ne _ _ (Nat.ne_of_lt hxl)] at ho
-      exact hI.lObjs i x o hx ho
-  · -- headsLocal
-    intro i x hx
-    by_cases hi : i = n
-    · subst hi
-      simp only [createOp_heads] at hx
-      simp only [createOp_lops]
-      rcases hHsub x hx with h | h
-      · exact Or.inl (hI.headsLocal i x h)
-      · exact Or.inr h
-    · rw [createOp_node_ne hi] at hx ⊢; exact hI.headsLocal i x hx
-  · -- headsAnti
-    intro i x y hx hy hA
-    simp only [createOp_U, create_par] at hA
-    by_cases hi : i = n
-    · subst hi
-      simp only [createOp_heads] at hx hy
-      exact hHanti x y hx hy hA
-    · rw [createOp_node_ne hi] at hx hy
-      exact hI.headsAnti i x y hx hy ((T (hI.headsLt hy)).1 hA)
-  · intro i
-    by_cases hi : i = n
-    · subst hi; exact ⟨s.U.next, by simpa using hHo⟩
-    · rw [createOp_node_ne hi]; exact hI.headsNonempty i
-  · -- ownInHeads
-    intro i x hx hc
-    simp only [createOp_U, create_next, create_creator, create_par] at hx hc ⊢
-    by_cases hxo : x = s.U.next
-    · subst hxo
-      rw [upd_same] at hc
-      cases hc
-      exact ⟨s.U.next, by simpa using hHo, Anc.refl⟩
-    · rw [upd_ne _ _ hxo] at hc
-      have hx' : x < s.U.next := by omega
-      obtain ⟨h, hh, hA⟩ := hI.ownInHeads i x hx' hc
-      by_cases hi : i = n
-      · subst hi
-        obtain ⟨h', hh', hA'⟩ := hHmono x h hh hA
-        exact ⟨h', by simpa using hh', hA'⟩
-      · rw [createOp_node_ne hi]
-        exact ⟨h, hh, (T (hI.headsLt hh)).2 hA⟩
   · intro i
     simp only [createOp_U, create_next]
     by_cases hi : i = n
@@ -680,11 +458,6 @@ theorem remake_reachable {s : State} (h : RReachable N s) : RReachable N s.remak
   rw [← e]; exact r2
 
 /-! ## Liveness after the hub stops going back -/
-
-/-- Node `n`'s `known` is a head in the hub's current history, at its sequence number: what
-`Inv.known` says of every node while the hub keeps its heads. -/
-def Consistent (s : State) (n : Nat) : Prop :=
-  (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2
 
 /-- Node `n` has one head, accepted, and comparable with every head in the hub's history. -/
 def Settled (s : State) (n : Nat) : Prop :=

@@ -141,6 +141,22 @@ theorem pUpload_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N s 
   have r4 := hP r3 (SyncStep.hubPutObjs _ n (s.upObjs n hd) (Or.inr rfl))
   exact hP r4 (SyncStep.push _ n (s.node n).known.2 hd hn hl)
 
+/-- The merged `Push` of what `Upload` would send, to `hd` from the node's `known` head, is a
+sync step, in any set of states that sync steps keep, from a state where node `n`'s operations
+are closed under parents and have their objects. -/
+theorem pushUpload_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N s s' → P s')
+    {s : State} (h : P s) {n hd : Nat} (hn : n < N)
+    (hpar : ∀ x p, (s.node n).lops x → p ∈ s.U.par x → (s.node n).lops p)
+    (hobj : ∀ x o, (s.node n).lops x → o ∈ s.U.objs x → (s.node n).lobj o)
+    (hl : (s.node n).lops hd) :
+    P (s.send (.push n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.2 hd)) := by
+  have lopsAnc : ∀ {a}, Anc s.U.par a hd → (s.node n).lops a := fun ha =>
+    Anc.closed (S := (s.node n).lops) (fun y p hy hp => hpar y p hy hp) ha hl
+  refine hP h (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.2 hd hn
+    (fun x hx => lopsAnc hx.1) (fun o ho => ?_) hl)
+  obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
+  exact hobj y o (lopsAnc hy) hoy
+
 /-- `pRealize` is a run of sync steps, in any set of states that sync steps keep, when the
 hub holds `x` and its objects and node `n` has its parents. -/
 theorem pRealize_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N s s' → P s')
@@ -187,19 +203,13 @@ theorem pstep_reachable {s s' : State} (h : Reachable N s) (hp : PStep N s s') :
     exact r'.step (Or.inr (SyncStep.learn _ n .accepted (s.hub.seq + 1) hd hn
       (Or.inl (Or.inr rfl)) (Nat.lt_succ_of_le (hI.known n).1)))
   | pushIdem n hd hn hh hne hk hidem =>
-    have hlt : (s.node n).known.1 < s.hub.seq := by
-      rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-      · exact h1
-      · exfalso; apply hne; rw [← hidem, ← hI.histHead, ← h1, (hI.known n).2]
+    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
     have r := pUpload_reachable h hn ((hh hd).2 rfl)
     have r' := r.step (Or.inr (SyncStep.casIdem _ n (s.node n).known.2 hd (Or.inr rfl) hidem))
     exact r'.step (Or.inr (SyncStep.learn _ n .accepted s.hub.seq s.hub.head hn
       (Or.inr rfl) hlt))
   | pushReject n hd hn hh hne hk hrej hrej' =>
-    have hlt : (s.node n).known.1 < s.hub.seq := by
-      rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-      · exact h1
-      · exfalso; apply hrej; rw [← hI.histHead, ← h1, (hI.known n).2]
+    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
     have r := pUpload_reachable h hn ((hh hd).2 rfl)
     have r' := r.step (Or.inr (SyncStep.casReject _ n (s.node n).known.2 hd (Or.inr rfl)
       hrej' (fun ⟨e, _, _⟩ => hrej e)))
@@ -508,12 +518,6 @@ theorem measure_merge {s : State} (hI : Inv N s) {n : Nat} {L O : List Nat} (hn 
   rfl
 @[simp] theorem pUpload_seq {s : State} {n h : Nat} : (s.pUpload n h).hub.seq = s.hub.seq := rfl
 
-/-- Facts about the state after `pUpload`. -/
-theorem pUpload_frame {s : State} {n h : Nat} :
-    (s.pUpload n h).U = s.U ∧ (s.pUpload n h).hub.head = s.hub.head ∧
-    (s.pUpload n h).hub.seq = s.hub.seq ∧ (s.pUpload n h).node = s.node :=
-  ⟨rfl, rfl, rfl, rfl⟩
-
 theorem measure_pushAccept {s : State} (hI : Inv N s) {n hd : Nat} (hn : n < N)
     (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
     (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
@@ -560,19 +564,13 @@ theorem measure_decreases {s s' : State} (h : Reachable N s) (hp : PStep N s s')
   | merge n L O hn hL h2 => exact measure_merge hI hn hL h2
   | pushAccept n hd hn hh hne hk hacc => exact measure_pushAccept hI hn hh hne hk hacc
   | pushIdem n hd hn hh hne hk hidem =>
-    have hlt : (s.node n).known.1 < s.hub.seq := by
-      rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-      · exact h1
-      · exfalso; apply hne; rw [← hidem, ← hI.histHead, ← h1, (hI.known n).2]
+    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
     refine measure_pushLearn hn ⟨rfl, rfl, rfl, fun i hi => ?_⟩ ?_ ?_ hlt
     · simp [State.pPushIdem, State.learn, setNode_ne hi]
     · simp [State.pPushIdem, State.learn]
     · simp [State.pPushIdem, State.learn]
   | pushReject n hd hn hh hne hk hrej hrej' =>
-    have hlt : (s.node n).known.1 < s.hub.seq := by
-      rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-      · exact h1
-      · exfalso; apply hrej; rw [← hI.histHead, ← h1, (hI.known n).2]
+    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
     refine measure_pushLearn hn ⟨rfl, rfl, rfl, fun i hi => ?_⟩ ?_ ?_ hlt
     · simp [State.pPushReject, State.learn, setNode_ne hi]
     · simp [State.pPushReject, State.learn]
@@ -583,10 +581,6 @@ theorem measure_decreases {s s' : State} (h : Reachable N s) (hp : PStep N s s')
 /-- Policy steps from reachable states are well-founded: there is no infinite policy run. -/
 theorem pstep_wf : WellFounded (fun s' s => Reachable N s ∧ PStep N s s') :=
   Subrelation.wf (fun ⟨h, hp⟩ => measure_decreases h hp) (InvImage.wf (measure N) lex5_wf)
-
-theorem no_infinite_run_aux {r : State → State → Prop} {a : State} (ha : Acc r a) :
-    ∀ f : Nat → State, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) :=
-  acc_no_infinite_chain ha
 
 /-- **Termination**: no infinite sequence of policy steps starts from a reachable state,
 whatever the scheduling (in particular despite contention for the hub). -/

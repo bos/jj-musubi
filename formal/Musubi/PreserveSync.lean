@@ -43,8 +43,8 @@ variable {s : State} {m : Msg} {S : OSet} {sq h : Nat}
 
 end simpLemmas
 
-/-- The per-node part of the invariant, for a candidate new state `nd` of node `n`. -/
-structure NodeOK (N : Nat) (s : State) (n : Nat) (nd : Node) : Prop where
+/-- The per-node part of `Core`, for a candidate new state `nd` of node `n`. -/
+structure CoreNode (s : State) (n : Nat) (nd : Node) : Prop where
   lroot : nd.lops root
   lLt : ∀ x, nd.lops x → x < s.U.next
   lParents : ∀ x p, nd.lops x → p ∈ s.U.par x → nd.lops p
@@ -52,11 +52,14 @@ structure NodeOK (N : Nat) (s : State) (n : Nat) (nd : Node) : Prop where
   headsLocal : ∀ x, nd.heads x → nd.lops x
   headsAnti : ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x y → x = y
   headsNonempty : ∃ h, nd.heads h
+  ownInHeads : ∀ x, x < s.U.next → s.U.creator x = some n →
+    ∃ h, nd.heads h ∧ Anc s.U.par x h
+
+/-- The per-node part of the invariant, for a candidate new state `nd` of node `n`. -/
+structure NodeOK (N : Nat) (s : State) (n : Nat) (nd : Node) : Prop extends CoreNode s n nd where
   known : nd.known.1 ≤ s.hub.seq ∧ s.hub.hist nd.known.1 = nd.known.2
   locality : ∀ x, nd.lops x → s.U.creator x = some n ∨ Anc s.U.par x s.hub.head
   staged : ∀ x, nd.sops x → Anc s.U.par x s.hub.head
-  ownInHeads : ∀ x, x < s.U.next → s.U.creator x = some n →
-    ∃ h, nd.heads h ∧ Anc s.U.par x h
   accHeads : ∀ x y, nd.heads x → nd.heads y →
     Anc s.U.par x s.hub.head → Anc s.U.par y s.hub.head → x = y
   comparable : ∀ x i, nd.heads x → Anc s.U.par x s.hub.head → i ≤ s.hub.seq →
@@ -65,7 +68,17 @@ structure NodeOK (N : Nat) (s : State) (n : Nat) (nd : Node) : Prop where
   headsMono : ∀ d h, (s.node n).heads h → Anc s.U.par d h →
     ∃ h', nd.heads h' ∧ Anc s.U.par d h'
 
-theorem Inv.nodeOK {s : State} (hI : Inv N s) (n : Nat) : NodeOK N s n (s.node n) where
+/-- A property of one node that holds of every node of `s` and of `nd` holds of every node of
+`s.setNode n nd`. -/
+theorem forall_setNode {s : State} {n : Nat} {nd : Node} {P : Nat → Node → Prop}
+    (hs : ∀ i, P i (s.node i)) (h : P n nd) : ∀ i, P i ((s.setNode n nd).node i) := by
+  intro i
+  by_cases hi : i = n
+  · subst hi; rw [setNode_self]; exact h
+  · rw [setNode_ne hi]; exact hs i
+
+/-- Every node of a state satisfying `Core` satisfies `CoreNode` there. -/
+theorem Core.coreNode {s : State} (hI : Core N s) (n : Nat) : CoreNode s n (s.node n) where
   lroot := hI.lroot n
   lLt := hI.lLt n
   lParents := hI.lParents n
@@ -73,38 +86,61 @@ theorem Inv.nodeOK {s : State} (hI : Inv N s) (n : Nat) : NodeOK N s n (s.node n
   headsLocal := hI.headsLocal n
   headsAnti := hI.headsAnti n
   headsNonempty := hI.headsNonempty n
+  ownInHeads := hI.ownInHeads n
+
+theorem Inv.nodeOK {s : State} (hI : Inv N s) (n : Nat) : NodeOK N s n (s.node n) where
+  toCoreNode := hI.coreNode n
   known := hI.known n
   locality := hI.locality n
   staged := hI.staged n
-  ownInHeads := hI.ownInHeads n
   accHeads := hI.accHeads n
   comparable := hI.comparable n
   headsMono := fun _ h hh hA => ⟨h, hh, hA⟩
+
+/-- Replacing node `n` by `nd` preserves `Core`. -/
+theorem Core.setNode {s : State} {n : Nat} {nd : Node} (hI : Core N s) (h : CoreNode s n nd) :
+    Core N (s.setNode n nd) :=
+  { hI with
+    lroot := forall_setNode (P := fun _ nd => nd.lops root) hI.lroot h.lroot
+    lLt := forall_setNode (P := fun _ nd => ∀ x, nd.lops x → x < s.U.next) hI.lLt h.lLt
+    lParents := forall_setNode (P := fun _ nd => ∀ x p, nd.lops x → p ∈ s.U.par x → nd.lops p)
+      hI.lParents h.lParents
+    lObjs := forall_setNode (P := fun _ nd => ∀ x o, nd.lops x → o ∈ s.U.objs x → nd.lobj o)
+      hI.lObjs h.lObjs
+    headsLocal := forall_setNode (P := fun _ nd => ∀ x, nd.heads x → nd.lops x)
+      hI.headsLocal h.headsLocal
+    headsAnti := forall_setNode
+      (P := fun _ nd => ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x y → x = y)
+      hI.headsAnti h.headsAnti
+    headsNonempty := forall_setNode (P := fun _ nd => ∃ h, nd.heads h)
+      hI.headsNonempty h.headsNonempty
+    ownInHeads := forall_setNode
+      (P := fun i nd => ∀ x, x < s.U.next → s.U.creator x = some i → ∃ h, nd.heads h ∧
+        Anc s.U.par x h)
+      hI.ownInHeads h.ownInHeads }
 
 theorem inv_setNode {s : State} {n : Nat} {nd : Node} (hI : Inv N s) (h : NodeOK N s n nd) :
     Inv N (s.setNode n nd) := by
   refine
     { hI with
-      lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_, headsLocal := ?_,
-      headsAnti := ?_, headsNonempty := ?_, known := ?_, locality := ?_, staged := ?_,
-      ownInHeads := ?_, accHeads := ?_, comparable := ?_, msgs := ?_ }
-  all_goals first
-    | (intro i
-       by_cases hi : i = n
-       · subst hi; simp only [setNode_self, setNode_U, setNode_hub]
-         first
-           | exact h.lroot | exact h.lLt | exact h.lParents | exact h.lObjs
-           | exact h.headsLocal | exact h.headsAnti | exact h.headsNonempty | exact h.known
-           | exact h.locality | exact h.staged | exact h.ownInHeads | exact h.accHeads
-           | exact h.comparable
-       · rw [setNode_ne hi]
-         first
-           | exact hI.lroot i | exact hI.lLt i | exact hI.lParents i | exact hI.lObjs i
-           | exact hI.headsLocal i | exact hI.headsAnti i | exact hI.headsNonempty i
-           | exact hI.known i | exact hI.locality i | exact hI.staged i
-           | exact hI.ownInHeads i | exact hI.accHeads i | exact hI.comparable i)
-    | skip
-  -- remaining: messages
+      toCore := hI.toCore.setNode h.toCoreNode
+      known := forall_setNode
+        (P := fun _ nd => nd.known.1 ≤ s.hub.seq ∧ s.hub.hist nd.known.1 = nd.known.2)
+        hI.known h.known
+      locality := forall_setNode
+        (P := fun i nd => ∀ x, nd.lops x → s.U.creator x = some i ∨ Anc s.U.par x s.hub.head)
+        hI.locality h.locality
+      staged := forall_setNode (P := fun _ nd => ∀ x, nd.sops x → Anc s.U.par x s.hub.head)
+        hI.staged h.staged
+      accHeads := forall_setNode
+        (P := fun _ nd => ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x s.hub.head →
+          Anc s.U.par y s.hub.head → x = y)
+        hI.accHeads h.accHeads
+      comparable := forall_setNode
+        (P := fun _ nd => ∀ x i, nd.heads x → Anc s.U.par x s.hub.head → i ≤ s.hub.seq →
+          Anc s.U.par x (s.hub.hist i) ∨ Anc s.U.par (s.hub.hist i) x)
+        hI.comparable h.comparable
+      msgs := ?_ }
   intro m hm
   have hm' := hI.msgs m hm
   cases m with

@@ -65,11 +65,7 @@ theorem pushAccept_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n <
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushAccept n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have r1 := h.step (Or.inr (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl))
+  have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushAccept _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl)
     (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
@@ -85,15 +81,8 @@ theorem pushIdem_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n < N
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushIdem n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have hlt : (s.node n).known.1 < s.hub.seq := by
-    rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-    · exact h1
-    · exfalso; apply hne; rw [← hidem, ← hI.histHead, ← h1, (hI.known n).2]
-  have r1 := h.step (Or.inr (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl))
+  have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
+  have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushIdem _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl) hidem))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .accepted s.hub.seq s.hub.head hn
@@ -107,15 +96,8 @@ theorem pushReject_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n <
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushReject n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have hlt : (s.node n).known.1 < s.hub.seq := by
-    rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
-    · exact h1
-    · exfalso; apply hrej; rw [← hI.histHead, ← h1, (hI.known n).2]
-  have r1 := h.step (Or.inr (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl))
+  have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
+  have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej)))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .rejected s.hub.seq s.hub.head hn
@@ -205,11 +187,7 @@ theorem pushAcceptR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushAccept n hd) := by
   have hI := invR_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushAccept _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl)
     (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
@@ -224,11 +202,7 @@ theorem pushIdemR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n <
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushIdem n hd) := by
   have hI := invR_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushIdem _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl) hidem)
   have r3 := r2.sync (SyncStep.learnUnfiltered _ n .accepted s.hub.seq s.hub.head hn
@@ -242,11 +216,7 @@ theorem pushRejectR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushReject n hd) := by
   have hI := invR_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
     (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej))
   have r3 := r2.sync (SyncStep.learnUnfiltered _ n .rejected s.hub.seq s.hub.head hn

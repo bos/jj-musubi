@@ -101,13 +101,13 @@ and projection used by native-event replay.
 | `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree. |
 | `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
-| `Musubi/Invariant.lean` | The inductive invariant `Inv` and the message invariant `MsgOK`. |
-| `Musubi/PreserveEnv.lean` | `Inv` is preserved by `UserOp`, `Merge` and message sends. |
-| `Musubi/PreserveSync.lean` | `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
+| `Musubi/Invariant.lean` | `Core`, what holds with or without a hub that goes back; the inductive invariant `Inv`, which extends it; and the message invariant `MsgOK`. |
+| `Musubi/PreserveEnv.lean` | `Core` and `Inv` are preserved by `UserOp`, `Merge` and message sends. |
+| `Musubi/PreserveSync.lean` | `Core` is preserved by replacing one node (`Core.setNode`); `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
 | `Musubi/Safety.lean` | The safety properties and no feedback. |
 | `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read, with a hub that may have gone back too. |
-| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
+| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives (`InvR`, which extends `Core`), and convergence once the hub stops going back. |
 | `Musubi/AbandonRefs.lean` | The boundary from contracted survivor heads and saved expected values to one-ref realization and merged publication. |
 | `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`). |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |

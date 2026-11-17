@@ -1315,10 +1315,6 @@ theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hA : AllPrune
 
 /-! ### Termination -/
 
-theorem no_infinite_run_auxS {r : SState → SState → Prop} {a : SState} (ha : Acc r a) :
-    ∀ f : Nat → SState, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) :=
-  acc_no_infinite_chain ha
-
 theorem spstepR_wf :
     WellFounded (fun S' S => (SRReachable N S ∧ AllPruned N S) ∧ SPStepR N S S') :=
   Subrelation.wf (fun ⟨⟨h, hA⟩, hp⟩ => smeasure_decreases h hA hp)

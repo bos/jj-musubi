@@ -55,44 +55,25 @@ theorem createOp_node_ne {i : Nat} (h : i ≠ n) : (s.createOp n L O mg H').node
 @[simp] theorem createOp_sops : ((s.createOp n L O mg H').node n).sops = (s.node n).sops := by
   simp [State.createOp]
 
-/-- The general preservation lemma for creating an operation on node `n`. -/
-theorem inv_createOp (hI : Inv N s) (hn : n < N)
+/-- Creating an operation on node `n` preserves `Core`, given what the new operation's parents
+`L` and the node's new heads `H'` must satisfy. -/
+theorem Core.createOp (hI : Core N s) (hn : n < N)
     (hL : ∀ p ∈ L, (s.node n).lops p) (hLne : L ≠ [])
     (hHo : H' s.U.next)
     (hHsub : ∀ y, H' y → (s.node n).heads y ∨ y = s.U.next)
     (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y)
     (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
-      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h')
-    (hMerge : mg = true →
-      (∃ p ∈ L, s.U.creator p = some n ∧ ¬ Anc s.U.par p s.hub.head) ∧
-      (∀ p ∈ L, s.U.creator p ≠ some n → Anc s.U.par p s.hub.head)) :
-    Inv N (s.createOp n L O mg H') := by
+      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h') :
+    Core N (s.createOp n L O mg H') := by
   have hLlt : ∀ p ∈ L, p < s.U.next := fun p hp => hI.lLt n p (hL p hp)
   have T : ∀ {a x : Nat}, x < s.U.next →
       (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
     fun hx => anc_upd_iff hI.parLt hLlt hx
-  have hlt' := parLt_upd hI.parLt hLlt
-  have hHlt : ∀ y, H' y → y < s.U.next + 1 := by
-    intro y hy
-    rcases hHsub y hy with h | h
-    · have := hI.headsLt h; omega
-    · omega
-  -- elements of `H'` that are accepted are old heads
-  have hHacc : ∀ y, H' y → Anc (upd s.U.par s.U.next L) y s.hub.head →
-      (s.node n).heads y ∧ y < s.U.next := by
-    intro y hy hA
-    have hA' := (T hI.headLt).1 hA
-    have hylt := hI.accLt hA'
-    rcases hHsub y hy with h | h
-    · exact ⟨h, hylt⟩
-    · omega
   refine
-    { parLt := hlt', nextPos := ?_, rootAnc := ?_, creatorSome := ?_, headLt := ?_,
-      histHead := hI.histHead, hist0 := hI.hist0, histStep := ?_, hubClosed := ?_,
-      lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_, headsLocal := ?_,
-      headsAnti := ?_, headsNonempty := ?_, known := ?_, locality := ?_, staged := ?_,
-      ownInHeads := ?_, accHeads := ?_, comparable := ?_, mergeOwn := ?_,
-      mergeForeign := ?_, birthLe := ?_, birthMono := ?_, creatorRoot := ?_, msgs := ?_ }
+    { parLt := parLt_upd hI.parLt hLlt, nextPos := ?_, rootAnc := ?_, creatorSome := ?_,
+      creatorRoot := ?_, headLt := ?_, histHead := hI.histHead, hist0 := hI.hist0,
+      histStep := ?_, hubClosed := ?_, lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_,
+      headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_, ownInHeads := ?_ }
   · simp
   · -- rootAnc
     intro x hx
@@ -110,6 +91,9 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
     by_cases hxo : x = s.U.next
     · rw [hxo, upd_same]; exact ⟨n, hn, rfl⟩
     · rw [upd_ne _ _ hxo]; exact hI.creatorSome x hx0 (by omega)
+  · -- creatorRoot
+    simp only [createOp_U, create_creator]
+    rw [upd_lt _ _ hI.nextPos]; exact hI.creatorRoot
   · simp; have := hI.headLt; omega
   · -- histStep
     intro i hi
@@ -188,10 +172,58 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
     by_cases hi : i = n
     · subst hi; exact ⟨s.U.next, by simpa using hHo⟩
     · rw [createOp_node_ne hi]; exact hI.headsNonempty i
+  · -- ownInHeads
+    intro i x hx hc
+    simp only [createOp_U, create_next, create_creator, create_par] at hx hc ⊢
+    by_cases hxo : x = s.U.next
+    · subst hxo
+      rw [upd_same] at hc
+      cases hc
+      exact ⟨s.U.next, by simpa using hHo, Anc.refl⟩
+    · have hx' : x < s.U.next := by omega
+      rw [upd_ne _ _ hxo] at hc
+      obtain ⟨h, hh, hA⟩ := hI.ownInHeads i x hx' hc
+      by_cases hi : i = n
+      · subst hi
+        obtain ⟨h', hh', hA'⟩ := hHmono x h hh hA
+        exact ⟨h', by simpa using hh', hA'⟩
+      · rw [createOp_node_ne hi]
+        exact ⟨h, hh, (T (hI.headsLt hh)).2 hA⟩
+
+/-- The general preservation lemma for creating an operation on node `n`. -/
+theorem inv_createOp (hI : Inv N s) (hn : n < N)
+    (hL : ∀ p ∈ L, (s.node n).lops p) (hLne : L ≠ [])
+    (hHo : H' s.U.next)
+    (hHsub : ∀ y, H' y → (s.node n).heads y ∨ y = s.U.next)
+    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y)
+    (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
+      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h')
+    (hMerge : mg = true →
+      (∃ p ∈ L, s.U.creator p = some n ∧ ¬ Anc s.U.par p s.hub.head) ∧
+      (∀ p ∈ L, s.U.creator p ≠ some n → Anc s.U.par p s.hub.head)) :
+    Inv N (s.createOp n L O mg H') := by
+  have hLlt : ∀ p ∈ L, p < s.U.next := fun p hp => hI.lLt n p (hL p hp)
+  have T : ∀ {a x : Nat}, x < s.U.next →
+      (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
+    fun hx => anc_upd_iff hI.parLt hLlt hx
+  -- elements of `H'` that are accepted are old heads
+  have hHacc : ∀ y, H' y → Anc (upd s.U.par s.U.next L) y s.hub.head →
+      (s.node n).heads y ∧ y < s.U.next := by
+    intro y hy hA
+    have hA' := (T hI.headLt).1 hA
+    have hylt := hI.accLt hA'
+    rcases hHsub y hy with h | h
+    · exact ⟨h, hylt⟩
+    · omega
+  refine
+    { toCore := Core.createOp hI.toCore hn hL hLne hHo hHsub hHanti hHmono, known := ?_,
+      locality := ?_, staged := ?_, accHeads := ?_, comparable := ?_, mergeOwn := ?_,
+      mergeForeign := ?_, birthLe := ?_, birthMono := ?_, msgs := ?_ }
   · -- known
     intro i
+    simp only [Consistent, createOp_hub]
     by_cases hi : i = n
-    · subst hi; simp only [createOp_known, createOp_hub]; exact hI.known i
+    · subst hi; simp only [createOp_known]; exact hI.known i
     · rw [createOp_node_ne hi]; exact hI.known i
   · -- locality
     intro i x hx
@@ -219,23 +251,6 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
       exact (T hI.headLt).2 (hI.staged i x hx)
     · rw [createOp_node_ne hi] at hx
       exact (T hI.headLt).2 (hI.staged i x hx)
-  · -- ownInHeads
-    intro i x hx hc
-    simp only [createOp_U, create_next, create_creator, create_par] at hx hc ⊢
-    by_cases hxo : x = s.U.next
-    · subst hxo
-      rw [upd_same] at hc
-      cases hc
-      exact ⟨s.U.next, by simpa using hHo, Anc.refl⟩
-    · have hx' : x < s.U.next := by omega
-      rw [upd_ne _ _ hxo] at hc
-      obtain ⟨h, hh, hA⟩ := hI.ownInHeads i x hx' hc
-      by_cases hi : i = n
-      · subst hi
-        obtain ⟨h', hh', hA'⟩ := hHmono x h hh hA
-        exact ⟨h', by simpa using hh', hA'⟩
-      · rw [createOp_node_ne hi]
-        exact ⟨h, hh, (T (hI.headsLt hh)).2 hA⟩
   · -- accHeads
     intro i x y hx hy hxa hya
     simp only [createOp_U, create_par, createOp_hub] at hxa hya
@@ -315,9 +330,6 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
     by_cases hyo : y = s.U.next
     · subst hyo; rw [upd_same]; exact hI.birthLe x hx'
     · rw [upd_ne _ _ hyo]; exact hI.birthMono x y hxy (by omega)
-  · -- creatorRoot
-    simp only [createOp_U, create_creator]
-    rw [upd_lt _ _ hI.nextPos]; exact hI.creatorRoot
   · -- msgs
     intro m hm
     have hm' := hI.msgs m hm

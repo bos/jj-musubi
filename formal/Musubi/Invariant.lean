@@ -19,14 +19,22 @@ def MsgOK (s : State) : Msg → Prop
   | .head _ _ sq h => sq ≤ s.hub.seq ∧ s.hub.hist sq = h
   | _ => True
 
-/-- The inductive invariant. Fields are grouped: universe, hub, nodes, cross-cutting
-properties, ghost merge records, messages. -/
-structure Inv (N : Nat) (s : State) : Prop where
+/-- Node `n`'s `known` is a head in the hub's current history, at its sequence number. -/
+def Consistent (s : State) (n : Nat) : Prop :=
+  (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2
+
+/-- What every state of the model satisfies, whether or not the hub can go back to an earlier
+head: the universe is a DAG rooted at `root`; the hub's history is a chain of heads ending in
+its head (`hubClosed`: every ancestor of that head, with its objects, is stored at the hub);
+and every node's repository is closed under parents, with an antichain of heads that covers the
+operations the node made. -/
+structure Core (N : Nat) (s : State) : Prop where
   -- universe
   parLt : ParLt s.U.par
   nextPos : 0 < s.U.next
   rootAnc : ∀ x, x < s.U.next → Anc s.U.par root x
   creatorSome : ∀ x, 0 < x → x < s.U.next → ∃ n, n < N ∧ s.U.creator x = some n
+  creatorRoot : s.U.creator root = none
   -- hub
   headLt : s.hub.head < s.U.next
   histHead : s.hub.hist s.hub.seq = s.hub.head
@@ -42,12 +50,72 @@ structure Inv (N : Nat) (s : State) : Prop where
   headsLocal : ∀ n x, (s.node n).heads x → (s.node n).lops x
   headsAnti : ∀ n x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y
   headsNonempty : ∀ n, ∃ h, (s.node n).heads h
-  known : ∀ n, (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2
+  ownInHeads : ∀ n x, x < s.U.next → s.U.creator x = some n →
+    ∃ h, (s.node n).heads h ∧ Anc s.U.par x h
+
+namespace Core
+
+variable {N : Nat} {s : State}
+
+theorem chain (hI : Core N s) {i j : Nat} (hij : i ≤ j) (hj : j ≤ s.hub.seq) :
+    Anc s.U.par (s.hub.hist i) (s.hub.hist j) := by
+  induction j with
+  | zero =>
+    have : i = 0 := by omega
+    subst this; exact Anc.refl
+  | succ j ih =>
+    by_cases h : i = j + 1
+    · subst h; exact Anc.refl
+    · exact (ih (by omega) (by omega)).trans (hI.histStep j (by omega)).1
+
+theorem histAnc (hI : Core N s) {i : Nat} (hi : i ≤ s.hub.seq) :
+    Anc s.U.par (s.hub.hist i) s.hub.head := by
+  have := hI.chain hi (Nat.le_refl _)
+  rwa [hI.histHead] at this
+
+theorem accLt (hI : Core N s) {x : Nat} (h : Anc s.U.par x s.hub.head) : x < s.U.next :=
+  Nat.lt_of_le_of_lt (h.le hI.parLt) hI.headLt
+
+theorem histLt (hI : Core N s) {i : Nat} (hi : i ≤ s.hub.seq) : s.hub.hist i < s.U.next :=
+  hI.accLt (hI.histAnc hi)
+
+/-- History is strictly increasing in id order. -/
+theorem histLtStrict (hI : Core N s) {i j : Nat} (hij : i < j) (hj : j ≤ s.hub.seq) :
+    s.hub.hist i < s.hub.hist j := by
+  induction j with
+  | zero => omega
+  | succ j ih =>
+    have hs := hI.histStep j (by omega)
+    have h1 : s.hub.hist j < s.hub.hist (j + 1) := hs.1.lt_of_ne hI.parLt hs.2
+    by_cases h : i = j
+    · subst h; exact h1
+    · exact Nat.lt_trans (ih (by omega) (by omega)) h1
+
+theorem histInj (hI : Core N s) {i j : Nat} (hi : i ≤ s.hub.seq) (hj : j ≤ s.hub.seq)
+    (h : s.hub.hist i = s.hub.hist j) : i = j := by
+  rcases Nat.lt_trichotomy i j with hlt | heq | hgt
+  · have := hI.histLtStrict hlt hj; omega
+  · exact heq
+  · have := hI.histLtStrict hgt hi; omega
+
+theorem headsLt (hI : Core N s) {n x : Nat} (h : (s.node n).heads x) : x < s.U.next :=
+  hI.lLt n x (hI.headsLocal n x h)
+
+theorem lopsAnc (hI : Core N s) {n x a : Nat} (hx : (s.node n).lops x)
+    (ha : Anc s.U.par a x) : (s.node n).lops a :=
+  Anc.closed (S := (s.node n).lops) (fun y p hy hp => hI.lParents n y p hy hp) ha hx
+
+end Core
+
+/-- The inductive invariant: `Core`, plus `known` (each node's known head is in the hub's
+current history), cross-cutting properties of the nodes' operations and heads relative to the
+hub's head and history, ghost records of where merges were made, and a guarantee for every
+in-flight message. -/
+structure Inv (N : Nat) (s : State) : Prop extends Core N s where
+  known : ∀ n, Consistent s n
   -- cross-cutting
   locality : ∀ n x, (s.node n).lops x → s.U.creator x = some n ∨ Anc s.U.par x s.hub.head
   staged : ∀ n x, (s.node n).sops x → Anc s.U.par x s.hub.head
-  ownInHeads : ∀ n x, x < s.U.next → s.U.creator x = some n →
-    ∃ h, (s.node n).heads h ∧ Anc s.U.par x h
   accHeads : ∀ n x y, (s.node n).heads x → (s.node n).heads y →
     Anc s.U.par x s.hub.head → Anc s.U.par y s.hub.head → x = y
   comparable : ∀ n x i, (s.node n).heads x → Anc s.U.par x s.hub.head → i ≤ s.hub.seq →
@@ -60,51 +128,12 @@ structure Inv (N : Nat) (s : State) : Prop where
     s.U.creator p ≠ s.U.creator m → Anc s.U.par p (s.hub.hist (s.U.birth m))
   birthLe : ∀ m, m < s.U.next → s.U.birth m ≤ s.hub.seq
   birthMono : ∀ x y, x < y → y < s.U.next → s.U.birth x ≤ s.U.birth y
-  creatorRoot : s.U.creator root = none
   -- messages
   msgs : ∀ m, s.net m → MsgOK s m
 
 namespace Inv
 
 variable {N : Nat} {s : State}
-
-theorem chain (hI : Inv N s) {i j : Nat} (hij : i ≤ j) (hj : j ≤ s.hub.seq) :
-    Anc s.U.par (s.hub.hist i) (s.hub.hist j) := by
-  induction j with
-  | zero =>
-    have : i = 0 := by omega
-    subst this; exact Anc.refl
-  | succ j ih =>
-    by_cases h : i = j + 1
-    · subst h; exact Anc.refl
-    · exact (ih (by omega) (by omega)).trans (hI.histStep j (by omega)).1
-
-theorem histAnc (hI : Inv N s) {i : Nat} (hi : i ≤ s.hub.seq) :
-    Anc s.U.par (s.hub.hist i) s.hub.head := by
-  have := hI.chain hi (Nat.le_refl _)
-  rwa [hI.histHead] at this
-
-theorem histLt (hI : Inv N s) {i : Nat} (hi : i ≤ s.hub.seq) : s.hub.hist i < s.U.next :=
-  Nat.lt_of_le_of_lt ((hI.histAnc hi).le hI.parLt) hI.headLt
-
-/-- History is strictly increasing in id order. -/
-theorem histLtStrict (hI : Inv N s) {i j : Nat} (hij : i < j) (hj : j ≤ s.hub.seq) :
-    s.hub.hist i < s.hub.hist j := by
-  induction j with
-  | zero => omega
-  | succ j ih =>
-    have hs := hI.histStep j (by omega)
-    have h1 : s.hub.hist j < s.hub.hist (j + 1) := hs.1.lt_of_ne hI.parLt hs.2
-    by_cases h : i = j
-    · subst h; exact h1
-    · exact Nat.lt_trans (ih (by omega) (by omega)) h1
-
-theorem histInj (hI : Inv N s) {i j : Nat} (hi : i ≤ s.hub.seq) (hj : j ≤ s.hub.seq)
-    (h : s.hub.hist i = s.hub.hist j) : i = j := by
-  rcases Nat.lt_trichotomy i j with hlt | heq | hgt
-  · have := hI.histLtStrict hlt hj; omega
-  · exact heq
-  · have := hI.histLtStrict hgt hi; omega
 
 theorem knownAnc (hI : Inv N s) (n : Nat) :
     Anc s.U.par (s.node n).known.2 s.hub.head := by
@@ -114,15 +143,12 @@ theorem knownAnc (hI : Inv N s) (n : Nat) :
 theorem knownLt (hI : Inv N s) (n : Nat) : (s.node n).known.2 < s.U.next :=
   Nat.lt_of_le_of_lt ((hI.knownAnc n).le hI.parLt) hI.headLt
 
-theorem headsLt (hI : Inv N s) {n x : Nat} (h : (s.node n).heads x) : x < s.U.next :=
-  hI.lLt n x (hI.headsLocal n x h)
-
-theorem lopsAnc (hI : Inv N s) {n x a : Nat} (hx : (s.node n).lops x)
-    (ha : Anc s.U.par a x) : (s.node n).lops a :=
-  Anc.closed (S := (s.node n).lops) (fun y p hy hp => hI.lParents n y p hy hp) ha hx
-
-theorem accLt (hI : Inv N s) {x : Nat} (h : Anc s.U.par x s.hub.head) : x < s.U.next :=
-  Nat.lt_of_le_of_lt (h.le hI.parLt) hI.headLt
+/-- A node whose `known` head is not the hub's head knows a sequence number below the hub's. -/
+theorem knownSeqLt (hI : Inv N s) {n : Nat} (h : s.hub.head ≠ (s.node n).known.2) :
+    (s.node n).known.1 < s.hub.seq := by
+  rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
+  · exact h1
+  · exfalso; apply h; rw [← hI.histHead, ← h1, (hI.known n).2]
 
 /-- An operation reachable from a node's heads but not accepted was created by that node. -/
 theorem ownOfUnacc (hI : Inv N s) {n x : Nat} (hx : (s.node n).lops x)
@@ -133,24 +159,30 @@ theorem ownOfUnacc (hI : Inv N s) {n x : Nat} (hx : (s.node n).lops x)
 
 end Inv
 
-theorem inv_init (N : Nat) : Inv N init := by
-  have anc0 : ∀ a x, Anc init.U.par a x → a = x := by
-    intro a x h
-    cases h with
-    | refl => rfl
-    | step hp _ => simp [init] at hp
+/-- In the initial state the only ancestor of an operation is itself. -/
+theorem anc_init {a x : Nat} (h : Anc init.U.par a x) : a = x := by
+  cases h with
+  | refl => rfl
+  | step hp _ => simp [init] at hp
+
+theorem core_init (N : Nat) : Core N init := by
   refine
-    { parLt := ?_, nextPos := ?_, rootAnc := ?_, creatorSome := ?_, headLt := ?_,
-      histHead := ?_, hist0 := ?_, histStep := ?_, hubClosed := ?_, lroot := ?_, lLt := ?_,
-      lParents := ?_, lObjs := ?_, headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_,
-      known := ?_, locality := ?_, staged := ?_, ownInHeads := ?_, accHeads := ?_,
-      comparable := ?_, mergeOwn := ?_, mergeForeign := ?_, birthLe := ?_, birthMono := ?_,
-      creatorRoot := ?_, msgs := ?_ }
+    { parLt := ?_, nextPos := ?_, rootAnc := ?_, creatorSome := ?_, creatorRoot := ?_,
+      headLt := ?_, histHead := ?_, hist0 := ?_, histStep := ?_, hubClosed := ?_,
+      lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_, headsLocal := ?_,
+      headsAnti := ?_, headsNonempty := ?_, ownInHeads := ?_ }
   all_goals simp [init, initNode, ClosedAt, HubHas]
   · intro y p hp; simp at hp
   · exact Anc.refl
   · intro x hx h; omega
-  · intro y h; exact anc0 _ _ h
+  · intro y h; exact anc_init h
+
+theorem inv_init (N : Nat) : Inv N init := by
+  refine
+    { toCore := core_init N, known := ?_, locality := ?_, staged := ?_, accHeads := ?_,
+      comparable := ?_, mergeOwn := ?_, mergeForeign := ?_, birthLe := ?_, birthMono := ?_,
+      msgs := ?_ }
+  all_goals simp [init, initNode, Consistent]
   · exact Anc.refl
   · intro x i hx _ _; subst hx; exact Or.inl Anc.refl
 

@@ -683,15 +683,13 @@ impl Search {
         let mut world = self.world.borrow_mut();
         let view = world.view_at_head(m);
         let target = choose(&tc, &view.targets());
-        let change = view
+        let target = view
             .commits
             .iter()
             .find(|c| c.id == target)
-            .map(|c| c.change.clone());
+            .expect("a drawn target is visible");
         fired("git_set_branch");
-        world.ledger.git_move(change.as_deref());
-        world.git_moves(m, &format!("refs/heads/{name}"));
-        world.git(m, &["update-ref", &format!("refs/heads/{name}"), &target]);
+        world.move_git_branch(m, name, target);
         drop(world);
         self.note(&tc);
     }
@@ -702,8 +700,7 @@ impl Search {
         let mut world = self.world.borrow_mut();
         let branch = choose(&tc, &world.git_branches(m));
         fired("git_delete_branch");
-        world.git_moves(m, &format!("refs/heads/{branch}"));
-        world.git(m, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+        world.delete_git_branch(m, &branch);
         drop(world);
         self.note(&tc);
     }

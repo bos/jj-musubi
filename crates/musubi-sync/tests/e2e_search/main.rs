@@ -2,9 +2,9 @@
 //! state machine drives two or three real colocated repositories, each a musubi node of an
 //! in-process hive whose hub prunes its records as a hub does, through local `jj` work,
 //! workspaces, forgotten and new copies, a shared `origin`, git-side work, partial syncs, and
-//! faults, then syncs to a fixed point and checks that the hive converged. The rules can reach
-//! every row of the race catalogue (docs/internals/races.md) but the documented refusals;
-//! `coverage` maps rows to rules.
+//! faults, then syncs to a fixed point and checks that the hive converged. `coverage` maps race
+//! catalogue rows (docs/internals/races.md) to suggested rules and reports concrete native
+//! witnesses separately from that exploration guidance.
 //!
 //! After every rule, every op head of every repository a sync or fault touched loads, every `jj`
 //! command and sync step must succeed (but for stops a user gets past as the error says, a copy's
@@ -22,8 +22,9 @@
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with
 //! `cargo nextest run -p musubi-sync --profile search`; each shard has its own example
-//! database under `target/tmp/e2e_search/`, and the run writes which rules fired to
-//! `target/tmp/e2e_search/coverage.txt` (printed with `--no-capture`). Environment:
+//! database under `target/tmp/e2e_search/`. Each test writes `coverage-v2-<test>.txt` and
+//! `counts-v2-<test>.json` there, separating rule activity, approximate exploration guidance
+//! and native race witnesses from completed cases (printed with `--no-capture`). Environment:
 //!
 //! - `MUSUBI_SEARCH_CASES`: test cases per shard (default 8; a case takes up to a few minutes when
 //!   several shards run at once);
@@ -48,6 +49,7 @@ mod fixture;
 
 mod checks;
 mod coverage;
+mod identity;
 mod imports;
 mod ledger;
 mod machine;
@@ -145,7 +147,7 @@ impl Config {
 
 #[hegel::standalone_function(config.settings())]
 fn search(tc: TestCase, config: Config) {
-    let _case = coverage::start_case();
+    let case = coverage::start_case();
     let setup = Setup {
         nodes: tc.draw(gs::integers::<usize>().min_value(2).max_value(3)),
         naming: [Naming::Own, Naming::Default, Naming::SharedHostname]
@@ -171,6 +173,7 @@ fn search(tc: TestCase, config: Config) {
         }
     }
     walk(tc, config, setup, |_, _| {});
+    case.passed();
 }
 
 #[test]
@@ -281,7 +284,7 @@ fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCas
 /// one operation, and publishes the drop. Then a walk, as the search's, and convergence.
 #[hegel::standalone_function(config.settings())]
 fn dropped_merge_search(tc: TestCase, config: Config) {
-    let _case = coverage::start_case();
+    let case = coverage::start_case();
     let setup = Setup {
         nodes: 4,
         naming: [Naming::Own, Naming::Default, Naming::SharedHostname]
@@ -298,11 +301,12 @@ fn dropped_merge_search(tc: TestCase, config: Config) {
         world.sync(1);
         world.check_dropped_by(1, &kept);
     });
+    case.passed();
 }
 
 #[test]
 fn e2e_dropped_merge() {
-    let _report = coverage::Report("dropped-merge");
+    let _report = coverage::Report::new("dropped-merge");
     dropped_merge_search(Config::smoke());
 }
 
@@ -419,18 +423,23 @@ fn e2e_records_snapshots_from_commands_and_looking() {
     let snapshot = read(&jj_lib::object_id::ObjectId::hex(&command.parents[0]));
     assert_eq!(snapshot.metadata.description, "snapshot working copy");
     for op in [&snapshot, &command] {
-        assert!(world.commands.contains_key(&world::merge_key(op)));
+        assert!(world.evidence.commands.contains_key(&world::merge_key(op)));
     }
     world.edit(0, 1);
     world.observe(0);
     let snapshot = read(&world.latest_op_head(0));
     assert_eq!(snapshot.metadata.description, "snapshot working copy");
-    assert!(world.commands.contains_key(&world::merge_key(&snapshot)));
+    assert!(
+        world
+            .evidence
+            .commands
+            .contains_key(&world::merge_key(&snapshot))
+    );
     world.converge();
 
     // The captured native payload bounds translation even when it itself diverges. Both
     // versions come from the real snapshot/describe interval above, with one change id.
-    let source = &world.commands[&world::merge_key(&command)];
+    let source = &world.evidence.commands[&world::merge_key(&command)];
     let mut divergent = source.made.clone();
     divergent
         .head_ids
@@ -458,36 +467,36 @@ fn e2e_records_snapshots_from_commands_and_looking() {
 
 #[test]
 fn e2e_search_shard_4() {
-    let _report = coverage::Report("shard-4-survivors");
+    let _report = coverage::Report::new("shard-4-survivors");
     dropped_merge_search(Config::shard(4));
 }
 
 #[test]
 fn e2e_smoke() {
-    let _report = coverage::Report("smoke");
+    let _report = coverage::Report::new("smoke");
     search(Config::smoke());
 }
 
 #[test]
 fn e2e_search_shard_0() {
-    let _report = coverage::Report("shard-0");
+    let _report = coverage::Report::new("shard-0");
     search(Config::shard(0));
 }
 
 #[test]
 fn e2e_search_shard_1() {
-    let _report = coverage::Report("shard-1");
+    let _report = coverage::Report::new("shard-1");
     search(Config::shard(1));
 }
 
 #[test]
 fn e2e_search_shard_2() {
-    let _report = coverage::Report("shard-2");
+    let _report = coverage::Report::new("shard-2");
     search(Config::shard(2));
 }
 
 #[test]
 fn e2e_search_shard_3() {
-    let _report = coverage::Report("shard-3");
+    let _report = coverage::Report::new("shard-3");
     search(Config::shard(3));
 }

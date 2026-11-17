@@ -1,5 +1,6 @@
-//! The properties checked whenever the hive fully converges: at the end of every sequence,
-//! and when the `converge` rule fires.
+//! A convergence checkpoint: settle the actors, check the shared history against independent
+//! evidence, then exercise workspace visibility. The last phase deliberately makes more work;
+//! the ledger is reset only after it has been checked too.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -12,6 +13,7 @@ use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
 use musubi_sync::OpId;
 
+use crate::identity::HistoryKey;
 use crate::reference::Reference;
 use crate::view::View;
 use crate::world::World;
@@ -23,9 +25,24 @@ pub fn masked(bug: &str) -> bool {
 }
 
 impl World {
-    /// Syncs to a fixed point, checks every property, then starts the ledger afresh.
+    /// Finishes a generated prefix and checks it before starting the ledger afresh.
+    ///
+    /// Preparation may run native commands and syncs. The history checks use the evidence
+    /// captured by those actors; the final workspace exercise then checks new writes from
+    /// every workspace. Keep this order: resetting the ledger earlier would lose evidence.
     pub fn converge(&mut self) {
+        crate::coverage::interrupt_races();
         self.record("converge".to_owned());
+        self.settle();
+        self.check_converged_history();
+        self.exercise_workspace_visibility();
+        let view = self.view_at_head(0);
+        self.ledger.reset(&view);
+    }
+
+    /// Brings edits, stale workspaces and syncs to rest, recording the operations they make.
+    /// This is actor work, so it must finish before the checkpoint's history is inspected.
+    fn settle(&mut self) {
         self.sync_everything();
         // A machine with edits it hasn't snapshotted snapshots them with its next `jj`
         // command, rewriting its working copy, possibly at an older operation and so
@@ -70,6 +87,11 @@ impl World {
         for m in 0..self.nodes() {
             self.check_imports(m);
         }
+    }
+
+    /// Checks agreement, retention and translation, then judges the same history against jj.
+    /// Workspace certificates are collected before the history and conflict checks use them.
+    fn check_converged_history(&mut self) {
         let views: Vec<View> = (0..self.nodes()).map(|m| self.view_at_head(m)).collect();
         self.check_heads();
         self.check_translation();
@@ -81,9 +103,6 @@ impl World {
         let beyond = reference.beyond_jj();
         self.check_divergence(&views[0], &mut reference, &beyond);
         self.check_conflicts(&reference, &beyond);
-        self.check_other_workspaces();
-        let view = self.view_at_head(0);
-        self.ledger.reset(&view);
     }
 
     /// Syncs every node, repeatedly, until a whole round changes nothing, as
@@ -193,10 +212,10 @@ impl World {
         // A copy's join is, on the copy itself, the last operation it made before it joined,
         // under its own key there (the join point, `translation_failure`): it shows as itself
         // only on the others.
-        let joins = |key: &String| key.ends_with(" joins") && key.contains(" musubi: ");
-        let new_ops = |m: usize| -> BTreeSet<String> {
+        let joins = |key: &HistoryKey| key.is_join();
+        let new_ops = |m: usize| -> BTreeSet<HistoryKey> {
             self.op_keys(m)
-                .difference(&self.baseline_keys[m])
+                .difference(&self.evidence.baseline_keys[m])
                 .filter(|key| !joins(key))
                 .cloned()
                 .collect()
@@ -237,7 +256,7 @@ impl World {
     /// Each machine has its own workspaces, and their working copies are visible, but for a
     /// machine the hive has forgotten, whose working copy can stay on the hidden commit its
     /// forget abandoned until its next work. (It shows the other machines' too, as
-    /// `machine/workspace`: `check_other_workspaces`.)
+    /// `machine/workspace`: `exercise_workspace_visibility`.)
     fn check_workspaces(&mut self, views: &[View], reference: &mut Reference) {
         let witnessed = reference.witnessed_workspace_names(self);
         let shown = self.fx.shown_machines();
@@ -462,7 +481,7 @@ impl World {
     /// snapshotting a working copy rebases every working copy built on it, so taking turns
     /// this way, each workspace's last operation comes after every rewrite of its working
     /// copy.
-    fn check_other_workspaces(&mut self) {
+    fn exercise_workspace_visibility(&mut self) {
         for (m, ws) in self.workspaces_ancestors_first() {
             // Update a stale working copy first, so the edit is not snapshotted at an older
             // operation.

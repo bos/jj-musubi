@@ -248,28 +248,109 @@ impl Machine {
 }
 
 /// The shared fields of the refs: `x`, `t`, and `y@origin`'s slot with no `K`.
-type Shared = (RefTarget, RefTarget, Slot);
+#[derive(Debug, PartialEq, Eq)]
+struct SharedRefs {
+    x: RefTarget,
+    tag: RefTarget,
+    origin: Slot,
+}
 
-/// A `jj` command on this machine after the other machine's operation and before this machine
-/// syncs, so that musubi realizes that operation beside it (`LStep.beside`, `CStep.beside`).
+/// A native command whose imports, edit and exports the model predicts. The other machine
+/// runs one before publishing; this machine may run one beside the resulting realization.
 #[derive(Clone, Debug)]
-enum Beside {
+enum RefCommand {
     /// The command moves `x`, `y` or `t` (`Refs::jj_sets`).
     Sets(Ref, RefTarget),
     /// `y` moves in `origin`, and `jj git fetch` fetches it (`Refs::jj_fetches_from`).
     Fetches(RefTarget),
 }
 
+/// Whether the other machine first takes this machine's latest operations, or acts on
+/// the history both had when they last synced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerOrder {
+    Following,
+    Concurrent,
+}
+
+/// The physical condition of `refs/heads/x` while this machine realizes and exports.
+#[derive(Clone, Copy, Debug)]
+enum GitExport {
+    Writable,
+    XLocked,
+}
+
+impl GitExport {
+    fn x_locked(self) -> bool {
+        matches!(self, Self::XLocked)
+    }
+}
+
+/// The independent axes of a realization: the other machine's command and history, the
+/// export's access to git, and an optional command here before realizing the published work.
+struct Realization {
+    command: RefCommand,
+    order: PeerOrder,
+    export: GitExport,
+    beside: Option<RefCommand>,
+}
+
+impl Realization {
+    fn following(command: RefCommand) -> Self {
+        Self {
+            command,
+            order: PeerOrder::Following,
+            export: GitExport::Writable,
+            beside: None,
+        }
+    }
+
+    fn concurrent(command: RefCommand) -> Self {
+        Self {
+            order: PeerOrder::Concurrent,
+            ..Self::following(command)
+        }
+    }
+
+    fn beside(self, command: RefCommand) -> Self {
+        Self {
+            beside: Some(command),
+            ..self
+        }
+    }
+
+    fn with_locked_export(self) -> Self {
+        Self {
+            export: GitExport::XLocked,
+            ..self
+        }
+    }
+}
+
+/// The last common operation and model, and this machine's head before a command beside
+/// the realization. Native merge parents decide the order in which the model merges them.
+struct RealizationBase {
+    synced_op: OperationId,
+    model: Model,
+    ours: OperationId,
+}
+
+/// The other machine's independently predicted command result and observed shared fields.
+struct PeerResult {
+    expected: Model,
+    canonical: SharedRefs,
+}
+
 /// The shared fields of the refs whose slots are `slot`'s.
-fn shared(slot: impl Fn(Ref) -> Slot) -> Shared {
-    (
-        slot(Ref::X).l,
-        slot(Ref::T).l,
-        Slot {
+fn shared(slot: impl Fn(Ref) -> Slot) -> SharedRefs {
+    SharedRefs {
+        x: slot(Ref::X).l,
+        tag: slot(Ref::T).l,
+        origin: Slot {
             k: RefTarget::absent(),
             ..slot(Ref::Origin)
         },
-    )
+    }
 }
 
 /// The model's machines, one for each ref, keeping the bookmark `y` the same in `Y`'s and
@@ -312,10 +393,10 @@ impl Model {
 
     /// `TSlot.realizeLocal` of `x`, `y` and `t`, and `realizeRemote` of `y@origin`, from
     /// the canonical view's slots: the shared fields, without dropping anything.
-    fn realize(&mut self, canonical: &Shared) {
-        let (x, t, origin) = canonical;
+    fn realize(&mut self, canonical: &SharedRefs) {
+        let SharedRefs { x, tag, origin } = canonical;
         self.at(Ref::X).v.l = x.clone();
-        self.at(Ref::T).v.l = t.clone();
+        self.at(Ref::T).v.l = tag.clone();
         self.at(Ref::Y).v.l = origin.l.clone();
         let v = &mut self.at(Ref::Origin).v;
         v.l = origin.l.clone();
@@ -323,7 +404,7 @@ impl Model {
         v.tr = origin.tr;
     }
 
-    fn shared(&self) -> Shared {
+    fn shared(&self) -> SharedRefs {
         shared(|r| self.get(r).v.clone())
     }
 
@@ -478,18 +559,25 @@ pub(crate) fn hive() -> Fixture {
     })
 }
 
+/// A model snapshot paired with the native operation whose refs it predicts.
+#[derive(Clone)]
+struct ModelAtOperation {
+    op: OperationId,
+    model: Model,
+}
+
 struct Refs {
     fixture: Fixture,
     alg: Alg,
     model: Model,
     /// The op head after the latest action, and the model then.
-    latest: (OperationId, Model),
+    latest: ModelAtOperation,
     /// The op head and the model before the latest action, for a `jj` command at that
     /// operation.
-    older: (OperationId, Model),
+    older: ModelAtOperation,
     /// This machine's op head and model when both machines last synced, where the other
     /// machine's operations start.
-    synced: (OperationId, Model),
+    synced: ModelAtOperation,
     /// The root, then `base`, `one`, `two` and `three`.
     commits: Vec<CommitId>,
     /// `y` in `origin`.
@@ -536,7 +624,10 @@ impl Refs {
                 restored: false,
             }
         }));
-        let head = (repo.op_id().clone(), model.clone());
+        let head = ModelAtOperation {
+            op: repo.op_id().clone(),
+            model: model.clone(),
+        };
         let mut refs = Self {
             fixture,
             alg: Alg {
@@ -573,7 +664,10 @@ impl Refs {
         let repo = self.fixture.load(HERE);
         let heads = block_on(repo.loader().op_heads_store().get_op_heads()).unwrap();
         assert_eq!(heads.len(), 1, "op heads: {heads:?}");
-        let latest = (repo.op_id().clone(), self.model.clone());
+        let latest = ModelAtOperation {
+            op: repo.op_id().clone(),
+            model: self.model.clone(),
+        };
         self.older = std::mem::replace(&mut self.latest, latest);
         for r in Ref::ALL {
             let model = self.model.get(r);
@@ -787,7 +881,10 @@ impl Refs {
     /// against the older operation, as `TSlot.merge`, then imports and exports. If the latest
     /// action made no operation, the command's operation is simply the next.
     fn jj_sets_at_older_op(&mut self, bookmark: Ref, l: RefTarget) {
-        let (old, base) = self.older.clone();
+        let ModelAtOperation {
+            op: old,
+            model: base,
+        } = self.older.clone();
         let head = self.head();
         let current = base.get(bookmark).v.l.clone();
         assert_ne!(l, current);
@@ -838,36 +935,97 @@ impl Refs {
         self.check();
     }
 
-    /// The other machine moves `x` or `t` (`moved`), or if none, fetches `y` after it moved
-    /// in `origin` to `upstream`, and both sync, the update of `x` failing if `locked`, while
-    /// git's lock on `refs/heads/x` is held: an `advance` of each ref, and the export, with
-    /// musubi's of a conflicted `y@origin`. If `concurrent`, the other machine acts before it
-    /// has this machine's latest operations, so that when it syncs, it merges them with its
-    /// own, and this machine realizes the merge: `realizeMerge`, which is jj's merge
-    /// (`realizeMerge_eq`), against the operation both last synced at. Two fetches merge so
-    /// to a conflicted `y@origin` if both moved it, and the side musubi writes for it must
-    /// be the same on both machines. If `beside`, this machine runs that `jj` command before
-    /// it syncs, and musubi realizes the other's operation beside it, merges the two, and
-    /// exports the merge: `LStep.beside` and `CStep.beside`.
-    fn musubi_realizes_with(
-        &mut self,
-        moved: Option<(Ref, RefTarget)>,
-        upstream: RefTarget,
-        locked: bool,
-        concurrent: bool,
-        beside: Option<Beside>,
-    ) {
-        self.fixture.hive.sync(HERE).unwrap();
-        if !concurrent {
-            // Both up to date, so that what this machine realizes follows its op head.
-            self.fixture.hive.sync(THERE).unwrap();
-            self.synced = (self.head(), self.model.clone());
+    /// Publish the other machine's command, realize it here, and compare both machines with
+    /// the model. Concurrent work is merged as jj merges it (`realizeMerge_eq`); a local
+    /// command before realization adds `LStep.beside` and `CStep.beside`. Git may hold `x`'s
+    /// lock during realization, and conflicted `y@origin` must have the same expected value
+    /// on both machines, whatever the command and ordering.
+    fn musubi_realizes_with(&mut self, scenario: Realization) {
+        let history = self.realization_base(scenario.order);
+        let peer = self.peer_command(&history.model, scenario.command);
+
+        // This machine as of `ours`, which the realization descends from.
+        let at_ours = self.model.clone();
+        match scenario.beside {
+            Some(RefCommand::Sets(r, l)) => self.jj_sets(r, l),
+            Some(RefCommand::Fetches(upstream)) => self.jj_fetches_from(upstream),
+            None => {}
         }
-        let (synced_op, base) = self.synced.clone();
-        let ours = self.head();
-        // The shared fields are the base's, but the other machine's import/export record
-        // and physical refs are its own. A pending git move here can leave our record
-        // behind even after both machines have the same shared fields.
+        let mine = self.head();
+        let beside = mine != history.ours;
+        self.sync_realization(scenario.export);
+
+        // A fetch that brings nothing new makes no operation to realize.
+        if peer.expected.shared() != history.model.shared() {
+            let realized = self.predict_realization(
+                &history,
+                &peer.canonical,
+                &at_ours,
+                &mine,
+                scenario.export,
+            );
+            // The ghosts are the command's, if any: musubi neither imports nor moves refs.
+            for r in Ref::ALL {
+                let Machine { v, g, .. } = realized.get(r).clone();
+                let m = self.model.at(r);
+                (m.v, m.g) = (v, g);
+            }
+            self.model.at(Ref::Origin).e = realized.get(Ref::Origin).e.clone();
+            // `CStep.advance`'s and `CStep.beside`'s precondition, which offering no root
+            // commit keeps.
+            let origin = self.model.get(Ref::Origin);
+            let e = origin.expected();
+            assert!(e == origin.g || self.alg.writable(&e));
+            self.model
+                .export(&self.alg, scenario.export.x_locked(), true);
+        }
+        if beside {
+            // The other machine catches up, so that both last synced at this machine's head.
+            self.fixture.hive.sync(THERE).unwrap();
+        }
+        self.check();
+        // Every machine has the same expected value of a conflicted `y@origin` in its `.git`.
+        if let Some(e) = conflicted_expected(&self.model) {
+            let (there, g) = read(&self.fixture.load(THERE), Ref::Origin);
+            assert_eq!(
+                there.r,
+                self.model.get(Ref::Origin).v.r,
+                "the other machine's y@origin"
+            );
+            assert_eq!(g, e, "the other machine's refs/remotes/origin/y");
+        }
+        self.synced = ModelAtOperation {
+            op: self.head(),
+            model: self.model.clone(),
+        };
+    }
+
+    /// Publish this machine's work first. A following peer takes it before acting; a
+    /// concurrent peer keeps the common history from the preceding sync.
+    fn realization_base(&mut self, order: PeerOrder) -> RealizationBase {
+        self.fixture.hive.sync(HERE).unwrap();
+        if order == PeerOrder::Following {
+            self.fixture.hive.sync(THERE).unwrap();
+            self.synced = ModelAtOperation {
+                op: self.head(),
+                model: self.model.clone(),
+            };
+        }
+        let ModelAtOperation {
+            op: synced_op,
+            model,
+        } = self.synced.clone();
+        RealizationBase {
+            synced_op,
+            model,
+            ours: self.head(),
+        }
+    }
+
+    /// Predict a command from the other machine's own import/export records and physical
+    /// refs, then check its native result before publishing it. A pending git move here can
+    /// leave our record behind even when both machines have the same shared fields.
+    fn peer_command(&mut self, base: &Model, command: RefCommand) -> PeerResult {
         let there = self.fixture.load(THERE);
         assert_eq!(
             shared(|r| slot(there.view().store_view(), r)),
@@ -879,29 +1037,26 @@ impl Refs {
             let m = expected.at(r);
             (m.v, m.g) = (v, g);
         }
-        expected.jj(&self.alg, |model| match &moved {
-            None => {
+        expected.jj(&self.alg, |model| match &command {
+            RefCommand::Fetches(upstream) => {
                 model.at(Ref::Origin).g = upstream.clone();
                 model.import_ref(&self.alg, Ref::Origin);
             }
-            Some((r, c)) if *c != base.get(*r).v.l => {
+            RefCommand::Sets(r, c) if *c != base.get(*r).v.l => {
                 model.bookmark_set(&self.alg, *r, c.clone());
             }
-            Some(_) => {}
+            RefCommand::Sets(_, _) => {}
         });
-        match &moved {
-            None => {
+        match command {
+            RefCommand::Fetches(upstream) => {
                 self.push_upstream(upstream);
                 self.fixture.repo(THERE).jj(&["git", "fetch"]);
             }
-            Some((r, c)) => {
-                // The other machine's ref is this one's when they last synced.
-                let current = base.get(*r).v.l.clone();
-                self.jj_set(THERE, *r, c, &current, None);
+            RefCommand::Sets(r, c) => {
+                let current = base.get(r).v.l.clone();
+                self.jj_set(THERE, r, &c, &current, None);
             }
         }
-        // Predict the command from its inputs with the oracle, including its imports and
-        // exports, before comparing what it leaves on the other machine.
         let there = self.fixture.load(THERE);
         let view = there.view().store_view();
         let canonical = shared(|r| slot(view, r));
@@ -919,131 +1074,111 @@ impl Refs {
             "the other machine's x, t, y and y@origin"
         );
         self.fixture.hive.sync(THERE).unwrap();
-        // This machine as of `ours`, which the realization descends from.
-        let at_ours = self.model.clone();
-        match beside {
-            Some(Beside::Sets(r, l)) => self.jj_sets(r, l),
-            Some(Beside::Fetches(upstream)) => self.jj_fetches_from(upstream),
-            None => {}
+        PeerResult {
+            expected,
+            canonical,
         }
-        // The operation the command made, if any, which the realization is beside.
-        let mine = self.head();
-        let beside = mine != ours;
+    }
+
+    /// Take the published work with the selected physical export condition.
+    fn sync_realization(&mut self, export: GitExport) {
         let lock = self
             .fixture
             .repo(HERE)
             .path()
             .join(".git/refs/heads/x.lock");
-        if locked {
+        if export.x_locked() {
             std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
             std::fs::write(&lock, "").unwrap();
         }
         self.fixture.hive.sync(HERE).unwrap();
-        if locked {
+        if export.x_locked() {
             std::fs::remove_file(&lock).unwrap();
         }
-        // `LStep.advance` for `x`, `y` and `t`, and `CStep.advance` for `y@origin`, then the
-        // export, if there was anything to realize: a fetch that brings nothing new makes no
-        // operation. Beside the command, `LStep.beside` and `CStep.beside`.
-        if expected.shared() != base.shared() {
-            // The realization, from this machine's refs as of `ours`, against `.git` as it is.
-            let mut realized = at_ours.clone();
-            for r in Ref::ALL {
-                realized.at(r).g = self.model.get(r).g.clone();
-            }
-            if ours == synced_op {
-                // The other machine's operations follow on from this machine's head, so a
-                // conflict they keep has the head's expected value.
-                let e = at_ours.get(Ref::Origin).expected();
-                realized.realize(&canonical);
-                realized.at(Ref::Origin).e = e;
+    }
+
+    /// `LStep.advance` and `CStep.advance`, followed by export; with a command here,
+    /// `LStep.beside` and `CStep.beside`. Actual native merge parents determine both orders.
+    fn predict_realization(
+        &self,
+        history: &RealizationBase,
+        canonical: &SharedRefs,
+        at_ours: &Model,
+        mine: &OperationId,
+        export: GitExport,
+    ) -> Model {
+        let ours = &history.ours;
+        let beside = mine != ours;
+        let locked = export.x_locked();
+        // The realization, from this machine's refs as of `ours`, against `.git` as it is.
+        let mut realized = at_ours.clone();
+        for r in Ref::ALL {
+            realized.at(r).g = self.model.get(r).g.clone();
+        }
+        if history.ours == history.synced_op {
+            // The other machine's operations follow on from this machine's head, so a
+            // conflict they keep has the head's expected value.
+            let e = at_ours.get(Ref::Origin).expected();
+            realized.realize(canonical);
+            realized.at(Ref::Origin).e = e;
+        } else {
+            // Theirs is realized here from the base, its record the base's, and merged
+            // with ours as the other machine merged them.
+            let mut theirs = history.model.clone();
+            theirs.realize(canonical);
+            let parents = if beside {
+                let merge = self.merge_parents();
+                let realization = merge.iter().find(|&op| op != mine).unwrap();
+                self.parents(realization)
             } else {
-                // Theirs is realized here from the base, its record the base's, and merged
-                // with ours as the other machine merged them.
-                let mut theirs = base.clone();
-                theirs.realize(&canonical);
-                let parents = if beside {
-                    let merge = self.merge_parents();
-                    let realization = merge.iter().find(|&op| *op != mine).unwrap();
-                    self.parents(realization)
-                } else {
-                    self.merge_parents()
-                };
-                assert!(
-                    parents.contains(&ours),
-                    "merged {parents:?}, not ours {ours:?}"
-                );
-                let merged = if parents[0] == ours {
-                    Model::merge(&self.alg, &base, &at_ours, &theirs)
-                } else {
-                    Model::merge(&self.alg, &base, &theirs, &at_ours)
-                };
-                let e = merged_expected(
-                    |r| self.alg.side(r),
-                    &merged[Ref::Origin as usize].r,
-                    [&at_ours, &theirs].map(|m| m.get(Ref::Origin)),
-                    parents[0] == ours,
-                );
-                for (r, v) in Ref::ALL.into_iter().zip(merged) {
-                    realized.at(r).v = v;
-                }
-                realized.at(Ref::Origin).e = e;
+                self.merge_parents()
+            };
+            assert!(
+                parents.contains(&history.ours),
+                "merged {parents:?}, not ours {ours:?}"
+            );
+            let merged = if parents[0] == history.ours {
+                Model::merge(&self.alg, &history.model, at_ours, &theirs)
+            } else {
+                Model::merge(&self.alg, &history.model, &theirs, at_ours)
+            };
+            let e = merged_expected(
+                |r| self.alg.side(r),
+                &merged[Ref::Origin as usize].r,
+                [at_ours, &theirs].map(|m| m.get(Ref::Origin)),
+                parents[0] == history.ours,
+            );
+            for (r, v) in Ref::ALL.into_iter().zip(merged) {
+                realized.at(r).v = v;
             }
-            if beside {
-                // Exported against `.git` as the command left it, then merged with the
-                // command's operation, against `ours`, as musubi merged them.
-                realized.export_beside(&self.alg, locked, &self.model);
-                let parents = self.merge_parents();
-                assert!(
-                    parents.contains(&mine),
-                    "merged {parents:?}, not the command's {mine:?}"
-                );
-                let merged = if parents[0] == mine {
-                    Model::merge(&self.alg, &at_ours, &self.model, &realized)
-                } else {
-                    Model::merge(&self.alg, &at_ours, &realized, &self.model)
-                };
-                let e = merged_expected(
-                    |r| self.alg.side(r),
-                    &merged[Ref::Origin as usize].r,
-                    [&self.model, &realized].map(|m| m.get(Ref::Origin)),
-                    parents[0] == mine,
-                );
-                for (r, v) in Ref::ALL.into_iter().zip(merged) {
-                    realized.at(r).v = v;
-                }
-                realized.at(Ref::Origin).e = e;
-            }
-            // The ghosts are the command's, if any: musubi neither imports nor moves refs.
-            for r in Ref::ALL {
-                let Machine { v, g, .. } = realized.get(r).clone();
-                let m = self.model.at(r);
-                (m.v, m.g) = (v, g);
-            }
-            self.model.at(Ref::Origin).e = realized.get(Ref::Origin).e.clone();
-            // `CStep.advance`'s and `CStep.beside`'s precondition, which offering no root
-            // commit keeps.
-            let origin = self.model.get(Ref::Origin);
-            let e = origin.expected();
-            assert!(e == origin.g || self.alg.writable(&e));
-            self.model.export(&self.alg, locked, true);
+            realized.at(Ref::Origin).e = e;
         }
         if beside {
-            // The other machine catches up, so that both last synced at this machine's head.
-            self.fixture.hive.sync(THERE).unwrap();
-        }
-        self.check();
-        // Every machine has the same expected value of a conflicted `y@origin` in its `.git`.
-        if let Some(e) = conflicted_expected(&self.model) {
-            let (there, g) = read(&self.fixture.load(THERE), Ref::Origin);
-            assert_eq!(
-                there.r,
-                self.model.get(Ref::Origin).v.r,
-                "the other machine's y@origin"
+            // Exported against `.git` as the command left it, then merged with the
+            // command's operation, against `ours`, as musubi merged them.
+            realized.export_beside(&self.alg, locked, &self.model);
+            let parents = self.merge_parents();
+            assert!(
+                parents.contains(mine),
+                "merged {parents:?}, not the command's {mine:?}"
             );
-            assert_eq!(g, e, "the other machine's refs/remotes/origin/y");
+            let merged = if &parents[0] == mine {
+                Model::merge(&self.alg, at_ours, &self.model, &realized)
+            } else {
+                Model::merge(&self.alg, at_ours, &realized, &self.model)
+            };
+            let e = merged_expected(
+                |r| self.alg.side(r),
+                &merged[Ref::Origin as usize].r,
+                [&self.model, &realized].map(|m| m.get(Ref::Origin)),
+                &parents[0] == mine,
+            );
+            for (r, v) in Ref::ALL.into_iter().zip(merged) {
+                realized.at(r).v = v;
+            }
+            realized.at(Ref::Origin).e = e;
         }
-        self.synced = (self.head(), self.model.clone());
+        realized
     }
 
     /// `jj undo`, or if `target`, `jj op restore` to it: as a `jj` command that changes
@@ -1130,7 +1265,7 @@ impl Refs {
     #[rule]
     fn jj_runs_at_older_op(&mut self, tc: TestCase) {
         let bookmark = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
-        let current = self.older.1.get(bookmark).v.l.clone();
+        let current = self.older.model.get(bookmark).v.l.clone();
         let l = self.target(&tc, true, &current);
         self.jj_sets_at_older_op(bookmark, l);
     }
@@ -1141,8 +1276,8 @@ impl Refs {
     fn jj_restores(&mut self, tc: TestCase) {
         let target = match tc.draw(gs::integers::<u8>().max_value(2)) {
             0 => None,
-            1 => Some(self.older.0.clone()),
-            _ => Some(self.synced.0.clone()),
+            1 => Some(self.older.op.clone()),
+            _ => Some(self.synced.op.clone()),
         };
         self.jj_restores_to(target);
     }
@@ -1158,34 +1293,52 @@ impl Refs {
     /// or without this machine's latest operations, and both sync (`musubi_realizes_with`).
     #[rule(weight = 2)]
     fn musubi_realizes(&mut self, tc: TestCase) {
-        let concurrent = tc.draw(gs::booleans());
+        let order = if tc.draw(gs::booleans()) {
+            PeerOrder::Concurrent
+        } else {
+            PeerOrder::Following
+        };
         let fetch = tc.draw(gs::booleans());
-        let locked = tc.draw(gs::booleans());
+        let export = if tc.draw(gs::booleans()) {
+            GitExport::XLocked
+        } else {
+            GitExport::Writable
+        };
         let moved = (!fetch).then(|| {
             let r = Ref::draw(&tc, &[Ref::X, Ref::T]);
             // The other machine's: as when they last synced, if it is behind, or else as
             // here.
-            let current = if concurrent {
-                self.synced.1.get(r).v.l.clone()
+            let current = if order == PeerOrder::Concurrent {
+                self.synced.model.get(r).v.l.clone()
             } else {
                 self.model.get(r).v.l.clone()
             };
             (r, self.target(&tc, true, &current))
         });
+        // Keep this draw in both branches so stored Hegel examples retain their meaning.
         let upstream = self.target(&tc, false, &self.upstream);
+        let command = match moved {
+            Some((r, target)) => RefCommand::Sets(r, target),
+            None => RefCommand::Fetches(upstream),
+        };
         // A `jj` command here that the realization is beside, where the records agree.
         let beside = (self.model.records_agree() && tc.draw(gs::booleans())).then(|| {
             if tc.draw(gs::booleans()) {
                 // Something other than this machine has, but perhaps what the other fetched.
                 let origin = &self.model.get(Ref::Origin).g;
-                Beside::Fetches(self.target(&tc, false, origin))
+                RefCommand::Fetches(self.target(&tc, false, origin))
             } else {
                 let r = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
                 let current = self.imported(r);
-                Beside::Sets(r, self.target(&tc, true, &current))
+                RefCommand::Sets(r, self.target(&tc, true, &current))
             }
         });
-        self.musubi_realizes_with(moved, upstream, locked, concurrent, beside);
+        self.musubi_realizes_with(Realization {
+            command,
+            order,
+            export,
+            beside,
+        });
     }
 }
 
@@ -1205,14 +1358,14 @@ fn a_pending_git_move_does_not_change_the_other_machines_import_record() {
     refs.git_moves_to(Ref::Origin, base.clone());
     refs.jj_sets(Ref::X, one);
     refs.git_moves_to(Ref::Origin, two);
-    refs.musubi_realizes_with(None, three, false, true, None);
+    refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(three)));
     let (here, _) = read(&refs.fixture.load(HERE), Ref::Origin);
     let (there, git) = read(&refs.fixture.load(THERE), Ref::Origin);
     assert_eq!(here.r, there.r);
     assert!(!there.r.is_resolved());
     assert_eq!(there.k, git);
     assert_ne!(here.k, there.k);
-    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
+    refs.musubi_realizes_with(Realization::following(RefCommand::Sets(Ref::X, root)));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
 }
 
@@ -1241,7 +1394,7 @@ fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
     let mut refs = Refs::new();
     let [base, _, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
     refs.jj_fetches_from(two);
-    refs.musubi_realizes_with(None, three, false, true, None);
+    refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(three)));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
     let conflicted = refs.head();
     refs.jj_fetches_from(base.clone());
@@ -1251,7 +1404,7 @@ fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
     assert_eq!(origin.g, base);
     let x = refs.model.get(Ref::X).v.l.clone();
     let moved = RefTarget::normal(refs.commits[if x == base { 2 } else { 1 }].clone());
-    refs.musubi_realizes_with(Some((Ref::X, moved)), base.clone(), false, false, None);
+    refs.musubi_realizes_with(Realization::following(RefCommand::Sets(Ref::X, moved)));
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
     let origin = refs.model.get(Ref::Origin);
@@ -1274,15 +1427,15 @@ fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
 fn realization_beside_a_fetch_keeps_the_fetch() {
     let mut refs = Refs::new();
     let [root, base, one, two] = [0, 1, 2, 3].map(|i| RefTarget::normal(refs.commits[i].clone()));
-    refs.musubi_realizes_with(None, two, false, false, None);
+    refs.musubi_realizes_with(Realization::following(RefCommand::Fetches(two)));
     refs.jj_fetches_from(base.clone());
-    refs.musubi_realizes_with(None, one, false, true, None);
+    refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(one)));
     refs.jj_restores_to(None);
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
-    refs.musubi_realizes_with(None, base.clone(), false, true, None);
+    refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(base.clone())));
     let (there, g) = read(&refs.fixture.load(THERE), Ref::Origin);
     assert_eq!((&there.r, &there.k, &g), (&base, &base, &base));
-    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
+    refs.musubi_realizes_with(Realization::following(RefCommand::Sets(Ref::X, root)));
 }
 
 /// A resolved merge has its own expected value even if neither parent had it: absence
@@ -1332,23 +1485,22 @@ fn realization_beside_a_fetch_here_keeps_the_fetch() {
     let mut refs = Refs::new();
     let [base, one, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
     refs.jj_fetches_from(two.clone());
-    refs.musubi_realizes_with(None, three, false, true, None);
+    refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(three)));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
     let conflicted = refs.head();
     refs.jj_fetches_from(base.clone());
     // The other machine moves `x` from where it is, `one`, so that both sync.
     assert_eq!(refs.model.get(Ref::X).v.l, one);
-    refs.musubi_realizes_with(
-        Some((Ref::X, base.clone())),
+    refs.musubi_realizes_with(Realization::following(RefCommand::Sets(
+        Ref::X,
         base.clone(),
-        false,
-        false,
-        None,
-    );
+    )));
     refs.jj_restores_to(Some(conflicted));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
-    let fetch = Some(Beside::Fetches(two.clone()));
-    refs.musubi_realizes_with(Some((Ref::T, two.clone())), base, false, true, fetch);
+    let fetch = RefCommand::Fetches(two.clone());
+    refs.musubi_realizes_with(
+        Realization::concurrent(RefCommand::Sets(Ref::T, two.clone())).beside(fetch),
+    );
     let parents = refs.parents(&refs.head());
     assert_eq!(parents.len(), 2, "merged beside the fetch");
     let repo = refs.fixture.load(HERE);
@@ -1814,11 +1966,8 @@ fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
     let three = RefTarget::normal(refs.commits[4].clone());
     let base = RefTarget::normal(refs.commits[1].clone());
     refs.musubi_realizes_with(
-        None,
-        three,
-        false,
-        false,
-        Some(Beside::Fetches(base.clone())),
+        Realization::following(RefCommand::Fetches(three))
+            .beside(RefCommand::Fetches(base.clone())),
     );
     refs.jj_sets_at_older_op(Ref::Y, RefTarget::normal(refs.commits[2].clone()));
 }
@@ -1836,15 +1985,11 @@ fn a_restore_first_exports_what_a_lock_held_back() {
     let [root, base, one] = [0, 1, 2].map(|i| RefTarget::normal(refs.commits[i].clone()));
     refs.jj_sets(Ref::X, root.clone());
     refs.musubi_realizes_with(
-        Some((Ref::X, base.clone())),
-        base.clone(),
-        true,
-        false,
-        None,
+        Realization::following(RefCommand::Sets(Ref::X, base.clone())).with_locked_export(),
     );
     let x = refs.model.get(Ref::X);
     assert_eq!((&x.v.l, &x.v.r, &x.v.k, &x.g), (&base, &one, &one, &one));
-    refs.jj_restores_to(Some(refs.older.0.clone()));
+    refs.jj_restores_to(Some(refs.older.op.clone()));
     let x = refs.model.get(Ref::X);
     assert_eq!((&x.v.l, &x.v.r, &x.v.k, &x.g), (&root, &one, &base, &base));
     assert!(x.restored, "{x:?}");

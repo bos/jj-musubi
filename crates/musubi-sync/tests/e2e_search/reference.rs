@@ -34,6 +34,23 @@
 //! hive's history can stand for one repository's, every machine's realization of each
 //! operation must have the hive's view of it, and no operation but a merge may make anything
 //! diverge or conflict unless what it did explains it (`explained`).
+//!
+//! [`Reference::build`] walks that history and chooses when a native result is an
+//! admissible explanation. The supporting contracts have separate homes:
+//! - `adjudication`: source validation, native witnesses and the replay frontier;
+//! - `comparison`: structural equality and divergence/conflicts beyond jj's;
+//! - `workspaces`: independent historical evidence for workspace names and targets;
+//! - `replay`: native jj execution from those authenticated inputs;
+//! - `rewrites`: independent duplicate rebases versus certified serial native rebases.
+//!
+//! The negative controls below exercise those boundaries without changing the search's rules.
+
+mod adjudication;
+mod comparison;
+mod replay;
+mod rewrites;
+mod witnesses;
+mod workspaces;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -41,8 +58,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
-use std::hash::Hash;
-use std::hash::Hasher as _;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -54,7 +69,6 @@ use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
 use jj_lib::default_backend_factories::default_backend_factories;
-use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store;
 use jj_lib::op_store::OperationId;
@@ -62,172 +76,382 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::View;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
-use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::RepoLoader;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
 use musubi_jj::op_id::CanonicalOp;
-use musubi_jj::op_id::LocalOp;
 use tempfile::TempDir;
 
+use crate::identity::NativeOperation;
 use crate::world::World;
 use crate::world::merge_key;
+use adjudication::{HistoryEntry, ReplayHistory};
+use comparison::Facts;
+use comparison::Summary;
+use comparison::refs;
+use replay::CertifiedParent;
+use replay::project_private_workspaces;
+use rewrites::MergeRewrite;
+use rewrites::native_rebase_matches;
+use rewrites::repeated_rebase;
+use workspaces::WorkspaceCertificate;
+use workspaces::foreign_alias_absent;
 
-/// What the reference needs of a commit, read once.
-struct Facts {
-    change: ChangeId,
-    parents: Vec<CommitId>,
-    /// Tree, description and author, but not the author's time.
-    content: u64,
-    /// The author's time, unless jj resets it in a rewrite.
-    author_time: Option<(i64, i32)>,
+pub struct Reference {
+    _dir: TempDir,
+    loader: RepoLoader,
+    facts: HashMap<CommitId, Facts>,
+    /// The commits visible at each set of heads (`heads_key`).
+    visible: HashMap<Vec<u8>, Arc<HashSet<CommitId>>>,
+    /// The hive's head, as copied into the reference, and the reference's own operation for
+    /// it.
+    head_copy: Operation,
+    head_replay: Operation,
+    /// Each operation where the reference parted from the hive or came back to it, oldest
+    /// first, for failure messages.
+    pub deviations: Vec<String>,
+    /// Every rewrite the hive's merges record: the merge, the new commit, and its
+    /// predecessors.
+    rewrites: Vec<MergeRewrite>,
+    /// Operations other than merges that made a change diverge or a bookmark or tag
+    /// conflict, where nothing the operation did explains it (`explained`), and merges that
+    /// did more of either than jj's merge of the same parents.
+    pub unexplained: Vec<String>,
+    /// The hive's history, but for the root.
+    history: Vec<CanonicalOp>,
+    workspace_certificates: HashMap<CanonicalOp, WorkspaceCertificate>,
+    workspace_in_progress: HashSet<CanonicalOp>,
+    workspace_copies: HashMap<CanonicalOp, Operation>,
+    pub workspace_unmapped: BTreeSet<(String, OperationId)>,
 }
 
-/// A name's target's terms, added and removed, by structural key, each sorted.
-type Terms = (Vec<Option<u64>>, Vec<Option<u64>>);
-
-/// A view as agreement compares it, with commits as structural keys (`Reference::keys`).
-#[derive(PartialEq, Eq, Debug, Default)]
-struct Summary {
-    visible: BTreeMap<u64, usize>,
-    refs: BTreeMap<String, Terms>,
+/// Settings for the reference's merges. The user is the tests' user; a seed of its own for
+/// the change ids of commits jj makes keeps them clear of the hive's.
+pub(crate) fn settings() -> UserSettings {
+    let mut config = StackedConfig::with_defaults();
+    let text = r#"
+user.name = "Test User"
+user.email = "test@example.com"
+operation.hostname = "reference"
+operation.username = "test"
+debug.randomness-seed = 9000000000000000000
+"#;
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, text).unwrap());
+    UserSettings::from_config_and_home_dir(config, None).unwrap()
 }
 
-#[derive(Clone, Default)]
-struct WorkspaceCertificate {
-    keys: BTreeMap<String, CommitId>,
-    /// An independent merge witnessed this name's birth. The name can survive a later
-    /// working-copy repair even when `keys` cannot certify its replacement commit.
-    merged: BTreeSet<String>,
-    dormant: BTreeSet<String>,
-    /// Names authenticated at this exact source history, independently of their current
-    /// canonical target. A native command may rebase a foreign working copy locally.
-    names: BTreeSet<String>,
-}
-
-impl WorkspaceCertificate {
-    fn foreign_binding_carried_by_command(
-        &self,
-        command: &crate::world::CommandSnapshot,
-        key: &str,
-        actual: &CommitId,
-        visible: &HashSet<CommitId>,
-    ) -> bool {
-        let Some((owner, _)) = key.split_once('/') else {
-            return false;
-        };
-        let Some(old) = self.keys.get(key) else {
-            return false;
-        };
-        if owner == command.copy || self.dormant.contains(key) {
-            return false;
+impl Reference {
+    /// Rebuilds the hub's canonical history, up to its head, in a new repository whose git
+    /// store borrows machine 0's objects and the recorded command sources', with jj's
+    /// record of their change ids and conflicts. A raw source base can contain commits
+    /// absent from the contracted canonical history, which machine 0 never fetched.
+    pub fn build(world: &World) -> Self {
+        let dir = musubi_testutil::tempdir();
+        let git = dir.path().join("git");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&git)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+        let machine = world.fx.repo(0);
+        let mut sources = world.evidence.command_sources.clone();
+        sources.insert(
+            machine.path().join(".git/objects"),
+            machine.repo_path().join("store/extra"),
+        );
+        let mut alternates = String::new();
+        for path in sources.keys() {
+            writeln!(alternates, "{}", path.display()).unwrap();
         }
-        let rewrites: Vec<_> = command
-            .predecessors
-            .iter()
-            .flat_map(|preds| preds.iter())
-            .filter(|(_, predecessors)| predecessors.contains(old))
-            .map(|(new, _)| new)
-            .collect();
-        if old == actual {
-            return rewrites.is_empty();
+        fs::write(git.join("objects/info/alternates"), alternates).unwrap();
+        let settings = settings();
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        block_on(Workspace::init_external_git(
+            &settings,
+            &root,
+            WorkspaceName::DEFAULT,
+            &git,
+        ))
+        .unwrap();
+        let repo_path = root.join(".jj/repo");
+        let extra = repo_path.join("store/extra");
+        fs::remove_dir_all(&extra).unwrap();
+        for source in sources.values() {
+            musubi_testutil::copy_tree(source, &extra);
         }
-        rewrites
-            .into_iter()
-            .filter(|new| visible.contains(*new))
-            .collect::<Vec<_>>()
-            == [actual]
-    }
+        let loader =
+            RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
+                .unwrap();
 
-    fn names_carried_by_command(
-        &self,
-        command: &crate::world::CommandSnapshot,
-        births: &BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        self.names
+        // The hub's history, parents first.
+        let store = world.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let head = CanonicalOp(store.head().1.clone());
+        let mut ops: BTreeMap<CanonicalOp, op_store::Operation> = BTreeMap::new();
+        let mut pending = vec![head.clone()];
+        while let Some(id) = pending.pop() {
+            if ops.contains_key(&id) || id == *canonical.root_operation_id() {
+                continue;
+            }
+            let op = canonical.read_operation(&id).unwrap();
+            pending.extend(CanonicalOp::parents_of(&op));
+            ops.insert(id, op);
+        }
+        // Concurrent operations of a generation in the order they ended, which is the same
+        // on every run of a case, unlike their ids: jj records each command's arguments,
+        // temporary paths and all.
+        let mut order: Vec<(u64, MillisSinceEpoch, String, CanonicalOp)> = ops
             .iter()
-            .filter(|key| {
-                command_workspace_alias(command, births, key, None)
-                    .is_some_and(|alias| command.made.wc_commit_ids.contains_key(&alias))
+            .map(|(id, op)| {
+                (
+                    canonical.generation(id).unwrap(),
+                    op.metadata.time.end.timestamp,
+                    op.view_id.hex(),
+                    id.clone(),
+                )
             })
-            .cloned()
-            .collect()
-    }
-}
+            .collect();
+        order.sort();
 
-/// One unambiguous raw alias for an already-certified key. The copy history is captured
-/// with the command, including departed copies; an owned literal cannot name a foreign slot.
-fn command_workspace_alias(
-    command: &crate::world::CommandSnapshot,
-    births: &BTreeSet<String>,
-    key: &str,
-    target: Option<&CommitId>,
-) -> Option<jj_lib::ref_name::WorkspaceNameBuf> {
-    let (owner, workspace) = key.split_once('/')?;
-    let candidates: Vec<_> = command
-        .base
-        .wc_commit_ids
-        .iter()
-        .filter(|(name, base)| {
-            if target.is_some_and(|target| *base != target) {
-                return false;
-            }
-            if owner == command.copy {
-                return name.as_str() == workspace;
-            }
-            let Some((prefix, shown_workspace)) = name.as_str().split_once('/') else {
-                return false;
-            };
-            !births.contains(&format!("{}/{}", command.copy, name.as_str()))
-                && shown_workspace == workspace
-                && command
-                    .copies
-                    .iter()
-                    .filter(|copy| musubi_jj::workspaces::could_be_shown_as(copy, prefix))
-                    .count()
-                    == 1
-                && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    match candidates.as_slice() {
-        [name] => Some(name.clone()),
-        _ => None,
-    }
-}
-
-/// A copy's shared absence cannot delete its private namespace. Only this merge's
-/// authenticated input names may bridge that omission; the raw owned slot supplies the
-/// proposed binding, which the caller still has jj replay and compare structurally.
-fn project_private_workspaces(
-    canonical: &mut View,
-    native: &View,
-    maker: &str,
-    source_names: &BTreeSet<String>,
-    frontier_names: &BTreeSet<String>,
-    absent: bool,
-) {
-    canonical.wc_commit_ids.retain(|key, _| {
-        !key.as_str()
-            .split_once('/')
-            .is_some_and(|(owner, _)| owner == maker)
-    });
-    for key in source_names
-        .iter()
-        .chain(frontier_names.iter().filter(|_| absent))
-    {
-        let Some((owner, workspace)) = key.split_once('/') else {
-            continue;
+        let root_op = block_on(loader.root_operation());
+        let mut reference = Self {
+            _dir: dir,
+            loader,
+            facts: HashMap::new(),
+            visible: HashMap::new(),
+            head_copy: root_op.clone(),
+            head_replay: root_op.clone(),
+            deviations: vec![],
+            rewrites: vec![],
+            unexplained: vec![],
+            history: order.iter().map(|(.., id)| id.clone()).collect(),
+            workspace_certificates: HashMap::new(),
+            workspace_in_progress: HashSet::new(),
+            workspace_copies: HashMap::new(),
+            workspace_unmapped: BTreeSet::new(),
         };
-        if owner == maker
-            && let Some(target) = native.wc_commit_ids.get(WorkspaceName::new(workspace))
-        {
-            canonical
-                .wc_commit_ids
-                .insert(key.clone().into(), target.clone());
+        let root_view = canonical
+            .read_operation_view(canonical.root_operation_id())
+            .unwrap();
+        let mut history =
+            ReplayHistory::new(&ops, canonical.root_operation_id(), root_op, root_view);
+        for (.., id) in order {
+            let op = &ops[&id];
+            let view = canonical.read_view(&op.view_id).unwrap();
+            let entry = HistoryEntry::new(world, &id, op, view);
+            reference.validate_source(world, &entry, &history);
+            let copy = reference.copy_operation(&entry, &history);
+            let replay = reference.replay_operation(world, &entry, &copy, &mut history);
+            history.record(entry, copy, replay);
+        }
+        (reference.head_copy, reference.head_replay) = history.heads(&head);
+        reference
+    }
+
+    /// The changes that diverge into more commits in `after` than in `before`, and the
+    /// bookmarks and tags that conflict in `after` but not `before`, but for a bookmark on a
+    /// commit `after` abandons, which jj moves to the commit's parents, so conflicts if it
+    /// was a merge.
+    fn made_divergent_or_conflicted(&mut self, before: &View, after: &View) -> Vec<Made> {
+        let mut made = vec![];
+        let (old, new) = (self.change_counts(before), self.change_counts(after));
+        for (change, n) in &new {
+            if *n > 1 && old.get(change).copied().unwrap_or(0) < *n {
+                made.push(Made::Diverges(change.clone()));
+            }
+        }
+        let visible = self.visible(after);
+        let before_refs = refs(before);
+        for (name, target) in refs(after) {
+            if name.starts_with("remote ") || target.is_resolved() {
+                continue;
+            }
+            let was = before_refs.get(&name);
+            if was.is_some_and(|was| !was.is_resolved()) {
+                continue;
+            }
+            let abandoned = was
+                .and_then(|was| was.as_normal().cloned())
+                .filter(|commit| !visible.contains(commit))
+                .is_some_and(|commit| {
+                    let parents: BTreeSet<CommitId> =
+                        self.facts(&commit).parents.iter().cloned().collect();
+                    target.adds().flatten().cloned().collect::<BTreeSet<_>>() == parents
+                });
+            if !abandoned {
+                made.push(Made::Conflicts(name));
+            }
+        }
+        made
+    }
+
+    /// A native command can itself make a change diverge. Its recorded result bounds what
+    /// translation may add: compare versions and conflict terms, not just their counts.
+    pub fn unexplained_command_changes(
+        &mut self,
+        before: &View,
+        native: &View,
+        canonical: &View,
+    ) -> Vec<String> {
+        let mut made: Vec<_> = self
+            .made_divergent_or_conflicted(before, canonical)
+            .iter()
+            .map(Made::to_string)
+            .collect();
+        if !made.is_empty() {
+            let known = self
+                .visible(native)
+                .iter()
+                .map(|commit| self.facts(commit).change.clone())
+                .collect();
+            let beyond = self.beyond(canonical, native, &known);
+            made.retain(|change| beyond.contains(change));
+        }
+        made
+    }
+
+    /// Every machine's realization of each of the hive's operations, the operation another
+    /// machine made or a merge, has the canonical view's visible commits, bookmarks and tags:
+    /// a machine's commands run where the hive's history says they did. A machine's own
+    /// operations have the canonical view's bookmarks and tags, and its visible commits but
+    /// for those the canonical view keeps visible for other machines (`canonical_view`):
+    /// whether keeping them makes anything diverge or conflict is judged against the
+    /// canonical parent, as for any operation. Returns those that differ.
+    pub fn check_realizations(&mut self, world: &World) -> Vec<String> {
+        let store = world.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let mut differ = vec![];
+        for (m, member) in world.fx.hive.members.iter().enumerate() {
+            let node = member.adapter.repo();
+            let op_store = node.loader().op_store();
+            for id in self.history.clone() {
+                let Some(local) = node.local_of(&id) else {
+                    differ.push(format!(
+                        "{} hasn't realized {}",
+                        world.machine(m),
+                        &id.0.hex()[..12]
+                    ));
+                    continue;
+                };
+                let local_op = block_on(op_store.read_operation(&local.0)).unwrap();
+                let ours = block_on(op_store.read_view(&local_op.view_id)).unwrap();
+                let theirs = canonical.read_operation_view(&id).unwrap();
+                let realized = world.realized(m, &id, &local_op);
+                let mut why = vec![];
+                if realized {
+                    if ours.head_ids != theirs.head_ids {
+                        why.push("heads differ".to_owned());
+                    }
+                } else {
+                    if !self.visible(&ours).is_subset(&self.visible(&theirs)) {
+                        why.push("commits visible here are hidden in the hive".to_owned());
+                    }
+                }
+                if ours.local_bookmarks != theirs.local_bookmarks {
+                    why.push("bookmarks differ".to_owned());
+                }
+                if ours.local_tags != theirs.local_tags {
+                    why.push("tags differ".to_owned());
+                }
+                if !why.is_empty() {
+                    differ.push(format!(
+                        "{}'s {} {} of {} \"{}\": {}",
+                        world.machine(m),
+                        if realized { "realization" } else { "operation" },
+                        &local.0.hex()[..12],
+                        &id.0.hex()[..12],
+                        local_op
+                            .metadata
+                            .description
+                            .lines()
+                            .next()
+                            .unwrap_or_default(),
+                        why.join(", ")
+                    ));
+                }
+            }
+        }
+        differ
+    }
+}
+
+/// Whether every operation descending from one of `deviated` is an ancestor or a
+/// descendant of `id` (or `id`), in the history `ops` with `children`.
+fn dominates(
+    ops: &BTreeMap<CanonicalOp, op_store::Operation>,
+    children: &HashMap<CanonicalOp, Vec<CanonicalOp>>,
+    deviated: &BTreeSet<CanonicalOp>,
+    id: &CanonicalOp,
+) -> bool {
+    if deviated.is_empty() {
+        return true;
+    }
+    let walk = |start: &CanonicalOp, next: &dyn Fn(&CanonicalOp) -> Vec<CanonicalOp>| {
+        let mut found: HashSet<CanonicalOp> = HashSet::new();
+        let mut pending = vec![start.clone()];
+        while let Some(op) = pending.pop() {
+            if found.insert(op.clone()) {
+                pending.extend(next(&op));
+            }
+        }
+        found
+    };
+    let parents = |op: &CanonicalOp| ops.get(op).map_or(vec![], CanonicalOp::parents_of);
+    let kids = |op: &CanonicalOp| children.get(op).cloned().unwrap_or_default();
+    let related: HashSet<CanonicalOp> = walk(id, &parents)
+        .into_iter()
+        .chain(walk(id, &kids))
+        .collect();
+    deviated
+        .iter()
+        .all(|d| walk(d, &kids).iter().all(|op| related.contains(op)))
+}
+
+/// What a single operation did that would make a change diverge or a name conflict, as
+/// `Reference::made_divergent_or_conflicted` finds it.
+enum Made {
+    Diverges(String),
+    Conflicts(String),
+}
+
+impl std::fmt::Display for Made {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Diverges(change) => write!(f, "{change} diverges"),
+            Self::Conflicts(name) => write!(f, "{name} conflicts"),
         }
     }
 }
+
+/// Whether what `op` did explains `made`, as jj would do it on one machine: a fetch brings
+/// back a pushed commit beside its rewrite, or conflicts a bookmark with the remote's; an
+/// undo, redo, restore or revert brings back an older view; and an import of git refs takes
+/// what `.git` has where jj's record of it differs, which happens without anyone moving a
+/// branch, as when an undo restores an older record and a conflicted bookmark can't be
+/// exported over it. An import of git's HEAD likewise moves the working copy onto what
+/// `.git`'s HEAD has, bringing back a rewritten commit there, as after a command at an older
+/// operation wrote HEAD and jj's merge with the operations since conflicted its record of it.
+/// (Whether musubi keeps those records as jj would is for the per-machine refs' conformance
+/// test, docs/internals/conformance.md, and the check of every import, `imports`.) Anything
+/// else must be bounded by a captured native command's actual result, or it is musubi's:
+/// an operation of its own, or a realization or canonical form that differs from that result.
+fn explained(op: &op_store::Operation) -> bool {
+    NativeOperation::of(op).explains_reintroduced_work()
+}
+
+/// A canonical operation, for messages: its description, id and machine.
+fn describe(id: &CanonicalOp, op: &op_store::Operation) -> String {
+    format!(
+        "\"{}\" ({} on {})",
+        op.metadata.description.lines().next().unwrap_or_default(),
+        &id.0.hex()[..12],
+        op.metadata.hostname
+    )
+}
+
+// Negative controls: the reference must reject unproven inputs and excess effects.
 
 #[test]
 fn private_projection_requires_a_current_name_and_an_actual_owned_slot() {
@@ -285,39 +509,6 @@ fn private_projection_requires_a_current_name_and_an_actual_owned_slot() {
     );
 }
 
-fn workspace_fixup_input<'a>(
-    world: &'a World,
-    id: &CanonicalOp,
-    op: &'a op_store::Operation,
-) -> Option<(&'a str, &'a CanonicalOp)> {
-    let (trimmer, input) = world.workspace_fixup_inputs.get(&merge_key(op))?;
-    let owner = op.metadata.attributes.get("musubi.work")?;
-    (input != id && owner != trimmer).then_some((owner.as_str(), input))
-}
-
-/// The exact foreign alias is absent from this captured command's output. An owned
-/// literal never stands for a foreign slot, and an ambiguous foreign prefix is not absent.
-fn foreign_alias_absent(
-    command: &crate::world::CommandSnapshot,
-    source_names: &BTreeSet<String>,
-    key: &str,
-) -> bool {
-    let Some((owner, workspace)) = key.split_once('/') else {
-        return false;
-    };
-    owner != command.copy
-        && command.made.wc_commit_ids.keys().all(|name| {
-            source_names.contains(&format!("{}/{}", command.copy, name.as_str()))
-                || !name
-                    .as_str()
-                    .split_once('/')
-                    .is_some_and(|(prefix, shown)| {
-                        shown == workspace
-                            && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-                    })
-        })
-}
-
 #[test]
 fn foreign_commands_keep_bindings_after_their_local_aliases_are_forgotten() {
     let commit = |byte| CommitId::new(vec![byte; 20]);
@@ -332,8 +523,10 @@ fn foreign_commands_keep_bindings_after_their_local_aliases_are_forgotten() {
         made: View::make_root(commit(0)),
     };
     let mut proof = WorkspaceCertificate::default();
-    proof.keys.insert("beta/default".to_owned(), commit(1));
-    proof.names.insert("beta/default".to_owned());
+    proof
+        .entry("beta/default".to_owned())
+        .remember_binding(commit(1));
+    proof.entry("beta/default".to_owned()).authenticate_name();
     let old = commit(1);
     let new = commit(2);
     let visible = HashSet::from([new.clone()]);
@@ -349,12 +542,14 @@ fn foreign_commands_keep_bindings_after_their_local_aliases_are_forgotten() {
     assert!(!carried(&proof, &command, &old, &visible));
     assert!(!carried(&proof, &command, &commit(3), &visible));
     assert!(!carried(&proof, &command, &new, &HashSet::new()));
-    proof.dormant.insert("beta/default".to_owned());
+    proof.entry("beta/default".to_owned()).mark_dormant();
     assert!(!carried(&proof, &command, &new, &visible));
-    proof.dormant.clear();
-    proof.keys.clear();
+    proof.clear_dormancy();
+    proof.clear_bindings();
     assert!(!carried(&proof, &command, &new, &visible));
-    proof.keys.insert("beta/default".to_owned(), old.clone());
+    proof
+        .entry("beta/default".to_owned())
+        .remember_binding(old.clone());
     command.copy = "beta".to_owned();
     assert!(!carried(&proof, &command, &new, &visible));
     command.copy = "alpha".to_owned();
@@ -386,10 +581,14 @@ fn native_foreign_alias_omissions_do_not_erase_owned_names() {
     };
     let key = "beta#bbbb/default";
     let mut source_names = BTreeSet::new();
-    assert!(foreign_alias_absent(&command, &source_names, key));
+    assert!(foreign_alias_absent(
+        &command,
+        |name| source_names.contains(name),
+        key
+    ));
     assert!(!foreign_alias_absent(
         &command,
-        &source_names,
+        |name| source_names.contains(name),
         "alpha#aaaa/default"
     ));
     for alias in ["beta/default", "beta-bbbb/default", "beta-bbbb--/default"] {
@@ -399,7 +598,7 @@ fn native_foreign_alias_omissions_do_not_erase_owned_names() {
             .wc_commit_ids
             .insert(alias.into(), commit.clone());
         assert!(
-            !foreign_alias_absent(&command, &source_names, key),
+            !foreign_alias_absent(&command, |name| source_names.contains(name), key),
             "{alias}"
         );
     }
@@ -408,16 +607,28 @@ fn native_foreign_alias_omissions_do_not_erase_owned_names() {
         .made
         .wc_commit_ids
         .insert("beta/second".into(), commit.clone());
-    assert!(foreign_alias_absent(&command, &source_names, key));
+    assert!(foreign_alias_absent(
+        &command,
+        |name| source_names.contains(name),
+        key
+    ));
     command
         .made
         .wc_commit_ids
         .insert("beta/default".into(), commit);
     // A later birth does not prove that this earlier slot was owned at this source.
     let later_births = BTreeSet::from(["alpha#aaaa/beta/default".to_owned()]);
-    assert!(!foreign_alias_absent(&command, &source_names, key));
+    assert!(!foreign_alias_absent(
+        &command,
+        |name| source_names.contains(name),
+        key
+    ));
     source_names.extend(later_births);
-    assert!(foreign_alias_absent(&command, &source_names, key));
+    assert!(foreign_alias_absent(
+        &command,
+        |name| source_names.contains(name),
+        key
+    ));
 }
 
 #[test]
@@ -441,33 +652,35 @@ fn native_aliases_carry_only_authenticated_workspace_names() {
         .wc_commit_ids
         .insert("beta/default".into(), commit(3));
     let mut input = WorkspaceCertificate::default();
+    for name in ["alpha/default", "beta/default"] {
+        input.entry(name.to_owned()).authenticate_name();
+    }
     input
-        .names
-        .extend(["alpha/default".to_owned(), "beta/default".to_owned()]);
-    input.keys.insert("beta/default".to_owned(), commit(4));
-    let mut births = input.names.clone();
+        .entry("beta/default".to_owned())
+        .remember_binding(commit(4));
+    let mut births: BTreeSet<_> = input.names().cloned().collect();
     assert!(
         input
             .names_carried_by_command(&command, &births)
-            .contains("beta/default")
+            .any(|name| name == "beta/default")
     );
-    assert_eq!(input.keys["beta/default"], commit(4));
+    assert_eq!(input.binding("beta/default"), Some(&commit(4)));
 
     // Neither a historical birth nor a matching existing raw alias supplies a missing
     // input certificate. The target and the global birth remain unchanged in this control.
-    input.names.remove("beta/default");
-    input.keys.remove("beta/default");
+    input.remove_name("beta/default");
+    input.remove_binding("beta/default");
     assert!(
         !input
             .names_carried_by_command(&command, &births)
-            .contains("beta/default")
+            .any(|name| name == "beta/default")
     );
-    input.names.insert("beta/default".to_owned());
+    input.entry("beta/default".to_owned()).authenticate_name();
     births.insert("alpha/beta/default".to_owned());
     assert!(
         !input
             .names_carried_by_command(&command, &births)
-            .contains("beta/default")
+            .any(|name| name == "beta/default")
     );
 
     command
@@ -481,7 +694,7 @@ fn native_aliases_carry_only_authenticated_workspace_names() {
     assert!(
         !input
             .names_carried_by_command(&command, &births)
-            .contains("alpha/default")
+            .any(|name| name == "alpha/default")
     );
 }
 
@@ -499,7 +712,7 @@ fn a_clones_workspace_witness_is_its_native_join_input() {
     world.sync(0);
     world.clone_copy(1);
     world.converge();
-    let (key, bindings) = world.workspace_joins.iter().next().unwrap();
+    let (key, bindings) = world.evidence.workspace_joins.iter().next().unwrap();
     let store = world.fx.hive.members[1].adapter.repo().canonical_store();
     let join = store
         .operation_ids()
@@ -510,10 +723,7 @@ fn a_clones_workspace_witness_is_its_native_join_input() {
     let own = format!("{}/default", world.fx.machine_key(1));
     let mut reference = Reference::build(&world);
     assert_eq!(
-        reference
-            .workspace_certificate(&world, &join)
-            .keys
-            .get(&own),
+        reference.workspace_certificate(&world, &join).binding(&own),
         bindings.get(&own)
     );
     assert!(bindings.contains_key(&own));
@@ -536,16 +746,15 @@ fn a_clones_workspace_witness_is_its_native_join_input() {
     operation.view_id = store.write_view(&view).unwrap();
     let forged = store.write_operation(&operation).unwrap();
     let certificate = reference.workspace_certificate(&world, &forged);
-    assert!(!certificate.keys.contains_key(&foreign));
-    assert!(!certificate.keys.contains_key(&own));
+    assert!(certificate.binding(&foreign).is_none());
+    assert!(certificate.binding(&own).is_none());
 
-    world.workspace_joins.clear();
+    world.evidence.workspace_joins.clear();
     reference.workspace_certificates.clear();
     assert!(
         !reference
             .workspace_certificate(&world, &join)
-            .names
-            .contains(&own)
+            .has_name(&own)
     );
 }
 
@@ -574,7 +783,14 @@ fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs(
         &["describe", &old.hex(), "-m", "second foreign rewrite"],
     );
     let second = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
-    let snapshot = |id: &OperationId| world.commands.values().find(|c| c.id == *id).unwrap();
+    let snapshot = |id: &OperationId| {
+        world
+            .evidence
+            .commands
+            .values()
+            .find(|c| c.id == *id)
+            .unwrap()
+    };
     let replacement = |id: &OperationId| {
         snapshot(id)
             .predecessors
@@ -609,13 +825,13 @@ fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs(
     ] {
         let mut source = source_view.clone();
         let mut certificate = WorkspaceCertificate::default();
-        certificate.keys.insert(key.clone(), old.clone());
-        certificate.names.insert(key.clone());
+        certificate.entry(key.clone()).remember_binding(old.clone());
+        certificate.entry(key.clone()).authenticate_name();
         if case == "missing proof" {
-            certificate.keys.clear();
+            certificate.clear_bindings();
         }
         if case == "dormant" {
-            certificate.dormant.insert(key.clone());
+            certificate.entry(key.clone()).mark_dormant();
         }
         if case == "missing slot" {
             source.wc_commit_ids.remove(WorkspaceName::new(&key));
@@ -697,7 +913,7 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
     let mut operation = store.read_operation(&head).unwrap();
     let mut reference = Reference::build(&world);
     let original = reference.workspace_certificate(&world, &head);
-    assert!(!original.keys.is_empty());
+    assert!(original.bindings().next().is_some());
     operation.metadata.attributes.clear();
     operation.metadata.workspace_name = None;
     operation.commit_predecessors = None;
@@ -707,10 +923,22 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
         head = store.write_operation(&operation).unwrap();
     }
     let certificate = reference.workspace_certificate(&world, &head);
-    assert_eq!(certificate.keys, original.keys);
-    assert_eq!(certificate.names, original.names);
-    assert_eq!(certificate.merged, original.merged);
-    assert_eq!(certificate.dormant, original.dormant);
+    assert_eq!(
+        certificate.bindings().collect::<BTreeMap<_, _>>(),
+        original.bindings().collect::<BTreeMap<_, _>>()
+    );
+    assert_eq!(
+        certificate.names().collect::<BTreeSet<_>>(),
+        original.names().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        certificate.merge_births().collect::<BTreeSet<_>>(),
+        original.merge_births().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        certificate.dormant_names().collect::<BTreeSet<_>>(),
+        original.dormant_names().collect::<BTreeSet<_>>()
+    );
     assert_eq!(
         reference.workspace_copy(&world, &head).unwrap().id(),
         &head.0
@@ -719,7 +947,7 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
     // must be preloaded too, rather than recursing once per earlier trim.
     let owner = world.fx.machine_key(1);
     let key = format!("{owner}/default");
-    let target = original.keys[&key].clone();
+    let target = original.binding(&key).unwrap().clone();
     operation.parents = vec![store.root_operation_id().0.clone()];
     operation
         .metadata
@@ -729,18 +957,19 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
         operation.metadata.description = format!("trim workspace source {n}");
         let next = store.write_operation(&operation).unwrap();
         world
+            .evidence
             .workspace_fixup_inputs
             .insert(merge_key(&operation), (world.fx.machine_key(0), head));
         head = next;
     }
     let certificate = reference.workspace_certificate(&world, &head);
-    assert_eq!(certificate.keys.get(&key), Some(&target));
-    assert!(certificate.names.contains(&key));
+    assert_eq!(certificate.binding(&key), Some(&target));
+    assert!(certificate.has_name(&key));
     assert_eq!(
-        certificate.merged.contains(&key),
-        original.merged.contains(&key)
+        certificate.has_merge_birth(&key),
+        original.has_merge_birth(&key)
     );
-    assert!(!certificate.dormant.contains(&key));
+    assert!(!certificate.is_dormant(&key));
 }
 
 #[test]
@@ -916,25 +1145,25 @@ fn workspace_certificates_require_each_sources_existing_binding() {
             replacement.clone()
         };
         let mut proof = WorkspaceCertificate::default();
-        proof.keys.insert(key.clone(), old.clone());
-        proof.names.insert(key.clone());
-        proof.merged.insert(key.clone());
+        proof.entry(key.clone()).remember_binding(old.clone());
+        proof.entry(key.clone()).authenticate_name();
+        proof.entry(key.clone()).witness_merge_birth();
         let opaque_command = case.starts_with("foreign ") || case == "owner alias gone";
         if opaque_command {
-            proof.keys.clear();
+            proof.clear_bindings();
         }
         if case == "foreign name missing" {
-            proof.names.clear();
-            proof.merged.clear();
+            proof.clear_names();
+            proof.clear_merge_births();
         }
         if case == "missing" || case == "deleted" {
-            proof.keys.clear();
-            proof.names.clear();
+            proof.clear_bindings();
+            proof.clear_names();
         }
         if renewal || ["dormant", "omitted", "all dormant", "deleted"].contains(&case) {
             source.wc_commit_ids.remove(WorkspaceName::new(&key));
             if case != "deleted" {
-                proof.dormant.insert(key.clone());
+                proof.entry(key.clone()).mark_dormant();
             }
         }
         operation.view_id = store.write_view(&source).unwrap();
@@ -976,13 +1205,13 @@ fn workspace_certificates_require_each_sources_existing_binding() {
             other.view_id = store.write_view(&live).unwrap();
             let other = store.write_operation(&other).unwrap();
             let mut proof = WorkspaceCertificate::default();
-            proof.keys.insert(key.clone(), live_target);
+            proof.entry(key.clone()).remember_binding(live_target);
             if case == "renewed missing" {
-                proof.keys.clear();
+                proof.clear_bindings();
             }
-            proof.names.insert(key.clone());
+            proof.entry(key.clone()).authenticate_name();
             if case == "all dormant" {
-                proof.dormant.insert(key.clone());
+                proof.entry(key.clone()).mark_dormant();
             }
             reference
                 .workspace_certificates
@@ -1000,7 +1229,7 @@ fn workspace_certificates_require_each_sources_existing_binding() {
                 base.wc_commit_ids
                     .insert("alpha/default".into(), old.clone());
             }
-            world.commands.insert(
+            world.evidence.commands.insert(
                 merge_key(&output),
                 crate::world::CommandSnapshot {
                     id: OperationId::new(vec![42; 64]),
@@ -1021,7 +1250,7 @@ fn workspace_certificates_require_each_sources_existing_binding() {
         let certified = reference.workspace_certificate(&world, &result);
         if output.parents.len() == 1 {
             assert_eq!(
-                certified.merged.contains(&key),
+                certified.has_merge_birth(&key),
                 ![
                     "missing",
                     "deleted",
@@ -1034,7 +1263,7 @@ fn workspace_certificates_require_each_sources_existing_binding() {
         }
         if case == "renewed" {
             assert!(
-                certified.merged.contains(&key),
+                certified.has_merge_birth(&key),
                 "a forgotten branch cannot veto new live work"
             );
             assert_ne!(
@@ -1043,7 +1272,7 @@ fn workspace_certificates_require_each_sources_existing_binding() {
             );
         }
         assert_eq!(
-            certified.keys.get(&key),
+            certified.binding(&key),
             ["unique", "merge", "omitted", "renewed"]
                 .contains(&case)
                 .then_some(&target),
@@ -1052,15 +1281,10 @@ fn workspace_certificates_require_each_sources_existing_binding() {
     }
 }
 
-struct WorkspaceReplay {
-    view: View,
-    parents: Vec<View>,
-    private: Option<(String, View)>,
-}
-
 #[test]
 fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
     use crate::world::{Naming, Setup};
+    use witnesses::{RejectionCause, WitnessKind};
 
     fn run(observe: bool) -> (Vec<ChangeId>, String) {
         let mut world = World::new(Setup {
@@ -1146,7 +1370,7 @@ fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
         assert!(
             reference
                 .native_merge_matches(&world, &id, &parents, &output, &known, &views)
-                .is_some()
+                .is_ok()
         );
         world.assert_observer_state(&before);
         let mut wrong = output.clone();
@@ -1154,24 +1378,39 @@ fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
             "invented".into(),
             RefTarget::normal(output.head_ids.iter().next().unwrap().clone()),
         );
+        let rejected =
+            reference.native_merge_matches(&world, &id, &parents, &wrong, &known, &views);
+        assert!(rejected.is_err());
+        let rejected = rejected.unwrap_err();
         assert!(
-            reference
-                .native_merge_matches(&world, &id, &parents, &wrong, &known, &views)
-                .is_none()
+            rejected.contains(
+                WitnessKind::NativeDag,
+                &RejectionCause::StructuralResultDiffers
+            ),
+            "{rejected}"
         );
         let mut reversed = parents.clone();
         reversed.reverse();
+        let rejected =
+            reference.native_merge_matches(&world, &id, &reversed, &output, &known, &views);
+        assert!(rejected.is_err());
+        let rejected = rejected.unwrap_err();
         assert!(
-            reference
-                .native_merge_matches(&world, &id, &reversed, &output, &known, &views)
-                .is_none()
+            rejected.contains(
+                WitnessKind::NativeDag,
+                &RejectionCause::OrderedParentsDiffer
+            ),
+            "{rejected}"
         );
         let mut wrong_inputs = views.clone();
         wrong_inputs.get_mut(&parents[0]).unwrap().local_bookmarks = wrong.local_bookmarks;
+        let rejected =
+            reference.native_merge_matches(&world, &id, &parents, &output, &known, &wrong_inputs);
+        assert!(rejected.is_err());
+        let rejected = rejected.unwrap_err();
         assert!(
-            reference
-                .native_merge_matches(&world, &id, &parents, &output, &known, &wrong_inputs)
-                .is_none()
+            rejected.contains(WitnessKind::NativeDag, &RejectionCause::SharedInputDiffers),
+            "{rejected}"
         );
         let mut missing_workspace = views.clone();
         missing_workspace
@@ -1180,21 +1419,41 @@ fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
             .wc_commit_ids
             .pop_first()
             .unwrap();
+        let rejected = reference.native_merge_matches(
+            &world,
+            &id,
+            &parents,
+            &output,
+            &known,
+            &missing_workspace,
+        );
         assert!(
-            reference
-                .native_merge_matches(&world, &id, &parents, &output, &known, &missing_workspace)
-                .is_none(),
+            rejected.is_err(),
             "matching shared summaries cannot excuse different workspace bindings"
+        );
+        let rejected = rejected.unwrap_err();
+        assert!(
+            rejected.contains(
+                WitnessKind::NativeDag,
+                &RejectionCause::CertifiedInputBindingsDiffer
+            ),
+            "{rejected}"
         );
         world.assert_observer_state(&before);
         let result = (world.next_actor_randomness(), world.fingerprint());
         // Replacing the maker leaves only marked renderings of this operation. Those
         // cannot turn the product's output into independent native evidence.
         world.clone_copy(0);
+        let rejected =
+            reference.native_merge_matches(&world, &id, &parents, &output, &known, &views);
+        assert!(rejected.is_err());
+        let rejected = rejected.unwrap_err();
         assert!(
-            reference
-                .native_merge_matches(&world, &id, &parents, &output, &known, &views)
-                .is_none()
+            rejected.contains(
+                WitnessKind::NativeDag,
+                &RejectionCause::RealizationIsNotMaker
+            ),
+            "{rejected}"
         );
         result
     }
@@ -1262,8 +1521,16 @@ fn private_workspace_replay_merges_all_native_bases() {
     let replays = reference.workspace_private_replays(
         &world,
         &final_merge,
-        &[first.clone(), second],
-        &[certificate.clone(), certificate],
+        &[
+            CertifiedParent {
+                canonical: &first,
+                certificate: &certificate,
+            },
+            CertifiedParent {
+                canonical: &second,
+                certificate: &certificate,
+            },
+        ],
     );
     let replay = replays
         .iter()
@@ -1299,7 +1566,7 @@ fn private_workspace_replay_merges_all_native_bases() {
         .canonical_store()
         .read_operation(&first)
         .unwrap();
-    world.commands.insert(
+    world.evidence.commands.insert(
         merge_key(&op),
         crate::world::CommandSnapshot {
             id: OperationId::new(vec![42; 64]),
@@ -1317,99 +1584,6 @@ fn private_workspace_replay_merges_all_native_bases() {
     assert!(!reference.workspace_dependencies_available(&world, std::slice::from_ref(&first)));
     assert!(reference.workspace_certificates.is_empty());
     assert!(reference.workspace_in_progress.is_empty());
-}
-
-pub struct Reference {
-    _dir: TempDir,
-    loader: RepoLoader,
-    facts: HashMap<CommitId, Facts>,
-    /// The commits visible at each set of heads (`heads_key`).
-    visible: HashMap<Vec<u8>, Arc<HashSet<CommitId>>>,
-    /// The hive's head, as copied into the reference, and the reference's own operation for
-    /// it.
-    head_copy: Operation,
-    head_replay: Operation,
-    /// Each operation where the reference parted from the hive or came back to it, oldest
-    /// first, for failure messages.
-    pub deviations: Vec<String>,
-    /// Every rewrite the hive's merges record: the merge, the new commit, and its
-    /// predecessors.
-    rewrites: Vec<MergeRewrite>,
-    /// Operations other than merges that made a change diverge or a bookmark or tag
-    /// conflict, where nothing the operation did explains it (`explained`), and merges that
-    /// did more of either than jj's merge of the same parents.
-    pub unexplained: Vec<String>,
-    /// The hive's history, but for the root.
-    history: Vec<CanonicalOp>,
-    workspace_certificates: HashMap<CanonicalOp, WorkspaceCertificate>,
-    workspace_in_progress: HashSet<CanonicalOp>,
-    workspace_copies: HashMap<CanonicalOp, Operation>,
-    pub workspace_unmapped: BTreeSet<(String, OperationId)>,
-}
-
-#[derive(Clone)]
-struct MergeRewrite {
-    operation: OperationId,
-    new: CommitId,
-    predecessors: Vec<CommitId>,
-    /// Inputs of an independently replayed native merge that made this exact rewrite.
-    /// A result already visible there was not made by an independent concurrent merge.
-    native_inputs: Arc<HashSet<CommitId>>,
-}
-
-/// Whether the native replay certifies this rewrite, including its complete shared result.
-fn native_rebase_matches<'a>(
-    results: (&Summary, &Summary),
-    key: u64,
-    predecessors: &[CommitId],
-    native: impl IntoIterator<Item = (u64, &'a [CommitId])>,
-) -> bool {
-    results.0 == results.1
-        && native.into_iter().any(|(native_key, native_predecessors)| {
-            native_key == key && native_predecessors == predecessors
-        })
-}
-
-fn repeated_rebase(rewrites: &[MergeRewrite], keys: &HashMap<CommitId, u64>) -> bool {
-    let mut made: HashMap<(CommitId, u64), Vec<&MergeRewrite>> = HashMap::new();
-    for rewrite in rewrites {
-        for predecessor in &rewrite.predecessors {
-            let previous = made
-                .entry((predecessor.clone(), keys[&rewrite.new]))
-                .or_default();
-            if previous.iter().any(|other| {
-                other.operation != rewrite.operation
-                    && other.new != rewrite.new
-                    && !rewrite.native_inputs.contains(&other.new)
-                    && !other.native_inputs.contains(&rewrite.new)
-            }) {
-                return true;
-            }
-            previous.push(rewrite);
-        }
-    }
-    false
-}
-
-/// Settings for the reference's merges. The user is the tests' user; a seed of its own for
-/// the change ids of commits jj makes keeps them clear of the hive's.
-pub(crate) fn settings() -> UserSettings {
-    let mut config = StackedConfig::with_defaults();
-    let text = r#"
-user.name = "Test User"
-user.email = "test@example.com"
-operation.hostname = "reference"
-operation.username = "test"
-debug.randomness-seed = 9000000000000000000
-"#;
-    config.add_layer(ConfigLayer::parse(ConfigSource::User, text).unwrap());
-    UserSettings::from_config_and_home_dir(config, None).unwrap()
-}
-
-fn hash(value: impl Hash) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[test]
@@ -1649,2294 +1823,4 @@ fn a_native_serial_merge_can_repeat_a_rebase_after_abandon() {
         "commit_id ++ \"\\n\"",
     ]);
     assert_eq!(remaining.trim(), first.hex());
-}
-
-impl Reference {
-    /// Rebuilds the hub's canonical history, up to its head, in a new repository whose git
-    /// store borrows machine 0's objects and the recorded command sources', with jj's
-    /// record of their change ids and conflicts. A raw source base can contain commits
-    /// absent from the contracted canonical history, which machine 0 never fetched.
-    pub fn build(world: &World) -> Self {
-        let dir = musubi_testutil::tempdir();
-        let git = dir.path().join("git");
-        let status = Command::new("git")
-            .args(["init", "--bare", "-q"])
-            .arg(&git)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git init failed");
-        let machine = world.fx.repo(0);
-        let mut sources = world.command_sources.clone();
-        sources.insert(
-            machine.path().join(".git/objects"),
-            machine.repo_path().join("store/extra"),
-        );
-        let mut alternates = String::new();
-        for path in sources.keys() {
-            writeln!(alternates, "{}", path.display()).unwrap();
-        }
-        fs::write(git.join("objects/info/alternates"), alternates).unwrap();
-        let settings = settings();
-        let root = dir.path().join("repo");
-        fs::create_dir(&root).unwrap();
-        block_on(Workspace::init_external_git(
-            &settings,
-            &root,
-            WorkspaceName::DEFAULT,
-            &git,
-        ))
-        .unwrap();
-        let repo_path = root.join(".jj/repo");
-        let extra = repo_path.join("store/extra");
-        fs::remove_dir_all(&extra).unwrap();
-        for source in sources.values() {
-            musubi_testutil::copy_tree(source, &extra);
-        }
-        let loader =
-            RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
-                .unwrap();
-
-        // The hub's history, parents first.
-        let store = world.fx.hive.hub.store();
-        let canonical = store.canonical();
-        let head = CanonicalOp(store.head().1.clone());
-        let mut ops: BTreeMap<CanonicalOp, op_store::Operation> = BTreeMap::new();
-        let mut pending = vec![head.clone()];
-        while let Some(id) = pending.pop() {
-            if ops.contains_key(&id) || id == *canonical.root_operation_id() {
-                continue;
-            }
-            let op = canonical.read_operation(&id).unwrap();
-            pending.extend(CanonicalOp::parents_of(&op));
-            ops.insert(id, op);
-        }
-        // Concurrent operations of a generation in the order they ended, which is the same
-        // on every run of a case, unlike their ids: jj records each command's arguments,
-        // temporary paths and all.
-        let mut order: Vec<(u64, MillisSinceEpoch, String, CanonicalOp)> = ops
-            .iter()
-            .map(|(id, op)| {
-                (
-                    canonical.generation(id).unwrap(),
-                    op.metadata.time.end.timestamp,
-                    op.view_id.hex(),
-                    id.clone(),
-                )
-            })
-            .collect();
-        order.sort();
-
-        let root_op = block_on(loader.root_operation());
-        let mut reference = Self {
-            _dir: dir,
-            loader,
-            facts: HashMap::new(),
-            visible: HashMap::new(),
-            head_copy: root_op.clone(),
-            head_replay: root_op.clone(),
-            deviations: vec![],
-            rewrites: vec![],
-            unexplained: vec![],
-            history: order.iter().map(|(.., id)| id.clone()).collect(),
-            workspace_certificates: HashMap::new(),
-            workspace_in_progress: HashSet::new(),
-            workspace_copies: HashMap::new(),
-            workspace_unmapped: BTreeSet::new(),
-        };
-        let root_view = canonical
-            .read_operation_view(canonical.root_operation_id())
-            .unwrap();
-        let mut views: HashMap<CanonicalOp, View> =
-            HashMap::from([(canonical.root_operation_id().clone(), root_view)]);
-        // The operations where the reference went its own way. It goes back to the hive's
-        // only at an operation that every later operation descending from them descends
-        // from too: otherwise some line of its history would keep commits of its own, and a
-        // merge of that line with one that went back would take the hive's copies of them
-        // for other commits.
-        let mut deviated: BTreeSet<CanonicalOp> = BTreeSet::new();
-        let mut children: HashMap<CanonicalOp, Vec<CanonicalOp>> = HashMap::new();
-        for (id, op) in &ops {
-            for parent in CanonicalOp::parents_of(op) {
-                children.entry(parent).or_default().push(id.clone());
-            }
-        }
-        let mut copies: HashMap<CanonicalOp, Operation> = HashMap::new();
-        let mut replays: HashMap<CanonicalOp, Operation> = HashMap::new();
-        copies.insert(canonical.root_operation_id().clone(), root_op.clone());
-        replays.insert(canonical.root_operation_id().clone(), root_op);
-        for (.., id) in order {
-            let op = &ops[&id];
-            let op_parents = CanonicalOp::parents_of(op);
-            let view = canonical.read_view(&op.view_id).unwrap();
-            // A drop can expand a command's parent frontier or contract it to the root.
-            // Judge its payload against the actual input, whatever its new parent count.
-            let command = world.commands.get(&merge_key(op));
-            let kept = world.kept_operations.get(&merge_key(op));
-            let source_copy = command.map(|command| command.copy.as_str()).or_else(|| {
-                kept.filter(|source| source.native)
-                    .map(|source| source.copy.as_str())
-            });
-            let protected = source_copy
-                .map(|copy| {
-                    reference.retained_foreign_targets(
-                        world,
-                        copy,
-                        command.and_then(|c| c.input.as_ref()),
-                        op,
-                        &view,
-                    )
-                })
-                .unwrap_or_default();
-            let with_foreign = |native: &View| {
-                let mut expected = native.clone();
-                expected.head_ids.extend(protected.iter().cloned());
-                expected
-            };
-            let is_merge = op_parents.len() > 1 && command.is_none();
-            if is_merge {
-                for (new, predecessors) in op.commit_predecessors.iter().flatten() {
-                    reference.rewrites.push(MergeRewrite {
-                        operation: id.0.clone(),
-                        new: new.clone(),
-                        predecessors: predecessors.clone(),
-                        native_inputs: Arc::default(),
-                    });
-                }
-            }
-            // A `jj op abandon` survivor keeps its original view, whatever its parents
-            // are now: it must be that source view, as the
-            // realizations are held to theirs (`check_realizations`).
-            if let Some(replaced) = kept
-                && let Some(why) =
-                    reference.unlike_replaced(&replaced.view, replaced.realized, &view)
-            {
-                reference.unexplained.push(format!(
-                    "{}, which jj op abandon rewrote, keeping its view: {why}",
-                    describe(&id, op)
-                ));
-            }
-            if let Some(source) = kept
-                && let Some(parent) = &source.parent
-                && command.is_none()
-                && !source.realized
-                && !explained(op)
-            {
-                let made: Vec<String> = reference
-                    .made_divergent_or_conflicted(parent, &source.view)
-                    .iter()
-                    .map(Made::to_string)
-                    .collect();
-                if !made.is_empty() {
-                    reference.unexplained.push(format!(
-                        "{} introduced in its original source: {}",
-                        describe(&id, op),
-                        made.join(", ")
-                    ));
-                }
-            }
-            if let Some(source) = kept {
-                let made: Vec<String> = reference
-                    .made_divergent_or_conflicted(&with_foreign(&source.view), &view)
-                    .iter()
-                    .map(Made::to_string)
-                    .collect();
-                if !made.is_empty() {
-                    reference.unexplained.push(format!(
-                        "{} differs from its retained source: {}",
-                        describe(&id, op),
-                        made.join(", ")
-                    ));
-                }
-            }
-            if let Some(command) = command
-                && let Some(why) = reference.unlike_replaced(&command.made, false, &view)
-            {
-                reference.unexplained.push(format!(
-                    "{}, which is a source-recorded command: {why}",
-                    describe(&id, op)
-                ));
-            }
-            if let Some(command) = command {
-                let mut remotes = command.made.remote_views.clone();
-                remotes.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-                if remotes != view.remote_views {
-                    reference.unexplained.push(format!(
-                        "{}, which is a source-recorded command: remote refs differ",
-                        describe(&id, op)
-                    ));
-                }
-            }
-            if let Some(command) = command
-                && !explained(op)
-            {
-                let made = reference.unexplained_command_changes(
-                    &command.base,
-                    &with_foreign(&command.made),
-                    &view,
-                );
-                if !made.is_empty() {
-                    reference.unexplained.push(format!(
-                        "{}: {}",
-                        describe(&id, op),
-                        made.join(", ")
-                    ));
-                }
-            }
-            if let [parent] = op_parents.as_slice()
-                && command.is_none()
-                && !explained(op)
-                && kept.is_none()
-            {
-                let parent_view = views[parent].clone();
-                let made: Vec<String> = reference
-                    .made_divergent_or_conflicted(&parent_view, &view)
-                    .iter()
-                    .map(Made::to_string)
-                    .collect();
-                if !made.is_empty() {
-                    reference.unexplained.push(format!(
-                        "{}: {}",
-                        describe(&id, op),
-                        made.join(", ")
-                    ));
-                }
-            }
-            let op_store = reference.loader.op_store().clone();
-            let copy = op_store::Operation {
-                view_id: block_on(op_store.write_view(&view)).unwrap(),
-                parents: op_parents.iter().map(|p| copies[p].id().clone()).collect(),
-                metadata: op.metadata.clone(),
-                commit_predecessors: op.commit_predecessors.clone(),
-            };
-            let copy_id = block_on(op_store.write_operation(&copy)).unwrap();
-            let copy = block_on(reference.loader.load_operation(&copy_id)).unwrap();
-            let parents: Vec<&Operation> = op_parents.iter().map(|p| &replays[p]).collect();
-            let agreed = op_parents.iter().all(|p| replays[p].id() == copies[p].id());
-            // A merge `jj op abandon` gave other parents keeps its view, as jj keeps every
-            // operation's: it goes in as the hive has it, as a command does.
-            let replay = if (!is_merge || kept.is_some()) && agreed {
-                copy.clone()
-            } else {
-                let (replayed, how) = if !is_merge {
-                    let replayed = if let [parent] = op_parents.as_slice() {
-                        reference.apply(&copies[parent], &copy, parents[0])
-                    } else {
-                        // Lift the command's payload between independently merged copy
-                        // and replay frontiers, retaining the existing deviation tracking.
-                        let input =
-                            reference.merge(op_parents.iter().map(|p| &copies[p]).collect());
-                        let onto = reference.merge(parents);
-                        reference.apply(&input.op, &copy, &onto.op)
-                    };
-                    (replayed, "applied")
-                } else {
-                    (reference.merge(parents), "merged")
-                };
-                let known =
-                    reference.changes_of(op_parents.iter().flat_map(|p| [&copies[p], &replays[p]]));
-                let ours = reference.summary(&view, &known);
-                let theirs = reference.summary(&replayed.view, &known);
-                if is_merge && agreed && ours == theirs {
-                    reference.certify_serial_rebases(
-                        &id,
-                        op,
-                        &replayed,
-                        &op_parents,
-                        &views,
-                        (&ours, &theirs),
-                    );
-                }
-                // The same parents on both sides, but a different merge: it may be jj's own,
-                // on the machine that made it, of the parents as that machine had them.
-                let as_made = if is_merge && agreed && ours != theirs {
-                    reference
-                        .merged_as_made(world, &id, &op_parents, &replayed.view, &copies, &views)
-                        .filter(|(merged, _)| reference.summary(merged, &known) == ours)
-                        .or_else(|| {
-                            let inputs: Vec<_> = op_parents
-                                .iter()
-                                .map(|parent| reference.workspace_certificate(world, parent))
-                                .collect();
-                            reference
-                                .workspace_private_replays(world, &id, &op_parents, &inputs)
-                                .into_iter()
-                                .find_map(|replay| {
-                                    let (maker, _) = replay.private?;
-                                    let m = (0..world.nodes())
-                                        .find(|&m| world.fx.machine_key(m) == maker)?;
-                                    (reference.summary(&replay.view, &known) == ours)
-                                        .then(|| (replay.view, world.machine(m)))
-                                })
-                        })
-                        .or_else(|| {
-                            reference
-                                .native_merge_matches(
-                                    world,
-                                    &id,
-                                    &op_parents,
-                                    &view,
-                                    &known,
-                                    &views,
-                                )
-                                .map(|maker| (view.clone(), maker))
-                        })
-                } else {
-                    None
-                };
-                if is_merge && agreed && ours != theirs && as_made.is_none() {
-                    // What the hive's merge did beyond jj's is musubi's, whatever later
-                    // operations make of it.
-                    let beyond = reference.beyond(&view, &replayed.view, &known);
-                    if !beyond.is_empty() {
-                        reference.unexplained.push(format!(
-                            "{}: {} beyond jj's merge of the same parents",
-                            describe(&id, op),
-                            beyond.join(", ")
-                        ));
-                    }
-                }
-                if let Some((merged, machine)) = as_made {
-                    reference.deviations.push(format!(
-                        "{} merged by jj as {} had its parents",
-                        describe(&id, op),
-                        machine
-                    ));
-                    if dominates(&ops, &children, &deviated, &id) {
-                        copy.clone()
-                    } else {
-                        // Its own, as where jj's merge agrees but other lines have parted.
-                        deviated.insert(id.clone());
-                        let parents = op_parents.iter().map(|p| replays[p].id().clone());
-                        reference.write_like(&copy, &merged, parents.collect())
-                    }
-                } else if ours == theirs && dominates(&ops, &children, &deviated, &id) {
-                    if !agreed {
-                        reference
-                            .deviations
-                            .push(format!("agrees again at {}", describe(&id, op)));
-                    }
-                    copy.clone()
-                } else if ours == theirs {
-                    deviated.insert(id.clone());
-                    replayed.op
-                } else {
-                    let diff = reference.difference(&view, &replayed.view, &known);
-                    reference.deviations.push(format!(
-                        "{} {how} by jj differs from the hive's: {diff}",
-                        describe(&id, op)
-                    ));
-                    deviated.insert(id.clone());
-                    replayed.op
-                }
-            };
-            copies.insert(id.clone(), copy);
-            replays.insert(id.clone(), replay);
-            views.insert(id, view);
-        }
-        reference.head_copy = copies[&head].clone();
-        reference.head_replay = replays[&head].clone();
-        reference
-    }
-
-    /// The changes that diverge into more commits in `after` than in `before`, and the
-    /// bookmarks and tags that conflict in `after` but not `before`, but for a bookmark on a
-    /// commit `after` abandons, which jj moves to the commit's parents, so conflicts if it
-    /// was a merge.
-    fn made_divergent_or_conflicted(&mut self, before: &View, after: &View) -> Vec<Made> {
-        let mut made = vec![];
-        let (old, new) = (self.change_counts(before), self.change_counts(after));
-        for (change, n) in &new {
-            if *n > 1 && old.get(change).copied().unwrap_or(0) < *n {
-                made.push(Made::Diverges(change.clone()));
-            }
-        }
-        let visible = self.visible(after);
-        let before_refs = refs(before);
-        for (name, target) in refs(after) {
-            if name.starts_with("remote ") || target.is_resolved() {
-                continue;
-            }
-            let was = before_refs.get(&name);
-            if was.is_some_and(|was| !was.is_resolved()) {
-                continue;
-            }
-            let abandoned = was
-                .and_then(|was| was.as_normal().cloned())
-                .filter(|commit| !visible.contains(commit))
-                .is_some_and(|commit| {
-                    let parents: BTreeSet<CommitId> =
-                        self.facts(&commit).parents.iter().cloned().collect();
-                    target.adds().flatten().cloned().collect::<BTreeSet<_>>() == parents
-                });
-            if !abandoned {
-                made.push(Made::Conflicts(name));
-            }
-        }
-        made
-    }
-
-    /// A native command can itself make a change diverge. Its recorded result bounds what
-    /// translation may add: compare versions and conflict terms, not just their counts.
-    pub fn unexplained_command_changes(
-        &mut self,
-        before: &View,
-        native: &View,
-        canonical: &View,
-    ) -> Vec<String> {
-        let mut made: Vec<_> = self
-            .made_divergent_or_conflicted(before, canonical)
-            .iter()
-            .map(Made::to_string)
-            .collect();
-        if !made.is_empty() {
-            let known = self
-                .visible(native)
-                .iter()
-                .map(|commit| self.facts(commit).change.clone())
-                .collect();
-            let beyond = self.beyond(canonical, native, &known);
-            made.retain(|change| beyond.contains(change));
-        }
-        made
-    }
-
-    /// Canonical views keep other copies' working copies visible even when a native
-    /// operation removes their local aliases. Only exact live input bindings retained unchanged
-    /// by the result can extend the native command's visible payload.
-    fn retained_foreign_targets(
-        &mut self,
-        world: &World,
-        copy: &str,
-        command_input: Option<&CanonicalOp>,
-        op: &op_store::Operation,
-        view: &View,
-    ) -> BTreeSet<CommitId> {
-        let mut inputs = workspace_source_parents(op).unwrap_or_default();
-        inputs.extend(command_input.cloned());
-        inputs.sort();
-        inputs.dedup();
-        let mut targets = BTreeSet::new();
-        for input in inputs {
-            let certificate = self.workspace_certificate(world, &input);
-            let Some(source) = Self::workspace_source(world, &input) else {
-                continue;
-            };
-            let Some(source) = world.fx.hive.members.iter().find_map(|member| {
-                member
-                    .adapter
-                    .repo()
-                    .canonical_store()
-                    .read_view(&source.view_id)
-                    .ok()
-            }) else {
-                continue;
-            };
-            let visible = self.visible(&source);
-            for (key, target) in certificate.keys {
-                let Some((owner, _)) = key.split_once('/') else {
-                    continue;
-                };
-                if owner != copy
-                    && !certificate.dormant.contains(&key)
-                    && source.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)
-                    && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)
-                    && visible.contains(&target)
-                {
-                    targets.insert(target);
-                }
-            }
-        }
-        targets
-    }
-
-    /// How many visible commits each change has in `view`, by jj's change id.
-    fn change_counts(&mut self, view: &View) -> BTreeMap<String, usize> {
-        let mut counts = BTreeMap::new();
-        for id in self.visible(view).iter() {
-            *counts
-                .entry(self.facts(id).change.reverse_hex())
-                .or_default() += 1;
-        }
-        counts
-    }
-
-    /// Record inputs only when an independent native replay has the entire shared result
-    /// and the exact predecessor relation. Neither ancestry, a retained view, nor an
-    /// earlier result visible in a parent alone certifies a serial native rebase.
-    fn certify_serial_rebases(
-        &mut self,
-        id: &CanonicalOp,
-        op: &op_store::Operation,
-        replayed: &Replayed,
-        parents: &[CanonicalOp],
-        views: &HashMap<CanonicalOp, View>,
-        results: (&Summary, &Summary),
-    ) {
-        let native = &replayed.op.store_operation().commit_predecessors;
-        let new: Vec<_> = op
-            .commit_predecessors
-            .iter()
-            .flatten()
-            .chain(native.iter().flatten())
-            .map(|(new, _)| new.clone())
-            .collect();
-        let keys = self.keys(&new, &|_| true);
-        let mut inputs = HashSet::new();
-        for parent in parents {
-            inputs.extend(self.visible(&views[parent]).iter().cloned());
-        }
-        let inputs = Arc::new(inputs);
-        for rewrite in self.rewrites.iter_mut().filter(|r| r.operation == id.0) {
-            if native_rebase_matches(
-                results,
-                keys[&rewrite.new],
-                &rewrite.predecessors,
-                native
-                    .iter()
-                    .flatten()
-                    .map(|(new, predecessors)| (keys[new], predecessors.as_slice())),
-            ) {
-                rewrite.native_inputs = inputs.clone();
-            }
-        }
-    }
-
-    /// Whether two of the hive's independent merges rewrote one commit of `change` alike: into
-    /// commits with the same contents, change id and parents (by structural key). That is the
-    /// same rebase done twice, by two merges of the same operations, which the hub's
-    /// sequencing exists to prevent. Two commits of a change can also end up alike when jj
-    /// rebases two different rewrites of it onto the same parents, or when a command and a
-    /// merge each rebase it the same way, as a `jj rebase -r` of its parent and a merge with
-    /// a concurrent abandon of that parent do; neither is it. A native merge can also rebase
-    /// the original again after an operation abandon, with the first result already visible
-    /// in its inputs. Only an independently replayed full result and predecessor relation
-    /// certify that serial case; independent duplicate merges remain forbidden.
-    pub fn same_rebase_twice(&mut self, change: &str) -> bool {
-        let ours: Vec<_> = self
-            .rewrites
-            .clone()
-            .into_iter()
-            .filter(|rewrite| self.facts(&rewrite.new).change.reverse_hex() == change)
-            .collect();
-        let ids: Vec<CommitId> = ours.iter().map(|rewrite| rewrite.new.clone()).collect();
-        let keys = self.keys(&ids, &|_| true);
-        repeated_rebase(&ours, &keys)
-    }
-
-    /// Every machine's realization of each of the hive's operations, the operation another
-    /// machine made or a merge, has the canonical view's visible commits, bookmarks and tags:
-    /// a machine's commands run where the hive's history says they did. A machine's own
-    /// operations have the canonical view's bookmarks and tags, and its visible commits but
-    /// for those the canonical view keeps visible for other machines (`canonical_view`):
-    /// whether keeping them makes anything diverge or conflict is judged against the
-    /// canonical parent, as for any operation. Returns those that differ.
-    pub fn check_realizations(&mut self, world: &World) -> Vec<String> {
-        let store = world.fx.hive.hub.store();
-        let canonical = store.canonical();
-        let mut differ = vec![];
-        for (m, member) in world.fx.hive.members.iter().enumerate() {
-            let node = member.adapter.repo();
-            let op_store = node.loader().op_store();
-            for id in self.history.clone() {
-                let Some(local) = node.local_of(&id) else {
-                    differ.push(format!(
-                        "{} hasn't realized {}",
-                        world.machine(m),
-                        &id.0.hex()[..12]
-                    ));
-                    continue;
-                };
-                let local_op = block_on(op_store.read_operation(&local.0)).unwrap();
-                let ours = block_on(op_store.read_view(&local_op.view_id)).unwrap();
-                let theirs = canonical.read_operation_view(&id).unwrap();
-                let realized = world.realized(m, &id, &local_op);
-                let mut why = vec![];
-                if realized {
-                    if ours.head_ids != theirs.head_ids {
-                        why.push("heads differ".to_owned());
-                    }
-                } else {
-                    if !self.visible(&ours).is_subset(&self.visible(&theirs)) {
-                        why.push("commits visible here are hidden in the hive".to_owned());
-                    }
-                }
-                if ours.local_bookmarks != theirs.local_bookmarks {
-                    why.push("bookmarks differ".to_owned());
-                }
-                if ours.local_tags != theirs.local_tags {
-                    why.push("tags differ".to_owned());
-                }
-                if !why.is_empty() {
-                    differ.push(format!(
-                        "{}'s {} {} of {} \"{}\": {}",
-                        world.machine(m),
-                        if realized { "realization" } else { "operation" },
-                        &local.0.hex()[..12],
-                        &id.0.hex()[..12],
-                        local_op
-                            .metadata
-                            .description
-                            .lines()
-                            .next()
-                            .unwrap_or_default(),
-                        why.join(", ")
-                    ));
-                }
-            }
-        }
-        differ
-    }
-
-    /// Extra logical names need an independent native birth witness. Plain commands may
-    /// preserve an injected name, so only their actual additions authorize new keys.
-    pub fn witnessed_workspace_names(&mut self, world: &World) -> BTreeSet<String> {
-        let head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
-        self.workspace_certificate(world, &head).merged
-    }
-
-    fn workspace_source(world: &World, id: &CanonicalOp) -> Option<op_store::Operation> {
-        world.fx.hive.members.iter().find_map(|member| {
-            let store = member.adapter.repo().canonical_store();
-            store
-                .has_operation(id)
-                .then(|| store.read_operation(id).ok())
-                .flatten()
-        })
-    }
-
-    fn workspace_copy(&mut self, world: &World, id: &CanonicalOp) -> Option<Operation> {
-        let root = world.fx.hive.members[0]
-            .adapter
-            .repo()
-            .canonical_store()
-            .root_operation_id();
-        self.workspace_copies
-            .entry(root.clone())
-            .or_insert_with(|| block_on(self.loader.root_operation()));
-        let mut pending = vec![(id.clone(), false)];
-        while let Some((next, ready)) = pending.pop() {
-            if self.workspace_copies.contains_key(&next) {
-                continue;
-            }
-            let mut op = Self::workspace_source(world, &next)?;
-            if !ready {
-                pending.push((next, true));
-                pending.extend(
-                    CanonicalOp::parents_of(&op)
-                        .into_iter()
-                        .rev()
-                        .map(|p| (p, false)),
-                );
-                continue;
-            }
-            let view = world.fx.hive.members.iter().find_map(|member| {
-                member
-                    .adapter
-                    .repo()
-                    .canonical_store()
-                    .read_view(&op.view_id)
-                    .ok()
-            })?;
-            let store = self.loader.op_store();
-            op.view_id = block_on(store.write_view(&view)).ok()?;
-            let copied = block_on(store.write_operation(&op)).ok()?;
-            if copied != next.0 {
-                return None;
-            }
-            let copied = block_on(self.loader.load_operation(&copied)).ok()?;
-            self.workspace_copies.insert(next, copied);
-        }
-        self.workspace_copies.get(id).cloned()
-    }
-
-    /// Existing marked identities remain useful after the disposable map loses an
-    /// unreachable alias. Read stored bodies only; observing a source creates no identity.
-    fn source_aliases(
-        world: &World,
-        node: &musubi_jj::node::NodeRepo,
-        local: &LocalOp,
-    ) -> Vec<CanonicalOp> {
-        let marked = block_on(node.loader().op_store().read_operation(&local.0))
-            .ok()
-            .and_then(|op| {
-                op.metadata
-                    .attributes
-                    .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
-                    .and_then(OperationId::try_from_hex)
-                    .map(CanonicalOp)
-            })
-            .filter(|id| Self::workspace_source(world, id).is_some());
-        let mut aliases: Vec<_> = marked.into_iter().collect();
-        if let Some(mapped) = node.canonical_of(local)
-            && !aliases.contains(&mapped)
-        {
-            aliases.push(mapped);
-        }
-        aliases
-    }
-
-    /// Replay an authenticated local merge with that copy's actual owned bindings, for
-    /// independently certified names. Foreign native rewrites can differ from canonical
-    /// bindings, and membership forgets omit private slots centrally.
-    /// Realizations are eligible too: their marker is no evidence, but their authenticated
-    /// parents and base can independently witness the same merge through native jj.
-    fn workspace_private_replays(
-        &mut self,
-        world: &World,
-        id: &CanonicalOp,
-        parents: &[CanonicalOp],
-        inputs: &[WorkspaceCertificate],
-    ) -> Vec<WorkspaceReplay> {
-        if parents.len() != 2 {
-            return vec![];
-        }
-        let frontier_names: BTreeSet<_> = inputs
-            .iter()
-            .flat_map(|input| input.names.iter().cloned())
-            .collect();
-        let mut replays = vec![];
-        let mut merges = HashMap::<(OperationId, OperationId, OperationId), View>::new();
-        let mut base_merges = HashMap::<Vec<OperationId>, Operation>::new();
-        for member in &world.fx.hive.members {
-            let node = member.adapter.repo();
-            let maker = node.machine().key();
-            let store = node.loader().op_store();
-            let Ok(files) = fs::read_dir(node.repo_path().join("op_store/operations")) else {
-                continue;
-            };
-            for file in files.flatten() {
-                let Some(local) = file
-                    .file_name()
-                    .to_str()
-                    .and_then(OperationId::try_from_hex)
-                    .map(LocalOp)
-                else {
-                    continue;
-                };
-                if !Self::source_aliases(world, node, &local).contains(id) {
-                    continue;
-                }
-                let Ok(operation) = block_on(store.read_operation(&local.0)) else {
-                    continue;
-                };
-                if operation.parents.len() != 2 {
-                    continue;
-                }
-                if !operation
-                    .parents
-                    .iter()
-                    .zip(parents)
-                    .all(|(raw, expected)| {
-                        Self::source_aliases(world, node, &LocalOp(raw.clone())).contains(expected)
-                    })
-                {
-                    continue;
-                }
-                let Ok(local_op) = block_on(node.loader().load_operation(&local.0)) else {
-                    continue;
-                };
-                let Ok(local_parents) = block_on(local_op.parents()) else {
-                    continue;
-                };
-                let Ok(bases) = block_on(jj_lib::op_walk::closest_common_ancestors(
-                    vec![local_parents[0].clone()],
-                    [local_parents[1].clone()],
-                )) else {
-                    continue;
-                };
-                let Some(base_ids) = bases
-                    .iter()
-                    .map(|base| {
-                        Self::source_aliases(world, node, &LocalOp(base.id().clone()))
-                            .into_iter()
-                            .next()
-                    })
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    continue;
-                };
-                if base_ids.is_empty()
-                    || base_ids.contains(id)
-                    || !self.workspace_dependencies_available(world, &base_ids)
-                {
-                    continue;
-                }
-                let certificates = base_ids
-                    .iter()
-                    .map(|base| self.workspace_certificate(world, base))
-                    .collect::<Vec<_>>();
-                let mut views = vec![];
-                let mut valid = true;
-                let sources = bases
-                    .iter()
-                    .zip(&base_ids)
-                    .zip(&certificates)
-                    .map(|((source, id), certificate)| (source, id, certificate))
-                    .chain([
-                        (&local_parents[0], &parents[0], &inputs[0]),
-                        (&local_parents[1], &parents[1], &inputs[1]),
-                    ]);
-                for (source, canonical_id, certificate) in sources {
-                    let Some(canonical) = Self::workspace_source(world, canonical_id) else {
-                        valid = false;
-                        break;
-                    };
-                    let Some(mut view) = world.fx.hive.members.iter().find_map(|member| {
-                        member
-                            .adapter
-                            .repo()
-                            .canonical_store()
-                            .read_view(&canonical.view_id)
-                            .ok()
-                    }) else {
-                        valid = false;
-                        break;
-                    };
-                    let Ok(raw) = block_on(source.view()) else {
-                        valid = false;
-                        break;
-                    };
-                    let absent = world
-                        .fx
-                        .hive
-                        .members
-                        .iter()
-                        .find_map(|member| member.adapter.repo().presence(canonical_id).ok())
-                        .is_some_and(|presence| !presence.is_present(maker));
-                    project_private_workspaces(
-                        &mut view,
-                        raw.store_view(),
-                        maker,
-                        &certificate.names,
-                        &frontier_names,
-                        absent,
-                    );
-                    views.push(view);
-                }
-                let offset = bases.len();
-                if !valid || views.len() != offset + 2 {
-                    continue;
-                }
-                let base_copy = if offset == 1 {
-                    let root = block_on(self.loader.root_operation());
-                    self.write_like(&root, &views[0], vec![root.id().clone()])
-                } else {
-                    // Preserve the independently authenticated base graph and the order
-                    // jj found there. jj recursively merges every base; no base is chosen
-                    // to make the observed output fit.
-                    let Some(copies) = base_ids
-                        .iter()
-                        .zip(&views)
-                        .map(|(id, view)| {
-                            let copy = self.workspace_copy(world, id)?;
-                            Some(self.write_like(&copy, view, copy.parent_ids().to_vec()))
-                        })
-                        .collect::<Option<Vec<_>>>()
-                    else {
-                        continue;
-                    };
-                    let key = copies.iter().map(|op| op.id().clone()).collect::<Vec<_>>();
-                    base_merges
-                        .entry(key)
-                        .or_insert_with(|| self.merge(copies.iter().collect()).op)
-                        .clone()
-                };
-                let left = self.write_like(
-                    &local_parents[0],
-                    &views[offset],
-                    vec![base_copy.id().clone()],
-                );
-                let right = self.write_like(
-                    &local_parents[1],
-                    &views[offset + 1],
-                    vec![base_copy.id().clone()],
-                );
-                let input = (
-                    base_copy.id().clone(),
-                    left.id().clone(),
-                    right.id().clone(),
-                );
-                let merged = if let Some(view) = merges.get(&input) {
-                    view.clone()
-                } else {
-                    let view = self.merge(vec![&left, &right]).view;
-                    merges.insert(input, view.clone());
-                    view
-                };
-                let Ok(made) = block_on(local_op.view()) else {
-                    continue;
-                };
-                replays.push(WorkspaceReplay {
-                    view: merged,
-                    parents: views[offset..].to_vec(),
-                    private: Some((maker.to_owned(), made.store_view().clone())),
-                });
-            }
-        }
-        replays
-    }
-
-    fn workspace_dependencies(world: &World, id: &CanonicalOp) -> Vec<CanonicalOp> {
-        let Some(op) = Self::workspace_source(world, id) else {
-            return vec![];
-        };
-        let mut dependencies = workspace_source_parents(&op).unwrap_or_default();
-        if let Some(input) = world
-            .commands
-            .get(&merge_key(&op))
-            .and_then(|c| c.input.as_ref())
-        {
-            dependencies.push(input.clone());
-        }
-        if let Some((_, input)) = workspace_fixup_input(world, id, &op) {
-            dependencies.push(input.clone());
-        }
-        dependencies
-    }
-
-    /// Optional historical bases cannot borrow the certificate being proved, even
-    /// indirectly through a source parent, captured command or trim input. Preflight the
-    /// entire candidate before writing any certificate or changing the active proof stack.
-    fn workspace_dependencies_available(&self, world: &World, bases: &[CanonicalOp]) -> bool {
-        let mut pending: Vec<_> = bases.iter().rev().map(|id| (id.clone(), false)).collect();
-        let mut visiting = HashSet::new();
-        let mut finished = HashSet::new();
-        while let Some((next, ready)) = pending.pop() {
-            if self.workspace_certificates.contains_key(&next) || finished.contains(&next) {
-                continue;
-            }
-            if ready {
-                visiting.remove(&next);
-                finished.insert(next);
-                continue;
-            }
-            if self.workspace_in_progress.contains(&next) || !visiting.insert(next.clone()) {
-                return false;
-            }
-            pending.push((next.clone(), true));
-            pending.extend(
-                Self::workspace_dependencies(world, &next)
-                    .into_iter()
-                    .rev()
-                    .map(|id| (id, false)),
-            );
-        }
-        true
-    }
-
-    fn workspace_certificate(&mut self, world: &World, id: &CanonicalOp) -> WorkspaceCertificate {
-        // A certificate's frame contains merge views and witnesses. Keep history depth on
-        // the heap rather than one such frame per source operation on the test thread.
-        let mut pending = vec![(id.clone(), false)];
-        while let Some((next, ready)) = pending.pop() {
-            if self.workspace_certificates.contains_key(&next) {
-                continue;
-            }
-            if ready {
-                let certificate = self.workspace_certificate_of(world, &next);
-                self.workspace_certificates
-                    .insert(next.clone(), certificate);
-                self.workspace_in_progress.remove(&next);
-                continue;
-            }
-            assert!(
-                self.workspace_in_progress.insert(next.clone()),
-                "workspace source dependencies cycle at {next:?}"
-            );
-            pending.push((next.clone(), true));
-            pending.extend(
-                Self::workspace_dependencies(world, &next)
-                    .into_iter()
-                    .rev()
-                    .map(|parent| (parent, false)),
-            );
-        }
-        self.workspace_certificates[id].clone()
-    }
-
-    fn workspace_certificate_of(
-        &mut self,
-        world: &World,
-        id: &CanonicalOp,
-    ) -> WorkspaceCertificate {
-        if let Some(known) = self.workspace_certificates.get(id) {
-            return known.clone();
-        }
-        let Some(op) = Self::workspace_source(world, id) else {
-            return WorkspaceCertificate::default();
-        };
-        let Some(view) = world.fx.hive.members.iter().find_map(|member| {
-            member
-                .adapter
-                .repo()
-                .canonical_store()
-                .read_view(&op.view_id)
-                .ok()
-        }) else {
-            return WorkspaceCertificate::default();
-        };
-        let Some(presence) = world
-            .fx
-            .hive
-            .members
-            .iter()
-            .find_map(|member| member.adapter.repo().presence(id).ok())
-        else {
-            return WorkspaceCertificate::default();
-        };
-        let private_at = |key: &str| {
-            let Some((owner, _)) = key.split_once('/') else {
-                return false;
-            };
-            !presence.is_present(owner)
-                || (op.metadata.workspace_name.is_none()
-                    && op
-                        .metadata
-                        .attributes
-                        .get("musubi.work")
-                        .is_some_and(|copy| copy == owner))
-        };
-        // Contraction preserves the original parent identities. Use those source parents
-        // to certify a retained operation, including a merge now represented on root.
-        let Some(parents) = workspace_source_parents(&op) else {
-            return WorkspaceCertificate::default();
-        };
-        let inputs: Vec<_> = parents
-            .iter()
-            .map(|parent| self.workspace_certificate(world, parent))
-            .collect();
-        let command = world.commands.get(&merge_key(&op));
-        let rewritten = |target: &CommitId| {
-            op.commit_predecessors
-                .iter()
-                .flat_map(|preds| preds.values())
-                .chain(command.into_iter().flat_map(|command| {
-                    command.predecessors.iter().flat_map(|preds| preds.values())
-                }))
-                .any(|old| old.contains(target))
-        };
-        let mut result = WorkspaceCertificate::default();
-        if command.is_none() && parents.len() == 1 {
-            for input in &inputs {
-                result.names.extend(
-                    input
-                        .names
-                        .iter()
-                        .filter(|key| {
-                            view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                                || private_at(key)
-                        })
-                        .cloned(),
-                );
-                // A proven merge birth authenticates the name independently of its
-                // current commit. Replacing an abandoned working copy does not create a
-                // new logical name; it also does not certify the replacement's payload.
-                result
-                    .merged
-                    .extend(input.merged.intersection(&result.names).cloned());
-            }
-        }
-        for input in &inputs {
-            for (key, target) in &input.keys {
-                let live = !input.dormant.contains(key)
-                    && view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target);
-                let dormant = !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                    && private_at(key)
-                    && !inputs.is_empty()
-                    && inputs
-                        .iter()
-                        .all(|other| other.keys.get(key) == Some(target))
-                    && !rewritten(target);
-                if live || dormant {
-                    result.keys.insert(key.clone(), target.clone());
-                    if dormant {
-                        result.dormant.insert(key.clone());
-                    }
-                    if input.merged.contains(key) {
-                        result.merged.insert(key.clone());
-                    }
-                }
-            }
-        }
-        if world.baseline_operation(&merge_key(&op)) {
-            for key in &world.initial_workspace_keys {
-                if let Some(target) = view.wc_commit_ids.get(WorkspaceName::new(key)) {
-                    result.keys.insert(key.clone(), target.clone());
-                }
-            }
-        }
-        if let Some(bindings) = world.workspace_joins.get(&merge_key(&op)) {
-            for (key, target) in bindings {
-                if view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target) {
-                    result.keys.insert(key.clone(), target.clone());
-                }
-            }
-        }
-        // A full native trim removes the ancestry of other copies' last work. Its
-        // fix-up must preserve their accepted slots. Use the history observed before
-        // the trim, never the fix-up's work marker alone, to certify an unchanged slot.
-        if let Some((owner, input)) = workspace_fixup_input(world, id, &op) {
-            let source = self.workspace_certificate(world, input);
-            for (key, target) in &source.keys {
-                if key.split_once('/').is_some_and(|(copy, _)| copy == owner)
-                    && view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target)
-                {
-                    result.keys.insert(key.clone(), target.clone());
-                    result.dormant.remove(key);
-                    if source.merged.contains(key) {
-                        result.merged.insert(key.clone());
-                    }
-                }
-            }
-        }
-        if let Some(command) = command {
-            if op
-                .metadata
-                .workspace_name
-                .as_ref()
-                .and_then(|key| musubi_jj::workspaces::split_key(key.as_str()))
-                .is_some_and(|(owner, _)| owner == command.copy)
-            {
-                let native_visible = self.visible(&command.made);
-                let mut command_inputs = inputs.clone();
-                if let Some(input) = &command.input {
-                    command_inputs.push(self.workspace_certificate(world, input));
-                }
-                if command.input.is_none() {
-                    self.workspace_unmapped
-                        .insert((command.copy.clone(), command.parent.clone()));
-                }
-                for input in &command_inputs {
-                    result
-                        .names
-                        .extend(input.names_carried_by_command(command, &world.workspace_births));
-                    // Forgetting a local alias cannot delete the other owner's name.
-                    // Later commands may no longer have that alias even at their base.
-                    // Keep only the independently known namespace, never its target.
-                    result.names.extend(
-                        input
-                            .names
-                            .iter()
-                            .filter(|key| {
-                                key.split_once('/')
-                                    .is_some_and(|(owner, _)| owner != command.copy)
-                                    && view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                            })
-                            .cloned(),
-                    );
-                    result
-                        .merged
-                        .extend(input.merged.intersection(&result.names).cloned());
-                }
-                for input in &command_inputs {
-                    for (key, base) in &input.keys {
-                        if let Some(actual) = view.wc_commit_ids.get(WorkspaceName::new(key))
-                            && key
-                                .split_once('/')
-                                .is_some_and(|(owner, _)| presence.is_present(owner))
-                            && input.foreign_binding_carried_by_command(
-                                command,
-                                key,
-                                actual,
-                                &native_visible,
-                            )
-                        {
-                            result.names.insert(key.clone());
-                            result.keys.insert(key.clone(), actual.clone());
-                            result.dormant.remove(key);
-                            if input.merged.contains(key) {
-                                result.merged.insert(key.clone());
-                            }
-                            continue;
-                        }
-                        let Some(alias) = command_workspace_alias(
-                            command,
-                            &world.workspace_births,
-                            key,
-                            Some(base),
-                        ) else {
-                            // A native command by another copy cannot remove a dormant
-                            // owner's namespace. Carry only this already-certified absent
-                            // binding, without authorizing a live payload or a new name.
-                            let owner = key.split_once('/').unwrap().0;
-                            let untouched = command.made.wc_commit_ids.keys().all(|name| {
-                                !name.as_str().split_once('/').is_some_and(|(prefix, _)| {
-                                    musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-                                })
-                            });
-                            if owner != command.copy
-                                && input.dormant.contains(key)
-                                && untouched
-                                && !rewritten(base)
-                                && private_at(key)
-                                && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                            {
-                                result.keys.insert(key.clone(), base.clone());
-                                result.dormant.insert(key.clone());
-                                if input.merged.contains(key) {
-                                    result.merged.insert(key.clone());
-                                }
-                            }
-                            continue;
-                        };
-                        let owner = key.split_once('/').unwrap().0;
-                        let target = command.made.wc_commit_ids.get(&alias);
-                        if let Some(target) = target {
-                            if view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target) {
-                                result.keys.insert(key.clone(), target.clone());
-                                result.dormant.remove(key);
-                                if input.merged.contains(key) {
-                                    result.merged.insert(key.clone());
-                                }
-                            } else {
-                                result.keys.remove(key);
-                                result.merged.remove(key);
-                            }
-                        } else if owner == command.copy {
-                            result.keys.remove(key);
-                            result.merged.remove(key);
-                        }
-                    }
-                }
-                let removed: Vec<_> = result
-                    .keys
-                    .keys()
-                    .filter(|key| {
-                        let (owner, name) = key.split_once('/').unwrap();
-                        owner == command.copy
-                            && !command
-                                .made
-                                .wc_commit_ids
-                                .contains_key(WorkspaceName::new(name))
-                    })
-                    .cloned()
-                    .collect();
-                for key in removed {
-                    result.keys.remove(&key);
-                    result.merged.remove(&key);
-                    result.dormant.remove(&key);
-                }
-                result.names.retain(|key| {
-                    let (owner, name) = key.split_once('/').unwrap();
-                    owner != command.copy
-                        || command
-                            .made
-                            .wc_commit_ids
-                            .contains_key(WorkspaceName::new(name))
-                });
-                for (name, target) in &command.made.wc_commit_ids {
-                    if name.as_str().contains('/') || command.base.wc_commit_ids.contains_key(name)
-                    {
-                        continue;
-                    }
-                    let key = format!("{}/{}", command.copy, name.as_str());
-                    if world.workspace_births.contains(&key)
-                        && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(target)
-                    {
-                        result.merged.remove(&key);
-                        result.dormant.remove(&key);
-                        result.keys.insert(key, target.clone());
-                    }
-                }
-            }
-        } else if parents.len() > 1 {
-            // The source graph's ordered parents are replayed by jj, rather than accepting
-            // the merge payload as evidence of its own additions or moves.
-            let copies: Option<Vec<_>> = parents
-                .iter()
-                .map(|parent| self.workspace_copy(world, parent))
-                .collect();
-            result = WorkspaceCertificate::default();
-            if let Some(copies) = copies {
-                let parent_views: Vec<_> = copies
-                    .iter()
-                    .map(|source| block_on(source.view()).unwrap().store_view().clone())
-                    .collect();
-                let mut replays = vec![WorkspaceReplay {
-                    view: self.merge(copies.iter().collect()).view,
-                    parents: parent_views,
-                    private: None,
-                }];
-                replays.extend(self.workspace_private_replays(world, id, &parents, &inputs));
-                for WorkspaceReplay {
-                    view: native,
-                    parents: source_views,
-                    private,
-                } in replays
-                {
-                    let mut known = self.changes_of(copies.iter());
-                    for source in &source_views {
-                        for target in source.wc_commit_ids.values() {
-                            known.insert(self.facts(target).change.clone());
-                        }
-                    }
-                    let private_made = private.as_ref().map(|(_, made): &(String, View)| made);
-                    let named: Vec<_> = native
-                        .wc_commit_ids
-                        .values()
-                        .chain(view.wc_commit_ids.values())
-                        .chain(
-                            private_made
-                                .into_iter()
-                                .flat_map(|made| made.wc_commit_ids.values()),
-                        )
-                        .cloned()
-                        .collect();
-                    let structural = self.keys(&named, &|change| known.contains(change));
-                    for (key, target) in &native.wc_commit_ids {
-                        let name = key.as_str();
-                        if world.workspace_births.contains(name)
-                            && inputs.iter().zip(&source_views).any(|(input, source)| {
-                                input.names.contains(name) && source.wc_commit_ids.contains_key(key)
-                            })
-                            && let Some(actual) = view.wc_commit_ids.get(key)
-                            && structural[actual] == structural[target]
-                        {
-                            result.names.insert(name.to_owned());
-                            result.merged.insert(name.to_owned());
-                        }
-                        if !world.workspace_births.contains(name)
-                            || !inputs.iter().zip(&source_views).any(|(input, source)| {
-                                input.keys.get(name).is_some_and(|certified| {
-                                    source.wc_commit_ids.get(key) == Some(certified)
-                                }) || (private.as_ref().is_some_and(|(maker, _)| {
-                                    name.split_once('/')
-                                        .is_some_and(|(owner, _)| owner == maker)
-                                }) && input.names.contains(name)
-                                    && source.wc_commit_ids.contains_key(key))
-                            })
-                        {
-                            continue;
-                        }
-                        if let Some(actual) = view.wc_commit_ids.get(key) {
-                            if structural[actual] == structural[target] {
-                                result.keys.insert(name.to_owned(), actual.clone());
-                                result.merged.insert(name.to_owned());
-                            }
-                        } else if private_at(name)
-                            && let Some((maker, made)) = &private
-                            && let Some((owner, workspace)) = name.split_once('/')
-                            && owner == maker
-                            && let Some(actual) =
-                                made.wc_commit_ids.get(WorkspaceName::new(workspace))
-                            && structural[actual] == structural[target]
-                        {
-                            result.keys.insert(name.to_owned(), actual.clone());
-                            result.merged.insert(name.to_owned());
-                            result.dormant.insert(name.to_owned());
-                        }
-                    }
-                }
-                // A membership-forgotten owner retains its private names, but an absent
-                // certificate on any branch vetoes opaque dormant carry.
-                for (key, target) in inputs.iter().flat_map(|input| &input.keys) {
-                    if private_at(key)
-                        && !rewritten(target)
-                        && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                        && inputs
-                            .iter()
-                            .all(|input| input.keys.get(key) == Some(target))
-                    {
-                        result
-                            .keys
-                            .entry(key.clone())
-                            .or_insert_with(|| target.clone());
-                        result.dormant.insert(key.clone());
-                        if inputs.iter().any(|input| input.merged.contains(key)) {
-                            result.merged.insert(key.clone());
-                        }
-                    }
-                }
-            }
-        }
-        // Membership omission is not owner deletion. Only parents where the owner is
-        // present contribute its bindings. Every such source must certify the name and
-        // agree, allowing a hidden target to follow its unique visible rewrite. A stale
-        // forgotten branch cannot veto newer live work. No output certifies itself.
-        if command.is_none() && !parents.is_empty() {
-            let sources: Option<Vec<_>> = parents
-                .iter()
-                .map(|parent| {
-                    let source = Self::workspace_source(world, parent)?;
-                    world.fx.hive.members.iter().find_map(|member| {
-                        let node = member.adapter.repo();
-                        Some((
-                            node.canonical_store().read_view(&source.view_id).ok()?,
-                            node.presence(parent).ok()?,
-                        ))
-                    })
-                })
-                .collect();
-            if let Some(sources) = sources {
-                for (name, actual) in &view.wc_commit_ids {
-                    let key = name.as_str();
-                    let Some((owner, _)) = key.split_once('/') else {
-                        continue;
-                    };
-                    if !presence.is_present(owner)
-                        || rewritten(actual)
-                        || !inputs
-                            .iter()
-                            .zip(&sources)
-                            .any(|(input, (_, source_presence))| {
-                                !input.dormant.contains(key)
-                                    && source_presence.is_present(owner)
-                                    && input.keys.contains_key(key)
-                            })
-                    {
-                        continue;
-                    }
-                    let agreed =
-                        inputs
-                            .iter()
-                            .zip(&sources)
-                            .all(|(input, (source, source_presence))| {
-                                if !source_presence.is_present(owner) {
-                                    return true;
-                                }
-                                let Some(old) = input.keys.get(key) else {
-                                    return false;
-                                };
-                                if input.dormant.contains(key) {
-                                    return old == actual
-                                        && !source.wc_commit_ids.contains_key(name);
-                                }
-                                if source.wc_commit_ids.get(name) != Some(old) {
-                                    return false;
-                                }
-                                if old == actual {
-                                    return true;
-                                }
-                                let visible = self.visible(source);
-                                if visible.contains(old) {
-                                    return false;
-                                }
-                                let change = self.facts(old).change.clone();
-                                let rewrites: Vec<_> = visible
-                                    .iter()
-                                    .filter(|id| self.facts(id).change == change)
-                                    .collect();
-                                rewrites.as_slice() == [actual]
-                            });
-                    if agreed {
-                        result.keys.insert(key.to_owned(), actual.clone());
-                        result.dormant.remove(key);
-                        if parents.len() > 1
-                            || inputs.iter().any(|input| input.merged.contains(key))
-                        {
-                            result.merged.insert(key.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        result.names.extend(result.keys.keys().cloned());
-        self.workspace_certificates
-            .insert(id.clone(), result.clone());
-        result
-    }
-
-    /// jj's merge of `parents`, in their order.
-    fn merge(&self, parents: Vec<&Operation>) -> Replayed {
-        let ops: Vec<Operation> = parents.into_iter().cloned().collect();
-        let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            block_on(self.loader.merge_operations(
-                ops,
-                None,
-                Some("reconcile divergent operations"),
-                [],
-            ))
-        }));
-        let repo = match merged {
-            Ok(Ok((repo, _))) => repo,
-            Ok(Err(err)) => panic!("the reference's merge failed: {err}"),
-            Err(_) => panic!("jj panicked merging the reference's operations"),
-        };
-        Replayed::of(&repo)
-    }
-
-    /// `op`, made at `base`, applied to `onto` as jj applies a concurrent operation: its
-    /// view's changes from `base`, merged three-way, then descendants of what it rewrote
-    /// rebased.
-    fn apply(&self, base: &Operation, op: &Operation, onto: &Operation) -> Replayed {
-        block_on(async {
-            let base = self.loader.load_at(base).await.unwrap();
-            let other = self.loader.load_at(op).await.unwrap();
-            let mut tx = self.loader.load_at(onto).await.unwrap().start_transaction();
-            tx.repo_mut().merge(&base, &other).await.unwrap();
-            tx.repo_mut().rebase_descendants().await.unwrap();
-            let repo = tx
-                .write(op.metadata().description.clone())
-                .await
-                .unwrap()
-                .leave_unpublished();
-            Replayed::of(&repo)
-        })
-    }
-
-    /// jj's merge of a merge's two parents as the machine that made it had them, where they
-    /// differ from the hive's: that machine's own views lack the working-copy commit of
-    /// another machine's workspace it forgot, which `jj workspace forget` abandoned there but
-    /// the hive keeps (docs/internals/races.md, "Known jj limitations"). jj's merge there,
-    /// by a `jj` command or the machine's daemon, takes the commit for abandoned, as on one
-    /// machine, moving bookmarks off it and rebasing work on it. So the parents, and their
-    /// base, as the machine's merge found them, go in as the hive has them but with the heads
-    /// the machine's views had, and without the workspaces whose commits those lacked, and
-    /// only where they lacked nothing else. An exact captured native input can also omit
-    /// an independently certified foreign slot while keeping its commit visible: whether a
-    /// commit is a working copy changes jj's merge too. A later workspace birth cannot prove
-    /// that omission; owned literals must be certified at the input itself.
-    /// The merge then gets back the commits jj's merge of
-    /// the hive's parents (`canonical`) keeps. `None` where that differs from nothing, or the
-    /// merge has several bases.
-    fn merged_as_made(
-        &mut self,
-        world: &World,
-        id: &CanonicalOp,
-        parents: &[CanonicalOp],
-        canonical: &View,
-        copies: &HashMap<CanonicalOp, Operation>,
-        views: &HashMap<CanonicalOp, View>,
-    ) -> Option<(View, &'static str)> {
-        // The machine that made the merge, rather than realized it, and the merge there.
-        let (m, node, local_op) =
-            world
-                .fx
-                .hive
-                .members
-                .iter()
-                .enumerate()
-                .find_map(|(m, member)| {
-                    let node = member.adapter.repo();
-                    let local = node.local_of(id)?;
-                    let local_op = block_on(node.loader().load_operation(&local.0)).unwrap();
-                    let made = !world.realized(m, id, local_op.store_operation());
-                    made.then_some((m, node, local_op))
-                })?;
-        let local_parents = block_on(local_op.parents()).unwrap();
-        let [first, second] = local_parents.as_slice() else {
-            return None;
-        };
-        // The same parents, in the same order.
-        let canonical_parents: Vec<Option<CanonicalOp>> = local_parents
-            .iter()
-            .map(|parent| node.canonical_of(&LocalOp(parent.id().clone())))
-            .collect();
-        if canonical_parents
-            .iter()
-            .cloned()
-            .collect::<Option<Vec<_>>>()?
-            != parents
-        {
-            return None;
-        }
-        let bases = block_on(jj_lib::op_walk::closest_common_ancestors(
-            vec![first.clone()],
-            [second.clone()],
-        ))
-        .unwrap();
-        let [base] = bases.as_slice() else {
-            return None;
-        };
-        let mut kept: HashSet<CommitId> = HashSet::new();
-        let mut omitted_workspace = false;
-        let mut as_had = vec![];
-        for local in [base, first, second] {
-            let canonical_id = node.canonical_of(&LocalOp(local.id().clone()))?;
-            let local_view = block_on(local.view()).unwrap().store_view().clone();
-            let mut view = views.get(&canonical_id)?.clone();
-            let working_copies: HashSet<CommitId> = view.wc_commit_ids.values().cloned().collect();
-            // Forgetting a foreign alias locally leaves its canonical slot intact. Even
-            // with identical visible heads, that slot changes which empty working copies
-            // jj abandons while merging. Use only an independently captured native input,
-            // and omit only an existing certified foreign slot absent from that input.
-            if let Some(command) = world.commands.get(&merge_key(local.store_operation()))
-                && command.id == *local.id()
-                && command.copy == node.machine().key()
-            {
-                let certificate = self.workspace_certificate(world, &canonical_id);
-                view.wc_commit_ids.retain(|key, target| {
-                    let absent = certificate.keys.get(key.as_str()) == Some(target)
-                        && foreign_alias_absent(command, &certificate.names, key.as_str());
-                    omitted_workspace |= absent;
-                    !absent
-                });
-            }
-            let visible = self.visible(&view);
-            if !local_view
-                .head_ids
-                .iter()
-                .all(|head| visible.contains(head))
-            {
-                return None;
-            }
-            let lacked: HashSet<CommitId> = visible
-                .difference(&self.visible(&local_view))
-                .cloned()
-                .collect();
-            if !lacked.iter().all(|commit| working_copies.contains(commit)) {
-                return None;
-            }
-            view.head_ids = local_view.head_ids.clone();
-            view.wc_commit_ids
-                .retain(|_, commit| !lacked.contains(commit));
-            kept.extend(lacked);
-            let copy = copies.get(&canonical_id)?;
-            as_had.push(self.write_like(copy, &view, copy.parent_ids().to_vec()));
-        }
-        if kept.is_empty() && !omitted_workspace {
-            return None;
-        }
-        let [base, first, second] = as_had.as_slice() else {
-            unreachable!()
-        };
-        let mut merged = self.apply(base, second, first).view;
-        let canonical = self.visible(canonical);
-        merged
-            .head_ids
-            .extend(kept.into_iter().filter(|commit| canonical.contains(commit)));
-        Some((merged, world.machine(m)))
-    }
-
-    /// Replay the actual native DAG and index when rebuilding its views in the
-    /// reference changes jj's result. Every parent and closest base must independently
-    /// agree with an already checked shared input. The merge payload is never an input.
-    fn native_merge_matches(
-        &mut self,
-        world: &World,
-        id: &CanonicalOp,
-        parents: &[CanonicalOp],
-        output: &View,
-        known: &HashSet<ChangeId>,
-        views: &HashMap<CanonicalOp, View>,
-    ) -> Option<&'static str> {
-        for (m, member) in world.fx.hive.members.iter().enumerate() {
-            let node = member.adapter.repo();
-            let Some(local) = node.local_of(id) else {
-                continue;
-            };
-            let operation = block_on(node.loader().load_operation(&local.0)).ok()?;
-            if operation
-                .metadata()
-                .attributes
-                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-            {
-                continue;
-            }
-            let native_parents = block_on(operation.parents()).ok()?;
-            if native_parents.len() != 2 {
-                continue;
-            }
-            let mapped: Option<Vec<_>> = native_parents
-                .iter()
-                .map(|p| node.canonical_of(&LocalOp(p.id().clone())))
-                .collect();
-            if mapped.as_deref() != Some(parents) {
-                continue;
-            }
-            let bases = block_on(jj_lib::op_walk::closest_common_ancestors(
-                vec![native_parents[0].clone()],
-                [native_parents[1].clone()],
-            ))
-            .ok()?;
-            // A recursive base merge consumes further views. Keep this fallback to one
-            // independently qualified base; the other replay paths handle known omissions.
-            if bases.len() != 1 {
-                continue;
-            }
-            let mut qualified = true;
-            for input in native_parents.iter().chain(&bases) {
-                let Some(mapped) = node.canonical_of(&LocalOp(input.id().clone())) else {
-                    qualified = false;
-                    break;
-                };
-                let Some(expected) = views.get(&mapped) else {
-                    qualified = false;
-                    break;
-                };
-                let mut actual = block_on(input.view()).ok()?.store_view().clone();
-                let certificate = self.workspace_certificate(world, &mapped);
-                let presence = world
-                    .fx
-                    .hive
-                    .members
-                    .iter()
-                    .find_map(|member| member.adapter.repo().presence(&mapped).ok())?;
-                let maker = node.machine().key();
-                // Workspace bindings influence jj's shared merge even when visible
-                // commits agree. Require a bijection with exact certified input slots;
-                // an opaque name alone cannot authorize a changed target or omission.
-                let mut matched = BTreeSet::new();
-                let bindings = actual.wc_commit_ids.len() == expected.wc_commit_ids.len()
-                    && actual.wc_commit_ids.iter().all(|(raw, target)| {
-                        let candidates = expected
-                            .wc_commit_ids
-                            .iter()
-                            .filter(|(key, value)| {
-                                if *value != target
-                                    || certificate.keys.get(key.as_str()) != Some(target)
-                                {
-                                    return false;
-                                }
-                                let Some((owner, workspace)) = key.as_str().split_once('/') else {
-                                    return false;
-                                };
-                                if owner == maker {
-                                    return raw.as_str() == workspace;
-                                }
-                                let Some((prefix, shown)) = raw.as_str().split_once('/') else {
-                                    return false;
-                                };
-                                shown == workspace
-                                    && !certificate
-                                        .names
-                                        .contains(&format!("{maker}/{}", raw.as_str()))
-                                    && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-                                    && presence
-                                        .known()
-                                        .iter()
-                                        .filter(|copy| {
-                                            musubi_jj::workspaces::could_be_shown_as(copy, prefix)
-                                        })
-                                        .count()
-                                        == 1
-                            })
-                            .map(|(key, _)| key.clone())
-                            .collect::<Vec<_>>();
-                        match candidates.as_slice() {
-                            [key] => matched.insert(key.clone()),
-                            _ => false,
-                        }
-                    });
-                if !bindings {
-                    qualified = false;
-                    break;
-                }
-                actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-                if self.summary(&actual, known) != self.summary(expected, known) {
-                    qualified = false;
-                    break;
-                }
-            }
-            if !qualified || bases.is_empty() {
-                continue;
-            }
-            let dir = musubi_testutil::tempdir();
-            let root = dir.path().join("repo");
-            musubi_testutil::copy_tree(world.fx.repo(m).path(), &root);
-            let loader = RepoLoader::init_from_file_system(
-                &settings(),
-                &root.join(".jj/repo"),
-                &default_backend_factories(),
-            )
-            .ok()?;
-            let inputs = native_parents
-                .iter()
-                .map(|p| block_on(loader.load_operation(p.id())))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            let (merged, _) =
-                block_on(loader.merge_operations(inputs, None, Some("reference native merge"), []))
-                    .ok()?;
-            let mut actual = merged.view().store_view().clone();
-            actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-            // Rebased commits exist only in this isolated store. Read their structural
-            // facts there, with the reference's independent settings and random generator.
-            let reference_loader = std::mem::replace(&mut self.loader, loader);
-            let replayed = self.summary(&actual, known);
-            self.loader = reference_loader;
-            if replayed == self.summary(output, known) {
-                return Some(world.machine(m));
-            }
-        }
-        None
-    }
-
-    /// `op` with `view` instead, on `parents`.
-    fn write_like(&self, op: &Operation, view: &View, parents: Vec<OperationId>) -> Operation {
-        let op_store = self.loader.op_store().clone();
-        let written = op_store::Operation {
-            view_id: block_on(op_store.write_view(view)).unwrap(),
-            parents,
-            ..op.store_operation().clone()
-        };
-        let id = block_on(op_store.write_operation(&written)).unwrap();
-        block_on(self.loader.load_operation(&id)).unwrap()
-    }
-
-    fn facts(&mut self, id: &CommitId) -> &Facts {
-        if !self.facts.contains_key(id) {
-            let commit = self.loader.store().get_commit(id).unwrap();
-            let author = commit.author();
-            let content = hash((
-                format!("{:?}", commit.tree_ids()),
-                commit.description(),
-                &author.name,
-                &author.email,
-            ));
-            let facts = Facts {
-                change: commit.change_id().clone(),
-                parents: commit.parent_ids().to_vec(),
-                content,
-                // jj resets the author's time when it rewrites a discardable commit, one
-                // that is empty with no description, as it rebases a working copy.
-                author_time: (!commit.description().is_empty())
-                    .then_some((author.timestamp.timestamp.0, author.timestamp.tz_offset)),
-            };
-            self.facts.insert(id.clone(), facts);
-        }
-        &self.facts[id]
-    }
-
-    /// How `view`, the hive's, differs from `replaced`, a machine's view of the operation an
-    /// operation replaced, exactly as `check_realizations` holds a machine's operation to the
-    /// hive's: a realization has the same heads; an operation of the machine's own has no
-    /// commit visible that the hive's hides; either has the same bookmarks and tags.
-    fn unlike_replaced(&mut self, replaced: &View, realized: bool, view: &View) -> Option<String> {
-        let short = |ids: &mut Vec<String>| {
-            ids.sort();
-            ids.clone()
-        };
-        let mut why = vec![];
-        let theirs = self.visible(view);
-        if realized {
-            if replaced.head_ids != view.head_ids {
-                why.push("the heads differ".to_owned());
-            }
-        } else {
-            // Checked before walking: the reference's store may lack what the hive hides.
-            let mut lacked: Vec<String> = replaced
-                .head_ids
-                .iter()
-                .filter(|c| !theirs.contains(*c))
-                .map(|c| c.hex()[..12].to_owned())
-                .collect();
-            if lacked.is_empty() {
-                let ours = self.visible(replaced);
-                lacked = ours
-                    .difference(&theirs)
-                    .map(|c| c.hex()[..12].to_owned())
-                    .collect();
-            }
-            if !lacked.is_empty() {
-                why.push(format!("the hive's hides {:?}", short(&mut lacked)));
-            }
-        }
-        if replaced.local_bookmarks != view.local_bookmarks {
-            why.push("bookmarks differ".to_owned());
-        }
-        if replaced.local_tags != view.local_tags {
-            why.push("tags differ".to_owned());
-        }
-        (!why.is_empty()).then(|| why.join(", "))
-    }
-
-    /// The commits visible in `view`, the root's aside.
-    fn visible(&mut self, view: &View) -> Arc<HashSet<CommitId>> {
-        let key = heads_key(view);
-        if let Some(found) = self.visible.get(&key) {
-            return found.clone();
-        }
-        let root = self.loader.store().root_commit_id().clone();
-        let mut found = HashSet::new();
-        let mut pending: Vec<CommitId> = view.head_ids.iter().cloned().collect();
-        while let Some(id) = pending.pop() {
-            if id == root || !found.insert(id.clone()) {
-                continue;
-            }
-            pending.extend(self.facts(&id).parents.clone());
-        }
-        let found = Arc::new(found);
-        self.visible.insert(key, found.clone());
-        found
-    }
-
-    /// The changes visible at any of `ops`.
-    fn changes_of<'a>(&mut self, ops: impl Iterator<Item = &'a Operation>) -> HashSet<ChangeId> {
-        let mut changes = HashSet::new();
-        for op in ops {
-            let view = block_on(self.loader.op_store().read_view(op.view_id())).unwrap();
-            for id in self.visible(&view).iter() {
-                changes.insert(self.facts(id).change.clone());
-            }
-        }
-        changes
-    }
-
-    /// Structural keys for `ids` and their ancestors: a commit's change id (unless the
-    /// change is new, not `known`), contents, author time (likewise), and parents' keys.
-    fn keys(
-        &mut self,
-        ids: &[CommitId],
-        known: &dyn Fn(&ChangeId) -> bool,
-    ) -> HashMap<CommitId, u64> {
-        let root = self.loader.store().root_commit_id().clone();
-        let mut keys: HashMap<CommitId, u64> = HashMap::from([(root, 0)]);
-        let mut pending: Vec<CommitId> = ids.to_vec();
-        while let Some(id) = pending.last().cloned() {
-            if keys.contains_key(&id) {
-                pending.pop();
-                continue;
-            }
-            let parents = self.facts(&id).parents.clone();
-            let missing: Vec<CommitId> = parents
-                .iter()
-                .filter(|p| !keys.contains_key(*p))
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                pending.extend(missing);
-                continue;
-            }
-            pending.pop();
-            let facts = self.facts(&id);
-            let new = !known(&facts.change);
-            let key = hash((
-                (!new).then(|| facts.change.clone()),
-                facts.content,
-                facts.author_time.filter(|_| !new),
-                parents.iter().map(|p| keys[p]).collect::<Vec<_>>(),
-            ));
-            keys.insert(id, key);
-        }
-        keys
-    }
-
-    fn summary(&mut self, view: &View, known: &HashSet<ChangeId>) -> Summary {
-        let visible: Vec<CommitId> = self.visible(view).iter().cloned().collect();
-        let named: Vec<CommitId> = refs(view)
-            .values()
-            .flat_map(|target| target.iter().flatten().cloned())
-            .collect();
-        let all: Vec<CommitId> = visible.iter().chain(&named).cloned().collect();
-        let keys = self.keys(&all, &|change| known.contains(change));
-        let mut summary = Summary::default();
-        for id in &visible {
-            *summary.visible.entry(keys[id]).or_default() += 1;
-        }
-        // A conflict's terms in any order are the same conflict: jj's merges order them by
-        // the order they merge operations in.
-        let key = |id: &Option<CommitId>| id.as_ref().map(|id| keys[id]);
-        for (name, target) in refs(view) {
-            let mut adds: Vec<Option<u64>> = target.adds().map(key).collect();
-            let mut removes: Vec<Option<u64>> = target.removes().map(key).collect();
-            adds.sort();
-            removes.sort();
-            summary.refs.insert(name, (adds, removes));
-        }
-        summary
-    }
-
-    /// How `view`, the hive's, differs from `replayed`, the reference's, for messages.
-    fn difference(&mut self, view: &View, replayed: &View, known: &HashSet<ChangeId>) -> String {
-        let ours = self.summary(view, known);
-        let theirs = self.summary(replayed, known);
-        let mut out = vec![];
-        let mut described = |side: &str, view: &View, summary: &Summary, other: &Summary| {
-            let visible: Vec<CommitId> = self.visible(view).iter().cloned().collect();
-            let keys = self.keys(&visible, &|change| known.contains(change));
-            let mut only: Vec<String> = visible
-                .iter()
-                .filter(|id| {
-                    summary.visible.get(&keys[*id]) > other.visible.get(&keys[*id]).or(Some(&0))
-                })
-                .map(|id| {
-                    let workspaces: Vec<&str> = view
-                        .wc_commit_ids
-                        .iter()
-                        .filter(|(_, wc)| *wc == id)
-                        .map(|(name, _)| name.as_str())
-                        .collect();
-                    let commit = self.loader.store().get_commit(id).unwrap();
-                    let parents: Vec<String> = commit
-                        .parent_ids()
-                        .iter()
-                        .map(|p| p.hex()[..12].to_owned())
-                        .collect();
-                    format!(
-                        "{} ({}, on {}, {:?}{})",
-                        &id.hex()[..12],
-                        &self.facts(id).change.reverse_hex()[..12],
-                        parents.join("+"),
-                        commit.description().lines().next().unwrap_or_default(),
-                        if workspaces.is_empty() {
-                            String::new()
-                        } else {
-                            format!(", working copy of {}", workspaces.join(","))
-                        }
-                    )
-                })
-                .collect();
-            only.sort();
-            if !only.is_empty() {
-                out.push(format!("visible only {side}: {}", only.join(", ")));
-            }
-        };
-        described("in the hive", view, &ours, &theirs);
-        described("in jj's", replayed, &theirs, &ours);
-        let names: BTreeSet<&String> = ours.refs.keys().chain(theirs.refs.keys()).collect();
-        let (view_refs, replayed_refs) = (refs(view), refs(replayed));
-        for name in names {
-            if ours.refs.get(name) != theirs.refs.get(name) {
-                out.push(format!(
-                    "{name}: {} in the hive, {} in jj's",
-                    show_target(view_refs.get(name)),
-                    show_target(replayed_refs.get(name))
-                ));
-            }
-        }
-        out.join("; ")
-    }
-
-    /// What `hive`, a view of the hive's, has beyond `jj`, the reference's view where the
-    /// two had the same operations: changes that diverge into commits `jj` doesn't have as
-    /// many of, as change ids name them, and bookmarks and tags conflicted with terms `jj`'s
-    /// targets lack. Commits are compared by structural key, those of changes not `known`
-    /// by all but their change ids.
-    fn beyond(&mut self, hive: &View, jj: &View, known: &HashSet<ChangeId>) -> Vec<String> {
-        let (hive_visible, jj_visible) = (self.visible(hive), self.visible(jj));
-        let (hive_refs, jj_refs) = (refs(hive), refs(jj));
-        let all: Vec<CommitId> = hive_visible
-            .iter()
-            .chain(jj_visible.iter())
-            .chain(
-                hive_refs
-                    .values()
-                    .chain(jj_refs.values())
-                    .flat_map(|target| target.iter().flatten()),
-            )
-            .cloned()
-            .collect();
-        let keys = self.keys(&all, &|change| known.contains(change));
-        let mut by_change =
-            |visible: &HashSet<CommitId>| -> BTreeMap<String, BTreeMap<u64, usize>> {
-                let mut by_change: BTreeMap<String, BTreeMap<u64, usize>> = BTreeMap::new();
-                for id in visible {
-                    let change = self.facts(id).change.reverse_hex();
-                    *by_change
-                        .entry(change)
-                        .or_default()
-                        .entry(keys[id])
-                        .or_default() += 1;
-                }
-                by_change
-            };
-        let (hive_changes, jj_changes) = (by_change(&hive_visible), by_change(&jj_visible));
-        let within = |ours: &BTreeMap<u64, usize>, theirs: Option<&BTreeMap<u64, usize>>| {
-            ours.iter()
-                .all(|(key, n)| theirs.and_then(|t| t.get(key)).is_some_and(|m| m >= n))
-        };
-        let mut beyond = vec![];
-        for (change, commits) in &hive_changes {
-            if commits.values().sum::<usize>() > 1 && !within(commits, jj_changes.get(change)) {
-                beyond.push(format!("{change} diverges"));
-            }
-        }
-        let terms = |target: &RefTarget| -> BTreeMap<u64, usize> {
-            let mut terms = BTreeMap::new();
-            // Added terms and removed ones apart, absent ones included.
-            for (i, id) in target.iter().enumerate() {
-                let key = hash((i % 2, id.as_ref().map(|id| keys[id])));
-                *terms.entry(key).or_default() += 1;
-            }
-            terms
-        };
-        for (name, target) in &hive_refs {
-            if name.starts_with("remote ") || target.is_resolved() {
-                continue;
-            }
-            let theirs = jj_refs
-                .get(name)
-                .filter(|target| !target.is_resolved())
-                .map(terms);
-            if !within(&terms(target), theirs.as_ref()) {
-                beyond.push(format!("{name} conflicts"));
-            }
-        }
-        beyond
-    }
-
-    /// What the hive's head has beyond the reference's (`beyond`): divergence and conflicts
-    /// jj wouldn't make of the same operations. Changes visible at only one of them count as
-    /// new, as jj's and musubi's working-copy commits for an abandoned one are.
-    pub fn beyond_jj(&mut self) -> Vec<String> {
-        let read = |op: &Operation| block_on(self.loader.op_store().read_view(op.view_id()));
-        let (hive, jj) = (
-            read(&self.head_copy).unwrap(),
-            read(&self.head_replay).unwrap(),
-        );
-        let changes = |reference: &mut Self, view: &View| -> HashSet<ChangeId> {
-            let visible = reference.visible(view);
-            visible
-                .iter()
-                .map(|id| reference.facts(id).change.clone())
-                .collect()
-        };
-        let (ours, theirs) = (changes(self, &hive), changes(self, &jj));
-        let known: HashSet<ChangeId> = ours.intersection(&theirs).cloned().collect();
-        self.beyond(&hive, &jj, &known)
-    }
-}
-
-/// Whether every operation descending from one of `deviated` is an ancestor or a
-/// descendant of `id` (or `id`), in the history `ops` with `children`.
-fn dominates(
-    ops: &BTreeMap<CanonicalOp, op_store::Operation>,
-    children: &HashMap<CanonicalOp, Vec<CanonicalOp>>,
-    deviated: &BTreeSet<CanonicalOp>,
-    id: &CanonicalOp,
-) -> bool {
-    if deviated.is_empty() {
-        return true;
-    }
-    let walk = |start: &CanonicalOp, next: &dyn Fn(&CanonicalOp) -> Vec<CanonicalOp>| {
-        let mut found: HashSet<CanonicalOp> = HashSet::new();
-        let mut pending = vec![start.clone()];
-        while let Some(op) = pending.pop() {
-            if found.insert(op.clone()) {
-                pending.extend(next(&op));
-            }
-        }
-        found
-    };
-    let parents = |op: &CanonicalOp| ops.get(op).map_or(vec![], CanonicalOp::parents_of);
-    let kids = |op: &CanonicalOp| children.get(op).cloned().unwrap_or_default();
-    let related: HashSet<CanonicalOp> = walk(id, &parents)
-        .into_iter()
-        .chain(walk(id, &kids))
-        .collect();
-    deviated
-        .iter()
-        .all(|d| walk(d, &kids).iter().all(|op| related.contains(op)))
-}
-
-/// What a single operation did that would make a change diverge or a name conflict, as
-/// `Reference::made_divergent_or_conflicted` finds it.
-enum Made {
-    Diverges(String),
-    Conflicts(String),
-}
-
-impl std::fmt::Display for Made {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Diverges(change) => write!(f, "{change} diverges"),
-            Self::Conflicts(name) => write!(f, "{name} conflicts"),
-        }
-    }
-}
-
-/// Whether what `op` did explains `made`, as jj would do it on one machine: a fetch brings
-/// back a pushed commit beside its rewrite, or conflicts a bookmark with the remote's; an
-/// undo, redo, restore or revert brings back an older view; and an import of git refs takes
-/// what `.git` has where jj's record of it differs, which happens without anyone moving a
-/// branch, as when an undo restores an older record and a conflicted bookmark can't be
-/// exported over it. An import of git's HEAD likewise moves the working copy onto what
-/// `.git`'s HEAD has, bringing back a rewritten commit there, as after a command at an older
-/// operation wrote HEAD and jj's merge with the operations since conflicted its record of it.
-/// (Whether musubi keeps those records as jj would is for the per-machine refs' conformance
-/// test, docs/internals/conformance.md, and the check of every import, `imports`.) Anything
-/// else must be bounded by a captured native command's actual result, or it is musubi's:
-/// an operation of its own, or a realization or canonical form that differs from that result.
-fn explained(op: &op_store::Operation) -> bool {
-    let description = op.metadata.description.as_str();
-    [
-        "undo",
-        "redo",
-        "restore to operation",
-        "revert operation",
-        "fetch from git remote",
-        "import git refs",
-        "import git head",
-    ]
-    .iter()
-    .any(|prefix| description.starts_with(prefix))
-}
-
-/// An operation the reference made, with its view.
-struct Replayed {
-    op: Operation,
-    view: View,
-}
-
-impl Replayed {
-    fn of(repo: &Arc<ReadonlyRepo>) -> Self {
-        Self {
-            op: repo.operation().clone(),
-            view: repo.view().store_view().clone(),
-        }
-    }
-}
-
-/// A view's heads, for caching what's visible in it.
-fn heads_key(view: &View) -> Vec<u8> {
-    let mut heads: Vec<&CommitId> = view.head_ids.iter().collect();
-    heads.sort();
-    heads
-        .into_iter()
-        .flat_map(|head| head.as_bytes())
-        .copied()
-        .collect()
-}
-
-/// Every bookmark, tag and remote bookmark (outside the `git` pseudo-remote, which
-/// canonical views don't have), as `bookmark <name>`, `tag <name>` and
-/// `remote <name>@<remote> <state>`.
-fn refs(view: &View) -> BTreeMap<String, RefTarget> {
-    let mut refs = BTreeMap::new();
-    for (name, target) in &view.local_bookmarks {
-        refs.insert(format!("bookmark {}", name.as_str()), target.clone());
-    }
-    for (name, target) in &view.local_tags {
-        refs.insert(format!("tag {}", name.as_str()), target.clone());
-    }
-    for (remote, remote_view) in &view.remote_views {
-        for (name, remote_ref) in &remote_view.bookmarks {
-            refs.insert(
-                format!(
-                    "remote {}@{} {:?}",
-                    name.as_str(),
-                    remote.as_str(),
-                    remote_ref.state
-                ),
-                remote_ref.target.clone(),
-            );
-        }
-    }
-    refs
-}
-
-fn workspace_source_parents(op: &op_store::Operation) -> Option<Vec<CanonicalOp>> {
-    match op.metadata.attributes.get("musubi.original-parents") {
-        Some(text) => text
-            .split_whitespace()
-            .map(OperationId::try_from_hex)
-            .map(|id| id.map(CanonicalOp))
-            .collect(),
-        None => Some(CanonicalOp::parents_of(op)),
-    }
-}
-
-fn show_target(target: Option<&RefTarget>) -> String {
-    match target {
-        None => "absent".to_owned(),
-        Some(target) => target
-            .iter()
-            .map(|id| {
-                id.as_ref()
-                    .map_or("-".to_owned(), |id| id.hex()[..12].to_owned())
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-    }
-}
-
-/// A canonical operation, for messages: its description, id and machine.
-fn describe(id: &CanonicalOp, op: &op_store::Operation) -> String {
-    format!(
-        "\"{}\" ({} on {})",
-        op.metadata.description.lines().next().unwrap_or_default(),
-        &id.0.hex()[..12],
-        op.metadata.hostname
-    )
 }

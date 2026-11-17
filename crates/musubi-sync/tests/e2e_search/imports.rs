@@ -76,14 +76,11 @@ use jj_lib::repo::RepoLoader;
 use musubi_jj::node::CANONICAL_ATTRIBUTE;
 
 use crate::coverage::fired;
+use crate::identity::{ImportIdentity, NativeOperation, SourceKey};
 use crate::view::ROOT;
 use crate::world::World;
 
 const ORIGIN: &str = "origin";
-
-/// Descriptions of the operations that restore an older view: jj's undo, redo, `op restore`
-/// and `op revert`.
-const RESTORES: &[&str] = &["undo", "redo", "restore to operation", "revert operation"];
 
 /// One publication's independently observed frontier and its exact carrier body.
 /// A later history rewrite can change its native and canonical ids without changing
@@ -105,7 +102,7 @@ pub struct Imports {
     /// Each machine's imports already judged, by their native command metadata. The seeded
     /// command clock gives each import its own times; contraction and per-machine exports
     /// can change both parents and views without running another import (`judged_key`).
-    judged: Vec<HashSet<String>>,
+    judged: Vec<HashSet<ImportIdentity>>,
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
     /// had before each of those moves.
     moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
@@ -232,9 +229,7 @@ fn exportable(target: &RefTarget) -> bool {
 
 /// One of jj's undo, redo, `op restore` or `op revert`.
 fn restore(op: &op_store::Operation) -> bool {
-    RESTORES
-        .iter()
-        .any(|prefix| op.metadata.description.starts_with(prefix))
+    NativeOperation::of(op).restores_view()
 }
 
 /// Whose a marked operation is, to tell a machine's own from a realization of another's
@@ -258,12 +253,12 @@ fn own(owner: &Owner, op: &op_store::Operation) -> bool {
 }
 
 fn own_import(owner: &Owner, op: &op_store::Operation) -> bool {
-    own(owner, op) && op.metadata.description.starts_with("import git refs")
+    own(owner, op) && NativeOperation::of(op) == NativeOperation::ImportRefs
 }
 
 /// One of this machine's own imports of git's HEAD.
 fn own_head_import(owner: &Owner, op: &op_store::Operation) -> bool {
-    own(owner, op) && op.metadata.description.starts_with("import git head")
+    own(owner, op) && NativeOperation::of(op) == NativeOperation::ImportHead
 }
 
 /// An operation a `jj` command of this machine's made, which names its workspace, unlike
@@ -283,16 +278,8 @@ fn head(view: &View, ws: &str) -> RefTarget {
 /// A native import's identity across contraction and per-machine export. Each command gets
 /// unique seeded times, and its ref and HEAD imports have distinct descriptions. A rewritten
 /// representation can have a different view as well as parents; neither is a new import.
-fn judged_key(op: &op_store::Operation) -> String {
-    let metadata = &op.metadata;
-    format!(
-        "{} {} {} {} {}",
-        metadata.time.start.timestamp.0,
-        metadata.time.end.timestamp.0,
-        metadata.hostname,
-        metadata.username,
-        metadata.description,
-    )
+fn judged_key(op: &op_store::Operation) -> ImportIdentity {
+    ImportIdentity::of(op)
 }
 
 fn describe(owner: &Owner, id: &OperationId, op: &op_store::Operation) -> String {
@@ -319,7 +306,7 @@ struct Log {
     ops: HashMap<OperationId, op_store::Operation>,
     views: HashMap<OperationId, View>,
     repos: HashMap<OperationId, Arc<ReadonlyRepo>>,
-    captured_sources: BTreeMap<String, op_store::Operation>,
+    captured_sources: BTreeMap<SourceKey, op_store::Operation>,
     preserved_heads: BTreeMap<OperationId, PreservedHeadInput>,
     validated: HashSet<(OperationId, RecordKind)>,
     head_writers: HashMap<(OperationId, String), Arc<HashSet<Option<CommitId>>>>,
@@ -1928,6 +1915,7 @@ impl World {
 
     fn check_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
         let native = self
+            .evidence
             .commands
             .get(&crate::world::merge_key(log.op(id)))
             .map(|source| source.id.clone());
@@ -2154,6 +2142,7 @@ impl World {
     /// two op heads that both changed the record left it differing from `.git`.
     fn check_head_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
         let native = self
+            .evidence
             .commands
             .get(&crate::world::merge_key(log.op(id)))
             .map(|source| source.id.clone());

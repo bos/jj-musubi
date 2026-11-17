@@ -30,6 +30,7 @@ use super::oracle::Measure;
 use super::oracle::Oracle;
 use super::storage::{Fallible, Faults, SharedFaults, StorageError, Timing};
 
+mod properties;
 mod storage_failures;
 
 type Req = Request<Op, Vec<Obj>>;
@@ -1120,111 +1121,6 @@ impl World {
 
     pub fn known_head(&self, node: usize) -> Op {
         self.cores[node].known().1
-    }
-
-    // Properties (docs/internals/protocol.md, "Properties").
-
-    fn check_merge_ownership(&self, node: usize, merge: Op, parents: &[Op]) {
-        if self.went_back || self.misled[node] {
-            return;
-        }
-        let univ = self.univ.borrow();
-        let accepted = univ.ancestors(self.hub.head);
-        assert!(
-            parents
-                .iter()
-                .any(|p| univ.creator[*p as usize] == Some(node) && !accepted.contains(p)),
-            "MergeOwnership: merge {merge} on node {node} has no unaccepted parent of its own: {parents:?}"
-        );
-    }
-
-    pub fn check_invariants(&self) {
-        let univ = self.univ.borrow();
-        assert!(self.hub.closed(self.hub.head), "HubClosed");
-        let accepted = self.ever_accepted(&univ);
-        for (n, repo) in self.repos.iter().enumerate() {
-            // A node misled has only what the hub offered it, accepted or not.
-            let offered = |x: &Op| self.misled[n] && self.offered.contains(x);
-            for &x in &repo.lops {
-                assert!(
-                    univ.creator[x as usize] == Some(n) || accepted.contains(&x) || offered(&x),
-                    "Locality: node {n} has {x}, neither its own nor accepted"
-                );
-                assert!(
-                    univ.parents[x as usize]
-                        .iter()
-                        .all(|p| repo.lops.contains(p)),
-                    "NodeClosed: parents"
-                );
-                assert!(
-                    univ.objs[x as usize].iter().all(|o| repo.lobj.contains(o)),
-                    "NodeClosed: objects"
-                );
-            }
-            assert!(
-                !repo.heads.is_empty() && repo.heads.is_subset(&repo.lops),
-                "NodeClosed: heads"
-            );
-            for op in repo.sops.keys() {
-                assert!(
-                    accepted.contains(op) || offered(op),
-                    "node {n} staged {op}, which the hub never accepted"
-                );
-            }
-            assert_eq!(
-                univ.maximal(&repo.heads),
-                repo.heads,
-                "heads form an antichain"
-            );
-            let (seq, head) = *self.cores[n].known();
-            assert!(
-                self.misled[n]
-                    || self.hist.get(seq as usize) == Some(&head)
-                    || self.lost.contains(&(seq, head)),
-                "KnownIsHubHistory on node {n}"
-            );
-        }
-        // Each head the hub accepted descends from the one before, or, where it accepted it
-        // through what survives of that one, is above all of it, once everything the hub had
-        // dropped then and the push dropped is (`imageAccept`'s `acceptDrops`).
-        for (seq, pair) in (1..).zip(self.hist.windows(2)) {
-            if self.contracted_accepts.contains(&seq) {
-                let drops = flat(&self.hub.record_hist[seq as usize]);
-                assert!(
-                    univ.below(&drops, pair[0], pair[1]),
-                    "HubMonotone, contracted"
-                );
-            } else {
-                assert!(univ.is_ancestor(pair[0], pair[1]), "HubMonotone");
-            }
-        }
-        // `SInv`: no head is in its holder's dropped set, and the root in none.
-        let hub_dropped = self.hub.dropped();
-        assert!(
-            !hub_dropped.contains(&self.hub.head),
-            "the hub's head is dropped"
-        );
-        assert!(!hub_dropped.contains(&ROOT), "the hub dropped the root");
-        for (n, repo) in self.repos.iter().enumerate() {
-            assert!(
-                repo.heads.iter().all(|head| !repo.dropped.contains(head)),
-                "node {n} has a head it dropped"
-            );
-            assert!(!repo.dropped.contains(&ROOT), "node {n} dropped the root");
-            assert!(
-                flat(&repo.applied).is_subset(&repo.dropped),
-                "node {n} took records it doesn't drop"
-            );
-        }
-    }
-
-    pub fn converged(&self) -> bool {
-        self.repos.iter().zip(&self.cores).all(|(repo, core)| {
-            repo.heads == BTreeSet::from([self.hub.head])
-                && *core.known() == (self.hub.seq, self.hub.head)
-                && repo.applied == self.hub.records
-                && repo.dropped == self.hub.dropped()
-        })
     }
 
     /// Stops environment actions, makes the network reliable, and runs every node's policy

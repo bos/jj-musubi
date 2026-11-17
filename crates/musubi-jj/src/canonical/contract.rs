@@ -369,7 +369,11 @@ mod tests {
     fn peer_cannot_put_two_versions_of_one_original_in_a_history() {
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-        let ids = history(&store, &[vec![0], vec![1]], &[0, 1]);
+        let ids = history(
+            &store,
+            &[vec![0], vec![1]],
+            &[Content::Plain(0), Content::Plain(1)],
+        );
         let mut forged = store.read_operation(&ids[1]).unwrap();
         forged.parents = vec![ids[2].0.clone()];
         let id = CanonicalOp(OperationId::new(
@@ -394,7 +398,7 @@ mod tests {
     fn a_received_stamp_must_read() {
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-        let ids = history(&store, &[vec![0]], &[0]);
+        let ids = history(&store, &[vec![0]], &[Content::Plain(0)]);
         for (stamp, taken) in [
             ("known a b", false),
             ("latest a xyz", false),
@@ -412,15 +416,68 @@ mod tests {
         }
     }
 
-    /// A history of `parents.len()` operations on the root, the `i`th with the given parents
-    /// among those before it, allowing equal nonparent content. Identical initial operations
-    /// are one original, so only those are given distinct descriptions. Content 3 or 4 makes
-    /// an operation work by copy `c3` or `c4`, 4 recording its forget-after too; 5 or 6 a
-    /// forget of `c3` or `c4`.
+    /// Equal symbols allow operations with equal nonparent content. Work and forgets make
+    /// contraction preserve presence too, including a copy's recorded expiry policy.
+    #[derive(Clone, Copy, Debug)]
+    enum Content {
+        Plain(u8),
+        WorkByC3,
+        LeasedWorkByC4,
+        ForgetC3,
+        ForgetC4,
+    }
+
+    impl Content {
+        fn draw(tc: &TestCase) -> Self {
+            match tc.draw(gs::integers::<u8>().max_value(6)) {
+                3 => Self::WorkByC3,
+                4 => Self::LeasedWorkByC4,
+                5 => Self::ForgetC3,
+                6 => Self::ForgetC4,
+                symbol => Self::Plain(symbol),
+            }
+        }
+
+        fn apply(self, op: &mut Operation, index: usize) {
+            let symbol = match self {
+                Self::Plain(symbol) => symbol,
+                Self::WorkByC3 => 3,
+                Self::LeasedWorkByC4 => 4,
+                Self::ForgetC3 => 5,
+                Self::ForgetC4 => 6,
+            };
+            op.metadata.description = format!("content {symbol}");
+            let attributes = &mut op.metadata.attributes;
+            match self {
+                Self::WorkByC3 | Self::LeasedWorkByC4 => {
+                    attributes.insert(
+                        crate::presence::WORK_ATTRIBUTE.to_owned(),
+                        format!("c{symbol}"),
+                    );
+                    if matches!(self, Self::LeasedWorkByC4) {
+                        attributes.insert(
+                            crate::presence::FORGET_AFTER_ATTRIBUTE.to_owned(),
+                            format!("{}h", index + 1),
+                        );
+                    }
+                }
+                Self::ForgetC3 | Self::ForgetC4 => {
+                    attributes.insert(
+                        crate::presence::FORGET_ATTRIBUTE.to_owned(),
+                        format!("c{}", symbol - 2),
+                    );
+                }
+                Self::Plain(_) => {}
+            }
+        }
+    }
+
+    /// A history on the root, with parents indexed among the root (0) and earlier operations.
+    /// Equal initial operations would be one original, so give only those distinct descriptions.
     fn history(
         store: &CanonicalStore,
         parents: &[Vec<usize>],
-        contents: &[u8],
+        contents: &[Content],
     ) -> Vec<CanonicalOp> {
         let view = store
             .write_view(&View::make_root(CommitId::from_bytes(&[0; 20])))
@@ -429,28 +486,7 @@ mod tests {
         for (i, ps) in parents.iter().enumerate() {
             let mut op = Operation::make_root(view.clone());
             op.parents = ps.iter().map(|&p| ids[p].0.clone()).collect();
-            op.metadata.description = format!("content {}", contents[i]);
-            match contents[i] {
-                3 | 4 => {
-                    op.metadata.attributes.insert(
-                        crate::presence::WORK_ATTRIBUTE.to_owned(),
-                        format!("c{}", contents[i]),
-                    );
-                    if contents[i] == 4 {
-                        op.metadata.attributes.insert(
-                            crate::presence::FORGET_AFTER_ATTRIBUTE.to_owned(),
-                            format!("{}h", i + 1),
-                        );
-                    }
-                }
-                5 | 6 => {
-                    op.metadata.attributes.insert(
-                        crate::presence::FORGET_ATTRIBUTE.to_owned(),
-                        format!("c{}", contents[i] - 2),
-                    );
-                }
-                _ => {}
-            }
+            contents[i].apply(&mut op, i);
             let mut id = store.write_operation(&op).unwrap();
             if ids.contains(&id) {
                 op.metadata.description = format!("distinct op {i}");
@@ -461,123 +497,226 @@ mod tests {
         ids
     }
 
-    /// Dropping one set and then another, named as the first left them, gives the ids that
-    /// dropping both at once gives (`Contract.cid_union`, and with stamps,
-    /// `PresenceContract.sid_union`), and a survivor's parents are its parents with each
-    /// dropped one replaced by its own, recursively, duplicates removed (`Contract.cpar`).
-    /// Presence at every survivor is what it was (`PresenceContract.pres_eq`), worked out
-    /// afresh.
-    #[hegel::test(test_cases = 200)]
-    fn dropping_twice_is_dropping_both(tc: TestCase) {
-        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
-        let parents: Vec<Vec<usize>> = (1..=count)
-            .map(|i| {
-                let first = tc.draw(gs::integers::<usize>().max_value(i - 1));
-                if tc.draw(gs::booleans()) {
-                    let second = tc.draw(gs::integers::<usize>().max_value(i - 1));
-                    if second != first {
-                        return vec![first, second];
+    /// The shared input for every contraction law: a small DAG and two possibly overlapping
+    /// drop sets. All laws use this one history and store.
+    struct ContractionCase {
+        parents: Vec<Vec<usize>>,
+        first: HashSet<usize>,
+        second: HashSet<usize>,
+    }
+
+    impl ContractionCase {
+        fn draw(tc: &TestCase) -> Self {
+            let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
+            let parents = (1..=count)
+                .map(|i| {
+                    let first = tc.draw(gs::integers::<usize>().max_value(i - 1));
+                    if tc.draw(gs::booleans()) {
+                        let second = tc.draw(gs::integers::<usize>().max_value(i - 1));
+                        if second != first {
+                            return vec![first, second];
+                        }
+                    }
+                    vec![first]
+                })
+                .collect();
+            let ops: Vec<usize> = (1..=count).collect();
+            let first = ops
+                .iter()
+                .copied()
+                .filter(|_| tc.draw(gs::booleans()))
+                .collect();
+            let second = ops
+                .iter()
+                .copied()
+                .filter(|_| tc.draw(gs::booleans()))
+                .collect();
+            Self {
+                parents,
+                first,
+                second,
+            }
+        }
+
+        fn drops(&self, op: usize) -> bool {
+            self.first.contains(&op) || self.second.contains(&op)
+        }
+    }
+
+    /// The graph definition, independent of contraction's store traversal and hashes of
+    /// rewritten operations: replace dropped parents recursively, retaining the first of
+    /// each duplicate (`Contract.cpar`), then build structural terms (`cid_eq_mk`).
+    struct ContractedGraph {
+        parents: Vec<Vec<usize>>,
+        terms: Vec<CId>,
+    }
+
+    impl ContractedGraph {
+        fn from_graph(case: &ContractionCase, store: &CanonicalStore, ids: &[CanonicalOp]) -> Self {
+            let mut images = vec![vec![0]];
+            let mut parents = vec![vec![]];
+            let mut terms = vec![CId(store.original_id(&ids[0]).unwrap(), vec![])];
+            for (i, id) in ids.iter().enumerate().skip(1) {
+                let mut expanded = vec![];
+                for &p in &case.parents[i - 1] {
+                    for &q in &images[p] {
+                        if !expanded.contains(&q) {
+                            expanded.push(q);
+                        }
                     }
                 }
-                vec![first]
-            })
-            .collect();
-        let ops: Vec<usize> = (1..=count).collect();
-        let first: HashSet<usize> = ops
-            .iter()
-            .copied()
-            .filter(|_| tc.draw(gs::booleans()))
-            .collect();
-        let second: HashSet<usize> = ops
-            .iter()
-            .copied()
-            .filter(|_| tc.draw(gs::booleans()))
-            .collect();
+                terms.push(CId(
+                    store.original_id(id).unwrap(),
+                    expanded.iter().map(|&q| terms[q].clone()).collect(),
+                ));
+                images.push(if case.drops(i) {
+                    expanded.clone()
+                } else {
+                    vec![i]
+                });
+                parents.push(expanded);
+            }
+            Self { parents, terms }
+        }
+    }
+
+    /// Expand every first-stage image through the second contraction, keeping the first
+    /// occurrence of each result (`Contract.exp_union`, with `dd` removing duplicates).
+    fn compose_images(
+        store: &CanonicalStore,
+        second: &mut Contraction,
+        first: &[CanonicalOp],
+    ) -> Vec<CanonicalOp> {
+        let mut images = vec![];
+        for image in first {
+            for next in second.images(store, image).unwrap() {
+                if !images.contains(&next) {
+                    images.push(next);
+                }
+            }
+        }
+        images
+    }
+
+    /// A surviving operation has one image, with its original immutable content and the
+    /// structurally contracted parents, and never borrows the identity of a dropped operation.
+    fn assert_survivor_identity(
+        store: &CanonicalStore,
+        case: &ContractionCase,
+        ids: &[CanonicalOp],
+        op: usize,
+        images: &[CanonicalOp],
+        term: &CId,
+    ) {
+        assert_eq!(images.len(), 1, "one image for survivor {op}");
+        assert_eq!(
+            stored_cid(store, &images[0]),
+            *term,
+            "content of survivor {op}"
+        );
+        for &old in case.first.union(&case.second) {
+            assert_ne!(images[0], ids[old], "a dropped id cannot return");
+        }
+        assert_eq!(
+            store.original_id(&images[0]).unwrap(),
+            store.original_id(&ids[op]).unwrap(),
+            "original identity of survivor {op}"
+        );
+    }
+
+    /// Recompute both answers without a memo shared with contraction
+    /// (`PresenceContract.pres_eq`).
+    fn assert_presence_preserved(
+        store: &CanonicalStore,
+        before: &CanonicalOp,
+        after: &CanonicalOp,
+    ) {
+        assert_eq!(
+            PresenceMemo::default().presence(store, after).unwrap(),
+            PresenceMemo::default().presence(store, before).unwrap(),
+            "presence at {before:?}"
+        );
+    }
+
+    /// Dropping first and then second gives the same images as dropping their union
+    /// (`Contract.exp_union`), including dropped operations; surviving ids agree too
+    /// (`Contract.cid_union`, and with stamps, `PresenceContract.sid_union`). Also check
+    /// lookup-order independence, parent expansion (`Contract.cpar` and `Contract.exp`), survivor
+    /// identities (`cid_eq_mk`), and presence preservation (`PresenceContract.pres_eq`).
+    #[hegel::test(test_cases = 200)]
+    fn dropping_twice_is_dropping_both(tc: TestCase) {
+        let case = ContractionCase::draw(&tc);
+        let count = case.parents.len();
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-        let contents: Vec<u8> = (0..count)
-            .map(|_| tc.draw(gs::integers::<u8>().max_value(6)))
-            .collect();
-        let ids = history(&store, &parents, &contents);
-        // Asked about in any order, as a machine's translation is.
+        let contents: Vec<Content> = (0..count).map(|_| Content::draw(&tc)).collect();
+        let ids = history(&store, &case.parents, &contents);
+
+        // Query a separate contraction in arbitrary order, as a machine's translation does.
         let mut order: Vec<usize> = (1..=count).collect();
         for i in (1..order.len()).rev() {
             order.swap(i, tc.draw(gs::integers::<usize>().max_value(i)));
         }
-        let mut shuffled =
-            Contraction::new(&store, first.union(&second).map(|&i| ids[i].clone())).unwrap();
-        let in_order: HashMap<usize, Vec<CanonicalOp>> = order
+        let mut shuffled = Contraction::new(
+            &store,
+            case.first.union(&case.second).map(|&i| ids[i].clone()),
+        )
+        .unwrap();
+        let out_of_order: HashMap<usize, Vec<CanonicalOp>> = order
             .iter()
             .map(|&i| (i, shuffled.images(&store, &ids[i]).unwrap()))
             .collect();
 
-        let mut once = Contraction::new(&store, first.iter().map(|&i| ids[i].clone())).unwrap();
+        // Sequential dropping renames the second set through the first contraction.
+        let mut once =
+            Contraction::new(&store, case.first.iter().map(|&i| ids[i].clone())).unwrap();
         let after_first: Vec<Vec<CanonicalOp>> = ids
             .iter()
             .map(|id| once.images(&store, id).unwrap())
             .collect();
-        let renamed = second
+        let renamed = case
+            .second
             .iter()
-            .filter(|i| !first.contains(i))
+            .filter(|i| !case.first.contains(i))
             .map(|&i| after_first[i][0].clone());
         let mut twice = Contraction::new(&store, renamed).unwrap();
-        let both_sets = first.union(&second).map(|&i| ids[i].clone());
+        let both_sets = case.first.union(&case.second).map(|&i| ids[i].clone());
         let mut both = Contraction::new(&store, both_sets).unwrap();
-        // What each original contracts to, by the definition, as indices.
-        let mut expected: Vec<Vec<usize>> = vec![vec![0]];
-        let mut terms = vec![CId(store.original_id(&ids[0]).unwrap(), vec![])];
+        let expected = ContractedGraph::from_graph(&case, &store, &ids);
+
+        for (i, first) in after_first.iter().enumerate() {
+            assert_eq!(
+                compose_images(&store, &mut twice, first),
+                both.images(&store, &ids[i]).unwrap(),
+                "sequential dropping at op {i}"
+            );
+        }
+
         for i in 1..=count {
-            let mut contracted = vec![];
-            for &p in &parents[i - 1] {
-                for &q in &expected[p] {
-                    if !contracted.contains(&q) {
-                        contracted.push(q);
-                    }
-                }
-            }
-            let dropped = first.contains(&i) || second.contains(&i);
-            // `cid_eq_mk`: immutable content and the ids of `cpar`'s parents. Unlike the
-            // implementation, this builds terms from the generated graph, with no hashes
-            // of rewritten operations and no store traversal.
-            terms.push(CId(
-                store.original_id(&ids[i]).unwrap(),
-                contracted.iter().map(|&q| terms[q].clone()).collect(),
-            ));
-            expected.push(if dropped { contracted.clone() } else { vec![i] });
             let images = both.images(&store, &ids[i]).unwrap();
-            assert_eq!(in_order[&i], images, "op {i}, asked out of order");
-            if dropped {
-                // What a dropped operation's parents became (`Contract.exp`).
-                let parents: Vec<CanonicalOp> = contracted
+            assert_eq!(out_of_order[&i], images, "lookup order at op {i}");
+            if case.drops(i) {
+                let parents: Vec<CanonicalOp> = expected.parents[i]
                     .iter()
                     .map(|&q| both.images(&store, &ids[q]).unwrap()[0].clone())
                     .collect();
-                assert_eq!(images, parents, "dropped op {i}");
+                assert_eq!(images, parents, "expansion of dropped op {i}");
                 continue;
             }
-            let id = images;
-            assert_eq!(id.len(), 1);
-            assert_eq!(stored_cid(&store, &id[0]), terms[i]);
-            for &old in first.union(&second) {
-                assert_ne!(id[0], ids[old], "a dropped id cannot return");
-            }
-            assert_eq!(
-                store.original_id(&id[0]).unwrap(),
-                store.original_id(&ids[i]).unwrap()
-            );
+            assert_survivor_identity(&store, &case, &ids, i, &images, &expected.terms[i]);
+            // The composed law deduplicates expansions; raw survivor images must be unique too.
             let via_first = twice.images(&store, &after_first[i][0]).unwrap();
-            assert_eq!(via_first, id, "op {i}");
-            let fresh = || PresenceMemo::default();
-            assert_eq!(
-                fresh().presence(&store, &id[0]).unwrap(),
-                fresh().presence(&store, &ids[i]).unwrap(),
-                "presence at op {i}"
-            );
-            let image_parents: Vec<CanonicalOp> = contracted
+            assert_eq!(via_first, images, "raw sequential images of survivor {i}");
+            assert_presence_preserved(&store, &ids[i], &images[0]);
+            let parents: Vec<CanonicalOp> = expected.parents[i]
                 .iter()
                 .map(|&q| both.images(&store, &ids[q]).unwrap()[0].clone())
                 .collect();
-            assert_eq!(store.parents(&id[0]).unwrap(), image_parents, "op {i}");
+            assert_eq!(
+                store.parents(&images[0]).unwrap(),
+                parents,
+                "parents of survivor {i}"
+            );
         }
     }
 }

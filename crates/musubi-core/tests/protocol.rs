@@ -29,12 +29,21 @@ use support::oracle::Oracle;
 use support::storage::Timing;
 use support::world::World;
 
+/// Which additional actions a generated case admits. All three environments include local
+/// work, arbitrary network delivery, abandonment and crashes. False replies exceed the
+/// Lean model's honest-hub assumptions; storage failures keep the oracle until a partial
+/// effect leaves its abstraction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Environment {
+    Protocol,
+    FalseReplies,
+    StorageFailures,
+}
+
 struct Machine {
     world: Rc<RefCell<World>>,
     crashes: usize,
-    /// Whether nodes may take false replies ([`Machine::false_reply`]).
-    false_replies: bool,
-    storage_failures: bool,
+    environment: Environment,
 }
 
 fn pick(tc: &TestCase, len: usize) -> usize {
@@ -142,7 +151,7 @@ impl Machine {
     /// properties, and the Lean model, rest on the hub's honesty.
     #[rule]
     fn false_reply(&mut self, tc: TestCase) {
-        tc.assume(self.false_replies);
+        tc.assume(self.environment == Environment::FalseReplies);
         let mut world = self.world.borrow_mut();
         let node = pick(&tc, world.nodes());
         let (ops, objs) = world.hub_stored();
@@ -276,7 +285,7 @@ impl Machine {
     /// surrounding protocol sequence.
     #[rule(weight = 3)]
     fn storage_failure(&mut self, tc: TestCase) {
-        tc.assume(self.storage_failures);
+        tc.assume(self.environment == Environment::StorageFailures);
         let mut world = self.world.borrow_mut();
         let node = pick(&tc, world.nodes());
         let timing = tc.draw(gs::sampled_from(vec![
@@ -325,21 +334,15 @@ fn chain(tc: &TestCase, world: &World, head: u64, stored: &[u64]) -> Vec<u64> {
 }
 
 /// Runs a case, returning its oracle, if it has one, for the next case once this one passes.
-fn run(
-    tc: TestCase,
-    oracle: Option<Oracle>,
-    false_replies: bool,
-    storage_failures: bool,
-) -> Option<Oracle> {
-    run_from(tc, oracle, false_replies, storage_failures, |_, _| 0)
+fn run(tc: TestCase, oracle: Option<Oracle>, environment: Environment) -> Option<Oracle> {
+    run_from(tc, oracle, environment, |_, _| 0)
 }
 
 /// [`run`], from where `prefix` takes the hive first, which returns how many crashes it used.
 fn run_from(
     tc: TestCase,
     oracle: Option<Oracle>,
-    false_replies: bool,
-    storage_failures: bool,
+    environment: Environment,
     prefix: impl FnOnce(&TestCase, &mut World) -> usize,
 ) -> Option<Oracle> {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
@@ -348,8 +351,7 @@ fn run_from(
     hegel::stateful::machine(Machine {
         world: world.clone(),
         crashes,
-        false_replies,
-        storage_failures,
+        environment,
     })
     .run(tc);
     let mut world = world.borrow_mut();
@@ -380,7 +382,7 @@ fn run_from(
 
 #[hegel::test(test_cases = 300)]
 fn protocol_invariants(tc: TestCase) {
-    run(tc, None, false, false);
+    run(tc, None, Environment::Protocol);
 }
 
 /// Nodes that take false replies, as a buggy hub might send, made of what it stores, stay
@@ -391,7 +393,7 @@ fn protocol_invariants(tc: TestCase) {
 /// hub, isn't consulted.
 #[hegel::test(test_cases = 300)]
 fn nodes_recover_from_false_replies(tc: TestCase) {
-    run(tc, None, true, false);
+    run(tc, None, Environment::FalseReplies);
 }
 
 #[hegel::test(test_cases = conformance_cases())]
@@ -400,7 +402,7 @@ fn conformance(tc: TestCase) {
     // took longer than most cases. One whose case failed goes, in whatever state it was.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle), false, false));
+    ORACLE.set(run(tc, Some(oracle), Environment::Protocol));
 }
 
 /// A head the hub accepted through what survives of the one before need not reach it. Once
@@ -450,7 +452,12 @@ fn going_back_past_an_acceptance_through_survivors_remakes_the_hub() {
 fn survivor_advance_conformance(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run_from(tc, Some(oracle), false, false, dropped_known));
+    ORACLE.set(run_from(
+        tc,
+        Some(oracle),
+        Environment::Protocol,
+        dropped_known,
+    ));
 }
 
 /// Node 0 makes a few operations, one on another, and drops some of those below its head;
@@ -495,7 +502,7 @@ fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
 fn storage_failures_preserve_operations(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle), false, true));
+    ORACLE.set(run(tc, Some(oracle), Environment::StorageFailures));
 }
 
 #[path = "protocol/storage_boundaries.rs"]

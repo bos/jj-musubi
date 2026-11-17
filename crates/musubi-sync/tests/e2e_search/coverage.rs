@@ -1,14 +1,27 @@
-//! Which rules the generated sequences fired, and which rows of the race catalogue
-//! (docs/internals/races.md) they reached. A rule or row no sequence reaches is a search problem:
-//! give it a richer starting state or fix its precondition (docs/internals/testing.md).
+//! Rule activity, approximate exploration guidance, and independently witnessed races.
+//!
+//! Catalogue rule combinations suggest where to search; their occurrence does not prove
+//! the named race happened. Only qualified native receipts from cases that completed all
+//! checks count as witnessed. Each report covers its own test execution and reads no old files.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::rc::Rc;
+
+use serde::Serialize;
+
+use crate::identity::SourceKey;
+use crate::world::CommandSnapshot;
+
+mod witnesses;
+
+use witnesses::Race;
+use witnesses::Tracker;
 
 /// Every rule of the state machine, and the setup choices, for listing those that never
 /// fired.
@@ -100,9 +113,9 @@ pub const EVENTS: &[&str] = &[
     "forgotten:working_copy_rebased",
 ];
 
-/// Each catalogue row, by test name, with the rules and events that together exercise it
-/// in one sequence (every sequence ends by syncing everything); `None` for rows the search
-/// deliberately avoids.
+/// Approximate exploration guidance for each race-catalogue test. These rule combinations
+/// identify candidate sequences, without establishing participants, objects or ordering.
+/// `None` marks cases deliberately outside this search. Witness support is separate.
 pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "machines_may_share_a_workspace_name",
@@ -528,13 +541,12 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on",
         None,
     ),
+    // Expiry permutations are checked by the hub's repository-free policy table.
     (
-        "a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops",
+        "hub::tests::pruning_waits_for_recent_joins_and_restart_grace",
         None,
     ),
-    ("a_joining_machine_away_for_over_a_day_stops", None),
     ("a_copy_joining_again_is_waited_for", None),
-    ("a_copy_joining_again_away_for_over_a_day_stops", None),
     // The search delivers every reply at once, never one held up across a prune.
     (
         "a_machine_takes_records_from_a_pruned_one_it_held_before",
@@ -576,158 +588,509 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("verbatim_replication_reverts_bookmarks", None),
 ];
 
-static FIRED: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
-static ROWS: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
-
-thread_local! {
-    static CASE: RefCell<BTreeSet<&'static str>> = const { RefCell::new(BTreeSet::new()) };
+/// Counts belong to one report, including every attempted case's rule activity. A witness
+/// receipt is admitted separately, only once that case has completed its checks.
+#[derive(Default)]
+struct Totals {
+    attempts: u64,
+    completed: u64,
+    activity: BTreeMap<&'static str, u64>,
+    combinations: BTreeMap<&'static str, u64>,
+    races: BTreeMap<&'static str, RaceTotal>,
 }
 
-/// Counts a rule that passed its precondition, or an event.
+struct RaceTotal {
+    cases: u64,
+    first_receipt: String,
+}
+
+impl Totals {
+    fn add_case(
+        &mut self,
+        activity: &BTreeMap<&'static str, u64>,
+        witnesses: impl IntoIterator<Item = (Race, String)>,
+        passed: bool,
+    ) {
+        self.attempts += 1;
+        for (&rule, &count) in activity {
+            *self.activity.entry(rule).or_default() += count;
+        }
+        for &(row, needs) in CATALOGUE {
+            if needs.is_some_and(|needs| needs.iter().all(|need| activity.contains_key(need))) {
+                *self.combinations.entry(row).or_default() += 1;
+            }
+        }
+        if passed {
+            self.completed += 1;
+            let mut counted = BTreeSet::new();
+            for (race, receipt) in witnesses {
+                let name = race.catalogue_name();
+                if !counted.insert(name) {
+                    continue;
+                }
+                let total = self.races.entry(name).or_insert(RaceTotal {
+                    cases: 0,
+                    first_receipt: receipt,
+                });
+                total.cases += 1;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct CaseData {
+    activity: BTreeMap<&'static str, u64>,
+    tracker: Tracker,
+}
+
+type SharedTotals = Rc<RefCell<Totals>>;
+type SharedCase = Rc<RefCell<CaseData>>;
+
+thread_local! {
+    static REPORT: RefCell<Option<SharedTotals>> = const { RefCell::new(None) };
+    static CASE: RefCell<Option<SharedCase>> = const { RefCell::new(None) };
+}
+
+/// Counts a rule that passed its precondition, or an observed setup/outcome event.
+/// Rule activity remains useful even when a later assumption or check stops the case.
 pub fn fired(rule: &'static str) {
     debug_assert!(
         RULES.contains(&rule) || EVENTS.contains(&rule),
         "unlisted rule {rule}"
     );
-    *FIRED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(rule)
-        .or_default() += 1;
-    CASE.with(|case| case.borrow_mut().insert(rule));
-}
-
-/// Starts counting a case's rules; the catalogue rows they reach are counted when the
-/// returned guard drops, whether the case passes or fails.
-pub fn start_case() -> Case {
-    CASE.with(|case| case.borrow_mut().clear());
-    Case
-}
-
-pub struct Case;
-
-impl Drop for Case {
-    fn drop(&mut self) {
-        end_case();
-    }
-}
-
-fn end_case() {
-    CASE.with(|case| {
-        let case = case.borrow();
-        let mut rows = ROWS.lock().unwrap_or_else(|e| e.into_inner());
-        for (row, needs) in CATALOGUE {
-            if let Some(needs) = needs
-                && needs.iter().all(|need| case.contains(need))
-            {
-                *rows.entry(row).or_default() += 1;
+    CASE.with(|current| {
+        if let Some(case) = current.borrow().as_ref() {
+            let mut case = case.borrow_mut();
+            *case.activity.entry(rule).or_default() += 1;
+            if RULES.contains(&rule) {
+                case.tracker.rule(rule);
             }
         }
     });
+}
+
+/// Captures evidence already read by the recorded-command boundary. Qualification neither
+/// probes an actor nor changes what the oracle accepts.
+pub fn record_native(
+    op: &jj_lib::op_store::Operation,
+    snapshot: &CommandSnapshot,
+    before: &BTreeSet<SourceKey>,
+) {
+    CASE.with(|current| {
+        if let Some(case) = current.borrow().as_ref() {
+            case.borrow_mut().tracker.command(op, snapshot, before);
+        }
+    });
+}
+
+/// Breaks the conservative independence interval at a synchronization or other barrier.
+pub fn interrupt_races() {
+    CASE.with(|current| {
+        if let Some(case) = current.borrow().as_ref() {
+            case.borrow_mut().tracker.interrupt();
+        }
+    });
+}
+
+/// Starts a case with its own tracker and captures the current report as its owner.
+/// Dropping retains activity; call `passed` after every final check to admit its witnesses.
+pub fn start_case() -> Case {
+    let data = Rc::new(RefCell::new(CaseData::default()));
+    let previous = CASE.with(|current| current.replace(Some(data.clone())));
+    let report = REPORT.with(|current| current.borrow().clone());
+    Case {
+        data,
+        report,
+        previous,
+        passed: false,
+    }
+}
+
+pub struct Case {
+    data: SharedCase,
+    report: Option<SharedTotals>,
+    previous: Option<SharedCase>,
+    passed: bool,
+}
+
+impl Case {
+    /// The generated walk and its final convergence checks completed successfully.
+    pub fn passed(mut self) {
+        self.passed = true;
+    }
+
+    /// Whether this case has captured a qualified receipt for the named race. Reporting
+    /// still requires `passed`; the native bridge tests inspect this before finishing.
+    pub fn witnessed(&self, name: &str) -> bool {
+        self.data
+            .borrow()
+            .tracker
+            .witnesses()
+            .any(|(race, _)| race.catalogue_name() == name)
+    }
+}
+
+impl Drop for Case {
+    fn drop(&mut self) {
+        CASE.with(|current| current.replace(self.previous.take()));
+        if let Some(report) = &self.report {
+            let case = self.data.borrow();
+            let witnesses = case
+                .tracker
+                .witnesses()
+                .map(|(race, witness)| (race, witness.to_string()));
+            report
+                .borrow_mut()
+                .add_case(&case.activity, witnesses, self.passed);
+        }
+    }
 }
 
 pub fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e_search")
 }
 
-fn render(counts: &BTreeMap<String, u64>) -> String {
-    let mut out = String::new();
-    let count = |name: &str| counts.get(name).copied().unwrap_or(0);
-    writeln!(out, "rules (times fired):").unwrap();
-    for rule in RULES.iter().chain(EVENTS) {
-        writeln!(out, "  {rule:<28} {}", count(rule)).unwrap();
+/// Raw output records both the witness support and the observations for each catalogue row.
+/// A zero for an instrumented race differs from a row whose witness is not implemented.
+#[derive(Serialize)]
+struct RawCounts<'a> {
+    schema_version: u8,
+    test: &'a str,
+    attempted_cases: u64,
+    completed_cases: u64,
+    rule_activity: &'a BTreeMap<&'static str, u64>,
+    catalogue: Vec<CatalogueCount<'a>>,
+}
+
+#[derive(Serialize)]
+struct CatalogueCount<'a> {
+    race: &'static str,
+    /// Approximate guidance only; failed and discarded cases contribute here too.
+    rule_combination_cases: u64,
+    suggested_rules: Option<&'static [&'static str]>,
+    evidence: RaceEvidence<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RaceEvidence<'a> {
+    Excluded,
+    NotInstrumented,
+    NotWitnessed,
+    Witnessed {
+        completed_cases: u64,
+        first_receipt: &'a str,
+    },
+}
+
+impl<'a> RawCounts<'a> {
+    fn of(name: &'a str, totals: &'a Totals) -> Self {
+        let catalogue = CATALOGUE
+            .iter()
+            .map(|&(race, rules)| {
+                let evidence = if rules.is_none() {
+                    RaceEvidence::Excluded
+                } else if !Race::ALL.iter().any(|known| known.catalogue_name() == race) {
+                    RaceEvidence::NotInstrumented
+                } else if let Some(total) = totals.races.get(race) {
+                    RaceEvidence::Witnessed {
+                        completed_cases: total.cases,
+                        first_receipt: &total.first_receipt,
+                    }
+                } else {
+                    RaceEvidence::NotWitnessed
+                };
+                CatalogueCount {
+                    race,
+                    rule_combination_cases: totals.combinations.get(race).copied().unwrap_or(0),
+                    suggested_rules: rules,
+                    evidence,
+                }
+            })
+            .collect();
+        Self {
+            schema_version: 2,
+            test: name,
+            attempted_cases: totals.attempts,
+            completed_cases: totals.completed,
+            rule_activity: &totals.activity,
+            catalogue,
+        }
     }
-    writeln!(out, "catalogue rows (sequences reaching them):").unwrap();
-    for (row, needs) in CATALOGUE {
-        match needs {
-            Some(needs) => writeln!(
+}
+
+fn render(name: &str, totals: &Totals) -> String {
+    let counts = RawCounts::of(name, totals);
+    let mut out = String::new();
+    writeln!(out, "coverage v2 for {name} (this test execution only):").unwrap();
+    writeln!(
+        out,
+        "cases: {} completed all checks / {} attempted",
+        totals.completed, totals.attempts
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "rules and events (times fired across attempted cases):"
+    )
+    .unwrap();
+    for rule in RULES.iter().chain(EVENTS) {
+        writeln!(
+            out,
+            "  {rule:<28} {}",
+            totals.activity.get(rule).copied().unwrap_or(0)
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "catalogue races (native witnesses from completed cases):"
+    )
+    .unwrap();
+    for row in &counts.catalogue {
+        match &row.evidence {
+            RaceEvidence::Excluded => writeln!(out, "  {}: excluded", row.race).unwrap(),
+            RaceEvidence::NotInstrumented => {
+                writeln!(out, "  {}: not instrumented", row.race).unwrap();
+            }
+            RaceEvidence::NotWitnessed => {
+                writeln!(out, "  {}: not witnessed", row.race).unwrap();
+            }
+            RaceEvidence::Witnessed {
+                completed_cases,
+                first_receipt,
+            } => {
+                writeln!(
+                    out,
+                    "  {}: witnessed in {completed_cases} completed cases",
+                    row.race
+                )
+                .unwrap();
+                for line in first_receipt.lines() {
+                    writeln!(out, "    {line}").unwrap();
+                }
+            }
+        }
+    }
+    writeln!(
+        out,
+        "approximate rule combinations (exploration guidance across attempted cases):"
+    )
+    .unwrap();
+    for row in &counts.catalogue {
+        if let Some(needs) = row.suggested_rules {
+            writeln!(
                 out,
-                "  {row:<60} {:>5}  via {}",
-                count(&format!("row:{row}")),
+                "  {}: {} via {}",
+                row.race,
+                row.rule_combination_cases,
                 needs.join(" + ")
             )
-            .unwrap(),
-            None => writeln!(out, "  {row:<60}     -  excluded").unwrap(),
+            .unwrap();
         }
     }
     let never: Vec<&str> = RULES
         .iter()
         .chain(EVENTS)
         .copied()
-        .filter(|rule| count(rule) == 0)
-        .collect();
-    let unreached: Vec<&str> = CATALOGUE
-        .iter()
-        .filter(|(row, needs)| needs.is_some() && count(&format!("row:{row}")) == 0)
-        .map(|(row, _)| *row)
+        .filter(|rule| !totals.activity.contains_key(rule))
         .collect();
     if never.is_empty() {
-        writeln!(out, "every rule fired").unwrap();
+        writeln!(out, "every listed rule and event fired").unwrap();
     } else {
         writeln!(out, "never fired: {}", never.join(", ")).unwrap();
-    }
-    if unreached.is_empty() {
-        writeln!(out, "every catalogue row reached").unwrap();
-    } else {
-        writeln!(out, "rows never reached: {}", unreached.join(", ")).unwrap();
     }
     out
 }
 
-/// Writes this test's counts to `target/tmp/e2e_search/coverage-<test>.txt`, then sums
-/// every test's file into `coverage.txt`, and prints both (visible with `--no-capture`).
-/// Written on drop, so a failing run still reports what it reached.
-pub struct Report(pub &'static str);
+const RETIRED_TOTAL: &str = "The cross-test coverage total has been retired.\n\
+Coverage is reported per test execution in coverage-v2-<test>.txt and counts-v2-<test>.json.\n\
+Use the files emitted by the current test command.\n";
+
+fn write_report(dir: &Path, name: &str, totals: &Totals) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join("coverage.txt"), RETIRED_TOTAL)?;
+    fs::write(
+        dir.join(format!("coverage-v2-{name}.txt")),
+        render(name, totals),
+    )?;
+    let raw = serde_json::to_vec_pretty(&RawCounts::of(name, totals))
+        .expect("coverage counts serialize to JSON");
+    fs::write(dir.join(format!("counts-v2-{name}.json")), raw)
+}
+
+/// One test execution's counts. The thread-local scope isolates tests even under the
+/// ordinary test harness; nested reports restore their outer owner on drop.
+pub struct Report {
+    name: &'static str,
+    totals: SharedTotals,
+    previous: Option<SharedTotals>,
+}
+
+impl Report {
+    pub fn new(name: &'static str) -> Self {
+        let totals = Rc::new(RefCell::new(Totals::default()));
+        let previous = REPORT.with(|current| current.replace(Some(totals.clone())));
+        Self {
+            name,
+            totals,
+            previous,
+        }
+    }
+}
 
 impl Drop for Report {
     fn drop(&mut self) {
-        let mut counts: BTreeMap<String, u64> = FIRED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), *v))
-            .collect();
-        for (row, n) in ROWS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-            counts.insert(format!("row:{row}"), *n);
+        REPORT.with(|current| current.replace(self.previous.take()));
+        let totals = self.totals.borrow();
+        eprintln!("{}", render(self.name, &totals));
+        if let Err(error) = write_report(&dir(), self.name, &totals) {
+            eprintln!("could not write coverage for {}: {error}", self.name);
         }
-        let dir = dir();
-        if fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let mut raw = String::new();
-        for (key, n) in &counts {
-            writeln!(raw, "{key} {n}").unwrap();
-        }
-        fs::write(dir.join(format!("counts-{}.txt", self.0)), raw).ok();
-        eprintln!("coverage of {}:\n{}", self.0, render(&counts));
-
-        let mut total: BTreeMap<String, u64> = BTreeMap::new();
-        let mut sources = vec![];
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(test) = name
-                .strip_prefix("counts-")
-                .and_then(|n| n.strip_suffix(".txt"))
-            else {
-                continue;
-            };
-            sources.push(test.to_owned());
-            let text = fs::read_to_string(entry.path()).unwrap_or_default();
-            for line in text.lines() {
-                if let Some((key, n)) = line.rsplit_once(' ')
-                    && let Ok(n) = n.parse::<u64>()
-                {
-                    *total.entry(key.to_owned()).or_default() += n;
-                }
-            }
-        }
-        sources.sort();
-        let summary = format!(
-            "coverage across {}:\n{}",
-            sources.join(", "),
-            render(&total)
-        );
-        fs::write(dir.join("coverage.txt"), &summary).ok();
-        eprintln!("{summary}");
     }
+}
+
+#[test]
+fn rule_combinations_do_not_claim_a_race() {
+    let mut totals = Totals::default();
+    let activity = BTreeMap::from([("describe", 1), ("squash_into", 1)]);
+    totals.add_case(&activity, [], true);
+    assert_eq!(
+        totals.combinations["same_change_rewritten_on_two_machines"],
+        1
+    );
+    assert_eq!(
+        totals.combinations["both_machines_squash_into_the_same_commit"],
+        1
+    );
+    assert!(totals.races.is_empty());
+    let output = serde_json::to_value(RawCounts::of("test", &totals)).unwrap();
+    for race in [
+        "same_change_rewritten_on_two_machines",
+        "both_machines_squash_into_the_same_commit",
+    ] {
+        let row = output["catalogue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["race"] == race)
+            .unwrap();
+        assert_eq!(row["evidence"]["status"], "not_witnessed");
+    }
+}
+
+#[test]
+fn only_completed_cases_admit_witness_receipts() {
+    let mut totals = Totals::default();
+    let race = Race::SameChangeRewritten;
+    let activity = BTreeMap::from([("describe", 2)]);
+    totals.add_case(&activity, [(race, "discarded receipt".to_owned())], false);
+    assert_eq!(totals.activity["describe"], 2);
+    assert_eq!(totals.combinations[race.catalogue_name()], 1);
+    assert!(totals.races.is_empty());
+    totals.add_case(
+        &activity,
+        [
+            (race, "completed receipt".to_owned()),
+            (race, "another receipt in the same case".to_owned()),
+        ],
+        true,
+    );
+    assert_eq!(totals.attempts, 2);
+    assert_eq!(totals.completed, 1);
+    assert_eq!(totals.races[race.catalogue_name()].cases, 1);
+    assert_eq!(
+        totals.races[race.catalogue_name()].first_receipt,
+        "completed receipt"
+    );
+}
+
+#[test]
+fn an_uninstrumented_race_is_not_a_zero_or_an_exclusion() {
+    let totals = Totals::default();
+    let output = serde_json::to_value(RawCounts::of("test", &totals)).unwrap();
+    let row = |name: &str| {
+        output["catalogue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["race"] == name)
+            .unwrap()
+    };
+    assert_eq!(
+        row("same_change_rewritten_on_two_machines")["evidence"]["status"],
+        "not_witnessed"
+    );
+    assert_eq!(
+        row("concurrent_fetches_of_a_moving_remote")["evidence"]["status"],
+        "not_instrumented"
+    );
+    assert_eq!(
+        row("a_copy_without_workspaces_can_be_forgotten_by_name")["evidence"]["status"],
+        "excluded"
+    );
+}
+
+#[test]
+fn reports_do_not_share_cases_or_rule_activity() {
+    let outer = Report::new("isolation-outer");
+    let first = start_case();
+    fired("commit");
+    first.passed();
+    {
+        let inner = Report::new("isolation-inner");
+        let case = start_case();
+        fired("describe");
+        drop(case);
+        assert_eq!(
+            inner.totals.borrow().activity,
+            BTreeMap::from([("describe", 1)])
+        );
+        assert_eq!(inner.totals.borrow().completed, 0);
+    }
+    let second = start_case();
+    fired("commit");
+    second.passed();
+    assert_eq!(outer.totals.borrow().attempts, 2);
+    assert_eq!(outer.totals.borrow().completed, 2);
+    assert_eq!(
+        outer.totals.borrow().activity,
+        BTreeMap::from([("commit", 2)])
+    );
+}
+
+#[test]
+fn old_reports_never_contribute_to_a_current_report() {
+    let dir = musubi_testutil::tempdir();
+    fs::write(
+        dir.path().join("coverage.txt"),
+        "every catalogue row reached",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("counts-old.txt"),
+        "row:same_change_rewritten_on_two_machines 999",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("counts-v2-old.json"),
+        r#"{"schema_version":2,"completed_cases":999}"#,
+    )
+    .unwrap();
+    let totals = Totals::default();
+    write_report(dir.path(), "current", &totals).unwrap();
+    let current: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.path().join("counts-v2-current.json")).unwrap())
+            .unwrap();
+    assert_eq!(current["attempted_cases"], 0);
+    assert_eq!(current["completed_cases"], 0);
+    for row in current["catalogue"].as_array().unwrap() {
+        assert_ne!(row["evidence"]["status"], "witnessed");
+    }
+    assert!(!dir.path().join("counts-current.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("coverage.txt")).unwrap(),
+        RETIRED_TOTAL
+    );
 }

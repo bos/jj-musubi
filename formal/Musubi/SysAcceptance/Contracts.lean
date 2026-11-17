@@ -173,8 +173,9 @@ handling. Every sampled view comes from the same `HiveObs`.
 
 The fine-system refinement is supplied separately to `hive_converges`, once nodes have entered
 and completed an active sample, past the old-effects cut. `FineAssembly.hive_converges_observed`
-derives that interface from native event replay. Fairness within that system remains explicit
-in `FineAt`. Automatic-write termination is the explicit premise in `Source.Environment`. -/
+derives that interface from native event replay. Fairness within that system is a premise of
+`FineAssembly.FineSource` (`fair`, `pushFair`), the source `hive_converges_observed` asks of every
+fine cut. Automatic-write termination is the explicit premise in `Source.Environment`. -/
 structure HiveContracts {ρ α : Type} [DecidableEq ρ] (N : Nat) (run : Nat → Sys)
     (acts : Nat → Act) (recs : Nat → Exec.SEState) (B : Nat)
     (epoch : Nat → Nat → Retry.Records.State) (adopts fails : Nat → Nat → Bool)

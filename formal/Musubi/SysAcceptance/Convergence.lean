@@ -26,18 +26,15 @@ theorem hive_converges {ρ α : Type} [DecidableEq ρ] {N : Nat} {D : Nat → Na
       FineCut N Rof wOf O recordCut cut →
       Nonempty (FineAt N D law (EligibleAt N recs recordCut) run acts cut
         (run recordCut).hub.seq O.hist)) :
-    ∃ K cut, K ≤ cut ∧ (∀ i, cut ≤ i → (run i).hub = (run K).hub) ∧
-      ∀ n, n < N → ∃ H, ∀ i, cut ≤ i →
-        NodeSettle.Settled ⟨(run K).hub.seq, H, (run K).hub.recs, D n⟩ ((run i).node n).ns ∧
-        ((run i).node n).emb H = (run K).hub.head ∧
-        ∀ x, Recovery.HubSys.heads (run i) n x ↔ x = (run K).hub.head := by
+    Converges D (fun n => n < N) run := by
   obtain ⟨recordCut, phase⟩ := entry_phase C
   obtain ⟨entryCut, entered⟩ := entered_phase C phase
   obtain ⟨fineCut, boundary, truthful⟩ := fine_cut C phase entered
   obtain ⟨system⟩ := fine recordCut fineCut phase.cut phase.quiet boundary
   have honest := honest_latched_known C phase.quiet truthful
-  obtain ⟨K, cut, -, ordered, stable, settled⟩ := system.converges honest (fun n h => h.1)
+  obtain ⟨K, cut, ordered, stable, settled⟩ := system.converges honest (fun n h => h.1)
   have eligible := all_eligible C phase entered stable
+  unfold Converges
   exact ⟨K, cut, ordered, stable, fun n hn => settled n (eligible n hn)⟩
 
 end Musubi.SysAcceptance

@@ -30,6 +30,21 @@ structure Honest (E : Nat → Prop) (w t0 : Nat) (hist : Nat → Nat) (g : Sys) 
     (r.ans = .fetched s ∨ r.ans = .head s) → HonestSnap w hist g s
   notes : ∀ nt ∈ g.notes, E nt.node → t0 ≤ nt.time + 1 → HonestSnap w hist g nt.snap
 
+/-- The replies in flight at `g` to eligible nodes from `t0` on, and the notifications in flight
+naming a state from `t0` on, carry honest snapshots. Of `Honest`, these are the clauses about
+traffic already sent; the others follow from the history window and the clock. -/
+structure InFlightHonest (E : Nat → Prop) (w t0 : Nat) (hist : Nat → Nat) (g : Sys) : Prop where
+  reps : ∀ r ∈ g.reps, E r.node → t0 ≤ r.time → ∀ s,
+    (r.ans = .fetched s ∨ r.ans = .head s) → HonestSnap w hist g s
+  notes : ∀ nt ∈ g.notes, E nt.node → t0 ≤ nt.time + 1 → HonestSnap w hist g nt.snap
+
+/-- Honest traffic in flight, with the hub's head the history's at its sequence, past the
+window's start, at a time of `t0` or later, is `Honest`. -/
+theorem InFlightHonest.honest {E : Nat → Prop} {w t0 : Nat} {hist : Nat → Nat} {g : Sys}
+    (F : InFlightHonest E w t0 hist g) (window : w ≤ g.hub.seq)
+    (head : hist g.hub.seq = g.hub.head) (time : t0 ≤ g.time) : Honest E w t0 hist g :=
+  ⟨window, head, time, F.reps, F.notes⟩
+
 /-- An honest snapshot stays so as the hub goes on: the history agrees below its sequence. -/
 theorem honestSnap_mono {w : Nat} {hist hist' : Nat → Nat} {g g' : Sys} {s : Snap}
     (h : HonestSnap w hist g s) (hseq : g.hub.seq ≤ g'.hub.seq)

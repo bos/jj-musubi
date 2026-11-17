@@ -103,6 +103,7 @@ open Musubi
 #assert_axioms NativeEvents.RecordView.applied_current
 #assert_axioms NativeEvents.RecordView.pending_empty
 #assert_axioms NativeEvents.RecordView.applied_stays
+#assert_axioms FineAssembly.InFlightHonest.honest
 #assert_axioms FineAssembly.Honest.extend
 #assert_axioms FineAssembly.honest_step
 #assert_axioms FineAssembly.honest_run

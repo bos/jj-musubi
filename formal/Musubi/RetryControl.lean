@@ -89,6 +89,8 @@ theorem finish_old_decreases (s : Inbox) (id cut : Nat)
     (s.finish id).1.old cut < s.old cut := by
   exact filter_remove_lt s.pending id cut (by simpa [Inbox.finish] using hm) hc
 
+/-- A step of an inbox. The flag says the step finished a pending call whose id is below
+`cut`. -/
 inductive InboxStep (cut : Nat) : Inbox → Inbox → Bool → Prop
   | start (s : Inbox) : InboxStep cut s s.start.1 false
   | reserve (s : Inbox) : InboxStep cut s s.reserve false

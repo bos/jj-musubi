@@ -242,6 +242,18 @@ theorem node_settles_accepted (ρ : Nat → Sys) (acts : Nat → Act) (n k0 k kf
 
 end Accept
 
+/-- The run `run` converges for the nodes satisfying `P`: its hub stops moving, and each of those
+nodes settles at its head. From some `cut` on, the hub is the one it was at an earlier time `K`.
+From `cut` on, each node `n` with `P n` has `NodeSettle.Settled` at that hub's sequence, records
+and head, under a label `H` of the head in `n`'s own graph (`D n` being the drops `n` makes), and
+`H`'s image is the hub's head, which is the only head of `n`'s repository. -/
+def Converges (D : Nat → Nat → Nat → Prop) (P : Nat → Prop) (run : Nat → Sys) : Prop :=
+  ∃ K cut, K ≤ cut ∧ (∀ i, cut ≤ i → (run i).hub = (run K).hub) ∧
+    ∀ n, P n → ∃ H, ∀ i, cut ≤ i →
+      NodeSettle.Settled ⟨(run K).hub.seq, H, (run K).hub.recs, D n⟩ ((run i).node n).ns ∧
+      ((run i).node n).emb H = (run K).hub.head ∧
+      ∀ x, Recovery.HubSys.heads (run i) n x ↔ x = (run K).hub.head
+
 /-- Composition for eligible nodes of the same joint system: hub stabilization is proved
 from its events, then a proper push would contradict it. This is a suffix theorem; deriving
 entry and making every surviving native node eligible are separate obligations. -/
@@ -264,11 +276,7 @@ theorem eligible_system_converges {N : Nat} {D : Nat → Nat → Nat → Prop} {
     (hq : ∀ n, E n → PushFair ρ acts n 0)
     (hdecide : ∀ n, E n → ∀ j q, q ∈ (ρ j).reqs → q ∉ (ρ (j + 1)).reqs → q.node = n →
       ∀ P, q.body = .push P → Nonempty (LawfulDecision M decode (ρ j) (ρ (j + 1)) P)) :
-    ∃ k cut, k ≤ cut ∧ (∀ i, cut ≤ i → (ρ i).hub = (ρ k).hub) ∧
-      ∀ n, E n → ∃ H, ∀ i, cut ≤ i →
-        NodeSettle.Settled ⟨(ρ k).hub.seq, H, (ρ k).hub.recs, D n⟩ ((ρ i).node n).ns ∧
-        ((ρ i).node n).emb H = (ρ k).hub.head ∧
-        ∀ x, Recovery.HubSys.heads (ρ i) n x ↔ x = (ρ k).hub.head := by
+    Converges D E ρ := by
   obtain ⟨k, hinv, hk⟩ := Recovery.HubSys.hub_stabilizes_sys ρ acts initial hs h0 hd hb hi hknown
     hl hN kb hm
   have stable : ∀ i, k ≤ i → (ρ i).hub = (ρ k).hub := by
@@ -304,7 +312,8 @@ theorem eligible_system_converges {N : Nat} {D : Nat → Nat → Nat → Prop} {
       exact ⟨settled, raw, heads⟩
     · exact ⟨0, fun _ _ hn => False.elim (he hn)⟩
   obtain ⟨cut, hc⟩ := finite_common_cut N _ each
-  exact ⟨k, max k cut, by omega, fun i hi => stable i (by omega),
+  unfold Converges
+  refine ⟨k, max k cut, by omega, fun i hi => stable i (by omega),
     fun n hn => hc (max k cut) (by omega) n (hN n hn) hn⟩
 
 end Musubi.SysAcceptance

@@ -68,19 +68,48 @@ is `formal/.lake/build/bin/oracle`.
 
 ## Reading the integration proofs
 
-Start with `Musubi/SysAcceptance.lean` for the convergence argument's phases. Then follow the
-interfaces in this order:
+The convergence argument proves one statement, and the assumptions it rests on are listed in one
+place. Start there:
 
-1. `SysAcceptance/Observations.lean` groups the readings of one actual hive run by
-   responsibility. Its sampled views use those same readings for entry, fetch and pending runs.
-2. `SysAcceptance/Cuts.lean` names record stabilization, quiet suffixes and old-effect cutoffs.
-3. `SysAcceptance/Contracts.lean` groups source effects, environment, transport, knowledge,
-   entry, scheduling and system bindings. Completion and fairness obligations stay explicit.
-4. `SysAcceptance/Phases.lean` derives quiet records, persistent entry, a completed active sample
-   and final eligibility. `Convergence.lean` composes those results. `Eligible.lean` owns
-   `FineStart` (the initial snapshot) and `FineAt` (the run after the fine cut).
-5. `FineAssembly.lean` builds `FineAt` from the event replay and `FineSource`. Both interfaces
-   share `FineStart`; `FineAssembly/Honesty.lean` proves the snapshot invariant used by assembly.
+1. The statement of `FineAssembly.hive_converges_observed` in `FineAssembly.lean`. Its conclusion
+   is `SysAcceptance.Converges` (`Acceptance.lean`): the hub stops moving and every node settles
+   at its head.
+2. [The trusted base of convergence](#the-trusted-base-of-convergence), every premise of that
+   theorem, field by field.
+3. `SysAcceptance/Convergence.lean`, where `hive_converges` composes the derived phases. It
+   shows which fact each phase supplies to the next.
+4. `Musubi/SysAcceptance.lean`, the map of the layers, then the interfaces in this order:
+   1. `SysAcceptance/Observations.lean` groups the readings of one actual hive run by
+      responsibility. Its sampled views use those same readings for entry, fetch and pending
+      runs.
+   2. `SysAcceptance/Cuts.lean` names record stabilization, quiet suffixes and old-effect
+      cutoffs.
+   3. `SysAcceptance/Contracts.lean` groups source effects, environment, transport, knowledge,
+      entry, scheduling and system bindings. Completion and fairness obligations stay explicit.
+   4. `SysAcceptance/Phases.lean` derives quiet records, persistent entry, a completed active
+      sample and final eligibility.
+   5. `SysAcceptance/Eligible.lean` owns `FineStart` and `FineAt`, and `Acceptance.lean` owns
+      `eligible_system_converges`.
+   6. `FineAssembly.lean` builds `FineAt` from the event replay and `FineSource`;
+      `FineAssembly/Honesty.lean` proves the invariant on replies and notifications that
+      assembly uses.
+
+Four proof names use the word *fine*. The hive's run includes nodes whose dropped originals
+differ from the hub's records. The *eligible* nodes (`EligibleAt`) drop exactly what the hub's
+records drop. The *fine system* is the hive's run filtered to those nodes (`NodeSysEntry.filt`,
+`hiveSys`): the other nodes' slots are frozen, and their fresh requests and the replies to them
+are left out. Each observed event of the hive becomes a step of the fine system, which the hub
+and node proofs already cover. The *fine cut* (`FineCut`) is the time from which every node has
+entered and has completed an active sample after old effects stopped; the fine system starts
+there. Then:
+
+* `FineStart` is the fine system's starting snapshot at the fine cut;
+* `FineAt` is the fine system's interface from that cut: `FineStart`, its steps, graph law,
+  fixed records, decisions and fairness. `FineAt.converges` concludes `Converges` for it;
+* `FineSource` is the same interface read from native event replay. `FineAssembly.fineAt_of`
+  builds `FineAt` from it;
+* `hive_converges_observed` takes a `FineSource` for every fine cut, and derives the rest of
+  `FineAt`.
 
 `Pending/Contracts.lean` separates the abstract round's control and publication laws from
 survival facts derived from native naming. `known_after` in `Phases.lean` supplies the shared
@@ -88,10 +117,204 @@ knowledge-tail argument, including the stable-head corollary. The two `SysStep` 
 hide constructor bookkeeping from the honesty invariant.
 
 For local control, `NodeSettle.Settled` names the final state's properties and `NodeSettle.rank`
-orders the remaining work by priority. `NodeSys.SysStep.nonanswer_effect` describes the unchanged hub
-and shrinking traffic of a step outside hub answering. `Schedule.lean` owns the shared bounds
-on event order and batch completion. `HiveFilter.lean` owns the eligible-system observation
-and projection used by native-event replay.
+orders the remaining work by priority. `NodeSys.SysStep.nonanswer_effect` describes the
+unchanged hub and shrinking traffic of a step outside hub answering. `Schedule.lean` owns the
+shared bounds on event order and batch completion. `HiveFilter.lean` owns the eligible-system
+observation and projection used by native-event replay.
+
+## The trusted base of convergence
+
+`FineAssembly.hive_converges_observed` takes the premises below and nothing else. A stable hub,
+entry, eventual eligibility, fresh knowledge and a successful round are not among them: the
+proof derives them, along with the record, quiet and old-effect cuts, the empty pending drops,
+the fixed hub records and the honesty of traffic sent after the fine cut.
+
+The premises, in the order of the statement:
+
+* `label`, `decodeR` and `origin` are the adapter's data: they read a native record identity as
+  a model id and as executable records, and name each operation's original.
+* `C : HiveContracts` has 8 groups and 42 fields.
+* `views`, `hubRecs` and `hubRecsStep` tie the records of the native observer, the hub and the
+  fine nodes together.
+* `fine` yields a `FineSource` (12 fields) and its `FineStart` (10 fields). It is asked at every
+  `recordCut` and `cut` that satisfy `CutAt`, `QuietAt` and `FineCut`, not only at the pair the
+  proof picks, which it chooses by existence.
+
+Each field carries a tag, except data fields:
+
+* **correspondence**: the native code, or the adapter's reading of it, behaves this way. It is
+  checked against the implementation, and the proof cannot establish it;
+* **progress/fairness**: something eventually happens: a failure stops, a call completes, a node
+  is scheduled;
+* **invariant at a cut**: a property of a state, assumed at a time the proof derives, because no
+  bound step leads to that time from the start to derive it.
+
+Most laws are asked only from a record cut `k` (`CutAt`: records and drops fixed, no adopt or
+fail) in a quiet environment (`QuietAt`: no I/O or object failure, automatic write, user work or
+loss). Those are the rows with a reason in the last column. The proof derives such a `k`, and
+the premise is the law on the suffix after it. That is natural for one reason: before `k` a
+remade hub, a gc, a user write or a record set still moving can legitimately break a law about
+undisturbed native code, and nothing here needs the law there.
+
+Check these specially:
+
+* `Entry.pending`: see [below](#the-pending-premise).
+* `Environment.autoWritesStop` is a progress assumption that the proof cannot derive from
+  finitely many user and configuration changes.
+* `FineSource.binds` and `Entry.entry` are the largest correspondence obligations: the first is
+  one binding for each kind of replayed event, whose node-side fields the source says no checker
+  of this exact relation tests (`decide`, `handle`); the second is 28 per-call laws of a node's
+  pre-entry run (`EntryLaws`), including `hobjects` and `hstart`, which require eventual round
+  restarts.
+* `FineSource.inFlight` is the one part of the honesty invariant that is not derived. Its
+  window, head and clock parts follow from `historyWindow` and `clock`; the replay proves honesty
+  of traffic sent after the cut. A reply or notice already in flight at the cut has a snapshot
+  that no contract constrains: `ownHead`, `noteHead` and `replyBind` bind the observer's times,
+  and only replies consumed after the cut. So `inFlight` cannot be derived from the other
+  premises.
+* `HubHandling.answer` joins an eventual-handling assumption to a correspondence.
+
+### Record effects (`Source.RecordEffects`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `recStep` | at each step the native records stay or take drops (`takeRecs`) | **correspondence** | |
+| `prune` | the pruned count never falls | **correspondence** | |
+| `pruneLe` | the pruned count is at most the record count | **correspondence** | |
+| `dropsGrow` | a node's dropped originals only grow | **correspondence** | |
+| `hubBound`, `nodeBound` | every dropped original is below the bound `B` | **correspondence** | |
+| `epochStep` | each node's record bookkeeping steps by `Retry.Records.Step` (fetch, adopt, reopen) | **correspondence** | asked once records are fixed and old replies and notices have stopped; an old `Fetched` may announce old records before then |
+
+### Environment (`Source.Environment`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `envFinal` | nothing is lost (hub remade, objects lost, gc) from some time on | **progress/fairness** | |
+| `readyKeep` | object credit survives a step that loses nothing | **correspondence** | |
+| `readyFail` | a missing-object reply spends the credit and the node is then ready | **correspondence** | |
+| `failFinal` | I/O failures stop | **progress/fairness** | |
+| `autoWritesStop` | a node's automatic writes stop (housekeeping, prelude, cleanup, abandon pass-on, reparenting) | **progress/fairness** | |
+| `userFinal` | user work in the nodes' repositories stops | **progress/fairness** | |
+
+### Transport (`Source.Transport`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `inboxStep` | for every call id `c`, a node's inbox steps by `Retry.InboxStep c`, whose flag says the step finished a pending call with an id below `c`; the flag is set whenever the step handles an own reply to a call below `c` | **correspondence** | |
+| `callIds` | call ids are never reset: a call whose id is not yet issued at `t` is made at or after `t` | **correspondence** | |
+| `notesOld` | notices published before a cut are finitely many, in flight or queued, and handling one uses it up | **correspondence** | |
+
+### Knowledge (`Source.Knowledge`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `ownHead` | an own reply names a hub state between its call and its handling, and `handleHead` updates the known pair | **correspondence** | |
+| `noteHead` | a notice names a state no later than its handling, and `handleHead` updates the known pair | **correspondence** | |
+| `quietKnown` | with no reply, notice or reopen, the known pair stays | **correspondence** | |
+| `rootSeq` | the hub at sequence 0 has the root as its head | **correspondence** | |
+| `hubSeqStep` | the hub's sequence does not fall at a step that loses nothing | **correspondence** | |
+| `histBind` | when nothing is lost from `a`, the history at the hub's sequence is the hub's head | **correspondence** | |
+
+### Entry (`Source.Entry`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `entry` | each node's run from a sample after the cut obeys `EntryLaws` | **correspondence** and **progress/fairness** | entry is argued on undisturbed calls: no object failure, no change of records |
+| `reopenWhy` | a reopen follows `Incomplete` or a missing-object reply not yet recovered | **correspondence** | I/O failure, loss or user work can reopen a node before the cut |
+| `incHead` | an `Incomplete` push is from the hub's head, and its upload is not closed | **correspondence** | asked only once the records are fixed |
+| `closure` | an entered node's push from the hub's head is closed | **correspondence** | a lost hub object or cached have would leave the upload short |
+| `keep` | raw entry persists unless the node reopens | **correspondence** | a loss, failure or automatic write can undo entry before the cut |
+| `pending` | see [below](#the-pending-premise) | **correspondence** | asked of a hub that stays, after the cut |
+
+### Scheduling (`Source.Scheduling`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `schedMono` | each node has infinitely many sampled events, in order | **progress/fairness** | |
+| `doneIn` | a sampled call batch completes before the next sample | **progress/fairness** | |
+| `idleStart` | a node between rounds eventually starts one | **progress/fairness** | fairness is asked of the quiet suffix, where nothing keeps restarting it |
+| `startActive` | the sample after a started round is active | **progress/fairness** | as `idleStart` |
+
+### System bindings (`Source.SystemBindings`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `clock` | the system's time is the hive time | **correspondence** | |
+| `maintBind` | a maintenance step is an automatic write | **correspondence** | |
+| `noteBind` | a notice a node takes is the observer's, at its publishing time | **correspondence** | |
+| `replyBind` | a head-bearing reply consumed after the cut belongs to a completed sampled batch and a call made no later than the reply | **correspondence** | replies from before a loss or reconnect need not match a sampled batch |
+| `freshOwn` | a fresh reply at `t` has an own reply by the batch's completion, to the call made at `t` | **correspondence** | |
+| `latchKnown` | the system's known pair is the observer's at the latch time | **correspondence** | |
+| `latchLe`, `latchMono`, `latchAtSample` | the latch is no later than `t`, monotone, and at a sample is that sample | **correspondence** | |
+
+### Hub handling (`Source.HubHandling`)
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `answer` | a push is handled at or after it is sent, and the hub then is `RawPublish.after` its packet and checks | **correspondence** and **progress/fairness** | a remade hub can drop a push before the cut |
+
+### The starting snapshot (`FineStart`)
+
+`rawRoot` is data: the id of the raw root. Every other field is an **invariant at a cut**, at the
+fine cut `k` and for the eligible nodes. Each holds of a well-formed state and is kept by every
+step after `k`, but no bound step leads to `k` from the start, so the proof cannot derive it at
+`k`.
+
+| Field | Says |
+| --- | --- |
+| `rawRoot`, `rootBound`, `rootParents` | `rawRoot` is data; the raw root it names exists and has no parents |
+| `nodes` | each eligible node is well-formed (`NodeOK`: local invariant, scoped embedding, wait), and its object requests and replies match (`ObjsOK`) |
+| `system` | request and reply slots are below the counter, a reply to a fetch is `fetched`, a reply to a push is `refused` or `head` with constraints on its records, and the hub law's `dropped` holds of no push request in flight (`SysOK`) |
+| `time` | every reply and notice was made in the past (`TimeOK`) |
+| `objectReplies` | a reply to an objects request is objects |
+| `requestBounds` | a push in flight names an existing operation |
+| `historyWindow` | parents have smaller ids (`parLt`); the hub's head is an existing operation (`headLt`) and is the history's entry at the hub's sequence (`histHead`); `w`, the record cut's sequence, is at most that sequence (`window`); and from `w` the hub's history is a chain of ancestors (`chain`) with strictly increasing ids (`strict`) |
+| `distinctHeads` | each eligible node's heads, and those of its step in flight, are distinct |
+
+### Replay and fairness (`FineSource`)
+
+Asked of the fine cut and its run.
+
+| Field | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `decisionNodes`, `decodeRecords`, `events` | data: the executable hub's node count and record decoder, and the native events | | |
+| `replay` | the run from the cut is the replay of `events` | **correspondence** | the events are the actual ones |
+| `replayActs` | each step's action is its event's | **correspondence** | |
+| `binds` | each event obeys its bindings: a node's call and its handling obey the core's laws (`NodeIssue.Binds` and the other kinds), the hub's answer is its decision | **correspondence** | |
+| `inFlight` | replies to eligible nodes and notices in flight at the cut, from the record cut on, carry honest snapshots | **invariant at a cut** | the replay derives it for later traffic only |
+| `parentsFirst` | an operation's parents have smaller ids | **correspondence** | |
+| `advance` | an eligible node's busy step with the advance guard and no automatic write is a full-frontier advance | **correspondence** | an advance's cleanup writes nothing once no automatic write happens |
+| `pushDecisions` | each push event's handling is a decision of the executable hub, with its primitive laws | **correspondence** | |
+| `fair` | each eligible node's rounds start, its steps happen and its replies are taken | **progress/fairness** | |
+| `pushFair` | a push an eligible node sends is handled eventually | **progress/fairness** | |
+
+### The loose premises
+
+| Premise | Says | Tag | Why from the cut |
+| --- | --- | --- | --- |
+| `views` | a node's applied records in the system are the label of the observer's, the native applied records decode them, and its pending originals are in custody (`RecordView`) | **correspondence** | records are fixed |
+| `hubRecs` | the native hub's records at the cut are what the observer's records identity decodes to | **correspondence** | records are fixed |
+| `hubRecsStep` | the system hub's records change only when the native records or the pruned count do | **correspondence** | records are fixed and the environment quiet |
+| `fine` | gives `FineSource` above | | |
+
+### The pending premise
+
+`Source.Entry.pending` assumes, for each node that is not `EligibleAt`, all 29 fields of
+`PendingLaws` for that node's frozen round, on a hub that stays and a node that knows its head:
+control, publication checks and naming laws of the push the node would send. Its only use is
+`all_eligible` (`Phases.lean`), which passes it to `PendingLaws.absurd`: a node that stays
+ineligible on a stable hub would stay pending forever, and its push, accepted by the hub, would
+move the hub.
+
+The premise is used only by refutation. In a run that satisfies every premise no node is ever in
+that state, so the 29 laws are never exercised on an actual execution, and a test of the whole
+system or of the conclusion does not check them. They are claims about what the native code
+would do for an ineligible node on a hub that stays. An auditor checks each against the native
+round, as for any correspondence. A law the native code violates there does not falsify the
+conclusion for runs without such a node. It removes the guarantee for the runs where a node
+could stay ineligible, the case the premise exists to exclude. The laws to read closely are
+`hguard` (the round's guard bits), `hdropsSub` (a node that offers the hub's records drops at
+least what they drop), `hnormalDef` and `hsend`.
 
 ## Files
 

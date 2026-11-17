@@ -65,8 +65,9 @@ theorem lawful_filt {M : Nat} {decode : Nat → List Exec.Rec} {g g' : Sys} {P :
 end Hive
 
 open Musubi.Recovery.HubSys in
-/-- The eligible system's starting snapshot. These are correspondence obligations of the
-actual observation at `k`; raw entry alone does not establish them.
+/-- The eligible system's starting snapshot at `k`: the raw root `rawRoot`, which is data, and
+invariants that the actual observation at `k` must satisfy; raw entry alone does not establish
+them.
 
 `distinctHeads` is a supplied snapshot obligation: native prelude realignment and a completed
 merge establish it, while an active sampled event alone does not. `heads_nodup_step` preserves
@@ -119,11 +120,7 @@ theorem FineAt.converges {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
       Recovery.HubNodeSteps.HonestSnap w initial (run k) ⟨(known (run k) n).1,
         (known (run k) n).2, (run k).hub.recs⟩)
     (hN : ∀ n, E n → n < N) :
-    ∃ K cut, k ≤ K ∧ K ≤ cut ∧ (∀ i, cut ≤ i → (run i).hub = (run K).hub) ∧
-      ∀ n, E n → ∃ H, ∀ i, cut ≤ i →
-        NodeSettle.Settled ⟨(run K).hub.seq, H, (run K).hub.recs, D n⟩ ((run i).node n).ns ∧
-        ((run i).node n).emb H = (run K).hub.head ∧
-        ∀ x, heads (run i) n x ↔ x = (run K).hub.head := by
+    Converges D E run := by
   obtain ⟨hρ, hk0, hb0, hi0, hkn0, hl0, -⟩ :=
     hive_filtered (N := N) (law := law) run acts initial k F.rawRoot F.steps F.nodes
       F.system F.time F.objectReplies F.rootBound F.rootParents F.requestBounds F.historyWindow
@@ -145,7 +142,8 @@ theorem FineAt.converges {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
       obtain ⟨kf, h⟩ := F.fair n hE
       exact ⟨kf, fair_filt hE h⟩)
     (fun n hE => pushFair_filt hE (F.pushFair n hE)) hdecide'
-  refine ⟨k + K, k + cut, by omega, by omega, fun i hi => ?_, fun n hE => ?_⟩
+  unfold Converges
+  refine ⟨k + K, k + cut, by omega, fun i hi => ?_, fun n hE => ?_⟩
   · obtain ⟨j, rfl⟩ : ∃ j, i = k + j := ⟨i - k, by omega⟩
     exact hhub j (by omega)
   · obtain ⟨H, hH⟩ := hnodes n hE

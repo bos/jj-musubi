@@ -26,7 +26,8 @@ open Musubi NodeSettle NodeSys NodeSysEntry SysAcceptance NativeEvents Recovery.
 /-! ## The fine system, assembled -/
 
 /-- Native replay and its laws at the fine cut. `FineStart` owns the initial snapshot;
-`honestStart` supplies honesty of the eligible nodes' replies and notifications from `t0`.
+`inFlight` supplies honesty of the eligible nodes' replies and notifications already in flight
+from `t0`.
 
 The remaining obligations have distinct sources:
 * `events`, `replay`, `replayActs` and `binds` describe the same observed execution;
@@ -48,7 +49,7 @@ structure FineSource (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw)
   replay : ∀ i, run (k + i) = observedRun N law (run k) events i
   replayActs : ∀ i, acts (k + i) = (events i).act
   binds : ∀ i, (events i).Binds N D law E (run k).reqs (run (k + i))
-  honestStart : Honest E w t0 initial (run k)
+  inFlight : InFlightHonest E w t0 initial (run k)
   parentsFirst : ∀ i x, x < (run i).next → ∀ p ∈ (run i).par x, p < x
   advance : ∀ i, k ≤ i → ∀ n, E n → acts i = .core n .busy → ¬ auto n i →
     AdvGuard ((run i).node n).ns → FullAdv ((run i).node n).ns ((run (i + 1)).node n).ns
@@ -74,13 +75,14 @@ theorem FineSource.steps {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
 /-- The fine system's premises, from the replay and the laws `FineSource` names, given that no
 eligible node makes an automatic write (`hnoAuto`), so each advance's cleanup writes nothing, the
 hub's records stay (`hr`), no eligible node has pending drops (`pending`), adopts (`applied`) or
-does housekeeping (`hm`), and an eligible node takes only head-bearing replies answered, and
-notifications naming a state, from `t0` on (`takes`, `notes`). -/
+does housekeeping (`hm`), the clock is not before `t0` at the cut (`time`), and an eligible node
+takes only head-bearing replies answered, and notifications naming a state, from `t0` on
+(`takes`, `notes`). -/
 def fineAt_of {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} [DecidablePred E] {run : Nat → Sys} {acts : Nat → Act} {k w : Nat}
     {initial : Nat → Nat} {t0 : Nat} {auto : Nat → Nat → Prop}
     (S : FineSource N D law E run acts k w initial t0 auto)
-    (hnoAuto : ∀ i, k ≤ i → ∀ n, E n → ¬ auto n i)
+    (hnoAuto : ∀ i, k ≤ i → ∀ n, E n → ¬ auto n i) (time : t0 ≤ (run k).time)
     (hr : ∀ i, k ≤ i → (run i).hub.recs = (run k).hub.recs)
     (pending : ∀ i, k ≤ i → ∀ n, E n → ((run i).node n).ns.pending = [])
     (applied : ∀ i, k ≤ i → ∀ n, E n → ((run (i + 1)).node n).ns.ap = ((run i).node n).ns.ap)
@@ -91,7 +93,7 @@ def fineAt_of {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     FineAt N D law E run acts k w initial := by
   have hsteps := S.steps
   have honest := honest_run (fun j => run (k + j)) (fun j => acts (k + j)) initial hsteps
-    S.honestStart
+    (S.inFlight.honest S.historyWindow.window S.historyWindow.histHead time)
   refine {
     toFineStart := S.toFineStart
     decisionNodes := S.decisionNodes
@@ -168,11 +170,7 @@ theorem hive_converges_observed {ρ α : Type} [DecidableEq ρ] {N : Nat}
       FineCut N Rof wOf O recordCut cut →
       FineSource N D law (EligibleAt N recs recordCut) run acts cut
         (run recordCut).hub.seq O.hist recordCut O.autoWrite) :
-    ∃ K cut, K ≤ cut ∧ (∀ i, cut ≤ i → (run i).hub = (run K).hub) ∧
-      ∀ n, n < N → ∃ H, ∀ i, cut ≤ i →
-        NodeSettle.Settled ⟨(run K).hub.seq, H, (run K).hub.recs, D n⟩ ((run i).node n).ns ∧
-        ((run i).node n).emb H = (run K).hub.head ∧
-        ∀ x, heads (run i) n x ↔ x = (run K).hub.head := by
+    Converges D (fun n => n < N) run := by
   refine hive_converges (D := D) (law := law) C fun recordCut fineCut cutLaws quiet boundary => ?_
   have afterRecord := boundary.afterRecord
   have entry := boundary.entry
@@ -218,7 +216,8 @@ theorem hive_converges_observed {ρ α : Type} [DecidableEq ρ] {N : Nat}
   have V := (views recordCut cutLaws).mono afterRecord
   have pending := V.pending_empty afterRecord cutLaws.records (hubRecs recordCut cutLaws) entry
   have applied := V.applied_stays entry
-  exact ⟨fineAt_of (fine recordCut fineCut cutLaws quiet boundary) hnoAuto hr
+  exact ⟨fineAt_of (fine recordCut fineCut cutLaws quiet boundary) hnoAuto
+    (by rw [C.clock fineCut]; exact afterRecord) hr
     (fun i hi n hE => pending n hE i hi) (fun i hi n hE => applied n hE.1 i hi) hm takes notes⟩
 
 end Musubi.FineAssembly

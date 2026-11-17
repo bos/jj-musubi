@@ -51,9 +51,18 @@ def decodeHeadKind : String → Except String HeadKind
   | "notify" => pure .notify
   | k => throw s!"unknown headKind {k}"
 
+/-- The fields of a push to the hub: the node, the operations and objects it sends, and the
+head it expects and the one it sets. -/
+def getPush (j : Json) : Except String (Nat × List Nat × List Nat × Nat × Nat) :=
+  return (← getNat j "node", ← getNats j "ops", ← getNats j "objs", ← getNat j "expected",
+    ← getNat j "new")
+
 def decodeAction (j : Json) : Except String Action := do
   let kind ← j.getObjValAs? String "kind"
   let node := getNat j "node"
+  let push (f : Nat → List Nat → List Nat → Nat → Nat → Action) := do
+    let (n, S, O, e, d) ← getPush j
+    return f n S O e d
   match kind with
   | "userOp" => return .userOp (← node) (← getNat j "parent") (← getNats j "objs")
   | "merge" => return .merge (← node) (← getNats j "parents") (← getNats j "objs")
@@ -85,18 +94,10 @@ def decodeAction (j : Json) : Except String Action := do
   | "casIdem" => return .casIdem (← node) (← getNat j "expected") (← getNat j "new")
   | "casAccept" => return .casAccept (← node) (← getNat j "expected") (← getNat j "new")
   | "casReject" => return .casReject (← node) (← getNat j "expected") (← getNat j "new")
-  | "hubPushIdem" =>
-    return .hubPushIdem (← node) (← getNats j "ops") (← getNats j "objs")
-      (← getNat j "expected") (← getNat j "new")
-  | "hubPushAccept" =>
-    return .hubPushAccept (← node) (← getNats j "ops") (← getNats j "objs")
-      (← getNat j "expected") (← getNat j "new")
-  | "hubPushReject" =>
-    return .hubPushReject (← node) (← getNats j "ops") (← getNats j "objs")
-      (← getNat j "expected") (← getNat j "new")
-  | "hubPushIncomplete" =>
-    return .hubPushIncomplete (← node) (← getNats j "ops") (← getNats j "objs")
-      (← getNat j "expected") (← getNat j "new")
+  | "hubPushIdem" => push .hubPushIdem
+  | "hubPushAccept" => push .hubPushAccept
+  | "hubPushReject" => push .hubPushReject
+  | "hubPushIncomplete" => push .hubPushIncomplete
   | "hubFetch" => return .hubFetch (← node) (← getNat j "base") (← getNats j "haves")
   | "crashHub" => return .crashHub
   | "hubForget" => return .hubForget (← getNats j "ops") (← getNats j "objs")
@@ -113,9 +114,8 @@ def decodeSAction (j : Json) : Except String SAction := do
   let node := getNat j "node"
   let push (f : Nat → List Nat → List Nat → Nat → Nat → List Rec → List Nat → SAction) :=
     do
-    let (n, S, O) := (← node, ← getNats j "ops", ← getNats j "objs")
-    let (e, d, A, Δ) := (← getNat j "expected", ← getNat j "new", ← getRecs j "applied",
-      ← getNats j "dropped")
+    let (n, S, O, e, d) ← getPush j
+    let (A, Δ) := (← getRecs j "applied", ← getNats j "dropped")
     return f n S O e d A Δ
   match kind with
   | "abandon" => return .abandon (← node) (← getNats j "ops")
@@ -403,28 +403,33 @@ take the hash injective; this one tells the blob from every other byte string, w
 `receive` asks of it. -/
 def blobHash (b : List Nat) (p : List Nat) : Nat := if p = b then 0 else 1
 
-/-- The prefix receiver's state after each step from `initP`: its reply to a chunk
-(`Chunks.receive`; a number for `Received::Prefix`, null for `Received::Complete`), the
-prefix it has, and whether it has stored the blob. -/
-def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
-  let state (s : Chunks.PState) (fields : List (String × Json)) : Json :=
-    Json.mkObj (fields ++ [("pre", toJson s.pre.toArray), ("stored", Json.bool s.store.isSome)])
-  let rec go (s : Chunks.PState) : List ChunkStep → List Json
-    | [] => []
-    | .chunk c total :: rest =>
-      let (s', reply) := Chunks.receive (blobHash b) b s c total
-      state s' [("received", match reply with | some n => toJson n | none => Json.null)] ::
-        go s' rest
-    | .sweep pre stored :: rest =>
-      let s' := { s with pre := if pre then [] else s.pre,
-                         store := if stored then none else s.store }
-      state s' [] :: go s' rest
-  Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP steps).toArray)]
-
 /-- A reply as JSON: a number for `Received::Prefix`, null for `Received::Complete`. -/
 def optJson : Option Nat → Json
   | some n => toJson n
   | none => Json.null
+
+/-- The receiver's state after a step: `fields`, then the prefix it has and whether it has
+stored the blob. -/
+def receiverState (s : Chunks.PState) (fields : List (String × Json)) : Json :=
+  Json.mkObj (fields ++ [("pre", toJson s.pre.toArray), ("stored", Json.bool s.store.isSome)])
+
+/-- The receiver after a sweep of the partial blob, the stored one, or both. -/
+def sweepReceiver (s : Chunks.PState) (pre stored : Bool) : Chunks.PState :=
+  { s with pre := if pre then [] else s.pre, store := if stored then none else s.store }
+
+/-- The prefix receiver's state after each step from `initP`: its reply to a chunk
+(`Chunks.receive`; a number for `Received::Prefix`, null for `Received::Complete`), the
+prefix it has, and whether it has stored the blob. -/
+def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
+  let rec go (s : Chunks.PState) : List ChunkStep → List Json
+    | [] => []
+    | .chunk c total :: rest =>
+      let (s', reply) := Chunks.receive (blobHash b) b s c total
+      receiverState s' [("received", optJson reply)] :: go s' rest
+    | .sweep pre stored :: rest =>
+      let s' := sweepReceiver s pre stored
+      receiverState s' [] :: go s' rest
+  Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP steps).toArray)]
 
 /-- A step of a transfer by attempts (`Chunks.lean`, "Attempts under a deadline"): an attempt
 whose window has `w` chunks, of which the receiver takes the first `m` and the sender hears of
@@ -456,22 +461,19 @@ the blob, and where the sender goes on from (null once it has heard that the rec
 blob). -/
 def attemptsReply (b : List Nat) (limit : Nat) (download : Bool) (steps : List AttemptStep) :
     Json :=
-  let state (s : Chunks.PState) (fields : List (String × Json)) : Json :=
-    Json.mkObj (fields ++ [("pre", toJson s.pre.toArray), ("stored", Json.bool s.store.isSome)])
   let rec go (s : Chunks.PState) (o : Nat) : List AttemptStep → List Json
     | [] => []
     | .attempt w m k :: rest =>
       let o := if download then s.pre.length else o
       let replies := (Chunks.deliver (blobHash b) b s (Chunks.windowFrom b limit o m)).2
       let (s', next) := Chunks.attempt (blobHash b) b limit s o m k
-      state s' [("offsets", toJson ((Chunks.windowFrom b limit o w).map (·.off)).toArray),
+      receiverState s' [("offsets", toJson ((Chunks.windowFrom b limit o w).map (·.off)).toArray),
           ("replies", Json.arr (replies.map optJson).toArray), ("next", optJson next)] ::
         go s' (next.getD o) rest
     | .sweep pre stored :: rest =>
-      let s' := { s with pre := if pre then [] else s.pre,
-                         store := if stored then none else s.store }
-      state s' [] :: go s' o rest
-    | .restart :: rest => state s [] :: go s 0 rest
+      let s' := sweepReceiver s pre stored
+      receiverState s' [] :: go s' o rest
+    | .restart :: rest => receiverState s [] :: go s 0 rest
   Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP 0 steps).toArray)]
 
 /-! ## Workspace names (`Names.lean`) -/

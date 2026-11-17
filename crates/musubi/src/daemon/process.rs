@@ -4,6 +4,7 @@
 //! control server runs under that lock; upgrades restart only after it and the runtime drop.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use crate::control;
 use crate::control::ControlClient;
 use crate::login;
 use crate::socket::Socket;
+use crate::ui::Ui;
 
 /// How large the daemon's log grows before a daemon starting starts it over.
 pub(super) const LOG_LIMIT: u64 = 10 << 20;
@@ -349,6 +351,55 @@ pub fn detach(command: &mut std::process::Command) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+/// `musubi daemon install`: has the service manager start the daemon at login.
+pub async fn install(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
+    // The service manager starts the daemon from now on, so stop one started otherwise; and
+    // start it again if the service manager can't.
+    let stopped = stop(socket).await?;
+    let described = match login::install(login::Service::Daemon, None) {
+        Ok(described) => described,
+        Err(err) => {
+            if stopped && let Err(again) = ensure(socket).await {
+                writeln!(ui.warning(), "Couldn't start the daemon again: {again:#}")?;
+            }
+            return Err(err);
+        }
+    };
+    ensure(socket).await?;
+    writeln!(
+        ui.stdout(),
+        "The daemon starts at login from now on, through {described}."
+    )?;
+    if cfg!(target_os = "linux") {
+        writeln!(
+            ui.hint(),
+            "To keep it running while you're logged out, as on a server: `loginctl \
+             enable-linger`"
+        )?;
+    }
+    Ok(())
+}
+
+/// `musubi daemon uninstall`: stops the daemon starting at login, and stops it.
+pub async fn uninstall(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
+    let was = login::uninstall(login::Service::Daemon)?;
+    let stopped = stop(socket).await?;
+    if was {
+        writeln!(
+            ui.stdout(),
+            "The daemon no longer starts at login, and is stopped."
+        )?;
+    } else if stopped {
+        writeln!(
+            ui.stdout(),
+            "Stopped the daemon. It wasn't set to start at login."
+        )?;
+    } else {
+        writeln!(ui.stdout(), "The daemon wasn't set to start at login.")?;
+    }
+    Ok(())
 }
 
 /// Stops this machine's daemon, if it runs, and waits for it to go. Returns whether one was

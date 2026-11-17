@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use interprocess::local_socket::tokio::Listener;
 use interprocess::local_socket::tokio::Stream;
+use jj_cli::formatter::FormatterExt as _;
 use musubi_sync::server::HubServer;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
@@ -584,6 +585,48 @@ async fn open_local(dir: &Path) -> anyhow::Result<Stream> {
         .connect_stream()
         .await?
         .ok_or_else(not_serving)
+}
+
+/// `musubi hub remove`: removes a hive from a hub.
+pub async fn remove(ui: &Ui, hive: String, hub: Option<String>) -> anyhow::Result<()> {
+    let hub = config::UserState::hub(hub.as_deref())?;
+    let reply = ask(&hub, HubWideRequest::Remove { name: hive }).await?;
+    if let HubWideReply::Hive(info) = reply {
+        let mut out = ui.stdout();
+        write!(out, "Removed hive ")?;
+        writeln!(out.labeled("hive"), "{}", info.name)?;
+    }
+    Ok(())
+}
+
+/// `musubi hub rename`: renames a hive on a hub.
+pub async fn rename(
+    ui: &Ui,
+    hive: String,
+    new_name: String,
+    hub: Option<String>,
+) -> anyhow::Result<()> {
+    let hub = config::UserState::hub(hub.as_deref())?;
+    let request = HubWideRequest::Rename {
+        name: hive.clone(),
+        to: new_name,
+    };
+    let reply = ask(&hub, request).await?;
+    let HubWideReply::Renamed { from, hive } = reply else {
+        anyhow::bail!("unexpected reply from the hub: {reply:?}");
+    };
+    let mut out = ui.stdout();
+    if from == hive.name {
+        write!(out, "Hive ")?;
+        write!(out.labeled("hive"), "{from}")?;
+        writeln!(out, " already has that name")?;
+    } else {
+        write!(out, "Renamed hive ")?;
+        write!(out.labeled("hive"), "{from}")?;
+        write!(out, " to ")?;
+        writeln!(out.labeled("hive"), "{}", hive.name)?;
+    }
+    Ok(())
 }
 
 /// Asks `hub` about its hives; a refusal is an error.

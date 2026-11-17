@@ -16,10 +16,12 @@ pub use process::Running;
 #[cfg(windows)]
 pub use process::detach;
 pub use process::ensure;
+pub use process::install;
 pub use process::run;
 pub use process::running;
 pub use process::stop;
 pub use process::trim_log;
+pub use process::uninstall;
 pub use process::unreachable;
 pub use status::Status;
 pub use status::now;

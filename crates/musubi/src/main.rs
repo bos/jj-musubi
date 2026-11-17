@@ -38,11 +38,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::CommandFactory as _;
 use clap::Parser as _;
-use jj_cli::formatter::FormatterExt as _;
 use jj_cli::ui::ColorChoice;
 use musubi_hub::hub_dir::JoinChoice;
-use musubi_sync::wire::HubWideReply;
-use musubi_sync::wire::HubWideRequest;
 
 use crate::cli::Cli;
 use crate::cli::Command;
@@ -51,7 +48,6 @@ use crate::cli::Debug;
 use crate::cli::HubAction;
 use crate::cli::HubArgs;
 use crate::config::Settings;
-use crate::config::UserState;
 use crate::socket::Socket;
 use crate::ui::Ui;
 
@@ -59,8 +55,7 @@ use crate::ui::Ui;
 /// config. Otherwise the hub and the daemon log what they do, and other commands only
 /// warn, since they say what they did themselves.
 fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilter> {
-    let daemon = matches!(cli.command, Some(Command::Daemon { action: None }));
-    let hub = matches!(cli.command, Some(Command::Hub { action: None, .. }));
+    let role = Role::of(cli.command.as_ref());
     if let Some(filter) = &cli.log {
         return parse_filter(filter).with_context(|| format!("bad log filter {filter:?}"));
     }
@@ -73,11 +68,13 @@ fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilte
             Err(err) => writeln!(ui.warning(), "Ignoring RUST_LOG={filter:?} ({err}).")?,
         }
     }
-    if daemon && let Some(filter) = Settings::load()?.daemon_log {
+    if role == Role::Daemon
+        && let Some(filter) = Settings::load()?.daemon_log
+    {
         return parse_filter(&filter)
             .with_context(|| format!("bad log filter {filter:?} in musubi.daemon.log"));
     }
-    if daemon || hub {
+    if role.serves() {
         return parse_filter(&serving_filter());
     }
     // Anything logged would land in the middle of the screen; top shows what goes wrong.
@@ -153,17 +150,56 @@ fn early_color() -> Option<ColorChoice> {
 /// over ssh, for musubi to read, so it reads no config, which mustn't keep other machines
 /// from the hub.
 fn command_ui(cli: &Cli) -> anyhow::Result<Ui> {
-    match &cli.command {
-        Some(Command::Hub {
-            action: Some(HubAction::Connect { .. }),
-            ..
-        }) => Ok(Ui::plain()),
-        Some(Command::Daemon { action: None } | Command::Hub { action: None, .. })
-            if !std::io::stderr().is_terminal() =>
-        {
+    match Role::of(cli.command.as_ref()) {
+        Role::Relay => Ok(Ui::plain()),
+        role if role.serves() && !std::io::stderr().is_terminal() => {
             Ui::new(Some(ColorChoice::Never))
         }
         _ => Ui::new(cli.color),
+    }
+}
+
+/// What kind of process a command makes, which decides how it logs, prints and finds its ssh
+/// agent. A command with no subcommand runs `list`, so is `Ordinary`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// `daemon` with no action: the serving daemon.
+    Daemon,
+    /// `hub` with no action: the serving hub.
+    Hub,
+    /// `hub connect`: the far end of an ssh link, whose stdio belongs to the protocol.
+    Relay,
+    /// `completion`: a shell printing its completion script as it starts.
+    Completion,
+    /// Everything else.
+    Ordinary,
+}
+
+impl Role {
+    fn of(command: Option<&Command>) -> Self {
+        match command {
+            Some(Command::Daemon { action: None }) => Self::Daemon,
+            Some(Command::Hub { action: None, .. }) => Self::Hub,
+            Some(Command::Hub {
+                action: Some(HubAction::Connect { .. }),
+                ..
+            }) => Self::Relay,
+            Some(Command::Completion { .. }) => Self::Completion,
+            _ => Self::Ordinary,
+        }
+    }
+
+    /// Whether this process serves until stopped, and logs what it does.
+    fn serves(self) -> bool {
+        matches!(self, Self::Daemon | Self::Hub)
+    }
+
+    /// Whether the ssh agent here is the user's own. Serving a hub, and `hub connect`, are for
+    /// other machines, whose agents aren't this machine's; the daemon itself has the link, or
+    /// the service manager's agent. Every shell may print its completion script as it starts,
+    /// which says nothing of whose agent to use.
+    fn has_users_agent(self) -> bool {
+        self == Self::Ordinary
     }
 }
 
@@ -174,26 +210,13 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         // A log file never has colour.
         .with_ansi(ui.color() && std::io::stderr().is_terminal())
         .init();
-    // Serving a hub, and `hub connect`, are for other machines, whose agents aren't this
-    // machine's; the daemon itself has the link, or the service manager's agent. Every shell
-    // may print its completion script as it starts, which says nothing of whose agent to use.
-    if !matches!(
-        cli.command,
-        Some(
-            Command::Hub {
-                action: None | Some(HubAction::Connect { .. }),
-                ..
-            } | Command::Daemon { action: None }
-                | Command::Completion { .. }
-        )
-    ) && let Err(err) = agent::refresh()
+    let role = Role::of(cli.command.as_ref());
+    if role.has_users_agent()
+        && let Err(err) = agent::refresh()
     {
         tracing::debug!("not pointing the daemon at this ssh agent: {err:#}");
     }
-    if matches!(
-        cli.command,
-        Some(Command::Hub { action: None, .. } | Command::Daemon { action: None })
-    ) {
+    if role.serves() {
         open_files::raise();
     }
     let socket = || Socket::locate(cli.socket.as_deref());
@@ -231,16 +254,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         Command::Hub {
             action: Some(HubAction::Remove { hive, hub }),
             ..
-        } => block_on(async {
-            let hub = UserState::hub(hub.as_deref())?;
-            let reply = hub::ask(&hub, HubWideRequest::Remove { name: hive }).await?;
-            if let HubWideReply::Hive(info) = reply {
-                let mut out = ui.stdout();
-                write!(out, "Removed hive ")?;
-                writeln!(out.labeled("hive"), "{}", info.name)?;
-            }
-            Ok(())
-        }),
+        } => block_on(hub::remove(ui, hive, hub)),
         Command::Hub {
             action:
                 Some(HubAction::Rename {
@@ -249,29 +263,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
                     hub,
                 }),
             ..
-        } => block_on(async {
-            let hub = UserState::hub(hub.as_deref())?;
-            let request = HubWideRequest::Rename {
-                name: hive.clone(),
-                to: new_name,
-            };
-            let reply = hub::ask(&hub, request).await?;
-            let HubWideReply::Renamed { from, hive } = reply else {
-                anyhow::bail!("unexpected reply from the hub: {reply:?}");
-            };
-            let mut out = ui.stdout();
-            if from == hive.name {
-                write!(out, "Hive ")?;
-                write!(out.labeled("hive"), "{from}")?;
-                writeln!(out, " already has that name")?;
-            } else {
-                write!(out, "Renamed hive ")?;
-                write!(out.labeled("hive"), "{from}")?;
-                write!(out, " to ")?;
-                writeln!(out.labeled("hive"), "{}", hive.name)?;
-            }
-            Ok(())
-        }),
+        } => block_on(hub::rename(ui, hive, new_name, hub)),
         Command::Create { name, member } => join::join(
             ui,
             &cwd()?,
@@ -346,55 +338,10 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         }),
         Command::Daemon {
             action: Some(DaemonAction::Install),
-        } => block_on(async {
-            let socket = socket()?;
-            // The service manager starts the daemon from now on, so stop one started
-            // otherwise; and start it again if the service manager can't.
-            let stopped = daemon::stop(&socket).await?;
-            let described = match login::install(login::Service::Daemon, None) {
-                Ok(described) => described,
-                Err(err) => {
-                    if stopped && let Err(again) = daemon::ensure(&socket).await {
-                        writeln!(ui.warning(), "Couldn't start the daemon again: {again:#}")?;
-                    }
-                    return Err(err);
-                }
-            };
-            daemon::ensure(&socket).await?;
-            writeln!(
-                ui.stdout(),
-                "The daemon starts at login from now on, through {described}."
-            )?;
-            if cfg!(target_os = "linux") {
-                writeln!(
-                    ui.hint(),
-                    "To keep it running while you're logged out, as on a server: `loginctl \
-                     enable-linger`"
-                )?;
-            }
-            Ok(())
-        }),
+        } => block_on(daemon::install(ui, &socket()?)),
         Command::Daemon {
             action: Some(DaemonAction::Uninstall),
-        } => block_on(async {
-            let socket = socket()?;
-            let was = login::uninstall(login::Service::Daemon)?;
-            let stopped = daemon::stop(&socket).await?;
-            if was {
-                writeln!(
-                    ui.stdout(),
-                    "The daemon no longer starts at login, and is stopped."
-                )?;
-            } else if stopped {
-                writeln!(
-                    ui.stdout(),
-                    "Stopped the daemon. It wasn't set to start at login."
-                )?;
-            } else {
-                writeln!(ui.stdout(), "The daemon wasn't set to start at login.")?;
-            }
-            Ok(())
-        }),
+        } => block_on(daemon::uninstall(ui, &socket()?)),
         Command::Daemon {
             action: Some(DaemonAction::Stop),
         } => block_on(async {

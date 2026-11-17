@@ -16,6 +16,7 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use musubi_hub::activity::Report;
 use musubi_hub::hub_dir::HiveId;
+use musubi_sync::driver::NodeDriver;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -308,149 +309,283 @@ async fn serve_async(
     hubs: &Hubs,
 ) -> anyhow::Result<()> {
     // No entry: the copy left, or its hive was removed.
-    let Some((entry, located)) = find_copy(key)? else {
+    let Some(mut session) = Session::open(key, commands, status, progress, waiting, hubs).await?
+    else {
         return Ok(());
     };
-    let hive = HiveConfig::load(&located.repo_path)?
-        .with_context(|| format!("{} is not part of a hive", entry.path.display()))?;
-    let workspace = &entry.path;
-    let mut opened = identity(&located.repo_path);
-    let connection = hubs.connect(&hive.hub).await?;
-    let own = hubs.own_connections(&hive.hub);
-    let (mut driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
-    let transport = connection.transport.clone();
-    let mut notices = transport.subscribe(&hive.head_subject()).await?;
-    let mut reconnections = transport.reconnections();
-    let mut watcher = Watcher::op_heads(&located.repo_path)?;
-    // Where jj records the copy's path, which it rewrites when it finds the copy moved. A
-    // copy moved is news only there, until the poll: the op heads watch, on the old path,
-    // sees nothing on macOS, and on Linux sees heads under paths that no longer exist.
-    let mut moves = crate::settings::config_id_dir(&entry.config_id).and_then(|dir| {
-        Watcher::moves(&dir)
-            .inspect_err(|err| tracing::debug!("{err:#}"))
-            .ok()
-    });
-    let mut poll = tokio::time::interval(POLL_INTERVAL);
-    let mut backoff = Backoff::new(Duration::from_millis(500), MAX_BACKOFF);
-    let mut retry = false;
-    // Whether the connection coming back has cut short a wait to retry since the last sync
-    // that worked.
-    let mut woke_early = false;
-    // Why the hub was out of reach when last asked, to log once rather than at every retry.
-    let mut unreachable: Option<String> = None;
-    let mut gc_checked: Option<std::time::Instant> = None;
-    tracing::info!("serving in hive {}", hive.display_name());
     loop {
-        // After a failure, try again once the backoff has passed, rather than waiting for
-        // something to change; and sync at once when asked.
-        let trigger = if retry {
-            "a retry".to_owned()
-        } else if !waiting.is_empty() {
-            "a request".to_owned()
-        } else {
-            tokio::select! {
-                _ = poll.tick() => "the poll interval".to_owned(),
-                () = watcher.changed() => "a local operation".to_owned(),
-                () = crate::watch::changed(moves.as_mut()) => match copy::moved_to(&entry) {
-                    // Served where it is now, once found again.
-                    Some(path) => {
-                        return Err(Suspended(format!("the copy moved to {}", path.display())).into());
+        let trigger = match session.next_trigger().await? {
+            Flow::On(trigger) => trigger,
+            Flow::Again => continue,
+            Flow::Done => return Ok(()),
+        };
+        session.check_copy()?;
+        match session.wait_for_hub().await {
+            Flow::On(()) => {}
+            Flow::Again => continue,
+            Flow::Done => return Ok(()),
+        }
+        session.reopen_if_changed()?;
+        let attempt = session.sync(&trigger).await;
+        if let Flow::Done = session.after_sync(attempt).await? {
+            return Ok(());
+        }
+    }
+}
+
+/// Where the serving loop goes after a step.
+enum Flow<T> {
+    /// On to the next step, with what this one found.
+    On(T),
+    /// Back to waiting for a reason to sync.
+    Again,
+    /// Serving is over: the copy left its hive, or nothing can send commands any more.
+    Done,
+}
+
+/// How a sync went, for [`Session::after_sync`].
+struct Attempt {
+    result: anyhow::Result<usize>,
+    /// What the copy knows of the hive after it.
+    synced: Synced,
+    /// Whether publication was held before it.
+    held_before: bool,
+}
+
+/// One copy served in its hive, from opening it until something calls for starting over.
+///
+/// Fields drop in the order they are declared: the watches, subscription and driver before
+/// the connection they use, as when they were locals declared in the opposite order.
+struct Session<'a> {
+    commands: &'a mut mpsc::UnboundedReceiver<Command>,
+    status: &'a SharedStatus,
+    waiting: &'a mut Vec<oneshot::Sender<Result<Synced, String>>>,
+    gc_checked: Option<std::time::Instant>,
+    /// Why the hub was out of reach when last asked, to log once rather than at every retry.
+    unreachable: Option<String>,
+    /// Whether the connection coming back has cut short a wait to retry since the last sync
+    /// that worked.
+    woke_early: bool,
+    retry: bool,
+    backoff: Backoff,
+    poll: tokio::time::Interval,
+    /// Where jj records the copy's path, which it rewrites when it finds the copy moved. A
+    /// copy moved is news only there, until the poll: the op heads watch, on the old path,
+    /// sees nothing on macOS, and on Linux sees heads under paths that no longer exist.
+    moves: Option<Watcher>,
+    watcher: Watcher,
+    reconnections: musubi_transport::Reconnections,
+    notices: musubi_transport::Subscription,
+    driver: NodeDriver,
+    machine: String,
+    connection: Arc<Connection>,
+    /// The identity of the repository's directory when it was last opened.
+    opened: Option<(u64, u64)>,
+    hive: HiveConfig,
+    located: Located,
+    entry: Entry,
+}
+
+impl<'a> Session<'a> {
+    /// Finds the copy `key`'s entry names, connects to its hub and opens it, or finds no
+    /// entry.
+    async fn open(
+        key: &str,
+        commands: &'a mut mpsc::UnboundedReceiver<Command>,
+        status: &'a SharedStatus,
+        progress: &Progress,
+        waiting: &'a mut Vec<oneshot::Sender<Result<Synced, String>>>,
+        hubs: &Hubs,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some((entry, located)) = find_copy(key)? else {
+            return Ok(None);
+        };
+        let hive = HiveConfig::load(&located.repo_path)?
+            .with_context(|| format!("{} is not part of a hive", entry.path.display()))?;
+        let opened = identity(&located.repo_path);
+        let connection = hubs.connect(&hive.hub).await?;
+        let own = hubs.own_connections(&hive.hub);
+        let (driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
+        let transport = &connection.transport;
+        let notices = transport.subscribe(&hive.head_subject()).await?;
+        let reconnections = transport.reconnections();
+        let watcher = Watcher::op_heads(&located.repo_path)?;
+        let moves = crate::settings::config_id_dir(&entry.config_id).and_then(|dir| {
+            Watcher::moves(&dir)
+                .inspect_err(|err| tracing::debug!("{err:#}"))
+                .ok()
+        });
+        let poll = tokio::time::interval(POLL_INTERVAL);
+        tracing::info!("serving in hive {}", hive.display_name());
+        Ok(Some(Self {
+            commands,
+            status,
+            waiting,
+            gc_checked: None,
+            unreachable: None,
+            woke_early: false,
+            retry: false,
+            backoff: Backoff::new(Duration::from_millis(500), MAX_BACKOFF),
+            poll,
+            moves,
+            watcher,
+            reconnections,
+            notices,
+            driver,
+            machine,
+            connection,
+            opened,
+            hive,
+            located,
+            entry,
+        }))
+    }
+
+    /// Why to sync next. After a failure, try again once the backoff has passed, rather than
+    /// waiting for something to change; and sync at once when asked.
+    async fn next_trigger(&mut self) -> anyhow::Result<Flow<String>> {
+        if self.retry {
+            return Ok(Flow::On("a retry".to_owned()));
+        }
+        if !self.waiting.is_empty() {
+            return Ok(Flow::On("a request".to_owned()));
+        }
+        let trigger = tokio::select! {
+            _ = self.poll.tick() => "the poll interval".to_owned(),
+            () = self.watcher.changed() => "a local operation".to_owned(),
+            () = crate::watch::changed(self.moves.as_mut()) => match copy::moved_to(&self.entry) {
+                // Served where it is now, once found again.
+                Some(path) => {
+                    return Err(Suspended(format!("the copy moved to {}", path.display())).into());
+                }
+                None => return Ok(Flow::Again),
+            },
+            // Announcements made while it was disconnected, as while the machine
+            // slept, are lost.
+            () = self.reconnections.next() => "reconnecting to the hub".to_owned(),
+            notice = self.notices.next() => {
+                let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
+                match Envelope::<HeadNotice>::decode(&notice.payload) {
+                    Ok(notice) => {
+                        let seq = notice.seq;
+                        self.driver.notice(notice)?;
+                        format!("the hub announcing {seq}")
                     }
-                    None => continue,
-                },
-                // Announcements made while it was disconnected, as while the machine
-                // slept, are lost.
-                () = reconnections.next() => "reconnecting to the hub".to_owned(),
-                notice = notices.next() => {
-                    let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
-                    match Envelope::<HeadNotice>::decode(&notice.payload) {
-                        Ok(notice) => {
-                            let seq = notice.seq;
-                            driver.notice(notice)?;
-                            format!("the hub announcing {seq}")
-                        }
-                        Err(err) => {
-                            tracing::warn!("ignoring announcement: {err:#}");
-                            "an unreadable announcement".to_owned()
-                        }
+                    Err(err) => {
+                        tracing::warn!("ignoring announcement: {err:#}");
+                        "an unreadable announcement".to_owned()
                     }
                 }
-                command = commands.recv() => match command {
-                    None => return Ok(()),
-                    Some(Command::Sync(reply)) => {
-                        waiting.push(reply);
-                        "a request".to_owned()
-                    }
-                },
             }
+            command = self.commands.recv() => match command {
+                None => return Ok(Flow::Done),
+                Some(Command::Sync(reply)) => {
+                    self.waiting.push(reply);
+                    "a request".to_owned()
+                }
+            },
         };
-        // Still the copy, before anything is read from it or written to it, its status
-        // included.
-        let found = copy::Found::read(&located.repo_path)?;
-        if let Err(why) = copy::check(&entry, &found) {
+        Ok(Flow::On(trigger))
+    }
+
+    /// Checks that the repository is still the copy, before anything is read from it or
+    /// written to it, its status included.
+    fn check_copy(&mut self) -> anyhow::Result<()> {
+        let found = copy::Found::read(&self.located.repo_path)?;
+        if let Err(why) = copy::check(&self.entry, &found) {
             let why = format!(
                 "the repository at {} isn't the copy: {why}",
-                workspace.display()
+                self.entry.path.display()
             );
-            answer_all(waiting, &Err(format!("suspended: {why}")));
+            answer_all(self.waiting, &Err(format!("suspended: {why}")));
             return Err(Suspended(why).into());
         }
-        // While the hub is out of reach, a sync could only wait for its requests to time
-        // out. Say why instead, to `musubi status` and to any command waiting, and wait for
-        // the connection to come back, or for the backoff to pass. A reconnection from now
-        // on ends the wait.
-        reconnections.seen();
-        if !transport.connected()
-            && let Some(why) = connection.out_of_reach().await
+        Ok(())
+    }
+
+    /// While the hub is out of reach, a sync could only wait for its requests to time out.
+    /// Say why instead, to `musubi status` and to any command waiting, and wait for the
+    /// connection to come back, or for the backoff to pass.
+    async fn wait_for_hub(&mut self) -> Flow<()> {
+        // A reconnection from now on ends the wait.
+        self.reconnections.seen();
+        if !self.connection.transport.connected()
+            && let Some(why) = self.connection.out_of_reach().await
         {
-            if unreachable.as_ref() != Some(&why) {
+            if self.unreachable.as_ref() != Some(&why) {
                 tracing::warn!("{why}");
             }
-            status.record(Some(&located), |status| {
+            self.status.record(Some(&self.located), |status| {
                 status.failed(&anyhow::anyhow!("{why}"));
             });
-            answer_all(waiting, &Err(why.clone()));
-            unreachable = Some(why);
-            retry = true;
+            answer_all(self.waiting, &Err(why.clone()));
+            self.unreachable = Some(why);
+            self.retry = true;
             // Nothing failed here, so nothing need start over; and the connection coming
             // back always ends the wait, since no sync ran that could lose it again.
             let stopped = tokio::select! {
-                stopped = pause(backoff.next(), commands, waiting) => stopped,
-                () = reconnections.next() => false,
+                stopped = pause(self.backoff.next(), self.commands, self.waiting) => stopped,
+                () = self.reconnections.next() => false,
             };
-            if stopped {
-                return Ok(());
-            }
-            continue;
+            return if stopped { Flow::Done } else { Flow::Again };
         }
-        unreachable = None;
-        // Reopen when the directory or jj's settings change. The stores keep their signer
-        // and other settings from when they opened, so updating the loader alone would
-        // keep signing with the old key. An unchanged config keeps the existing caches.
-        let now_identity = identity(&located.repo_path);
-        let settings = crate::settings::load(&located.workspace_root, &located.repo_path)?;
-        if now_identity != opened || !crate::settings::unchanged(driver.settings(), &settings) {
+        self.unreachable = None;
+        Flow::On(())
+    }
+
+    /// Reopens the repository when its directory or jj's settings change. The stores keep
+    /// their signer and other settings from when they opened, so updating the loader alone
+    /// would keep signing with the old key. An unchanged config keeps the existing caches.
+    fn reopen_if_changed(&mut self) -> anyhow::Result<()> {
+        let now_identity = identity(&self.located.repo_path);
+        let settings =
+            crate::settings::load(&self.located.workspace_root, &self.located.repo_path)?;
+        if now_identity != self.opened
+            || !crate::settings::unchanged(self.driver.settings(), &settings)
+        {
             tracing::info!("the repository's directory or settings changed; opening it afresh");
-            let settings = driver
+            let settings = self
+                .driver
                 .settings()
                 .with_new_config(settings.config().clone())?;
-            driver.reopen(located.open_with_settings(&settings)?)?;
-            watcher = Watcher::op_heads(&located.repo_path)?;
-            opened = now_identity;
+            self.driver
+                .reopen(self.located.open_with_settings(&settings)?)?;
+            self.watcher = Watcher::op_heads(&self.located.repo_path)?;
+            self.opened = now_identity;
         }
+        Ok(())
+    }
+
+    /// Syncs once, for `trigger`.
+    async fn sync(&mut self, trigger: &str) -> Attempt {
         tracing::debug!("syncing after {trigger}");
         let started = std::time::Instant::now();
         // Reconnecting during the sync, which may miss announcements, calls for another.
-        reconnections.seen();
-        let held_before = status.publication_held();
-        let result = driver.sync().await;
+        self.reconnections.seen();
+        let held_before = self.status.publication_held();
+        let result = self.driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
-        let synced = known(&driver);
+        let synced = known(&self.driver);
         // Why the hub is out of reach, if the connector knows, says more than a timeout.
         let result = match result {
             Ok(synced) => Ok(synced),
-            Err(err) => Err(connection.explain(err).await),
+            Err(err) => Err(self.connection.explain(err).await),
         };
+        Attempt {
+            result,
+            synced,
+            held_before,
+        }
+    }
+
+    /// Records and reports how a sync went, answers whoever asked for it, and readies the
+    /// next: [`Flow::Done`] when serving is over, else [`Flow::Again`].
+    async fn after_sync(&mut self, attempt: Attempt) -> anyhow::Result<Flow<()>> {
+        let Attempt {
+            result,
+            synced,
+            held_before,
+        } = attempt;
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
             && HiveGone::of(err) == Some(HiveGone::Removed)
@@ -460,89 +595,98 @@ async fn serve_async(
             );
             // Changed meanwhile, as by `musubi join --hub`: start over with what it is now.
             anyhow::ensure!(
-                leave_hive(&located, &hive, Membership::Removed)?,
+                leave_hive(&self.located, &self.hive, Membership::Removed)?,
                 "this repository's hive or hub changed while it synced"
             );
             tracing::warn!("{message}");
-            answer_all(waiting, &Err(message.clone()));
-            return Ok(());
+            answer_all(self.waiting, &Err(message.clone()));
+            return Ok(Flow::Done);
         }
         let reply = match &result {
             Ok(_) => Ok(synced.clone()),
             Err(err) => Err(format!("{err:#}")),
         };
-        status.record(Some(&located), |status| {
+        self.status.record(Some(&self.located), |status| {
             status.synced(result.as_ref().err(), &synced);
         });
         report(
-            &connection,
-            &located.repo_path,
-            &hive,
-            &machine,
+            &self.connection,
+            &self.located.repo_path,
+            &self.hive,
+            &self.machine,
             synced.seq,
             reply.as_ref().err(),
         );
-        answer_all(waiting, &reply);
+        answer_all(self.waiting, &reply);
         match result {
             Ok(_) => {
-                backoff.reset();
-                retry = false;
-                woke_early = false;
-                if gc_checked.is_none_or(|checked| checked.elapsed() >= GC_CHECK_INTERVAL) {
-                    gc_checked = Some(std::time::Instant::now());
-                    collect_garbage(&located);
+                self.backoff.reset();
+                self.retry = false;
+                self.woke_early = false;
+                if self
+                    .gc_checked
+                    .is_none_or(|checked| checked.elapsed() >= GC_CHECK_INTERVAL)
+                {
+                    self.gc_checked = Some(std::time::Instant::now());
+                    collect_garbage(&self.located);
                 }
+                Ok(Flow::Again)
             }
-            Err(err) => {
-                if publication_held(&err) {
-                    if !held_before {
-                        tracing::warn!("{err:#}");
-                    }
-                    // No reconnect/reopen loop for a policy hold. Keep the immutable
-                    // accounting cache, and keep listening for incoming and local work.
-                    retry = false;
-                    backoff.reset();
-                    continue;
+            Err(err) if publication_held(&err) => {
+                if !held_before {
+                    tracing::warn!("{err:#}");
                 }
-                tracing::warn!("{err:#}");
-                // What failed may be that the copy is no longer there, as when it was moved
-                // or deleted during the sync: then open nothing there, which would write.
-                if !copy::holds(&entry, workspace) {
-                    return Err(Suspended(format!(
-                        "the copy is no longer at {}",
-                        workspace.display()
-                    ))
-                    .into());
-                }
-                // Lost replies are indistinguishable from lost requests, and the open
-                // repository's cached state may be what failed: start over, reopened.
-                if let Err(err) = located.open().and_then(|repo| driver.reopen(repo)) {
-                    tracing::warn!("cannot reopen: {err:#}");
-                    driver.restart();
-                }
-                // So too may the watcher, if the directory it watches was replaced, as by
-                // restoring a backup: one watching a deleted directory never wakes.
-                match Watcher::op_heads(&located.repo_path) {
-                    Ok(new) => watcher = new,
-                    Err(err) => tracing::debug!("cannot watch afresh: {err:#}"),
-                }
-                retry = true;
-                // The connection coming back while it waits, as after the machine slept, ends
-                // the wait, but only once: a sync that itself loses the connection would
-                // otherwise come straight back, again and again.
-                reconnections.seen();
-                let stopped = tokio::select! {
-                    stopped = pause(backoff.next(), commands, waiting) => stopped,
-                    () = reconnections.next(), if !woke_early => {
-                        woke_early = true;
-                        false
-                    }
-                };
-                if stopped {
-                    return Ok(());
-                }
+                // No reconnect/reopen loop for a policy hold. Keep the immutable accounting
+                // cache, and keep listening for incoming and local work.
+                self.retry = false;
+                self.backoff.reset();
+                Ok(Flow::Again)
             }
+            Err(err) => self.after_failure(&err).await,
         }
+    }
+
+    /// Starts over after a sync failed, reopened, and waits out the backoff before retrying.
+    async fn after_failure(&mut self, err: &anyhow::Error) -> anyhow::Result<Flow<()>> {
+        tracing::warn!("{err:#}");
+        // What failed may be that the copy is no longer there, as when it was moved or
+        // deleted during the sync: then open nothing there, which would write.
+        if !copy::holds(&self.entry, &self.entry.path) {
+            return Err(Suspended(format!(
+                "the copy is no longer at {}",
+                self.entry.path.display()
+            ))
+            .into());
+        }
+        // Lost replies are indistinguishable from lost requests, and the open repository's
+        // cached state may be what failed: start over, reopened.
+        if let Err(err) = self
+            .located
+            .open()
+            .and_then(|repo| self.driver.reopen(repo))
+        {
+            tracing::warn!("cannot reopen: {err:#}");
+            self.driver.restart();
+        }
+        // So too may the watcher, if the directory it watches was replaced, as by restoring
+        // a backup: one watching a deleted directory never wakes.
+        match Watcher::op_heads(&self.located.repo_path) {
+            Ok(new) => self.watcher = new,
+            Err(err) => tracing::debug!("cannot watch afresh: {err:#}"),
+        }
+        self.retry = true;
+        // The connection coming back while it waits, as after the machine slept, ends the
+        // wait, but only once: a sync that itself loses the connection would otherwise come
+        // straight back, again and again.
+        self.reconnections.seen();
+        let stopped = tokio::select! {
+            stopped = pause(self.backoff.next(), self.commands, self.waiting) => stopped,
+            () = self.reconnections.next(), if !self.woke_early => {
+                self.woke_early = true;
+                false
+            }
+        };
+        Ok(if stopped { Flow::Done } else { Flow::Again })
     }
 }
 

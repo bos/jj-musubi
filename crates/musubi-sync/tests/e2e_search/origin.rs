@@ -61,6 +61,16 @@ impl Origin {
     /// Someone else pushes a new commit on top of origin's `main`. The seed fetches first,
     /// so that the push is a fast-forward of whatever the hive pushed there.
     pub fn advance(&mut self) -> String {
+        self.write_commit(false)
+    }
+
+    /// An external writer replaces the tip with a sibling, including replacing a root.
+    /// Its new observation cannot be ordered against an old one by commit ancestry.
+    pub fn rewrite(&mut self) -> String {
+        self.write_commit(true)
+    }
+
+    fn write_commit(&mut self, rewrite: bool) -> String {
         self.pushes += 1;
         let bare = self.bare.to_str().unwrap().to_owned();
         let has_main = !self
@@ -85,7 +95,16 @@ impl Origin {
             &self.seed,
             &["for-each-ref", "--format=%(objectname)", "refs/heads/main"],
         );
-        let parent = match head.trim() {
+        let head = if rewrite && has_main {
+            self.git(&self.seed, &["show", "--no-patch", "--format=%P", "HEAD"])
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        } else {
+            head.trim().to_owned()
+        };
+        let parent = match head.as_str() {
             "" => String::new(),
             head => format!("parent {head}\n"),
         };
@@ -102,10 +121,12 @@ impl Origin {
             &commit,
         );
         self.git(&self.seed, &["reset", "--quiet", "--hard", id.trim()]);
-        self.git(
-            &self.seed,
-            &["push", "--quiet", &bare, "HEAD:refs/heads/main"],
-        );
+        let mut push = vec!["push", "--quiet"];
+        if rewrite {
+            push.push("--force");
+        }
+        push.extend([bare.as_str(), "HEAD:refs/heads/main"]);
+        self.git(&self.seed, &push);
         message
     }
 

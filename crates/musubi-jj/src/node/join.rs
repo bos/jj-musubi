@@ -55,6 +55,28 @@ impl JoinSummary {
 }
 
 impl NodeRepo {
+    /// Conflicted shared bookmarks by Git remote, once concurrent heads have been merged
+    /// and exported. The local `git` pseudo-remote is not an upstream to fetch.
+    pub fn conflicted_git_bookmarks(&mut self) -> Result<BTreeMap<String, Vec<String>>, NodeError> {
+        let repo = self.merged_repo()?;
+        let mut remotes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (symbol, _) in repo
+            .view()
+            .all_remote_bookmarks()
+            .filter(|(symbol, remote)| {
+                symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO
+                    && symbol.name.as_str() != "HEAD"
+                    && !remote.target.is_resolved()
+            })
+        {
+            remotes
+                .entry(symbol.remote.as_str().to_owned())
+                .or_default()
+                .push(symbol.name.as_str().to_owned());
+        }
+        Ok(remotes)
+    }
+
     fn joins_path(&self) -> PathBuf {
         self.repo_path.join("musubi/joins")
     }

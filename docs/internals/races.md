@@ -96,6 +96,8 @@ own work brings it back ([design.md, "Copies that go away"](design.md#copies-tha
 | Same tag set to different commits | Conflicted tag on every machine. Each machine's `@git` tag keeps its own value. | `same_tag_created_at_different_commits` |
 | One machine fetches an annotated tag | A known limitation: every machine's jj has the tag, at the same commit, but only that machine's `.git` has the tag object, with its message, tagger and any signature. The others' `.git` has a lightweight tag at the commit, so there `git describe` without `--tags` passes it over, and `git tag -v` has nothing to verify. jj records a tag by its commit, and musubi moves the commits a view needs, not tag objects. | `an_annotated_tag_arrives_lightweight` |
 | Independent repositories with differing `main` join one hive | The histories merge at jj's shared root operation, and `main` is conflicted until someone resolves it. | `joining_repositories_with_conflicting_bookmarks` |
+| A joining copy and the hive have fetched different points on one forward history | jj takes the descendant from either copy. Neither machine has priority. | `joining_takes_the_newer_main_from_either_copy` |
+| A joining copy and the hive observed different rewrites of upstream history | The command attempts a native fetch and syncs its effects, preserving local work and checkout files. An unavailable remote leaves a warning and the conflict; rejoining retries. A fresh fetch can select a target neither copy knew. | `joining_fetches_ambiguous_remote_bookmarks`, `e2e_join_after_upstream_rewrite` |
 
 ## Changes
 

@@ -216,6 +216,16 @@ impl World {
     /// the root and synced, then on its local `trunk()`. A new machine's, if `m` is `nodes()`, or
     /// else in place of machine `m`'s copy, which has left the hive.
     pub fn clone_copy(&mut self, m: usize) {
+        self.new_copy(m, false);
+    }
+
+    /// An independently fetched Git copy joins with its recorded upstream state, which
+    /// can differ from the hive's. Subsequent commands and syncs keep checking both views.
+    pub fn join_existing_copy(&mut self, m: usize) {
+        self.new_copy(m, true);
+    }
+
+    fn new_copy(&mut self, m: usize, existing: bool) {
         crate::coverage::interrupt_races();
         let n = self.next();
         let repo = if m == self.nodes() {
@@ -245,11 +255,27 @@ impl World {
             "origin",
             self.origin.bare.to_str().unwrap(),
         ]);
+        if existing {
+            repo.jj(&["git", "fetch", "--remote", "origin"]);
+            let main = repo.jj(&[
+                "log",
+                "--no-graph",
+                "-r",
+                "present(main@origin)",
+                "-T",
+                "commit_id",
+            ]);
+            if !main.is_empty() {
+                repo.jj(&["bookmark", "track", "main", "--remote", "origin"]);
+                fired("join:with_history");
+            }
+        }
         if self.fx.hive.hub.store().pruned() > 0 {
             fired("join:after_prune");
         }
+        let command = if existing { "join" } else { "clone" };
         self.record(format!(
-            "{}: musubi clone into {}",
+            "{}: musubi {command} at {}",
             self.machine(m),
             repo.path().display()
         ));
@@ -343,6 +369,17 @@ impl World {
             .collect();
         self.evidence.baseline_keys[m] = keys;
         self.restart_imports(m);
+        if existing {
+            // The command's best-effort repair is an ordinary native fetch, not a change
+            // to canonical merging. The independent import and replay checks still apply.
+            let remotes = self.fx.node(m).conflicted_git_bookmarks().unwrap();
+            if remotes.contains_key("origin") {
+                fired("join:fetch_conflict");
+                self.jj(m, &["git", "fetch", "--remote", "origin"]);
+                self.sync_counted(m);
+            }
+            return;
+        }
         // As `musubi clone` checks out the destination's local `trunk()`.
         let trunk = self.raw_jj(
             m,

@@ -1443,6 +1443,31 @@ def TSlot.import (auto : Bool) (s : TSlot T) (g : T) : TSlot T :=
     let tr := if s.R = absent ∧ s.tr = false then auto else s.tr
     TSlot.norm ⟨⟨if tr then merge s.L s.R g else s.L, g, g⟩, tr⟩
 
+/-- A selected upstream observation replaces the remote target, even when `.git` already
+holds it. This applies to an explicit fetch after a join's ambiguous merge; it does not
+order the two cached observations or assert that a failed fetch selected any ref. -/
+theorem TSlot.import_remote (auto : Bool) (s : TSlot T) (g : T) :
+    (s.import auto g).R = g := by
+  unfold TSlot.import
+  split <;> simp_all
+
+/-- The record agrees with a selected observation. After the native fetch and its export,
+an ordinary command's unchanged-ref selection has nothing further to import. -/
+theorem TSlot.import_record (auto : Bool) (s : TSlot T) (g : T) :
+    (s.import auto g).K = g := by
+  unfold TSlot.import
+  split <;> simp_all
+
+/-- A tracked bookmark that has no difference from its remote follows a selected fetch,
+even when both were conflicted by joining independent snapshots. Local differences are
+instead merged by `import_L`, without choosing one machine's bookmark by priority. -/
+theorem TSlot.import_following {auto : Bool} {s : TSlot T} (g : T)
+    (htr : s.tr = true) (hfollow : s.L = s.R) : (s.import auto g).L = g := by
+  unfold TSlot.import
+  by_cases hg : g = s.R
+  · simp [hg, hfollow]
+  · simp [hg, htr, hfollow, merge_unchanged_self]
+
 /-- Whether jj's import sets the bookmark (`set_local_bookmark_target`), which `import` merges
 the remote ref's change into: where the remote ref moved and is tracked, or is new and tracked
 by default (`import_L`). -/

@@ -855,6 +855,15 @@ Thus the theorems about resolving a conflicted remote bookmark or `restore_rever
 an actual import, not an unconditional effect of the next ordinary command. The conformance
 harness applies that selection and tests unchanged refs too.
 
+For an explicit fetch after an ambiguous join, `TSlot.import_remote` and `import_record`
+establish that the selected observation becomes the remote target and its record, even when
+the physical ref did not move. `TSlot.import_following` establishes that a tracked local
+bookmark equal to its remote follows that observation. Local differences remain jj's merge
+(`import_L`). These are properties of the selected-ref computation already checked through
+the oracle, not claims that every fetch succeeds, that a failed call has no completed effects,
+or that cached observations have a total order. The CLI and generated join regressions listed
+in [conformance](../docs/internals/conformance.md#per-machine-refs) check the command boundary.
+
 - `noSpuriousRevert`: an import changes a local bookmark only if git moved its ref, whatever
   musubi realizes and whether or not its export succeeds. `remoteNoSpuriousRevert`: the same
   for a remote bookmark, as long as every realization is exported before a `jj` command can

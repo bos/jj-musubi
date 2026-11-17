@@ -123,6 +123,32 @@ See [Move, copy or restore a repo](guides/manage.md#move-copy-or-restore-a-repo)
 If the first sync fails after joining or cloning, the repo is set up and the daemon keeps
 trying. Fix the reported cause and run `musubi sync`; don't delete the repo to retry setup.
 
+## Remote bookmarks remain conflicted after joining
+
+`musubi join` and `musubi create` try fetching the conflicted bookmarks after their first
+sync, with a 30-second limit per remote. If a remote is unavailable or isn't configured here,
+the copy still joins and keeps the conflict. Restore access and run `musubi join` again, or
+fetch the affected bookmark on a machine with access to that remote:
+
+```sh
+jj git fetch --remote exact:origin --branch exact:main
+musubi sync
+```
+
+Use the remote and bookmark named by `jj bookmark list --all-remotes`. Exact branch selectors
+override configured fetch filters that might otherwise omit the bookmark. Quote names as jj's
+string-pattern syntax requires, or use `musubi join` to select them automatically. Add
+`--ignore-working-copy` if the checkout is stale, to update recorded state without changing
+checkout files. The resolution syncs to other copies. Local bookmark conflicts can
+remain when the copies also have local changes; resolve those as described in
+[When machines change the same thing][same-thing].
+
+[same-thing]: guides/working-across-machines.md#when-machines-change-the-same-thing
+
+Neither commit dates nor which copy joined last establishes which rewritten upstream target
+is current. A fetch asks the remote for a fresh observation. Ordinary syncs never fetch Git
+remotes automatically.
+
 ## Accidental files and cleanup
 
 A snapshot hold pauses sending while receiving continues. Inspect the held history without

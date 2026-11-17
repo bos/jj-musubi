@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `musubi join` and `musubi create` try fetching conflicted Git remote bookmarks after their
+  first sync, with a 30-second limit per remote, then sync the result. Forward moves still
+  come from either copy. A fresh fetch can resolve conflicts from rewritten upstream history
+  while preserving local work and checkout files. An unavailable remote leaves a warning and
+  the conflict. Ordinary sync does not fetch Git remotes. No action is needed on upgrading.
+
 - Set `musubi.auto-snapshot = true` in jj's config to record edits in local workspaces while
   the daemon runs, even when an editor or agent never runs `jj`. Run `musubi daemon restart`
   after replacing the executable by hand so the command and daemon use the same build. See

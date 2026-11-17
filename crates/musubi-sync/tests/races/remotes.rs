@@ -346,6 +346,42 @@ fn joining_repositories_with_conflicting_bookmarks() {
     assert!(hive.bookmarks(0)["main@"].starts_with("conflict:"));
 }
 
+/// A join's snapshot has no shared operation ancestry, but jj still takes the descendant
+/// commit, whether the hive or the joining copy fetched it. Neither side has precedence.
+#[test]
+fn joining_takes_the_newer_main_from_either_copy() {
+    for newer_joins in [false, true] {
+        let mut hive = Fixture::new(&["alpha"]);
+        let seed = with_origin(&hive);
+        let beta = hive.env.init_repo("beta");
+        beta.jj(&[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            hive.env.root().join("origin.git").to_str().unwrap(),
+        ]);
+        hive.repo(0).jj(&["git", "fetch"]);
+        beta.jj(&["git", "fetch"]);
+        hive.repo(0)
+            .jj(&["bookmark", "track", "main", "--remote", "origin"]);
+        beta.jj(&["bookmark", "track", "main", "--remote", "origin"]);
+        advance_origin(&hive, &seed, 2);
+        let newer = if newer_joins { &beta } else { hive.repo(0) };
+        newer.jj(&["git", "fetch"]);
+        let expected = newer.git(&["rev-parse", "refs/remotes/origin/main"]);
+        hive.sync();
+        hive.add(beta);
+        hive.sync();
+        hive.assert_converged();
+        for index in 0..2 {
+            let bookmarks = hive.bookmarks(index);
+            assert_eq!(bookmarks["main@"], expected.trim());
+            assert_eq!(bookmarks["main@origin"], expected.trim());
+        }
+    }
+}
+
 /// Force-pushes `main` on origin to a sibling of its current commit: a new commit on the
 /// current commit's parent.
 fn force_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {

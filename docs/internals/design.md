@@ -769,6 +769,21 @@ operations it has that the new ones descend from, and the hub leaves out everyth
 node also fetches operations starting from the newest hub head it has, which includes its own
 accepted push, so it never downloads what it uploaded.
 
+The explicit `join` and `create` commands inspect remote-bookmark conflicts after their first
+sync. Native merging already selects a descendant from either snapshot. For the remaining
+ambiguity, each command attempts one native `jj --ignore-working-copy git fetch` per conflicted
+remote. Exact remote and branch selectors fetch only affected bookmarks, overriding configured
+filters. The command selects a verified colocated workspace, if any exists, to take jj's Git
+import/export lock; this can be a secondary workspace of a non-colocated primary workspace. Each
+attempt is bounded to 30 seconds. Timeout or interruption terminates jj and its Git/SSH
+descendants using a Unix process group or Windows job, and reaps the child. An interrupt stops the
+command, leaving the copy joined. Otherwise the command syncs and reports unresolved remotes.
+Fetch changes recorded state without snapshotting or updating checkout files; normal native fetch
+semantics preserve and merge local bookmark differences. Failed calls can retain completed
+effects, so the second sync runs after failed attempts too. There is no retry loop, timestamp
+ranking, or machine priority. Ordinary sync does not contact Git remotes. This command policy adds
+native operations; it does not change canonical views or their merge rules.
+
 ### Which hive
 
 A hub holds many hives, and a joining repository doesn't say which it belongs to: the hub works it

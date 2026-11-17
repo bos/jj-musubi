@@ -130,29 +130,26 @@ and projection used by native-event replay.
 | `Musubi/ContractedExec.lean` | The explicit executable union with survivor advance, atomic prepared adoption and contracted acceptance and rejection. |
 | `Musubi/ContractedRecordCut.lean` | One record, pruning and node-drop stabilization cut for the executable recovery union, without assuming head stability. |
 | `Musubi/PostCut.lean` | Strict hub movement after the record cut and finite influence of old ledger targets. |
-| `Musubi/CutHistory.lean` | Survival of each saved hub head under its matching saved records, including rollback. |
-| `Musubi/RecoveryEpoch.lean` | Composition of the record/drop cut with aligned acceptance witnesses. |
+| `Musubi/CutHistory.lean` | Survival of each saved hub head under its matching saved records, including rollback. Not used by the convergence proof. |
 | `Musubi/PacketCoupling.lean` | One immutable push's full fields and actual send-time state, including actual-sender alignment. |
 | `Musubi/PacketAcceptance.lean` | Upload coverage and actual packet checks force the executable hub's acceptance decision. |
-| `Musubi/NodeReconcile.lean` | Surviving node heads throughout recovery and immediate adoption at an eligible node. |
-| `Musubi/RecordReplies.lean` | Held-prefix custody and reconstruction of fresh serialized ordered-record replies. |
+| `Musubi/NodeReconcile.lean` | Surviving node heads throughout recovery and immediate adoption at an eligible node. Not used by the convergence proof. |
+| `Musubi/RecordReplies.lean` | Held-prefix custody and reconstruction of fresh serialized ordered-record replies. Not used by the convergence proof. |
 | `Musubi/SerialReply.lean` | Serialized calls, own-response recovery, shared request ids and notification scheduling between rounds. |
 | `Musubi/RecordEpoch.lean` | Finite record adoptions and stale-plan reopens after current replies replace obsolete callbacks. |
 | `Musubi/NotificationControl.lean` | Finite old notification handling, counting both in-flight logical frames and queued entries. |
 | `Musubi/HubSuffix.lean` | Hub stabilization in raw graph space, with finite old-packet credit and a derived sender invariant. |
-| `Musubi/HistoryWindow.lean` | Carry the raw accepted-head chain from the record cut to eligible nodes' later entry. |
-| `Musubi/FreshObservation.lean` | Force an honest own response and repair obsolete initial knowledge without a whole-round premise. |
+| `Musubi/HistoryWindow.lean` | The raw accepted-head chain from the record cut, and its entry into the hub suffix. |
 | `Musubi/EarlyEntry.lean` | Entry API: imports all six layers below. |
-| `Musubi/EarlyEntry/Abstract.lean` | Abstract local events and eligible entry before hub stabilization. |
+| `Musubi/EarlyEntry/Abstract.lean` | The invariant a burst of node steps needs of a state. |
 | `Musubi/EarlyEntry/Burst.lean` | Finite bursts with the known pair frozen. |
 | `Musubi/EarlyEntry/Control.lean` | Raw control, choice guards, surveys and progress ranks. |
 | `Musubi/EarlyEntry/FreshHead.lean` | Naming stabilization and a first fresh head-bearing reply. |
 | `Musubi/EarlyEntry/FreshFetch.lean` | Taking current records through a fresh fetch. |
 | `Musubi/EarlyEntry/RawEntry.lean` | Source laws, round restarts and assembled raw entry. |
-| `Musubi/EntryAssembly.lean` | Join eligible entry cuts and exclude core fix-ups/tips before hub stabilization. |
+| `Musubi/EntryAssembly.lean` | Pending-name custody and the native packet and record algebra for fixed records. |
 | `Musubi/NodeSettle.lean` | Finite local control after hub stabilization, from individual calls and local scheduling. |
-| `Musubi/RecoveryBridge.lean` | Compose hub and local stabilization, with packet-specific handling and later response cuts. |
-| `Musubi/CallBatch.lean` | Sequential finite call batches and injective virtual/wire-id correlation. |
+| `Musubi/CallBatch.lean` | Sequential finite call batches and injective virtual/wire-id correlation. Not used by the convergence proof. |
 | `Musubi/Expansion.lean` | Expand each actual event to a positive finite path and transfer stabilization back. |
 | `Musubi/NodeSys.lean` | Joint graph/control model, named request guards and hub-answer law, invariants and shared scheduling facts. |
 | `Musubi/NodeSysExec.lean` | Check structural writes with canonical id reuse. |
@@ -179,10 +176,8 @@ and projection used by native-event replay.
 | `Musubi/RawExpansion.lean`, `Musubi/RawMaintenance.lean` | Expand finite raw write batches, counting actual maintenance operations. |
 | `Musubi/HubNodeSteps.lean` | Refine eligible node events to hub-suffix paths under explicit native primitive laws. |
 | `Musubi/HubAnswers.lean` | Derive the suffix accept or frame from the actual immutable request and hub answer. |
-| `Musubi/HubHistory.lean` | Derive the raw history window from the joint run before eligible-node entry. |
+| `Musubi/HubHistory.lean` | The hub's history of the joint run, by sequence number. |
 | `Musubi/RequestBounds.lean` | Derive request bounds, expand actual joint events, and prove the hub stabilizes. |
-| `Musubi/HistoryReplies.lean` | Bind fresh replies and notifications to the actual hub history despite delayed delivery. |
-| `Musubi/RawEvolution.lean`, `Musubi/GlobalRaw.lean` | Derive a single immutable raw graph and history window before fine control simulation starts. |
 | `Musubi/PendingEpoch.lean` | Bound pending alias changes with partial normalization and per-original coherence. |
 | `Musubi/ContractedMeasure.lean` | The record-aware executable progress check through surviving images; coincidence with the old check before drops. |
 | `Musubi/ContractedExecTest.lean` | Build-time checks of independent recovery and mutually exclusive contracted outcomes. |
@@ -839,9 +834,7 @@ Notifications have no request id. `NotificationControl.lean` instead counts thei
 old logical frames in flight and in queues: arrival transfers credit and consumption spends
 it. It assumes a consumptive stream/channel, with later publications from the current
 history, rather than arbitrary infinite reinjection of obsolete frames. Fresh notifications
-may continue forever. `FreshObservation.lean` separately forces an own response, because a
-current notification can be ignored below an obsolete known sequence. That own response
-repairs the pair; truthful later notifications preserve it.
+may continue forever.
 
 `RecordEpoch.lean` accounts for the old announcement and persistent received-record debt
 carried into a fixed-record suffix. Fresh Fetched replies announce only the fixed list, but
@@ -861,13 +854,13 @@ inside a running round. Until current records are applied, a push is refused bef
 expected head is read, and therefore cannot change knowledge either. A frozen known pair
 has only finite local closure, plan, advance and merge work before the next RPC or idle.
 A current fetch is reconstructible and adoption runs first at an eligible node.
-`EntryAssembly.lean` joins their finitely many entry cuts. Shared ordered-record identity
-and custody then derive empty pending and disable both core fix-ups and publication tips.
+`EntryAssembly.lean` derives an eligible node's empty pending list from shared ordered-record
+identity and custody, which disables both core fix-ups and publication tips.
 Finitely many automatic semantic writes remain an explicit premise, distinct from those
 derived core-write bounds. This includes cleanup inside a busy call and writers in the
 round's prelude, as well as idle housekeeping; the boundary is detailed below.
-`HistoryWindow.lean` carries the strict raw history from the
-earlier record cut to this later entry; nodes need not already know the latest sequence.
+`HistoryWindow.lean` carries the strict raw history from the earlier record cut to an eligible
+node's entry; nodes need not already know the latest sequence.
 
 The separate `EarlyEntry.Burst` argument counts locality on the fixed raw known closure,
 frontier coverage by the known images, heads, and queued plan entries. A fresh survey spends
@@ -910,46 +903,46 @@ upload-closure law. `raw_entry_persists` retains entry after ordinary failures a
 stop, deriving that an entered node's push cannot cause an incomplete-upload reopen. These are
 still component results: their inputs must be the actual sampled daemon events and packet.
 
-`HubSuffix.lean` works on raw operation vertices in a growing acyclic graph. Its packet
-invariant derives, from policy guards, when a current-generation sender still holds the
-head it sent. Every other move-capable packet belongs to a finite earlier list, whose
-targets pay for its movements. Under finite eligible maintenance writes, the hub's head
-and sequence stabilize; acceptance is not assumed finite. `NodeSettle.lean` gives the next
-local-control argument: its branch-ordered rank falls until a node is settled or emits a
-proper push from the settled hub head. `PacketAcceptance.lean` separates its primitive checks
-from the hub's actual decision and rules out refusal, rejection, idempotence and incomplete
-closure for the proper packet. Upload coverage uses the actual base-image frontier after
-server-generated contraction bodies are present; the raw expected-head difference is only
-the no-renaming case. `RecoveryBridge.lean` uses that packet's decision, allows a later local
-response/reopen cut after hub stability, and joins all nodes' convergence cuts. These are
-independent component theorems. The observed assembly below uses the joint-system route through
-`eligible_system_converges` and `node_settles_accepted`; it does not call
-`RecoveryBridge.refined_suffix_converges`. The bridge's generic `finite_common_cut` is shared by
-both routes.
+`HubSuffix.lean` works on raw operation vertices in a growing acyclic graph. Its packet invariant
+derives, from policy guards, when a current-generation sender still holds the head it sent. Every
+other move-capable packet belongs to a finite earlier list, whose targets pay for its movements.
+Under finite eligible maintenance writes, the hub's head and sequence stabilize; acceptance is not
+assumed finite. `NodeSettle.lean` gives the next local-control argument: its branch-ordered rank
+falls until a node is settled or emits a proper push from the settled hub head.
+`PacketAcceptance.lean` separates its primitive checks from the hub's actual decision and rules
+out refusal, rejection, idempotence and incomplete closure for the proper packet; the assembly
+does not use those packet-check theorems. Upload coverage uses the actual base-image frontier
+after server-generated contraction bodies are present; the raw expected-head difference is only
+the no-renaming case. The observed assembly below uses the joint-system route through
+`eligible_system_converges` and `node_settles_accepted`, and `finite_common_cut` joins all nodes'
+convergence cuts. Of the executable-union results above, `CutHistory`, `NodeReconcile` and
+`RecordReplies`, the strict-movement and old-ledger-target results of `PostCut` (the assembly uses
+only `execStep_hubPushAccept_guards`), the packet-coupling theorems of `PacketCoupling` (it uses
+only `PushPacket`) and the packet-check theorems of `PacketAcceptance` are standalone component
+theorems that the assembly does not use.
 
-The joint system now supplies per-event refinements. `NodeSys` keeps each node's scoped
-embedding into the same raw graph and retains immutable requests while other nodes run.
-`HubLedger` derives packet coverage from those actual request lists. `HubNodeSteps` expands
-local events, including a full-frontier advance followed by its optional merge;
-`HubAnswers` uses the actual accepted request and guards. `HubHistory` derives the history
-window before node entry. `SysFreshCuts` derives both consumed-old-message cutoffs from the
-joint transitions: later calls use fresh slots, and notifications leave their queues exactly
-once. It does not require unread messages to disappear. `CallBatch` justifies sequential
-native calls and interleaved physical request ids under injective correlation.
-`RequestBounds.hub_stabilizes_sys` now constructs the expansion from those same joint events,
-including finite maintenance: monotone generations cannot hide a maintenance write between
-equal endpoint generations. Initial requests remain in the old-packet budget even if their
-sender is ineligible; alignment is needed only for the actual moving answer's fresh request.
+The joint system now supplies per-event refinements. `NodeSys` keeps each node's scoped embedding
+into the same raw graph and retains immutable requests while other nodes run. `HubLedger` derives
+packet coverage from those actual request lists. `HubNodeSteps` expands local events, including a
+full-frontier advance followed by its optional merge; `HubAnswers` uses the actual accepted
+request and guards. `SysFreshCuts` derives both consumed-old-message cutoffs from the joint
+transitions: later calls use fresh slots, and notifications leave their queues exactly once. It
+does not require unread messages to disappear. `CallBatch`, which the assembly does not use,
+justifies sequential native calls and interleaved physical request ids under injective
+correlation. `RequestBounds.hub_stabilizes_sys` now constructs the expansion from those same joint
+events, including finite maintenance: monotone generations cannot hide a maintenance write between
+equal endpoint generations. Initial requests remain in the old-packet budget even if their sender
+is ineligible; alignment is needed only for the actual moving answer's fresh request.
 `SysAcceptance` couples the actual answered request to one executable decision, carrying the
 conditional primitive laws of that same decision. It does not quantify over other executable
 states that happen to have matching head and sequence fields. These primitive laws still need
 their native correspondence; the theorem does not establish them by assuming acceptance.
 `eligible_system_converges` composes the actual hub proof with local settling and retains
-agreement of the physical raw heads with the hub. Only newly issued pushes must finish;
-orphan requests from an old client session need never drain. This is the eligible-suffix
-component; the assembly below derives entry, pending-name stabilization and eligibility of
-every surviving machine. A node with pending drops translates hub operations into its own
-namespace, so it cannot use the eligible node's single raw embedding unchanged.
+agreement of the physical raw heads with the hub. Only newly issued pushes must finish; orphan
+requests from an old client session need never drain. This is the eligible-suffix component; the
+assembly below derives entry, pending-name stabilization and eligibility of every surviving
+machine. A node with pending drops translates hub operations into its own namespace, so it cannot
+use the eligible node's single raw embedding unchanged.
 
 `SysAcceptance.no_forever_pending` supplies the separate raw-control argument for such a
 node on a stable hub. Finite local and completed-call work derives a pending push; the actual
@@ -1136,15 +1129,15 @@ an incoming record clears the same original under another name. The two native r
 republishing to a replacement hub. `PendingEpoch` proves the finite alias cutoff once pending
 originals stop growing and known heads belong to the fixed-record history window. Its step
 relation allows some originals to normalize while other bodies are still arriving, requiring
-agreement only among aliases of an original whose name changes. `RawEvolution` and `GlobalRaw`
-derive that window without assuming the later fine control trace.
+agreement only among aliases of an original whose name changes.
 `pending_names_settle_with_old_known` also handles an obsolete known pair: after old
 observations and reopens stop, knowledge either remains fixed or enters the window. A fixed
 head's own unique originals suffice, without comparing its ancestry to the new window or
 assuming that a fresh observation ever arrives. Native assembly still must establish the
 per-step known-source rule and partial-normalization correspondence. The source-indexed
 variant reserves an index for the obsolete head and indexes the current history by observation
-time; an obsolete native sequence can be higher than the current one after rollback.
+time; an obsolete native sequence can be higher than the current one after rollback. The
+assembly uses neither of these two results.
 
 The native receipt boundary now keeps records before preparation writes any local operation,
 without counting them as applied or acknowledging them to the hub. Lost receipts become

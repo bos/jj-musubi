@@ -6,6 +6,8 @@ sees is a path of one frame. Concatenating the paths gives a model run whose sta
 increasing indices are the actual ones (`concat`), so whatever the model run settles to, the
 actual run settles to as well (`stabilizes_of_expansion`), and whatever holds of every model step
 from some path on holds of every model step from that path's index on (`concat_tail`).
+
+The convergence proof uses this file.
 -/
 import Musubi.Basic
 
@@ -113,11 +115,6 @@ theorem index_lt (i : Nat) : index p i < index p (i + 1) := by
   have := (p i).pos
   omega
 
-theorem le_index (i : Nat) : i ≤ index p i := by
-  induction i with
-  | zero => exact Nat.le_refl _
-  | succ i ih => have := index_lt p i; omega
-
 /-- A model step of the concatenation is the step of a path from where it is. -/
 theorem concat_step_of (S : G → G → Prop) (j : Nat)
     (hS : ∀ o, o < (p (place p j).1).len →
@@ -164,14 +161,6 @@ theorem concat_tail (S : G → G → Prop) (K : Nat)
   fun j hj => concat_step_of p S j (hS _ (place_ge p K j hj))
 
 end Concat
-
-/-- An expansion of an actual run into a model run. -/
-theorem expand {G : Type} (R : G → G → Prop) (α : Nat → G)
-    (hp : ∀ i, Nonempty (Path R (α i) (α (i + 1)))) :
-    ∃ (a : Nat → G) (m : Nat → Nat), m 0 = 0 ∧ (∀ i, m i < m (i + 1)) ∧
-      (∀ i, a (m i) = α i) ∧ ∀ j, R (a j) (a (j + 1)) := by
-  let p : ∀ i, Path R (α i) (α (i + 1)) := fun i => Classical.choice (hp i)
-  exact ⟨concat p, index p, rfl, index_lt p, concat_index p, concat_step p⟩
 
 /-- Whatever an expanded model run settles to, the actual run does. -/
 theorem stabilizes_of_expansion {G O : Type} (obs : G → O) (α a : Nat → G) (m : Nat → Nat)

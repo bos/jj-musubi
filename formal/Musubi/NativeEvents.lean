@@ -3,6 +3,8 @@ Compose observations of individual native events into a run of the eligible syst
 semantic effects of one native call remain explicit boundary obligations; a whole SysStep or
 HiveStep trace is not an input. The node invariants needed to handle replies are carried by
 the constructed filtered run, rather than assumed again at each event.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance
 
@@ -356,21 +358,5 @@ theorem RecordView.applied_stays {ρ α : Type} {N k : Nat} {run : Nat → Sys}
     (V.applied_current hn hi (he n hn i hi)).symm
 
 end Records
-
-omit [DecidablePred E] in
-/-- A publishing write above a head that descends from the known images cannot return the
-known operation itself when that result would give it the singleton normal image. The two
-ancestry directions would make the proper write a cycle. This uses neither a fresh id nor
-equality of whole normalizers. Native use must supply the complete-body normalization fact. -/
-theorem normalized_write_ne_known {par : Nat → List Nat} {images : List Nat}
-    {head known new : Nat} (hlt : ParLt par)
-    (hdesc : ∀ i ∈ images, Anc par i head)
-    (hnormal : new = known → images = [known])
-    (hwrite : Anc par head new) (hproper : new ≠ head) : new ≠ known := by
-  intro he
-  have hbefore : Anc par known head := hdesc known (by rw [hnormal he]; simp)
-  have hafter : Anc par head known := he ▸ hwrite
-  have hhead : head = known := Nat.le_antisymm (hafter.le hlt) (hbefore.le hlt)
-  exact hproper (he.trans hhead.symm)
 
 end Musubi.NativeEvents

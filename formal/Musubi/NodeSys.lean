@@ -24,6 +24,8 @@ hub answers requests one at a time, in any order, from its state when it answers
 push publishes notifications, which a node takes only between rounds. The hub refuses a push
 whose new head is dropped, as natively, and a node never sends one (`issue`'s `hnd`, a primitive
 law of the node); it never answers `Incomplete` (`HubLaw`).
+
+The convergence proof uses this file.
 -/
 import Musubi.EarlyEntry
 
@@ -163,7 +165,7 @@ Each new label stands for a raw id below `g'.next`: either one that did not exis
 `g.next` on), whose parents are the images of its parents, or an existing one with those same
 parents that no old label stands for. The new labels stand for distinct ids, and every newly
 existing raw id is one of them; nothing below moves. `Grow` is the case that reuses nothing
-(`Grow.toR`). -/
+(`Grow`). -/
 structure GrowR (g g' : Sys) (σ σ' : NS) (emb emb' : Nat → Nat) : Prop where
   next : σ.next ≤ σ'.next
   rawGrows : g.next ≤ g'.next
@@ -570,55 +572,6 @@ theorem scoped_raw {σ : NS} {emb : Nat → Nat} {g g' : Sys} (S : Scoped σ emb
   ⟨S.inj, fun x hx => Nat.lt_of_lt_of_le (S.lt x hx) h.1,
     fun x hx => by rw [h.2 _ (S.lt x hx)]; exact S.par x hx⟩
 
-theorem Grow.raw {g g' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat} (G : Grow g g' σ σ' emb emb') :
-    RawGrow g g' := ⟨by rw [G.rawNext]; omega, G.parRaw⟩
-
-/-- A node's own writes keep its embedding scoped. -/
-theorem scoped_grow {σ σ' : NS} {emb emb' : Nat → Nat} {g g' : Sys} (S : Scoped σ emb g)
-    (hlt : ParLt σ.par) (G : Grow g g' σ σ' emb emb') : Scoped σ' emb' g' := by
-  have hn := G.next
-  have hr := G.rawNext
-  refine ⟨fun x y hx hy he => ?_, fun x hx => ?_, fun x hx => ?_⟩
-  · by_cases hxo : x < σ.next <;> by_cases hyo : y < σ.next
-    · rw [G.embOld x hxo, G.embOld y hyo] at he
-      exact S.inj x y hxo hyo he
-    · rw [G.embOld x hxo, G.embNew y (by omega) hy] at he
-      have := S.lt x hxo
-      omega
-    · rw [G.embNew x (by omega) hx, G.embOld y hyo] at he
-      have := S.lt y hyo
-      omega
-    · rw [G.embNew x (by omega) hx, G.embNew y (by omega) hy] at he
-      omega
-  · by_cases hxo : x < σ.next
-    · rw [G.embOld x hxo]
-      have := S.lt x hxo
-      omega
-    · rw [G.embNew x (by omega) hx]
-      omega
-  · by_cases hxo : x < σ.next
-    · rw [G.embOld x hxo, G.parRaw _ (S.lt x hxo), S.par x hxo, G.parOld x hxo]
-      apply List.map_congr_left
-      intro p hp
-      exact (G.embOld p (Nat.lt_trans (hlt x p hp) hxo)).symm
-    · exact G.parNew x (by omega) hx
-
-/-- Writing only fresh operations is a write. -/
-theorem Grow.toR {g g' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat} (G : Grow g g' σ σ' emb emb') :
-    GrowR g g' σ σ' emb emb' where
-  next := G.next
-  rawGrows := by rw [G.rawNext]; omega
-  embOld := G.embOld
-  parRaw := G.parRaw
-  parOld := G.parOld
-  bound := fun x h1 h2 => by rw [G.embNew x h1 h2, G.rawNext]; omega
-  parNew := G.parNew
-  reuse := fun x h1 h2 h => by rw [G.embNew x h1 h2] at h; omega
-  injNew := fun x y hx1 hx2 hy1 hy2 he => by
-    rw [G.embNew x hx1 hx2, G.embNew y hy1 hy2] at he; omega
-  cover := fun y h1 h2 => ⟨σ.next + (y - g.next), by omega, by rw [G.rawNext] at h2; omega,
-    by rw [G.embNew _ (by omega) (by rw [G.rawNext] at h2; omega)]; omega⟩
-
 theorem GrowR.raw {g g' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat}
     (G : GrowR g g' σ σ' emb emb') : RawGrow g g' := ⟨G.rawGrows, G.parRaw⟩
 
@@ -815,8 +768,10 @@ theorem NodeOK.wait_start_iff {D : Nat → Nat → Nat → Prop} {n : Nat} {g : 
     w.kind = .start ↔ (g.node n).ns.act = false :=
   Issue.start_iff_inactive (I.wait w waiting).issue
 
-/-- Slots in flight are below the next one, a reply is what the hub's law answers its request
-with, and no push in flight drops its own new head, so it is refused only for other records. -/
+/-- Slots in flight are below the next one; a reply to a fetch is `fetched`; a reply to a push
+is `refused` or `head`, and, unless it accepted the push, a refusal names records other than the
+push's and a `head` reply carries the push's records; and no push request in flight is one that
+the law's `dropped` holds of at its own records. -/
 structure SysOK (law : HubLaw) (g : Sys) : Prop where
   reqs : ∀ q ∈ g.reqs, q.slot < g.slot
   reps : ∀ r ∈ g.reps, r.slot < g.slot

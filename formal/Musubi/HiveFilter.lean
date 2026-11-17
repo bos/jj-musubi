@@ -2,6 +2,8 @@
 The eligible system observed inside a hive run. `HiveStep` records the events the observation
 keeps; `filt` freezes foreign control slots and removes their fresh traffic. Filtering preserves
 system steps and the initial invariants required by native-event replay.
+
+The convergence proof uses this file.
 -/
 import Musubi.NodeSysEntry
 
@@ -13,29 +15,27 @@ open Musubi Musubi.NodeSettle Musubi.EarlyEntry Musubi.NodeSys
 
 The observation starts at the entry cut, not at the record cut: a finite cut after it by which
 every eligible node has handled a fresh head from after the record cut and taken the current
-records, so that its known head is named in the current records' namespace and its embedding
-is scoped. Before it, an eligible node may still know an old raw head whose node-space image
-the current drops have changed, and its steps are not claimed to be the fine system's. From the
-entry cut on, the hive's run is observed coarsely (`HiveStep`): an eligible node's events, the
-environment's, and the hub's answers to requests eligible nodes sent or that were in flight at
-the entry cut (`old`, finitely many, which may still move the hub) are steps of the fine
-system; a node that is not eligible is raw. What it writes only grows the raw graph; it may
-send requests, which take no virtual slot from the system's counter (the projection maps each
-call it actually sends injectively, apart from the system's); the replies and notifications
-it takes stay in the observation as ghosts, its state being unmodelled; and the hub answers its
-fresh requests without moving (`answerRaw`'s `hhub`). That is a law of the native run, from
-the records alone once they are fixed: an accepted push whose record effect leaves the records
-as they were has its sender's raw pending originals among what they drop, which its custody
-excludes (`Recovery.raw_pending_empty_of_fixed_records`, from
-`Recovery.PendingOriginals.unpublished`). It needs no original history and no embedding;
-`Recovery.pending_push_not_accepted_fixed` is the same fact for the executable model's own
-traces, not this law. So the observation is not every field of the native run: it is what the
-fine system reads of it.
+records, so that its known head is named in the current records' namespace and its embedding is
+scoped. Before it, an eligible node may still know an old raw head whose node-space image the
+current drops have changed, and its steps are not claimed to be the fine system's. From the entry
+cut on, the hive's run is observed coarsely (`HiveStep`): an eligible node's events, the
+environment's, and the hub's answers to requests eligible nodes sent or that were in flight at the
+entry cut (`old`, finitely many, which may still move the hub) are steps of the fine system; a
+node that is not eligible is raw. What it writes only grows the raw graph; it may send requests,
+which take no virtual slot from the system's counter (the projection maps each call it actually
+sends injectively, apart from the system's); the replies and notifications it takes stay in the
+observation as ghosts, its state being unmodelled; and the hub answers its fresh requests without
+moving (`answerRaw`'s `hhub`). That is a law of the native run, from the records alone once they
+are fixed: an accepted push whose record effect leaves the records as they were has its sender's
+raw pending originals among what they drop, which its custody excludes
+(`Recovery.raw_pending_empty_of_fixed_records`, from `Recovery.PendingOriginals.unpublished`). It
+needs no original history and no embedding. So the observation is not every field of the native
+run: it is what the fine system reads of it.
 
 The eligible nodes' system is a function of that observation (`filt`): the other nodes' slots
 frozen, their fresh requests and the replies to them left out. Each observed step is a step of
 it (`filt_step`), so a run of the hive from the entry cut is a run of the fine system
-(`filt_run`, `filt_run_from`), with the hub, the raw graph and the eligible nodes as they are.
+(`filt_run_from`), with the hub, the raw graph and the eligible nodes as they are.
 -/
 
 section Filter
@@ -116,17 +116,6 @@ theorem scoped_congr {σ : NS} {emb : Nat → Nat} {g h : Sys} (S : Scoped σ em
   inj := S.inj
   lt := fun x hx => hn ▸ S.lt x hx
   par := fun x hx => hp ▸ S.par x hx
-
-theorem grow_congr {g g' h h' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat}
-    (G : Grow g g' σ σ' emb emb') (hn : h.next = g.next) (hp : h.par = g.par)
-    (hn' : h'.next = g'.next) (hp' : h'.par = g'.par) : Grow h h' σ σ' emb emb' where
-  next := G.next
-  rawNext := by rw [hn', hn]; exact G.rawNext
-  embOld := G.embOld
-  embNew := fun x h1 h2 => by rw [G.embNew x h1 h2, hn]
-  parRaw := fun y hy => by rw [hp', hp]; exact G.parRaw y (hn ▸ hy)
-  parNew := fun x h1 h2 => by rw [hp']; exact G.parNew x h1 h2
-  parOld := G.parOld
 
 theorem growR_congr {g g' h h' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat}
     (G : GrowR g g' σ σ' emb emb') (hn : h.next = g.next) (hp : h.par = g.par)
@@ -321,13 +310,6 @@ theorem filt_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {a
     · simp only [filt, hreps, List.filter_append, List.filter_cons, hkrep, List.filter_nil]
       simp
 
-/-- So a run of the hive from the entry cut is a run of the eligible nodes' system, with the
-same acts. -/
-theorem filt_run {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} (run : Nat → Sys)
-    (acts : Nat → Act) (hs : ∀ i, HiveStep N D law E old (acts i) (run i) (run (i + 1))) :
-    ∀ i, SysStep N D law (acts i) (filt E frozen old (run i)) (filt E frozen old (run (i + 1))) :=
-  fun i => filt_step (hs i)
-
 /-- The same, for a run observed from the entry cut `k` on, read from there: the steps before
 `k` are not claimed. -/
 theorem filt_run_from {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
@@ -444,11 +426,6 @@ theorem runOK_filt_init {D : Nat → Nat → Nat → Prop} {law : HubLaw} {g : S
       refine ⟨fun r hr => hans r (List.mem_filter.1 hr).1, fun w hw => ?_, fun w hw => ?_⟩
       · rw [hd] at hw; cases hw
       · rw [hd] at hw; cases hw
-
-/-- The eligible nodes' system has the hive's hub, raw graph and eligible nodes. -/
-theorem filt_hub (g : Sys) : (filt E frozen old g).hub = g.hub := rfl
-theorem filt_next (g : Sys) : (filt E frozen old g).next = g.next := rfl
-theorem filt_par (g : Sys) : (filt E frozen old g).par = g.par := rfl
 
 end Filter
 

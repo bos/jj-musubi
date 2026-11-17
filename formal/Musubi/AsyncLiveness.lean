@@ -2,6 +2,9 @@
 Progress at the asynchronous boundaries hidden by the atomic policy exchanges. These lemmas
 do not yet prove the retry bridge: fix-up creation and stale ordered-record adoption need a
 separate stabilization argument before the record-aware policy theorem can apply.
+
+The convergence proof uses only `nat_trace_stabilizes` from this file. The rest, such as
+`settling_hub_stabilizes`, is not used by the assembly and stands alone as a progress result.
 -/
 import Musubi.RecordLiveness
 

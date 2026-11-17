@@ -140,4 +140,24 @@ theorem exists_min (P : Nat → Prop) {a : Nat} (ha : P a) :
       exact ih y hy hPy
     · exact ⟨a, ha, fun y hy hPy => h ⟨y, hy, hPy⟩⟩
 
+/-- The first index satisfying `P`, if any does. -/
+theorem exists_first {P : Nat → Prop} (h : ∃ n, P n) :
+    ∃ n, P n ∧ ∀ m, m < n → ¬ P m :=
+  let ⟨_, ha⟩ := h
+  exists_min P ha
+
+/-- Finitely many indices each have a cut after which `P` holds; one cut serves them all. -/
+theorem finite_common_cut (N : Nat) (P : Nat → Nat → Prop)
+    (he : ∀ n, n < N → ∃ k, ∀ i, k ≤ i → P n i) :
+    ∃ k, ∀ i, k ≤ i → ∀ n, n < N → P n i := by
+  induction N with
+  | zero => exact ⟨0, fun _ _ _ hn => by omega⟩
+  | succ N ih =>
+    obtain ⟨k, hk⟩ := ih (fun n hn => he n (by omega))
+    obtain ⟨j, hj⟩ := he N (by omega)
+    refine ⟨max k j, fun i hi n hn => ?_⟩
+    by_cases heq : n = N
+    · subst n; exact hj i (by omega)
+    · exact hk i (by omega) n (by omega)
+
 end Musubi

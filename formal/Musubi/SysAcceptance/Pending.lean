@@ -2,6 +2,8 @@
 Raw control cannot remain pending once the hub and its records have settled. The interfaces
 live in `Pending.Contracts`; the proof here separates publication impossibility from the
 control argument that eventually forces a push.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Pending.Contracts
 
@@ -15,17 +17,6 @@ theorem not_dropped_of {named cached : Nat → Bool} {x : Nat} {dropped : List N
     (hnn : named x = false) (hnc : cached x = false) (hnot : x ∉ dropped) :
     ((named x || cached x) || decide (x ∈ dropped)) = false := by
   simpa [hnn, hnc] using hnot
-
-/-- A head fixed by a renaming function is no cached key if every cached key changes under
-that function. Together with exclusion from named and pending drops, this suffices for the
-hub's dropped-head check. -/
-theorem not_dropped_fixed {cur : Nat → List Nat} {named cached : Nat → Bool} {x : Nat}
-    {dropped : List Nat} (hren : ∀ y, cached y = true → cur y ≠ [y]) (hfix : cur x = [x])
-    (hnn : named x = false) (hnot : x ∉ dropped) :
-    ((named x || cached x) || decide (x ∈ dropped)) = false := by
-  cases hc : cached x
-  · simpa [hnn] using hnot
-  · exact absurd hfix (hren x hc)
 
 /-- No round remains pending on a stable hub. A push would pass the publication checks and
 move the hub; every other allowed action continues the round. Naming therefore stabilizes

@@ -3,6 +3,8 @@ Expand the finite operations written by one housekeeping call. Each new operatio
 maintenance generation; the final published head is the last one. The graph may contain
 arbitrary parent lists within that finite batch, provided they are acyclic. This structural
 lemma supplies the multi-operation case of the hub-side simulation.
+
+The convergence proof uses this file.
 -/
 import Musubi.RawExpansion
 

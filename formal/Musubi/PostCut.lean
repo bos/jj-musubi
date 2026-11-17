@@ -13,6 +13,10 @@ every acceptance to `hubSupAccept`. They are excluded by an explicit premise, as
 
 This is a statement about the finite original-operation model. Its native counterpart on the
 hub's raw store, without any version-to-original projection, is listed at the end.
+
+The convergence proof uses only `execStep_hubPushAccept_guards` from this file. The rest, the
+strict-movement and old-ledger-target results for the executable recovery union, is not used by
+the assembly and stands alone.
 -/
 import Musubi.ContractedRecordCut
 

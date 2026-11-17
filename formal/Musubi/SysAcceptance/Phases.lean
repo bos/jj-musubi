@@ -2,6 +2,8 @@
 Derive the successive suffixes used by hive convergence: quiet records, persistent entry,
 fresh knowledge, a completed active sample, and eligibility on a stable hub.
 See `Musubi.SysAcceptance` for the layers of the complete convergence argument.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Contracts
 import Musubi.SysAcceptance.Eligible
@@ -81,7 +83,7 @@ theorem old_effects_stop
 theorem old_gone
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
     (c : Nat) : ∃ k, c ≤ k ∧ OldGone N O c k := by
-  obtain ⟨k, hk⟩ := Recovery.finite_common_cut N
+  obtain ⟨k, hk⟩ := finite_common_cut N
     (fun n t => (∀ id a, O.own n t = some (id, a) → c ≤ O.callAt n id) ∧
       ∀ a, O.note n t = some a → c ≤ a)
     (fun n hn => (old_effects_stop C c n hn).elim fun T h => ⟨T, h.2⟩)
@@ -198,7 +200,7 @@ theorem record_control_stabilizes
     refine ⟨oldCut + offset, fun i hi => ?_⟩
     have := stopped (i - oldCut) (by omega)
     simpa [show oldCut + (i - oldCut) = i by omega] using this
-  obtain ⟨controlCut, stopped⟩ := Recovery.finite_common_cut N
+  obtain ⟨controlCut, stopped⟩ := finite_common_cut N
     (fun n i => adopts n i = false ∧ fails n i = false) each
   let cut := max recordCut controlCut
   refine ⟨cut, { records := ?_, control := fun n hn i hi => stopped i (by omega) n hn }⟩
@@ -213,7 +215,7 @@ theorem object_failures_stop
     (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O) :
     ∃ cut, ∀ t, cut ≤ t → ∀ n, n < N → ¬ O.objFail n t := by
   obtain ⟨lossCut, noLoss⟩ := C.envFinal
-  apply Recovery.finite_common_cut N (fun n t => ¬ O.objFail n t)
+  apply finite_common_cut N (fun n t => ¬ O.objFail n t)
   intro n hn
   classical
   obtain ⟨offset, stopped⟩ := Retry.Serial.object_recoveries_stop
@@ -232,7 +234,7 @@ theorem recovering_reopens_stop {objectCut : Nat}
     (noFailures : ∀ t, objectCut ≤ t → ∀ n, n < N → ¬ O.objFail n t) :
     ∃ cut, ∀ i, cut ≤ i → ∀ n, n < N → O.reopen n i → ∀ t, t ≤ i →
       O.objFail n t → ∃ between, t < between ∧ between < i ∧ O.reopen n between := by
-  apply Recovery.finite_common_cut N
+  apply finite_common_cut N
     (fun n i => O.reopen n i → ∀ t, t ≤ i → O.objFail n t →
       ∃ between, t < between ∧ between < i ∧ O.reopen n between)
   intro n hn
@@ -252,7 +254,7 @@ theorem entry_phase
   obtain ⟨objectCut, noObjects⟩ := object_failures_stop C
   obtain ⟨recoveryCut, recovered⟩ := recovering_reopens_stop noObjects
   obtain ⟨failureCut, noFailure⟩ := C.failFinal
-  obtain ⟨writeCut, noWrites⟩ := Recovery.finite_common_cut N (fun n t => ¬ O.autoWrite n t)
+  obtain ⟨writeCut, noWrites⟩ := finite_common_cut N (fun n t => ¬ O.autoWrite n t)
     C.autoWritesStop
   obtain ⟨userCut, noWork⟩ := C.userFinal
   obtain ⟨lossCut, noLoss⟩ := C.envFinal
@@ -304,7 +306,7 @@ theorem entered_phase
       (fun i hi => C.incHead _ phase.cut n i hn (by omega))
       (fun i hi => C.closure _ phase.cut phase.quiet n i hn (by omega))
       (fun i hi => C.keep _ phase.cut phase.quiet n i hn (by omega))⟩
-  obtain ⟨entryCut, entered⟩ := Recovery.finite_common_cut N
+  obtain ⟨entryCut, entered⟩ := finite_common_cut N
     (fun n i => RawEntry (Rof recordCut) (wOf recordCut) (O.rawAt n i)) each
   let cut := max recordCut entryCut
   have entry : ∀ n, n < N → ∀ i, cut ≤ i →
@@ -327,7 +329,7 @@ theorem fine_cut
     ∃ cut, FineCut N Rof wOf O recordCut cut ∧
       ∀ n, n < N → KnownTrue run O recordCut n (O.latch n cut) := by
   have sampleBound := fun n => Schedule.index_le (C.schedMono n)
-  obtain ⟨knowledgeCut, known⟩ := Recovery.finite_common_cut N
+  obtain ⟨knowledgeCut, known⟩ := finite_common_cut N
     (fun n i => KnownTrue run O recordCut n (O.latch n i)) (fun n hn => by
       obtain ⟨truthfulCut, truthful⟩ := known_truthful (entryCut := entryCut)
         C phase.cut phase.quiet (fun n hn i hi => entered.noReopen n hn i (by omega)) n hn
@@ -337,7 +339,7 @@ theorem fine_cut
       have := sampleBound n truthfulCut
       omega)
   obtain ⟨oldCut, afterRecord, oldGone⟩ := old_gone C recordCut
-  obtain ⟨completedCut, completed⟩ := Recovery.finite_common_cut N
+  obtain ⟨completedCut, completed⟩ := finite_common_cut N
     (fun n i => ∃ q, oldCut ≤ O.sched n q ∧ O.doneAt n (O.sched n q) < i ∧
       O.active n (O.sched n q) = true ∧ ∀ later, O.sched n q ≤ later →
         RawEntry (Rof recordCut) (wOf recordCut) (O.rawAt n later)) (fun n hn => by

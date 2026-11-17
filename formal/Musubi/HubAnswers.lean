@@ -3,6 +3,8 @@ The hub's actual answer event in the joint system, using the packet that request
 The ledger's coverage theorem supplies that same packet; the hub's guards supply expected,
 different target and raw ancestry. No abstract acceptance or progress event is a premise.
 Coverage of the actual accepted request and the target's raw bound remain boundary laws.
+
+The convergence proof uses this file.
 -/
 import Musubi.HubNodeSteps
 

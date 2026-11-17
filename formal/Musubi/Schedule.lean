@@ -1,6 +1,8 @@
 /-
 Time bounds shared by sampled-event proofs. A strictly increasing schedule cannot lag its
 index; completing each batch before the next sample also orders events by completion time.
+
+The convergence proof uses this file.
 -/
 import Musubi.Basic
 

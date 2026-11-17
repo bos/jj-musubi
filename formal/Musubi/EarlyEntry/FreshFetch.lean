@@ -1,3 +1,6 @@
+/-
+The round after a fresh Fetch and its record-taking laws. The convergence proof uses this file.
+-/
 import Musubi.EarlyEntry.FreshHead
 
 namespace Musubi.EarlyEntry.Control

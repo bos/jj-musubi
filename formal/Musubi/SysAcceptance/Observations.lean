@@ -2,6 +2,8 @@
 Observations of one actual hive run, grouped by responsibility. These structures contain data
 only. `HiveContracts` supplies source, completion and fairness laws; the sampled views below
 read this same data at each node's own events.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Pending.Contracts
 

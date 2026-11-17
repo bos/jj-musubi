@@ -1,6 +1,8 @@
 /-
 Convergence of the actual hive run, composed from the derived phases. The fine-system
 interface is supplied at the native boundary; `FineAssembly` builds it from event replay.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Phases
 

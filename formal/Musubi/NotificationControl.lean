@@ -5,6 +5,8 @@ reader delivers each logical frame once, and a channel receive removes its queue
 Receiving an in-flight old frame transfers credit rather than creating it. Later published
 notifications come from the current history. No fairness or queue-draining assumption is
 needed to bound OLD notification handling, even if fresh notices keep arriving forever.
+
+The convergence proof uses this file.
 -/
 import Musubi.RetryControl
 

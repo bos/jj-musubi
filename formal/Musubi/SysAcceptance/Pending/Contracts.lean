@@ -3,6 +3,8 @@ Named interfaces for the pending-node contradiction. The abstract round separate
 publication checks and the two survival facts derived from native naming. The native view
 constructs that round from one actual packet; source laws never assume hub stability or that
 object replies succeed.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Acceptance
 
@@ -57,7 +59,7 @@ structure PendingControl {ρ α : Type} (hub : RawPublish.Hub)
 
   /-- The frozen round's guard bits. Natively, `newIsKnown = false` needs complete-body
   normalization and a stable drop mask with the known head local; it does not require a fresh
-  id. `normalized_write_ne_known` derives the inequality under that source obligation. -/
+  id. The bit is that source obligation: the write differs from the known head. -/
   hguard : ∀ i, R.active i = true → (R.prims i).announced = false ∧ (R.prims i).dropHead = false ∧
     (R.prims i).differ = false ∧ (R.prims i).pending = true ∧ (R.prims i).newIsKnown = false
   hburst : ∀ i, R.active i = true → R.naming.Still i →

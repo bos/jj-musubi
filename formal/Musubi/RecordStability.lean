@@ -3,6 +3,9 @@ Hub record stabilization is independent of original-head ancestry. After regress
 `takeRecs` appends only a nonempty difference. If all original drops are below a finite cut,
 each changed record list spends an unseen original; pruning then spends a bounded prefix.
 This does not assume that the hub stops accepting heads, or that nodes have reconciled yet.
+
+The convergence proof uses this file except `sexec_record_prefix_stabilizes`,
+`adopt_pending_subset` and their helpers, which are not used by the assembly and stand alone.
 -/
 import Musubi.RetryControl
 import Musubi.ContractOrder

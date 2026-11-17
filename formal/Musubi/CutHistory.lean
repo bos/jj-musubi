@@ -3,6 +3,9 @@ Entry to the rollback-free record suffix. The current head's survival is not a c
 of SEOK alone: rollback must restore a head with the records saved at that same sequence.
 This invariant keeps that fact for every saved slot, without requiring the old model's
 original-ancestry history chain, which contracted acceptance does not preserve.
+
+The convergence proof does not use this file; it proves the saved-head invariant of the
+executable recovery union, which stands alone.
 -/
 import Musubi.PostCut
 

@@ -6,6 +6,10 @@ the executable hub, rather than being an assumed implementation progress event.
 
 The last section takes a node's pending drops on raw ids, as `Push::answer` sees them, with no
 original identified with a raw id (`Musubi.RawPublish`).
+
+The convergence proof uses this file except the executable-model upload and packet-check
+theorems (`packet_checks_accept`, `packet_upload_closes` and their helpers), which are not used by
+the assembly and stand alone.
 -/
 import Musubi.PacketCoupling
 import Musubi.CutHistory

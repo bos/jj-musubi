@@ -1,3 +1,7 @@
+/-
+Naming stabilization inside a frozen round and the first fresh head-bearing reply. The
+convergence proof uses this file.
+-/
 import Musubi.EarlyEntry.Control
 
 namespace Musubi.EarlyEntry.Control

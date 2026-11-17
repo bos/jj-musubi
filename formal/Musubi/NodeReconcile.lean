@@ -2,6 +2,9 @@
 The node-side entry to the stable-record suffix. A node that has already dropped every
 current hub drop can take the current record list immediately: none of its surviving heads
 can block adoption. This does not require the hub's head to have stabilized.
+
+The convergence proof does not use this file; it proves that every reachable node head of the
+executable recovery union survives its dropped set, which stands alone.
 -/
 import Musubi.PacketCoupling
 

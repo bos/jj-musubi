@@ -2,8 +2,12 @@
 Every issued push names a raw operation already created by the SAME node exchange.
 The bound is derived from Issue, WriteRes and the scoped post-write graph, and is retained
 by all actual request-list changes. It is not an extra bound on future accepted packets.
+
+The convergence proof uses this file except `hub_stabilizes_hive`, which is not used by the
+assembly: it states the hub's stability for a whole hive observation, a result in its own right.
 -/
-import Musubi.HistoryReplies
+import Musubi.HubHistory
+import Musubi.SysFreshCuts
 import Musubi.HiveFilter
 
 namespace Musubi.Recovery.HubSys

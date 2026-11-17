@@ -15,6 +15,10 @@ most once, to that one vertex, and never back.
 The pending originals not yet named by a vertex of the history are finitely many, and each
 renaming spends one, so the renamings stop. Neither the known head nor how often a name changes
 is assumed to settle.
+
+The convergence proof uses this file except `pending_names_settle_with_old_known`,
+`pending_names_settle_from_sources`, `finite_metadata_output_stabilizes` and their helpers, which
+are not used by the assembly and stand alone.
 -/
 import Musubi.AsyncLiveness
 
@@ -295,7 +299,7 @@ def sourceHead (old : Nat) (heads : Nat → Nat) : Option Nat → Nat
   | none => old
   | some i => heads i
 
-/-- A direct source-indexed form for the actual-time history from GlobalRaw: `none` is the
+/-- A direct source-indexed form for the actual-time history: `none` is the
 unchanged old pair, and `some i` records a head observed at time `i` in the current window.
 No numerical comparison of the old native sequence with the current one is made. -/
 theorem pending_names_settle_from_sources (H : History par hist 0 orig)

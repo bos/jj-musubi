@@ -16,5 +16,7 @@ Importing this module exposes every layer. `FineAssembly.hive_converges_observed
 fine-system premise by replaying observed events. The contracts still include eventual handling,
 restart and scheduling obligations, and the separate `autoWritesStop` assumption; the assembly
 does not derive termination of automatic native writes.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Convergence

@@ -5,6 +5,8 @@ of obligation; `HiveContracts` assembles them without adding a premise.
 The observation begins after the last destructive fault that loses records, drops or recent
 local writes. Convergence on this suffix transfers to the whole execution by its time offset.
 The cuts, truthful knowledge, entry, hub stability and eligibility are derived in `Convergence`.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Cuts
 import Musubi.SysAcceptance.Events

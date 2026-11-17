@@ -1,6 +1,8 @@
 /-
 The phase boundaries of hive convergence. Record cuts and quiet suffixes are derived by
 `Convergence`; the source contracts take them only to scope the laws of each phase.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Observations
 

@@ -4,6 +4,10 @@ Completing or retiring a request removes its slot; once a finite cut is chosen, 
 cannot create old slots. Fix-ups are cached across retries. The fix-up bound additionally
 requires pending drops, named by immutable originals, to shrink after a first alignment.
 The tests check slot consumption and cached writes, not eventual entry into such an epoch.
+
+The convergence proof uses this file except the fix-up write bounds (`fixup_writes_le_one`,
+`fixups_eventually_stop`) and the publication facts (`publication_retry`,
+`publication_tip_cached`), which are not used by the assembly and stand alone.
 -/
 import Musubi.AsyncLiveness
 

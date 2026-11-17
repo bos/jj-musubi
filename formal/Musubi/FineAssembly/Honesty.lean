@@ -1,6 +1,8 @@
 /-
 Replies and notifications answered after the cut carry honest hub snapshots. This invariant
 is proved along the actual replay, separately from assembling the convergence interface.
+
+The convergence proof uses this file.
 -/
 import Musubi.NativeEvents
 

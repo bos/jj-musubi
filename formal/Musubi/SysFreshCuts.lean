@@ -14,8 +14,9 @@ Notifications: removal is exact (`List.erase`), so a node's notifications made b
 only ever leave, one each time it processes one, and those made since are later.
 
 With the hub settled at `st` from the cut, no notification is made after it, so every one the
-node processes from some point on is the stable hub's. This gives `node_settles_entry` and
-`early_entry_sys` without their cut premises (`node_settles_fresh`, `early_entry_fresh`).
+node processes from some point on is the stable hub's.
+
+The convergence proof uses this file.
 -/
 import Musubi.NodeSysEntry
 import Musubi.AsyncLiveness
@@ -357,58 +358,6 @@ theorem fair_mono {ρ : Nat → Sys} {acts : Nat → Act} {n a b : Nat} (hf : Fa
     (hab : a ≤ b) : Fair ρ acts n b :=
   ⟨fun i hi => hf.start i (by omega), fun i hi => hf.core i (by omega),
     fun i hi => hf.reply i (by omega)⟩
-
-/-- `node_settles_entry` with its cuts derived: node `n` in the system, from a well-formed
-start, once the hub has settled at `st`, under fair scheduling of its events and housekeeping
-that writes stopping, settles at the stable hub's head under a label `H` of it, or sends a push
-from it that the stable hub would accept. No cut on old replies or notifications is assumed;
-they may stay in flight forever. -/
-theorem node_settles_fresh (ρ : Nat → Sys) (acts : Nat → Act) (n k0 k kf : Nat) (st : Snap)
-    (hstep : ∀ i, k0 ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
-    (h0 : RunOK law D n (ρ k0)) (hk : k0 ≤ k) (hstable : ∀ i, k ≤ i → (ρ i).hub = st)
-    (hfair : Fair ρ acts n kf) (hmaint : ∃ kb, ∀ i, kb ≤ i → acts i ≠ .core n .maint) :
-    ∃ k' H, k < k' ∧ H < ((ρ k').node n).ns.next ∧ ((ρ k').node n).emb H = st.head ∧
-      ((∃ i, k' ≤ i ∧ labOf n ⟨st.seq, H, st.recs, D n⟩ (ρ i) (acts i) = .emit ∧
-          ∃ post new, Emit ⟨st.seq, H, st.recs, D n⟩ ((ρ i).node n).ns post new) ∨
-        ∃ K, ∀ i, K ≤ i → NodeSettle.Settled ⟨st.seq, H, st.recs, D n⟩ ((ρ i).node n).ns) := by
-  have hK := runOK_run ρ acts hstep h0
-  have hstepk : ∀ i, k ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)) :=
-    fun i hi => hstep i (by omega)
-  obtain ⟨kr, hkr, hold⟩ := old_replies_stop ρ acts n k hstepk (hK k hk).sys
-  obtain ⟨kn, hkn, hnold⟩ := old_notes_stop ρ acts n k hstepk
-  have hNf := notes_from_stable ρ acts k st hstepk (hK k hk).time hstable
-  have hnotes : ∀ i, kr + kn + kf ≤ i → ∀ nt, acts i = .notice n nt → nt.snap = st := by
-    intro i hi nt ha
-    have hs := hstep i (by omega)
-    rw [ha] at hs
-    cases hs with
-    | notice _ _ _ _ _ _ _ _ _ hn =>
-      exact hNf i (by omega) nt hn (hnold i (by omega) nt ha)
-  obtain ⟨k', H, hk', hrest⟩ := node_settles_entry ρ acts n k0 k (kr + kn + kf) st hstep h0 hk
-    (by omega) hstable (fun i hi => hold i (by omega)) hnotes (fair_mono hfair (by omega))
-    hmaint
-  exact ⟨k', H, by omega, hrest⟩
-
-/-- `early_entry_sys` with its cuts derived: after the record cut at `kr` (the hub's records
-`R` and its sequence at least `sq` from then on), a fair eligible node comes to have `R`
-applied and to know a pair from after the cut, and keeps both. No cut on old replies or
-notifications is assumed. -/
-theorem early_entry_fresh (ρ : Nat → Sys) (acts : Nat → Act) (n k0 kr kf R sq : Nat)
-    (hstep : ∀ i, k0 ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
-    (h0 : RunOK law D n (ρ k0)) (hk : k0 ≤ kr)
-    (hrec : ∀ i, kr ≤ i → (ρ i).hub.recs = R ∧ sq ≤ (ρ i).hub.seq)
-    (hE : ∀ i, kf ≤ i → ¬ ∃ y ∈ ((ρ i).node n).ns.heads, D n R y)
-    (hfair : Fair ρ acts n kf) (hmaint : ∃ kb, ∀ i, kb ≤ i → acts i ≠ .core n .maint) :
-    ∃ k, kr ≤ k ∧ ∀ i, k ≤ i → Entry R sq ((ρ i).node n).ns := by
-  have hK := runOK_run ρ acts hstep h0
-  have hstepk : ∀ i, kr ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)) :=
-    fun i hi => hstep i (by omega)
-  obtain ⟨kc, hkc, hold⟩ := old_replies_stop ρ acts n kr hstepk (hK kr hk).sys
-  obtain ⟨kn, hkn, hnold⟩ := old_notes_stop ρ acts n kr hstepk
-  obtain ⟨k, hk1, hent⟩ := early_entry_sys ρ acts n k0 kr (kc + kn + kf) R sq hstep h0 hk
-    (by omega) hrec (fun i hi => hold i (by omega)) (fun i hi => hnold i (by omega))
-    (fun i hi => hE i (by omega)) (fair_mono hfair (by omega)) hmaint
-  exact ⟨k, by omega, hent⟩
 
 end Cuts
 

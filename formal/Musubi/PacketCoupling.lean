@@ -2,8 +2,12 @@
 One complete push, coupled to the state from which it was sent. The supersede ledger alone
 does not provide request identity: its entries omit the expected head and are matched by
 node and new head. Here the accepting action takes all fields from the same immutable packet.
+
+The convergence proof uses `PushPacket` from this file. The packet-coupling theorems
+(`packet_sender_aligned`, `packet_accept_fields` and the rest) are not used by the assembly and
+stand alone.
 -/
-import Musubi.RecoveryEpoch
+import Musubi.PostCut
 
 namespace Musubi.Exec
 

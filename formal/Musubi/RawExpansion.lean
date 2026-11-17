@@ -3,6 +3,8 @@ Expand a finite batch of raw graph growth into one-vertex model steps. The batch
 zero new vertices, and its length need not have a uniform bound. Unused parent-function
 values outside next are normalized to empty. This is a structural simulation, not a premise
 that a progress measure decreases or that a sync finishes.
+
+The convergence proof uses this file.
 -/
 import Musubi.HubSuffix
 import Musubi.Expansion

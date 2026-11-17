@@ -3,6 +3,8 @@ The packet ledger of the joint system. It retains immutable request fields, not 
 reading of a sender's state. Initial requests have no current generation. Every later
 eligible push is recorded with its actual send generation; noneligible requests need not
 be recorded once the record/drop cut excludes their acceptance.
+
+The convergence proof uses this file.
 -/
 import Musubi.HubSys
 

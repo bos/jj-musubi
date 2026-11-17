@@ -6,6 +6,8 @@ mid-batch knowledge. The call-batch correspondence must justify that delayed boo
 Parent lists outside the created raw universe are normalized to empty: changes to those unused
 function values are not graph changes. Store/object fields not observed by HubSuffix are left
 abstract here; packet closure is checked separately by PacketAcceptance.
+
+The convergence proof uses this file.
 -/
 import Musubi.NodeSys
 import Musubi.Expansion
@@ -51,16 +53,6 @@ theorem parents_same {g g' : Sys} (hn : g'.next = g.next)
   split
   · exact hp x ‹x < g.next›
   · rfl
-
-/-- Global raw acyclicity is a native DAG contract, not a consequence of RawGrow alone:
-RawGrow only protects old parents, and says nothing about new ones. -/
-theorem parents_parLt {g : Sys} (hp : ∀ x, x < g.next → ∀ p ∈ g.par x, p < x) :
-    ParLt (parents g) := by
-  intro x p h
-  by_cases hx : x < g.next
-  · simp only [parents, hx, ↓reduceIte] at h
-    exact hp x hx p h
-  · simp [parents, hx] at h
 
 theorem state_usame {g g' : Sys} {hist hist' : Nat → Nat}
     (hn : g'.next = g.next) (hp : ∀ x, x < g.next → g'.par x = g.par x) :

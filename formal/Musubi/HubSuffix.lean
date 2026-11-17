@@ -18,6 +18,8 @@ Eligible nodes' knowledge must already be truthful within the window when the su
 (`inv_entry`): the caller must show they learned an honest reply from the window after the
 cut. A known pair whose head is the hub's head under a wrong sequence number is not
 consistent, and is not assumed to be.
+
+The convergence proof uses this file.
 -/
 import Musubi.AsyncLiveness
 

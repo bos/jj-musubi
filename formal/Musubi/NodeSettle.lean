@@ -15,6 +15,8 @@ The last section lists them, and what each must be tied to. Once the known head 
 the core advances when `prepare_records` said the records drop an op
 head, as well as when no head descends from the known one, so no invariant of the hub's
 dropped operations is needed.
+
+The convergence proof uses this file.
 -/
 import Musubi.RetryControl
 
@@ -630,15 +632,6 @@ theorem normA_some {o : Option Nat} {ap A : Nat} (h : normA o ap = some A) :
     · simp [normA, hb] at h
     · rw [normA_ne hb] at h
       cases h; exact ⟨rfl, hb⟩
-
-theorem normA_none {o : Option Nat} {ap : Nat} (h : normA o ap = none) :
-    o = none ∨ o = some ap := by
-  cases o with
-  | none => exact Or.inl rfl
-  | some B =>
-    by_cases hb : B = ap
-    · subst hb; exact Or.inr rfl
-    · rw [normA_ne hb] at h; cases h
 
 theorem oldAnnouncement_norm (c : Ctx) (σ : NS) : oldAnnouncement c (norm σ) = oldAnnouncement c σ := by
   show ind (∃ A, normA σ.annc σ.ap = some A ∧ A ≠ c.R ∧ A ≠ σ.ap) =

@@ -13,6 +13,8 @@ The primitive boundaries have separate owners:
 
 Entry, old-effect cutoffs and stabilization are derived. Eventual handling and restarts remain
 source obligations, as does the termination of automatic native writes (`autoWritesStop`).
+
+The convergence proof uses this file.
 -/
 import Musubi.FineAssembly.Honesty
 

@@ -1,6 +1,11 @@
 /-
 Project individual hub and node observations into fine system steps.
 See `Musubi.SysAcceptance` for the layers of the complete convergence argument.
+
+The convergence proof uses this file except the answer-observation check (`expectAnswer`,
+`checkAnswer_expect`, `HubAnswer.observed_step`), `HubAnswer.push_handled`, `NodeIssue.raw_step`
+and `learn_new_bare`, which are not used by the assembly; the first of these is the soundness
+proof of the oracle's `hubRead` check.
 -/
 import Musubi.SysFreshCuts
 import Musubi.HiveFilter

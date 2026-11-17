@@ -20,6 +20,8 @@ record-adoption cut (the applied records stay); the raw graph's acyclicity; no p
 a step that sends calls (under audit); and the hub's answers honest within the window of root's
 history (`HonestSnap`). Distinct op heads at a merge are a premise here too, which the hive
 derives (`heads_nodup_step`).
+
+The convergence proof uses this file.
 -/
 import Musubi.HubLedger
 import Musubi.NodeSysEntry
@@ -486,9 +488,6 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
     have k1 : known g' m = (σ'.known.1, emb' σ'.known.2) :=
       known_of (congrArg NS.known r1.1) r1.2
     have hpar : ∀ x, x < g.next → g'.par x = g.par x := hg.parRaw
-    have kn : ∀ (K' : Nat × Nat), K' = (g.node m).ns.known → known g' m = known g m → True :=
-      fun _ _ _ => trivial
-    clear kn
     -- the known pair stays, and its label keeps its raw id
     have hkeep : σ'.known = (g.node m).ns.known → known g' m = known g m := by
       intro hk

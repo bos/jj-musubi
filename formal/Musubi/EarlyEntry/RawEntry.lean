@@ -1,3 +1,7 @@
+/-
+Raw entry, its persistence and the native per-call contract assembly. The convergence proof uses
+this file.
+-/
 import Musubi.EarlyEntry.Abstract
 import Musubi.EarlyEntry.FreshFetch
 import Musubi.RecordEpoch

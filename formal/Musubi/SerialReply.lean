@@ -2,6 +2,10 @@
 The driver's serialized call boundary. Notifications are applied between calls; a matching
 response consumes its exact live slot. This connects the finite old-slot budget to actual
 head-control effects without assuming that an entire sync loop terminates.
+
+The convergence proof uses `handleHead`, `filteredLearn`, `own_reply_learns`,
+`object_recoveries_stop` and `wentBack` from this file. The serialized-call model and its
+invariant are not used by the assembly and stand alone.
 -/
 import Musubi.RetryControl
 

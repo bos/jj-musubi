@@ -5,6 +5,9 @@ require reconciliation; every subsequent fresh Fetched announces the fixed list.
 invalidate a retained realization plan. A stale-plan error reopens the daemon, clearing its
 plan and announcement, and resetting knowledge in the full control state. This projection
 forgets knowledge, so it does not pretend that restart preserves the local progress rank.
+
+The convergence proof uses this file except `exec_sound` and the `Guard` facts, which are not
+used by the assembly.
 -/
 import Musubi.RetryControl
 

@@ -2,6 +2,9 @@
 Pruned-prefix custody for the extended recovery model, and reconstruction of a fresh reply's
 ordered records. A dropped-set cut alone does not imply that a node can read a pruned prefix;
 that fact must survive the added prepared-adoption and survivor-acceptance transitions too.
+
+The convergence proof does not use this file; it proves held-prefix custody and the reconstruction
+of fresh ordered-record replies in the executable recovery union, which stands alone.
 -/
 import Musubi.NodeReconcile
 import Musubi.SerialReply

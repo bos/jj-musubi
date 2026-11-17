@@ -1,6 +1,9 @@
 /-
 Raw closure and frontier ranks for a frozen-known local burst. These contracts describe field
 changes; the rank decrease is proved from them, never assumed of the native core.
+
+The convergence proof uses this file except `no_infinite_burst`, `localFromImages` and
+`local_grows_after_inputs`, which are not used by the assembly and stand alone.
 -/
 import Musubi.NodeSettle
 import Musubi.PendingEpoch

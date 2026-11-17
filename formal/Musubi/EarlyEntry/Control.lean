@@ -1,3 +1,8 @@
+/-
+Raw control of a node after the record and receipt cuts: calls, frames, the core's choice and its
+executable raw survey. The convergence proof uses this file except `no_infinite_calls` and
+`raw_round_yields`, which are not used by the assembly and stand alone.
+-/
 import Musubi.EarlyEntry.Burst
 import Musubi.ExecSound
 

@@ -1,9 +1,9 @@
 /-
 The push a fair node sends from the settled hub's head is accepted, so the hub could not have
-settled: `node_settles_fresh`'s alternative is impossible, and the node settles
-(`node_settles_accepted`). Acceptance is not a premise. It comes from the executable hub's
-checks (`packet_checks_force_accept`) on the very packet the node's actual push step built,
-taken from its request (`Bodies`), not from some packet that `Emit` would allow.
+settled, and the node settles (`node_settles_accepted`). Acceptance is not a premise. It comes
+from the executable hub's checks (`packet_checks_force_accept`) on the very packet the node's
+actual push step built, taken from its request (`Bodies`), not from some packet that `Emit`
+would allow.
 
 The bridge to the executable hub is explicit and per request: for each push request the hub
 answers, a decision of the executable hub (`HubDecision`), its state before and after bound to
@@ -16,6 +16,8 @@ laws (`PacketPrimitives`: ancestry, survival, upload closure) are native laws of
 hub's head with its records, stated as such. Requests are answered fairly one by one. With the
 system's own facts at the push (the node's invariant at its first push, its write, its scoped
 embedding), the checks hold, the hub's only decision is to accept, and its sequence would move.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysFreshCuts
 import Musubi.PacketAcceptance
@@ -184,13 +186,12 @@ theorem no_accepting_emit (ρ : Nat → Sys) (acts : Nat → Act) (n k i h M : N
     rw [decision.seqAfter, decision.seqBefore, hhubJ, hhubJ'] at hseq
     omega
 
-/-- `node_settles_fresh` without its alternative: node `n` in the system, from a well-formed
-start, once the hub has settled at `st`, settles at the stable hub's head under a label `H` of
-it. Fair scheduling of its events and of the hub's answers to its requests, housekeeping that
-writes stopping, the executable hub deciding each push request the system's hub answers, and the
-primitive laws of a push from the hub's head with its records are assumed; records are read
-through `decode`, with no injectivity. No acceptance, and no cut on old replies or
-notifications. -/
+/-- Node `n` in the system, from a well-formed start, once the hub has settled at `st`, settles at
+the stable hub's head under a label `H` of it. Fair scheduling of its events and of the hub's
+answers to its requests, housekeeping that writes stopping, the executable hub deciding each push
+request the system's hub answers, and the primitive laws of a push from the hub's head with its
+records are assumed; records are read through `decode`, with no injectivity. No acceptance, and no
+cut on old replies or notifications. -/
 theorem node_settles_accepted (ρ : Nat → Sys) (acts : Nat → Act) (n k0 k kf M : Nat) (st : Snap)
     (decode : Nat → List Exec.Rec)
     (hstep : ∀ i, k0 ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
@@ -302,7 +303,7 @@ theorem eligible_system_converges {N : Nat} {D : Nat → Nat → Nat → Prop} {
       rw [stable j sj] at raw heads
       exact ⟨settled, raw, heads⟩
     · exact ⟨0, fun _ _ hn => False.elim (he hn)⟩
-  obtain ⟨cut, hc⟩ := Recovery.finite_common_cut N _ each
+  obtain ⟨cut, hc⟩ := finite_common_cut N _ each
   exact ⟨k, max k cut, by omega, fun i hi => stable i (by omega),
     fun n hn => hc (max k cut) (by omega) n (hN n hn) hn⟩
 

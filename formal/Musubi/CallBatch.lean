@@ -5,6 +5,9 @@ each call starts, and other callers or subscriptions may allocate between them. 
 needs an injective relabelling of the actual live ids, not order preservation or equality of
 the physical and virtual counters. A finite batch completes from fairness of starting and
 finishing each individual call; no sync-round completion is assumed.
+
+The convergence proof does not use this file; it justifies modelling a driver's sequential native
+calls and their wire ids, which stands alone.
 -/
 import Musubi.RetryControl
 

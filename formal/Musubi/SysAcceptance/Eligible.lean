@@ -1,6 +1,8 @@
 /-
 Filter the actual hive to eligible nodes and assemble their stable-hub convergence.
 See `Musubi.SysAcceptance` for the layers of the complete convergence argument.
+
+The convergence proof uses this file.
 -/
 import Musubi.SysAcceptance.Acceptance
 

@@ -1,7 +1,7 @@
 /-
 Record stabilization for the complete executable recovery relation. Survivor advancement,
 prepared adoption and contracted acceptance must satisfy the same append/prune argument as
-the older executable rules; a cut proved only for `sexecStep` does not cover those runs.
+the rules of `sexecStep`; a cut proved only for `sexecStep` does not cover runs that use them.
 -/
 import Musubi.ContractedExec
 import Musubi.RecordStability

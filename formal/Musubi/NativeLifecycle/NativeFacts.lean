@@ -1,7 +1,8 @@
 /-
-Exact raw observation lookups, not source-selection or rendered-output predicates. Tables
-must come from independent native replay/encoding observations before Rust correspondence
-consumes them. Reference labels do not authenticate a table. No native law is asserted here.
+Lookups in tables of exact raw observations: encodings of complete bodies, native merge calls,
+helper outcomes and the physical Git state. A table must come from independent native replay or
+encoding observations, and a reference label does not authenticate it. The lookups answer no
+source-selection or rendering question, and no native law is asserted.
 -/
 import Musubi.NativeLifecycle.Selectors
 

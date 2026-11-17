@@ -1,5 +1,5 @@
 /-
-The accepted base's images (#138). `NodeAdapter::read_heads` refuses a history that has lost
+The accepted base's images. `NodeAdapter::read_heads` refuses a history that has lost
 the base the hub accepted, testing each image of the base that `to_node` gives against the op
 heads. Once the node drops the base, the base has several images, one for each of the
 operations below it that survive. `Covered` says that every image is below a head. It holds

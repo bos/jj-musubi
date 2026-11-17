@@ -1,7 +1,10 @@
 /-
-The record-aware executable progress check uses surviving images. The original mAdv can
-increase when an advance replaces a dropped expected head by several surviving heads. These
-definitions extend that check; they do not prove termination of the full union relation.
+The executable progress measure over surviving images. `EState.advE` (`mAdv` in `Exec.lean`)
+says whether a node still has to advance to its known head, but a survivor advance replaces a
+dropped known head by several surviving heads, so that component can increase. `advCE` counts
+instead the surviving images of the known head that no current head covers (`uncoveredImages`),
+and the other components are rebuilt around it. These definitions extend the measure; they do
+not prove termination of the full union relation.
 -/
 import Musubi.ContractedExec
 
@@ -66,7 +69,7 @@ def rankLess : List Nat → List Nat → Bool
   | _ :: _, [] => false
   | x :: xs, y :: ys => if x == y then rankLess xs ys else decide (x < y)
 
-/-- Without dropped operations the extended check is exactly the old one. -/
+/-- Without dropped operations the measure equals `EState.rmeasureE` of `Exec.lean`. -/
 theorem rmeasureCE_without_drops {ses : SEState} {N : Nat} (hlt : ParLt ses.es.parF)
     (hD : ∀ n x, (ses.nodeDF n).contains x = false) :
     ses.rmeasureCE N = ses.es.rmeasureE N := by

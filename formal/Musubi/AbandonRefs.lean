@@ -1,8 +1,9 @@
 /-
-The boundary between original operations, contracted survivors and one remote ref. This is
-not another network model: Supersede handles record delivery. Here a delivered dropped set
-renames *the current heads*, including work published since preparation, before realization
-is merged and published. Expected values are snapshots, not recomputed from contracted parents.
+The boundary between original operations, contracted survivors and one remote ref. Record
+delivery is modeled in `Supersede.lean`; here a delivered dropped set renames *the current
+heads*, including work published since preparation, before realization is merged and
+published. Expected values are snapshots, taken before contraction rather than recomputed from
+contracted parents.
 -/
 import Musubi.Contract
 import Musubi.ExecSound
@@ -22,14 +23,15 @@ def takeHeads (par : Nat → List Nat) (D : Nat → Bool) (heads : List Nat)
     (incoming : Nat) : List Nat := Exec.maxL (cpar par D) (candidates par D heads incoming)
 
 /-- The original-operation abstraction is unambiguous, even across different dropped sets.
-This is the immutable-content premise enforced by original identity validation (#73). -/
+This is the immutable-content premise that validating original identities enforces. -/
 theorem abstraction_unique {par : Nat → List Nat} (hlt : ParLt par)
     {content : Nat → Nat} (hi : Function.Injective content) {D E : Nat → Bool} {x y : Nat}
     (h : cid content par D x = cid content par E y) : x = y :=
   (cid_eq hlt hi h).1
 
-/-- Preparing an old record prefix and then the rest has the same canonical names as
-adopting their union. This is about graph contraction, not ordered-record liveness (#75). -/
+/-- Preparing a record prefix and then the rest has the same canonical names as
+adopting their union. This is a fact about graph contraction; ordered-record liveness is in
+`RecordLiveness.lean`. -/
 theorem adoption_composes {par : Nat → List Nat} (hlt : ParLt par)
     (content : Nat → Nat) (D E : Nat → Bool) (x : Nat) :
     cid content (cpar par D) E x = cid content par (union D E) x :=
@@ -147,7 +149,8 @@ theorem publish_current (h : History T) (first : Bool) (e : T) (hs : CInv h.curr
 
 /-- The combined boundary uses operation-indexed payloads and the normalized graph's base.
 Every surviving branch remains, the ref action is a CStep, and the new published identity
-carries exactly the resulting slot and expectation. Expected-value derivation remains #76. -/
+carries exactly the resulting slot and expectation. Expected values are derived in
+`Expected.lean`. -/
 theorem publish_refines (h : History T) (first : Bool) (e : T)
     (hlt : ParLt h.par) (hf : ∀ p ∈ h.parents, p < h.next)
     {base : Nat} (hb : h.bases = [base]) (hs : CInv h.current)

@@ -636,8 +636,9 @@ def reply (request : Json) : Except String Json := do
   if (← str physical "scope") ≠ "refs/heads/x" then throw "finite physical projection scope"
   let physicalGit ← label ctx.contents physical.compress
   let after ← get request "after"
-  -- C certifies only its first changed-head retry. Later retry canonicalization and
-  -- publication remain raw observations, never an extra identity/encoding premise here.
+  -- Only the first retry after the heads change is modeled (kind "retry"). The later retry
+  -- canonicalization and publication stay raw observations, with no extra identity or
+  -- encoding premise.
   let encodingRaw ← if (← str request "kind") = "retry" then get request "prepared" else pure after
   let observedBodies ← decodeEvidence ctx encodingRaw
   let facts : NativeFacts := {

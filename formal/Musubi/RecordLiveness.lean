@@ -23,7 +23,7 @@ theorem recordConvergedE_iff {N : Nat} {ses : SEState} :
   simp [SEState.recordConvergedE, RecordConverged, sconvergedE_iff,
     List.all_eq_true, List.mem_range]
 
-/-- The old measure with finite record debt appended. -/
+/-- `smeasure` with the finite record debt `recordLagE` appended. -/
 noncomputable def recordMeasure (N : Nat) (ses : SEState) :=
   (smeasure N (sabs ses), ses.recordLagE N)
 

@@ -1,7 +1,8 @@
 /-
-Executable model examples, not native evidence or Rust correspondence. They pin observable
-decision differences: second-name overlap, concrete versus erased work, physical aliases,
-record custody, stale captures and the separate schedule restrictions of accepted #149 v2.
+Examples that pin the executable native lifecycle model's decisions, checked at build time:
+ownership of a second workspace name, concrete versus erased work, physical aliases of one
+canonical operation, record custody, stale captures, and the publication, helper and recovery
+windows. They are model examples, not native evidence and not a correspondence with Rust.
 -/
 import Musubi.NativeLifecycle
 import Musubi.NativeLifecycle.ConstructionSound
@@ -48,7 +49,8 @@ private def receipt : Receipt :=
   { identity := 0, recordPrefix := 0, records := [], capturedHeads := [p 1], input := evidence,
     locals := [(p 1, [p 4])] }
 
--- Ownership is computed from complete native/canonical inputs, including the second name.
+-- Whether the current Git fields are used depends on every name this copy owns, including the
+-- second one.
 #guard (gitChoice evidence 30 me [p 1] (p 2) saved none).map (·.useCurrent) = .ok true
 #guard (gitChoice evidence 30 me [p 3] (p 2) saved none).map (·.useCurrent) = .ok false
 #guard (gitChoice evidence 30 me [p 1] (p 2) saved none).map
@@ -73,25 +75,29 @@ private def foreignEvidence : Evidence :=
     identities := evidence.identities ++
       [⟨p 5, c 5, o 5, .markedBody⟩, ⟨p 7, c 6, o 6, .original⟩] }
 
--- An identical displayed spelling is not overlap when the target slot belongs to beta.
+-- A workspace name spelled like this copy's own, but belonging to machine beta, is not an
+-- overlap.
 #guard (gitChoice foreignEvidence 30 me [p 7] (p 5) saved none).map
   (fun choice => (choice.currentOwned, choice.targetOwned, choice.useCurrent)) =
     .ok ([(foreignName, 30)], [], false)
 
--- Erased work is below concrete work in either parent order, never a new owner source.
+-- The latest-work parent is the concrete one in either parent order, and erased work gives
+-- no owner.
 #guard latestWorkParent evidence 30 me [c 4, c 3] = .ok 1
 #guard latestWorkParent evidence 30 me [c 3, c 4] = .ok 0
 #guard (selectOwn evidence 30 me (c 2) [p 3] [p 3] none) =
   .error (.malformed "parent vector identity")
 
--- A missing operation differs from an observed empty workspace map.
+-- An operation with an observed empty workspace map has no names; a missing operation is an
+-- error, and a missing restore target contributes no names.
 #guard ownOfNative evidence 30 me (p 0) = .ok []
 #guard ownOfNative evidence 30 me (p 88) = .error (.physical (p 88))
 #guard privateNames { evidence with native := evidence.native ++
   [{ id := p 8, parents := [p 0], source := .restore (p 88), workspaces := [(b, 20)] }] }
     me 30 (p 8) = .ok []
 
--- Exact same-receipt counterparts precede published/preferred local aliases.
+-- Source choice: a counterpart recorded in the same receipt wins over published aliases; two
+-- published aliases of one canonical operation are ambiguous and both stay heads.
 #guard (candidates evidence 30 [p 1] (some receipt) (c 1)).map chooseSource =
   .ok (.selected .prepared (p 4))
 #guard (selectParents evidence 30 [p 1] (some receipt) (c 2)).map (·.parents) =
@@ -103,7 +109,8 @@ private def foreignEvidence : Evidence :=
 private def drop : Record := { before := 0, identity := 1, drops := [o 1] }
 private def taking : Receipt := { receipt with identity := 1, records := [drop] }
 
--- Root classification comes from record transformation, not a supplied current-Git bit.
+-- Whether the base is the root is computed from the records taken, and decides the current-Git
+-- choice.
 #guard preparedBase evidence 30 saved taking = .ok (some (c 0))
 #guard rootBase evidence 30 saved (some taking) = .ok true
 #guard rootBase evidence 30 saved (some { taking with switched := true }) = .ok false
@@ -129,12 +136,15 @@ private def exported : NativeBody :=
   ⟨[], [], []⟩).earlier = [drop]
 #guard run state [.finish] = .error .phase
 
--- Allocating a label and creating a physical body are different effects; exact reuse is real.
+-- Allocating a model label and creating a physical body are separate; rewriting an identical
+-- body creates no second one.
 #guard (run state [.receive taking, .saveCustody, .allocateLabel, .write namedWrite,
   .allocateLabel, .write namedWrite]).map
     (fun s => (s.allocatedLabels, s.createdBodies)) = .ok (2, 1)
 
--- A pre-validation command causes retry. After the successful reread E1 is explicit.
+-- A native command before the final reread of the heads makes the attempt retry. After that
+-- reread, an external effect is recorded as an overlap in the publication window, in a helper's
+-- run, or in recovery.
 #guard (run state [.capture, .prepare (c 2) (p 2), .external [p 3] 0, .revalidate]).map
   (fun s => (s.phase, s.outside)) = .ok (.preparing, [])
 #guard (run state [.capture, .prepare (c 2) (p 2), .revalidate,
@@ -144,7 +154,7 @@ private def exported : NativeBody :=
   (fun s => (s.helper, s.outside)) = .ok (some .direct, [.helperOverlap])
 #guard (run state [.startRecovery, .external [p 3] 0]).map (·.outside) = .ok [.recoveryOverlap]
 
--- Bookkeeping has no physical writer effect; the export event records that effect separately.
+-- Bookkeeping leaves the physical Git state alone; only the export observation changes it.
 #guard (run state [.bookkeeping (p 1) 99]).map (·.physicalGit) = .ok 0
 #guard (run state [.capture, .prepare (c 2) (p 2), .revalidate,
   .write ⟨exported, []⟩,
@@ -155,7 +165,8 @@ private def beforeMove : List Action :=
   [.receive unmovedReceipt, .capture, .prepare (c 2) (p 2), .revalidate,
     .write ⟨exported, []⟩, .observeExport ⟨p 2, p 6, 0, 8, 8, 0⟩]
 
--- Publishing requires saved intent; interruption retains both physical heads and that intent.
+-- Publishing a head requires the saved move intent. An interrupted publication keeps both
+-- physical heads and the intent, and recovery finishes the move.
 #guard (run state (beforeMove ++ [.addHead (p 6)])) = .error .intent
 #guard (run state (beforeMove ++ [.saveIntent (some (p 6)) none, .addHead (p 6),
   .interrupt, .restart])).map (fun s => (s.heads, s.saved.intent.map (·.to))) =
@@ -164,7 +175,8 @@ private def beforeMove : List Action :=
   .interrupt, .restart, .startRecovery, .finishMove, .finishRecovery, .finish])).map
     (fun s => (s.heads, s.saved.intent.isNone, s.outside)) = .ok ([p 6], true, [])
 
--- A prejoin namespace does not turn an unmapped ancestor into a canonical root counterpart.
+-- In a prejoin namespace, an ancestor with no canonical counterpart is not mapped to the
+-- canonical root.
 private def prejoinEvidence : Evidence :=
   { root := c 0, physicalRoot := p 0,
     canonical := [
@@ -186,7 +198,8 @@ private def prejoinEvidence : Evidence :=
   [{ id := p 3, parents := [p 0] }] } 20 [p 2, p 3] none (c 0)).map chooseSource =
     .ok (.unavailable .published [(p 3, .unresolvedIdentity (p 3) .missingFingerprint)])
 
--- Hold keeps readable departed applied receipts, not merely the union of their drops.
+-- Taking responsibility for records keeps each readable record of the applied receipts that
+-- departed, not just the union of their drops.
 private def secondDrop : Record := { before := 1, identity := 2, drops := [o 2] }
 private def departed : Persistent :=
   takeResponsibility { saved with applied := [drop] } unmovedReceipt ⟨[], [], []⟩
@@ -216,8 +229,8 @@ private def lostOpaque : Persistent :=
 #guard (lostOpaque.earlier, lostOpaque.pending) = ([], [o 2])
 #guard heldRecords lostOpaque 2 2 = none
 
--- Recovery of A→A', B→B' moves classified heads. C is new native work replacing A;
--- missing independent identity material now leaves this model call explicitly unresolved.
+-- Recovery of a saved move A→A', B→B' moves the heads it can classify. A head `p 5` is new
+-- native work replacing A; with no identity material for it, the call is reported unresolved.
 private def recoveryEvidence : Evidence :=
   { root := c 0, physicalRoot := p 0,
     canonical := [
@@ -263,7 +276,8 @@ private def interruptedMove : State :=
   (·.heads) = .ok [p 3, p 4]
 #guard (run interruptedMove [.addHead (p 3), .finishMove]).map (·.heads) = .ok [p 3, p 4]
 
--- These tables exercise computed shape lookup. They are model examples, not native hashes.
+-- Receipt construction looks up the hash of each computed body in a table; the tables here
+-- are model examples, not native hashes.
 private def contracted : CanonicalBody :=
   { id := c 20, original := o 2, originalParents := [o 1], parents := [c 0], forgets := [me],
     stamp := some { known := [me], latest := [], worked := [(me, [o 1])] } }
@@ -280,7 +294,8 @@ private def observedReceipt : Receipt :=
 private def receiptState : State :=
   { state with heads := [p 2], nativeFacts := receiptFacts }
 
--- Contraction derives both the presence stamp and physical map; raw locals are only compared.
+-- Contraction computes the presence stamp and the map of rewritten heads; the observed map is
+-- only compared with the computed one, and must match it exactly.
 #guard (constructReceipt evidence receiptFacts saved me [p 2] request).map
   (fun result => (result.canonicalWrites, result.nativeWrites, result.base)) =
     .ok ([contracted], [rewritten], some (c 0))
@@ -294,7 +309,7 @@ private def receiptState : State :=
 #guard (constructReceipt evidence {} saved me [p 2] request) =
   .error (.encoding "canonical body")
 
--- The shared accepted base follows incoming contractions, independently of local drops.
+-- The accepted base follows the incoming records' contractions, not the local pending drops.
 #guard (constructReceipt evidence receiptFacts { saved with acceptedBase := some (c 2) }
   me [p 2] request).map (·.base) = .ok (some (c 20))
 #guard (constructReceipt evidence receiptFacts
@@ -320,7 +335,8 @@ private def forkBase : Evidence :=
 
 private def normalizedJoin : NativeBody :=
   { id := p 41, parents := [p 0], marker := some (c 1) }
--- An unaffected join keeps its native parent even when a normalized encoding is available.
+-- A join the records don't affect keeps its native parent, even when an encoding of the
+-- normalized body is available.
 #guard (constructReceipt prejoinEvidence {} {} me [p 2] ⟨0, 0, 0, []⟩).map
   (fun result => (result.canonicalWrites, result.nativeWrites,
     lookup result.computed.locals (p 2))) = .ok ([], [], some [p 2])
@@ -328,7 +344,7 @@ private def normalizedJoin : NativeBody :=
   { encodings := { native := [normalizedJoin] } } {} me [p 2] ⟨0, 0, 0, []⟩).map
   (fun result => (result.canonicalWrites, result.nativeWrites,
     lookup result.computed.locals (p 2))) = .ok ([], [], some [p 2])
--- The affected domain still drops a join and rewrites an unmarked surviving descendant.
+-- A join the records do affect is dropped, and an unmarked surviving descendant is rewritten.
 #guard (constructReceipt prejoinEvidence {} {} me [p 2] request).map
   (fun result => lookup result.computed.locals (p 2)) = .ok (some [p 0])
 private def unmarkedSurvivor : Evidence :=
@@ -348,7 +364,7 @@ private def durationContracted : CanonicalBody :=
   { contracted with id := c 21, stamp := some {
       known := [me], latest := [], worked := [(me, [o 1])],
       forgetAfter := [(me, [(o 1, some 10)])] } }
--- Forget-after records change a contraction's hash even though ownership ignores duration.
+-- A forget-after duration changes the hash of a contracted body, though ownership ignores it.
 #guard (contractOne durationEvidence { canonical := [durationContracted] } [o 1] 30
   (c 2) { evidence := durationEvidence }).map (fun result => result.1.writes) =
     .ok [durationContracted]
@@ -367,7 +383,8 @@ private def durationContracted : CanonicalBody :=
 
 private def fetchedSurvivor : State :=
   { receiptState with evidence := { evidence with canonical := evidence.canonical ++ [contracted] } }
--- Fetching a contracted body cannot bypass keep_custody via an uncommitted receipt plan.
+-- Render planning waits for the receipt to be committed, which itself needs saved custody;
+-- fetching a contracted body does not allow it earlier.
 #guard run fetchedSurvivor [.planReceipt request, .capture, .planRender (c 20)] = .error .phase
 #guard run fetchedSurvivor [.planReceipt request, .capture, .planRender (c 20),
   .writeRender 0, .restart] = .error .phase
@@ -384,7 +401,8 @@ private def refreshed : NativeBody :=
 private def renderFacts : NativeFacts :=
   { encodings := { native := [rendered, refreshed] } }
 
--- Every field is computed. A stale target's Git fields survive only unchanged parents.
+-- Every field of a rendered body is computed. A target's cached Git fields are reused only for
+-- identical ordered physical parents.
 #guard (constructRender evidence renderFacts me [p 1] none (c 2)).map
   (fun result => (result.result, result.nodes.map (·.body))) = .ok (p 22, [rendered])
 #guard (constructRender evidence renderFacts me [p 1] (some receipt) (c 2)).map
@@ -414,10 +432,12 @@ private def associationChecks : Query (List Bool) := do
     { prepared with inputs := { prepared.inputs with receipt := some receipt } }].map
       (preparedMatchesOrigin me · origin)
 
--- Equal result/suffix/reserved alone must not certify a different owner or planning input.
+-- A committed preparation matches its construction only if its owner, evidence, heads, target
+-- and receipt are the ones planned, not merely its result, suffix and reserved names.
 #guard associationChecks = .ok [true, false, false, false, false, false]
 
--- Historical preparation survives an actual external effect without adopting its new heads.
+-- A committed preparation keeps the heads it was planned from when an external effect moves
+-- the actual heads.
 #guard (certifiedConstructionRun me evidence [p 1] saved renderFacts 0
   (constructedRender ++ [.external [p 4] 7])).map (fun checked =>
     (checked.val.heads, checked.val.prepared.map (·.inputs.heads))) =
@@ -434,7 +454,8 @@ private def reparentedLeaf : NativeBody :=
 private def reparentedEvidence : Evidence :=
   { evidence with native := evidence.native ++ [reparentedLeaf] }
 
--- A native parent-only rewrite retains the old physical corpus and supplies no identity.
+-- A native rewrite of only the parents keeps the old physical bodies and gives the new body no
+-- identity.
 #guard decide (((Json.observedHeadReparent evidence reparentedEvidence [p 3] [p 80] (p 1) 0).map
   (fun observed => (observed.native, observed.identities, observed.heads))).toOption =
     some ([reparentedLeaf], [], [p 80]))
@@ -461,8 +482,8 @@ private def staleWriteStart : State :=
 private def priorEmptyReceipt : Receipt :=
   requestReceipt ⟨0, 0, 0, []⟩ staleWriteStart.evidence [p 1]
 
--- Build the prior saved intent by an actual empty-record interrupted publication. Native
--- work replaces its old frontier before recovery starts; the next receipt needs no writes.
+-- A saved intent comes from an interrupted publication with no records. Native work then
+-- replaces its frontier before recovery starts, and the next receipt needs no writes.
 private def staleRenderAttempt : Except StepError State := do
   let previous ← run staleWriteStart [
     .planReceipt ⟨0, 0, 0, []⟩, .commitReceipt priorEmptyReceipt,
@@ -477,7 +498,8 @@ private def staleRenderAttempt : Except StepError State := do
 #guard (staleRenderAttempt >>= fun s => run s [.startRecovery, .finishMove, .finish]).map
   (fun s => (s.heads, s.evidence.native.contains staleWriteBody, s.saved.custody, s.renderPlan)) =
     .ok ([p 0], false, [], none)
--- Clearing the current receipt cannot detach the captured plan's custody obligation.
+-- A render plan keeps the custody obligation of the receipt it captured, even after the
+-- current receipt is cleared.
 #guard (staleRenderAttempt >>= fun s =>
   run s [.startRecovery, .finishMove, .finish, .writeRender 0, .restart]) = .error .phase
 #guard (staleRenderAttempt >>= fun s => run s [.writeRender 0]) = .error .custody
@@ -505,7 +527,8 @@ private def helperState : State :=
     heads := [p 1, p 4], closedPublication := true,
     nativeFacts := { helpers := [helperFact] } }
 
--- An owned helper creates real bodies inside E1/E2, without allocating canonical labels.
+-- The adapter's own helper creates native bodies during the publication or helper window, as
+-- planned, without allocating canonical labels or counting as an external writer.
 #guard (run helperState [.helperEnter true, .ownHelper 0, .helperExit]).map
   (fun s => (s.heads, s.outside, s.createdBodies, s.allocatedLabels,
     s.physicalGit, s.physicalKnown)) = .ok ([p 30], [], 1, 0, 7, true)
@@ -546,12 +569,13 @@ private def tied : Evidence :=
     native := evidence.native ++ [{ id := p 40, parents := [p 0], workspaces := [(a, 99)] }],
     identities := evidence.identities ++ [⟨p 40, c 40, o 40, .original⟩] }
 
--- Equal end times use native physical-id order, even when the raw frontier is reversed.
+-- Operations with equal end times are ordered by physical id, whatever the order of the raw
+-- frontier.
 #guard ownAtHeads tied 30 me [p 40, p 1] = ownAtHeads tied 30 me [p 1, p 40]
 #guard (ownAtHeads tied 30 me [p 40, p 1]).map (fun bindings => lookup bindings a) = .ok (some 10)
 
--- Publication has a supplied operand vector. Tied times preserve it in either direction;
--- these guards establish model behavior, not a native stable-sort law.
+-- Publication merges the operands in the order given, in either direction, when times tie.
+-- These guards show the model's behavior, not a native stable-sort law.
 #guard orderedPublicationInputs tied [p 40, p 1] = .ok [p 40, p 1]
 #guard orderedPublicationInputs tied [p 1, p 40] = .ok [p 1, p 40]
 
@@ -564,8 +588,8 @@ private def partialIdentity : Evidence :=
       { id := c 51, original := o 51, originalParents := [o 50], parents := [c 50] }],
     nativeFingerprints := [(p 51, 51)], originalFingerprints := [(o 51, 51)] }
 
--- Raw decoding can retain both bodies without inventing identities or losing fallback
--- eligibility. Unknown identity is never a negative counterpart or a root namespace.
+-- A body with unresolved identity is kept as a gap: it is never taken to have no counterpart
+-- or to be in the root namespace, and every query that needs its identity reports the gap.
 #guard classifyIdentity partialIdentity 30 (p 50) = .ok (.unresolved .missingFingerprint)
 #guard classifyIdentity partialIdentity 30 (p 51) = .ok (.unresolved (.dependency (p 50)))
 #guard partialIdentity.counterpart (p 50) =
@@ -582,8 +606,8 @@ private def partialIdentity : Evidence :=
   .error (.unresolvedIdentity (p 50) .missingFingerprint)
 #guard encodeNative partialIdentity {} unknownBody = .ok unknownBody
 
--- Independent role priority can leave a lower tier unconsulted; consulting the same
--- full fallback, or encountering an unresolved published member, cannot select a source.
+-- Source tiers: a selected higher tier is not blocked by gaps in a lower one, but a gap in the
+-- tier being consulted (fallback, or a published member) means no source is selected.
 #guard (candidates partialIdentity 30 [p 1] none (c 1)).map chooseSource =
   .ok (.selected .published (p 1))
 #guard (candidates partialIdentity 30 [p 0] none (c 1)).map chooseSource =
@@ -593,8 +617,8 @@ private def partialIdentity : Evidence :=
 #guard (candidates partialIdentity 30 [p 1, p 50] none (c 1)).map chooseSource =
   .ok (.unavailable .published [(p 50, .unresolvedIdentity (p 50) .missingFingerprint)])
 
--- New positive evidence is checked, and dependent classifications are recomputed from
--- the retained fingerprint/parent material rather than clearing an old failure entry.
+-- Installing identity rows checks them against all established identities, and classifications
+-- that depend on them are recomputed from the retained fingerprints and parents.
 #guard (partialIdentity.installIdentities [⟨p 50, c 50, o 50, .original⟩] >>= fun next =>
   classifyIdentity next 30 (p 51)) = .ok (.known ⟨p 51, c 51, o 51, .original⟩)
 #guard (partialIdentity.installIdentities [⟨p 50, c 50, o 50, .original⟩] >>= fun next =>
@@ -616,8 +640,8 @@ private def stampCodecValue : Stamp :=
     worked := [(me, [o 0]), (beta, [o 0, o 1])],
     forgetAfter := [(me, [(o 0, none), (o 1, some 1000000007)]), (beta, [(o 0, some 0)])] }
 
--- A canonical wire stamp must decode to the construction's map representation, preserving
--- multiple owners, every set value, absent duration, zero and subsecond duration options.
+-- A canonical wire stamp decodes to the construction's map form, keeping multiple owners,
+-- every set value, absent durations, and zero and subsecond durations.
 #guard decide ((Json.stamp stampCodecContext (Lean.Json.mkObj [("attributes", Lean.Json.mkObj [
   ("musubi.presence", Lean.Json.str (Json.stampText stampCodecContext stampCodecValue))])])).toOption =
     some (some stampCodecValue))
@@ -639,8 +663,10 @@ private def descriptionEvidence : Evidence :=
 private def exclusionProjection (e : Evidence) (target : Canonical := c 52) :=
   (descriptionExclusion e (p 50) target).map (fun result => result.map (·.val))
 
--- A target-specific negative needs complete, separately observed empty routes. It is not
--- an identity for the unknown body, and does not transfer to a different drop survivor.
+-- An unknown body is excluded as a source for one target only when the ordinary-route
+-- observations are complete and empty and the body's description differs from what canonical
+-- ordinary construction gives that target. The exclusion gives the body no identity and says
+-- nothing about another target.
 #guard exclusionProjection descriptionEvidence = .ok (some {
   physical := p 50, target := c 52, targetOriginal := o 52,
   nativeDescription := "", originalDescription := "create bookmark child" })
@@ -683,8 +709,8 @@ private def sourceContext : Json.Context :=
 private def sourceFrameText (canonical : String) :=
   s!"step 00000000000000000001 00000000000000000001\nsource {sourceHash0} {canonical}\n"
 
--- Complete frames are retained; the checkpoint selects last-frame-per-number replay.
--- Torn/unrecognized input stays an interpretation gap instead of silently proving absence.
+-- Source log parsing keeps every complete frame, and the checkpoint selects the last frame for
+-- each step number. Torn or unrecognized input is an interpretation gap, not proof of absence.
 #guard decide (((Json.sourceFrames sourceContext evidence
   (sourceFrameText sourceHash0 ++ sourceFrameText sourceHash1)).map (·.length)).toOption = some 2)
 #guard decide ((Json.sourceFrames sourceContext evidence
@@ -707,8 +733,8 @@ private def sourceFrameText (canonical : String) :=
 
 private def routeState : State := { state with evidence := descriptionEvidence }
 
--- Pure capture/body/cache effects frame the observation. Route writes and unknown effects
--- invalidate it, and another capture cannot silently resurrect an old empty relation.
+-- The source-route observation survives capture, body and cache effects. A route write or an
+-- unknown effect invalidates it, and a later capture does not restore it.
 #guard (run routeState [.capture, .eraseMemo]).map (·.evidence.sourceRoutes) =
   .ok (some closedSourceRoutes)
 #guard (run routeState [.external [p 1] 0, .capture]).map (·.evidence.sourceRoutes) = .ok none
@@ -744,7 +770,8 @@ private def refreshState : State :=
       present := false, overlap := true, useCurrent := true },
     publication := some { incoming := p 70, beside := [p 4], mergeBeforeExport := true } }
 
--- Equal fields reuse even an unmarked original. Changed fields make its identity explicit.
+-- A body whose Git fields are unchanged is reused, even an unmarked original. A body with
+-- changed fields gets a marker naming its canonical identity.
 #guard currentGitBody unknownBody (c 50) 0 = unknownBody
 #guard (constructCurrentGit evidence {} [p 1] (c 1) (p 1)).map
   (fun build => (build.body.id, build.body.marker, build.writes)) = .ok (p 1, none, false)
@@ -765,7 +792,8 @@ private def refreshState : State :=
 #guard (run refreshState [.refreshCurrentGit, .merge [p 4, p 70] (p 4)]) =
   .error (.evidence (.malformed "native merge inputs"))
 
--- A real changed, record-named refresh requires the preparation's captured full receipt.
+-- A refresh that writes a body needs custody of the records in the preparation's captured
+-- receipt.
 private def refreshTaking : Receipt := { taking with input := refreshEvidence }
 private def namedRefreshState : State :=
   { refreshState with prepared := refreshState.prepared.map fun plan =>
@@ -795,8 +823,11 @@ private def probeState : State :=
     prepared := refreshState.prepared.map fun prepared =>
       { prepared with rendered := p 90, inputs := { prepared.inputs with heads := [p 3] } } }
 
--- Probe guards isolate action semantics. Their synthetic prepared slot is not a supplied
--- construction certificate; the generic historical-origin theorem derives that separately.
+-- Preparation probes: the two native merges of the rendered operand (forward and reversed
+-- operand order) write unpublished native bodies. They add those bodies to the native evidence,
+-- set the repository context, count the bodies in `createdBodies` and discard the source-route
+-- observation. The heads, identities, labels, prepared work, saved state and publication stay
+-- as they were. The prepared state here is built directly, to test the actions on their own.
 #guard preparationProbeInputs probeEvidence [p 3] (p 90) 0 = .ok [p 3, p 90]
 #guard preparationProbeInputs probeEvidence [p 3] (p 90) 1 = .ok [p 90, p 3]
 #guard preparationProbeInputs probeEvidence [p 0] (p 90) 0 =
@@ -833,8 +864,8 @@ private def tiedProbeEvidence : Evidence :=
 #guard step probeState (.preparationProbe 1) =
   .error (.evidence (.nativeFact "independent preparation probe observation"))
 
--- Empty captured receipt responsibility is vacuous in C. A named receipt is still checked
--- after commitRender, even if the live receipt slot has since disappeared.
+-- A probe needs custody of the captured receipt's records, even if the current receipt has
+-- since gone; an empty captured receipt needs none.
 private def namedProbeState : State :=
   { probeState with
     receipt := none, prepared := probeState.prepared.map fun prepared =>

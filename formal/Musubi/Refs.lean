@@ -50,8 +50,8 @@ For a remote bookmark `x@origin`, which is shared, the record of `refs/remotes/o
   and one that realizes the restore import the same (`restore_import_agrees`), and a
   bookmark restored with its remote bookmark to a conflict goes back to where the remote
   bookmark was (`restore_conflict_resolves_back`, `conflicted_restore_resolves`).
-  Writing the conflict's side there instead, as musubi once did for every conflict, has the
-  machines import different values, which the hive can merge to one older than either.
+  Writing the conflict's side there instead, for every conflict, would have the machines
+  import different values, which the hive can merge to one older than either.
 
 A tag `t` is a local bookmark's slot: `L` is `t`, `R` is `t@git`, which jj always tracks, and
 `K` is `git_refs["refs/tags/t"]`, which jj imports and exports as it does a local bookmark's,
@@ -83,8 +83,9 @@ head before musubi published, are merged as jj merges views (`Slot.merge3`, `TSl
   `Slot.import` wherever the remote ref is tracked (`TSlot.import_toSlot`);
 - musubi's realization of a canonical merge is jj's merge (`realizeMerge_eq`): its shortcut
   for the per-machine fields agrees with jj's merge wherever it applies (`shortcut_agrees`),
-  as it didn't before #56 was fixed (`shortcutUnguarded_keeps_absent`,
-  `shortcutUnguarded_untracks`); and where the heads have several closest common ancestors
+  because it leaves a merge with a tracked absent remote ref to jj; without that guard it
+  would disagree with jj (`shortcutUnguarded_keeps_absent`, `shortcutUnguarded_untracks`);
+  and where the heads have several closest common ancestors
   it merges against those merged, as jj does, since against the first of them a record can
   be left that the export can't correct (`firstBase_reverts`);
 - a realization beside an op head of this machine's own, as when a `jj` command ran since
@@ -1567,13 +1568,14 @@ def TSlot.pm (s : TSlot T) : T × Bool × T := (s.R, s.tr, s.K)
 def absentRef (p : T × Bool × T) : Bool := decide (p.1 = absent) && p.2.1
 
 /-- musubi's shortcut for the per-machine fields of a merge (`merged_trivially`): the side
-that changed them from the base, if only one did. As fixed for #56, it leaves a merge with a
-tracked absent remote ref to jj. -/
+that changed them from the base, if only one did. It leaves a merge with a tracked absent
+remote ref to jj. -/
 def shortcut (b a c : T × Bool × T) : Option (T × Bool × T) :=
   if absentRef b || absentRef a || absentRef c then none
   else if c = b then some a else if a = b then some c else none
 
-/-- The shortcut before #56's fix. -/
+/-- The shortcut without the guard against tracked absent remote refs: a counterexample
+showing the guard is needed. -/
 def shortcutUnguarded (b a c : T × Bool × T) : Option (T × Bool × T) :=
   if c = b then some a else if a = b then some c else none
 
@@ -1729,7 +1731,7 @@ bookmark is a conflict whose expected value is `1`, as `.git` and the record hav
 machine fetches `3`, a term of the conflict. musubi then realizes, beside the fetch, an
 operation of another machine's that keeps the conflict, as a restore of it does. The merge
 keeps the fetch, so musubi leaves `3` in `.git`, and the next import changes nothing. Had it
-written the expected value for the realization alone, as musubi once did, the merge's record
+written the expected value for the realization alone, the merge's record
 would be `3` and `.git` `1`, and the next import would move the bookmark back to `1`, with no
 `git` command having run: `u` is the step with `exportConflicted` in place of
 `exportConflictedBeside`. In `Tgt`, every value is a term of the conflict, as `3` must be. -/
@@ -1751,7 +1753,7 @@ theorem beside_keeps_fetch :
 while another moves the remote bookmark from `1` to `2`, and musubi realizes that beside the
 fetch: the merge is a conflict, whose expected value is its side, `2`, which musubi writes,
 so that this machine's import resolves the conflict to it, as every machine that realizes the
-merge does (`conflicted_import_agrees`). Published apart, as musubi once did, the two heads
+merge does (`conflicted_import_agrees`). Published apart instead, the two heads
 are merged by the next `jj` command, without exporting before its import, so the import
 resolves the conflict to the fetch, `3`, instead. -/
 theorem beside_published_apart_disagrees :
@@ -1807,9 +1809,9 @@ theorem restore_reverts :
   unfold Restorable
   decide
 
-/-- **#56, first shape.** One head has a tracked `x@git` with no target, kept while `x`
-exists; the other deleted `x` and left the record as the base had it. jj's merge deletes `x`
-and so drops `x@git`; the shortcut before the fix kept it, tracked. -/
+/-- **The unguarded shortcut keeps a dropped ref.** One head has a tracked `x@git` with no
+target, kept while `x` exists; the other deleted `x` and left the record as the base had it.
+jj's merge deletes `x` and so drops `x@git`; the unguarded shortcut keeps it, tracked. -/
 theorem shortcutUnguarded_keeps_absent :
     let b : TSlot Tgt := ⟨⟨.commit 1, .absent, .absent⟩, false⟩
     let v : TSlot Tgt := ⟨⟨.commit 1, .absent, .absent⟩, true⟩
@@ -1819,12 +1821,12 @@ theorem shortcutUnguarded_keeps_absent :
   intro b v w
   exact ⟨fun _ _ h => Tgt.noConfusion h, by decide⟩
 
-/-- **#56, second shape.** The base and one head have a tracked `x@git` with no target; the
-other has no `x` and `x@git` at `2`, tracked, as after importing git's creation of
-`refs/heads/x` there and then deleting `x`, the export of that failing. jj's merge
-drops the absent `x@git` with the bookmark, then merges the other head's as from nothing,
-leaving it untracked; the shortcut before the fix took it tracked. Untracked, a later move
-of `refs/heads/x` by git no longer moves `x`, until an export tracks `x@git` again. -/
+/-- **The unguarded shortcut tracks a ref jj leaves untracked.** The base and one head have a
+tracked `x@git` with no target; the other has no `x` and `x@git` at `2`, tracked, as after
+importing git's creation of `refs/heads/x` there and then deleting `x`, the export of that
+failing. jj's merge drops the absent `x@git` with the bookmark, then merges the other head's as
+from nothing, leaving it untracked; the unguarded shortcut takes it tracked. Untracked, a later
+move of `refs/heads/x` by git no longer moves `x`, until an export tracks `x@git` again. -/
 theorem shortcutUnguarded_untracks :
     let b : TSlot Tgt := ⟨⟨.commit 1, .absent, .absent⟩, true⟩
     let w : TSlot Tgt := ⟨⟨.absent, .commit 2, .commit 2⟩, true⟩

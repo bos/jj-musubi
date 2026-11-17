@@ -1,6 +1,13 @@
 /-
 Chunked blob transfer (`protocol.md`, "Chunked blobs"), as a separate model of one session
 transferring one blob `b` from a sender to a content-addressed receiver.
+
+The receiver stores a blob under the hash of its bytes, so it can trust bytes it assembled only
+if their hash is the blob's id. The model assumes the hash is injective, as the hypothesis
+`hinj : ∀ x y, hash x = hash y → x = y`: two byte strings with one hash are the same string.
+A real hash is not injective, but finding two blobs it maps together is infeasible for a
+collision-resistant one, which is what the implementation relies on. The theorems that
+conclude the receiver's stored bytes are the blob's take `hinj` as a hypothesis.
 -/
 import Musubi.Basic
 
@@ -514,7 +521,7 @@ end prefixProofs
 
 /-! ## Attempts under a deadline
 
-`prefix_finishes` resends one chunk at a time and counts no time. musubi's senders keep a window
+`prefix_finishes` resends one chunk at a time and counts no time. A sender keeps a window
 of chunks in flight, each request with a deadline from when it was sent, as long again for each
 chunk ahead of it in the window, so that a link too slow to carry a chunk within a deadline, or a
 hub that stops answering for a while, cuts an attempt short. Of an attempt's window the receiver
@@ -523,8 +530,8 @@ deadline (`attempt`), going on from the furthest prefix they report (`next`). Th
 doesn't hear of may still arrive, after it has stopped waiting (`ARun.late`).
 
 From within the receiver's prefix, an attempt that hears `k` replies takes the prefix at least
-`k` chunks on, or to the end (`attempt_progress`). One from the beginning, as musubi's senders
-made once, takes it nowhere once the prefix holds the chunks it delivers (`restart_stalls`), as
+`k` chunks on, or to the end (`attempt_progress`). An attempt that always restarts from the
+beginning takes it nowhere once the prefix holds the chunks it delivers (`restart_stalls`), as
 often as it is made. From any state the receiver reaches, every attempt that hears a reply
 brings the transfer nearer its end, and a chunk arriving late never takes it further away
 (`attempt_decreases`, `late_le`), so that a run ends with the receiver storing the blob within

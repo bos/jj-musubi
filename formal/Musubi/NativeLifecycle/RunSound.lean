@@ -1,7 +1,8 @@
 /-
-The actual executable action list, not a separately chosen abstract run. These results
-derive complete-record responsibility and historical construction policy along that trace.
-Native observation authentication and simulation remain distinct obligations.
+Results about the action list the executable model actually runs, not a separately chosen
+abstract run: complete-record responsibility and construction policy, as computed at planning
+time, along that trace. Authenticating native observations and simulating native behavior are
+separate and not proved.
 -/
 import Musubi.NativeLifecycle.ConstructionSound
 

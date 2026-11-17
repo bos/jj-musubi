@@ -1,8 +1,8 @@
 /-
-Finite inputs for the native preparation/publication boundary (#149 v2, #150).
-These are decoded observations, not certificates that musubi selected the right source.
-Native decoding, identity authentication and native outcome correspondence remain obligations.
-No declaration here supplies a native law or a refinement of NodeSys.
+Finite inputs of the native preparation and publication steps: native and canonical operation
+bodies, identity rows, records, receipts, namespaces and Git fields, decoded from observations.
+They are data only: nothing here certifies that an observation is authentic or that musubi
+selected the right source, and no declaration is a native law or a refinement of `NodeSys`.
 -/
 import Musubi.Names
 
@@ -167,8 +167,8 @@ inductive IdentityKind where
   | markedBody
 deriving DecidableEq, Repr
 
-/-- Raw persisted evidence rows. Checking their authentication is a separate correspondence
-gate; their existence must not be inferred from metadata resemblance or the judged answer. -/
+/-- Raw persisted evidence rows, as recorded. Whether they are authentic is checked
+separately. -/
 structure IdentityRow where
   physical : Physical
   canonical : Canonical
@@ -240,8 +240,8 @@ structure SourceMemory where
   prejoin : List Physical
 deriving DecidableEq, Repr
 
-/-- Parsed durable state and the separately supplied actual memory snapshot. No equality
-between them is assumed, and an absent file never supplies the memory relation. -/
+/-- Parsed durable state and, separately, a snapshot of the actual memory. The two may differ,
+and a missing file yields no memory relation. -/
 structure SourceRoutes where
   checkpoint : SourceCheckpoint
   frames : List SourceFrame
@@ -251,8 +251,10 @@ structure SourceRoutes where
   hubRenamings : List SourceHubFrame
 deriving DecidableEq, Repr
 
-/-- This finite ordinary-route slice accounts for every alternative by requiring its
-independently observed relation to be empty. Nonempty routes remain interpretation gaps. -/
+/-- Holds when the observations show only the ordinary route by which a native operation gets
+its canonical source: no checkpoint steps or log frames, no realign, move, take or fix-up in
+progress, and no records, joins or renamings. The model handles only this case; any other
+state is an interpretation gap. -/
 def SourceRoutes.closed (s : SourceRoutes) : Bool :=
   s.checkpoint.steps == 0 && s.frames.isEmpty && s.countedSources.isEmpty &&
   s.checkpoint.realign.isNone && !s.checkpoint.moving && !s.checkpoint.fixup &&
@@ -272,12 +274,12 @@ structure DescriptionExclusion where
   originalDescription : String
 deriving DecidableEq, Repr
 
-/-- The ordinary native canonicalization constructor copies description unchanged. Join,
-restore/revert and renaming routes are not this constructor and must be checked separately. -/
+/-- Canonicalizing an ordinary native operation copies its description unchanged. Join,
+restore/revert and renaming routes are other constructors, checked separately. -/
 def ordinaryOriginalDescription (native : String) : String := native
 
 /-- An overapproximation of the ordinary constructor: every other field is arbitrary,
-but its description is copied from the native input. This is not a join constructor. -/
+but its description is copied from the native input. -/
 def ordinaryOriginalBody (nativeDescription : String) (other : CanonicalBody) : CanonicalBody :=
   { other with description := ordinaryOriginalDescription nativeDescription }
 
@@ -360,7 +362,7 @@ structure Receipt where
   records : List Record
   capturedHeads : List Physical
   /-- Observer's full pre-contraction input, from which the model derives captured ownership.
-  This is historical observation data, not a claim that Rust persists this whole snapshot. -/
+  This is observed data, not all of which Rust persists. -/
   input : Evidence
   locals : List (Physical × List Physical)
   switched : Bool := false

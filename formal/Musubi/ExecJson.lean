@@ -1,6 +1,9 @@
 /-
-JSON codec for the oracle (`docs/internals/conformance.md`, "Wire format"). Decoding and encoding
-only; no protocol logic.
+JSON codec and request dispatch for the oracle (`docs/internals/conformance.md`, "Wire format").
+Decoding turns a request into model inputs, encoding turns model results into replies, and the
+`...Reply` functions run an executable model between the two. Protocol logic stays in the
+modules this file imports; the replies here only check that a request is well formed (for
+example that parents precede their children) and report a model's refusal as an error.
 -/
 import Lean.Data.Json
 import Init.Data.List.Sort.Lemmas
@@ -575,7 +578,10 @@ def expectedReply (j : Json) : Except String Json := do
   | none => throw "invalid or unfinished expected-value history"
   | some value => pure (Json.mkObj [("ok", Json.bool true), ("value", toJson value)])
 
-/-! ## Liveness (`Exec.lean`, "The liveness measure") -/
+/-! ## Replies for contraction, retry control and the liveness measure
+
+Ancestry through dropped operations (`Contract`), survivor advance, the retry-control state
+machines (`Retry`), and the session's liveness measures (`Exec.lean`, "The liveness measure"). -/
 
 def contractedAncestryReply (j : Json) : Except String Json := do
   let parents ← j.getObjValAs? (Array (List Nat)) "parents"
@@ -696,6 +702,10 @@ def measureReply (N : Nat) (ses : SEState) : Json :=
 def uploadReply (es : EState) (n new : Nat) : Json :=
   Json.mkObj [("ok", Json.bool true), ("ops", nats (es.upOpsL n new)),
     ("objs", nats (es.upObjsL n new))]
+
+/-! ## Replies for push, read and early-entry requests
+
+Raw pushes, hub reads, node growth, head control and local bursts. -/
 
 def pushSnapshotReply (N : Nat) (s : SEState) (j : Json) : Except String Json := do
   let p : PushPacket := {
@@ -874,7 +884,7 @@ def rawPushReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true), ("outcome", toJson outcome.name),
     ("seq", toJson after.seq), ("head", toJson after.head)])
 
-/-! ## Request handling -/
+/-! ## Publication reply and request dispatch -/
 
 /-- Native publication fixtures supply file closures and jj's operation facts. The reply
 computes the budget and selected cleanup using the same definitions as the proofs. -/

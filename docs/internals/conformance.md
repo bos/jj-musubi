@@ -1220,11 +1220,113 @@ keeps it, which lets a forget's merge bring the copy back, fails within a few hi
 
 ### Native lifecycle inputs and events
 
-The unit tests in `node/realize/native_contract_tests.rs` exercise a bounded native boundary
-for the preparation-to-publication work tracked in
-[#151](https://github.com/bos/jj-musubi/issues/151). They use pinned jj, real repositories and
-the shipping adapter. A recording made once per test-binary build supplies each test with its
-own copy and resumed seed counter.
+The native lifecycle model (`formal/Musubi/NativeLifecycle.lean` and the modules under
+`NativeLifecycle/`) is an executable model of one machine's attempt to turn a canonical
+operation into a native jj operation and publish it. It computes its answers from raw
+observations, so that Rust fixtures can be compared with them through the oracle's
+`nativeLifecycle` request.
+
+**What the model covers.**
+
+- `constructReceipt` computes, from the incoming records, the saved responsibility and the
+  captured native and canonical graphs, the effective drops, the contraction images, the
+  presence stamps, the native rewrites and the prepared base. The receipt that jj recorded is
+  not an input; `receiptInputMatches` compares it with the computed one afterwards.
+- `constructRender` computes the parents-first suffix, the source of each parent, the names this
+  machine owns, the reserved and workspace names, the private attributes, the inherited Git
+  fields and the whole native body, and only then looks up the body's hash in a table of
+  independently observed encodings.
+- `Steps.lean` runs the phases of an attempt: planning, each canonical and native write,
+  commit, capture, preparation, revalidation, merge, export, head publication, helper load and
+  repair, cleanup, interruption, restart and recovery. A named write checks the saved custody
+  of its records first; a restart keeps completed writes and custody and drops plans.
+- A situation outside the model's scope is recorded, not refused: an external native effect in
+  the publication window (E1: from the successful final reread of the heads through publication
+  and cleanup), in a helper's window (E2: from its choice of branch through its load and export)
+  or in recovery (from capture through recovery's own move); a source with no unique answer
+  (`uniqueSource`); and a failed call. The Rust tests name E1 and E2.
+
+**What is proved.** In `ConstructionSound.lean`, a successful encoding lookup returns an
+observed complete shape, and a successful receipt comparison preserves every computed image and
+admits no extra source key. Every pending plan and prepared result of a run of constructed
+actions comes from the actual constructors (`construction_step_preserves`, `runs_construction`);
+these invariant theorems are conditioned on `constructedAction`, which excludes the raw
+observation actions `receive`, `prepare`, `write` and `helperHeads`. Along any run, a named write
+has saved custody of its records (`runs_named_custody`). These facts hold of the state in which
+a plan was made, not of a state an external effect has changed since. The preservation theorem
+is not yet connected to committed receipt maps, installed identity rows, publication, cleanup
+and recovery, or to the assembled safety theorem.
+
+**What native evidence backs it.** These Rust tests, each run against pinned jj and the
+shipping adapter:
+
+- `complete_receipt_and_body_observation_is_pure`: reading the raw inputs changes nothing.
+- `second_owned_name_survives_complete_native_capture`: owned and foreign names.
+- `receipt_parent_precedes_preferred_alias` and `changed_physical_parent_refreshes_git_fields`:
+  parent selection and Git field refresh, over explicitly constructed physical inputs.
+- `native_command_before_validation_forces_refresh`: a command between preparation and
+  validation forces a retry.
+- `second_name_publication_matches_lifecycle_oracle` and
+  `private_overlap::disjoint_owned_names_do_not_select_current_git`: publication with a second
+  owned name, and the case where owned names are disjoint.
+- `current_git_merge_precedes_first_export`: the shared merge precedes the first export.
+- `receipt_custody_materialization_matches_lifecycle_oracle` and
+  `move_intent_precedes_old_head_removal`: custody at real native writes, and a saved move
+  across restart.
+- `complete_candidates_keep_ambiguous_published_aliases` and
+  `multibase::cached_suffix_after_contraction_uses_both_ordered_native_bases`: ambiguous
+  aliases, and a contracted suffix over both ordered bases.
+
+The receipt-custody test and the second-name publication test also run through the model: the
+oracle computes the expected result from the raw observations, and the test compares it with
+the native one.
+
+**What is not proved.**
+
+- That native jj behaves as the observations assume. The identity rows, encodings, native merge
+  results, helper outcomes and input histories are taken as observed; their authenticity, the
+  native hashing and tie order, and an exact codec for every field (such as stamp durations)
+  are not established.
+- That the Rust receive path selects the same template and sparse map, and that the renderer
+  produces the same output, beyond the fixtures above.
+- Original authority for an unpublished original, and restore or revert references to a
+  non-ancestor; `constructRender` reports these as evidence gaps.
+- The physical Git effects: only the selected ref's projection is modeled, and the export events
+  are bookkeeping boundaries, not per-ref, working-copy HEAD or failed compare-and-swap
+  observations. No law for exporting a full snapshot follows.
+- The canonical projection of a native child that a helper creates. Aliases stay physical until
+  an explicit operation changes them.
+- The order of writes across the canonical and native stores, the behavior of a pruned prefix,
+  and freshness.
+- That the publication, helper and recovery windows are free of other writers. They are
+  restrictions on schedules, not a theorem that a lock excludes such writers. No result covers
+  an arbitrary failure in mid-call, termination of automatic normalization, convergence, or a
+  refinement of the whole model by the Rust code.
+- Broader private overlap: only the cases above are tested. Object lifetime is open
+  ([#141](https://github.com/bos/jj-musubi/issues/141)). A Windows test is ignored
+  ([#67](https://github.com/bos/jj-musubi/issues/67)).
+- What the fixtures authenticate. They do not authenticate arbitrary `NativeFacts` entries, and
+  the fixture schema carries no Rust-selected ownership, overlap or source answers: those are
+  comparison targets, computed by the model from raw observations.
+- The scope of the fixtures that run through the oracle (`nativeLifecycle`), each a finite
+  certificate over a prefix of the attempt:
+  - The receipt fixture (`receipt_custody_materialization_matches_lifecycle_oracle`) is certified
+    from `planReceipt` through `commitReceipt` only. Settling, publication, identity-map
+    installation and cleanup are outside it.
+  - The publication fixture (`second_name_publication_matches_lifecycle_oracle`) is certified
+    through `revalidate` and `refreshCurrentGit`, its six-action projection. It omits
+    preparation's merge-probe writes, native merge, export, head publication, helper load and
+    repair, and cleanup. Its receipt-custody component is vacuous: it has no receipt records.
+  - The retry fixture (`native_abandon_between_preparation_and_reread_retries`) models the
+    preparation merge-probe writes and ends at the first changed-head retry. Its captured
+    receipt is absent, so its custody component is vacuous too. Later retry canonicalization and
+    whole-publication simulation are open.
+  - No other fixture is connected to the oracle.
+
+The unit tests in `node/realize/native_contract_tests.rs` exercise a bounded native boundary of
+the preparation-to-publication path. They use pinned jj, real repositories and the shipping
+adapter. A recording made once per test-binary build supplies each test with its own copy and
+resumed seed counter.
 
 `second_owned_name_survives_complete_native_capture` retains both owned names before a native
 command leaves only the second, then checks an observed empty map after deleting both. It
@@ -1249,8 +1351,8 @@ independent first-export parent assertion, before the event-exclusion check.
 Both warm and translation-cache-erased/reopened executions check this per-trace boundary.
 The latter compares native and canonical bodies, heads, receipt and retained expected
 observations across reopening, requiring an empty expected map before erasure. It makes no
-cross-run local-ID equality claim: exact cache agreement would also need authenticated unique
-source roles U and equal relevant retained observations I. This finite native adapter test
+cross-run local-ID equality claim: exact cache agreement would also need each source role
+authenticated as unique, and equal relevant retained observations. This finite native adapter test
 does not authenticate arbitrary sources, complete the selector's decision table or add a
 lifecycle theorem. Its raw event callback adds no separate byte/clock/RNG purity assertion.
 
@@ -1282,9 +1384,9 @@ body/parent graph, canonical bodies, receipt heads and full `Taking.locals`, per
 rows and retained export observations. It keeps both published aliases and a separate local
 body, invalidates the old receipt domain after a head change, and retains unmarked bodies.
 A marker is an observed label, not an authenticated source certificate. The later model must
-derive qualification and its unique-source restriction U from the complete facts; unknown
+derive qualification and its unique-source restriction from the complete facts; unknown
 identity evidence cannot be hidden by a preferred alias. Differing per-machine fields also
-remain visible, rather than asserting equal retained inputs I from equal canonical labels.
+remain visible, rather than asserting equal retained inputs from equal canonical labels.
 
 Private test hooks record preparation, exact locked rereads, source heads, export start/result,
 lock release and cleanup. Delegating native stores add actual writes and raw head updates to
@@ -1297,8 +1399,9 @@ shared merge and physical bookmark, then its position before head movement.
 including an interrupted add-before-remove frontier and restart. They do not cover every mid-call
 error or assert automatic alias normalization.
 
-These schedules close E1 (the successful final reread through cleanup) and every included E2
-helper branch/load interval explicitly, including cleanup after publication locks are released.
+These schedules cover the publication window (the successful final reread through cleanup) and
+every included helper window (branch choice through load and export) explicitly, including
+cleanup after publication locks are released.
 They do not establish a universal native writer lock. Abandon/integrate after-reread overlap
 and the one-to-multihead helper window remain separate characterization work.
 

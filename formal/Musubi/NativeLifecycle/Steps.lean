@@ -1,8 +1,17 @@
 /-
-Executable observation phases for the first native lifecycle increment. This module records
-successful native outcomes as data; it does not assert their native laws. E1/E2/recovery
-violations and non-unique source boundaries stay visible and never become invented refusals.
-The reachable-state theorem and Rust correspondence remain gated on native evidence.
+Executable phases of one native publication attempt. The module records successful native
+outcomes as data and asserts no native law. Three kinds of situation fall outside the model's
+scope, and each is kept in `State.outside` rather than refused or hidden:
+
+- an external native effect during the publication window, from the successful final reread of
+  the heads through publication and cleanup (E1, `Outside.publicationOverlap`), during a
+  helper's run, from its choice of branch through its load and export (E2,
+  `Outside.helperOverlap`), or during recovery, from capture through recovery's own move
+  (`Outside.recoveryOverlap`); the model does not prove a lock that excludes such effects;
+- a source query with no unique answer (`Outside.sources`; see `uniqueSource`);
+- a failed native call (`Outside.failedCall`).
+
+The reachable-state theorem and the correspondence with the Rust code are not proved.
 -/
 import Musubi.NativeLifecycle.Construction
 
@@ -25,8 +34,9 @@ inductive Outside where
   | failedCall
 deriving DecidableEq, Repr
 
-/-- Input equality I compares these observations, not computed output ids. Full relevant
-Git fields and retained export/expected observations are kept separate from disposable memo. -/
+/-- The observations a preparation reads. Two preparations have equal inputs when these are
+equal; computed output ids are not compared. The full relevant Git fields and the retained
+export and expected observations are kept here, apart from the disposable cache (`Memo`). -/
 structure Inputs where
   me : Copy
   evidence : Evidence
@@ -252,8 +262,8 @@ structure BodyWrite where
   records : List Record := []
 deriving DecidableEq, Repr
 
-/-- Independently captured native command outcome. Authentication of its author, identity,
-complete payload and physical writers remains N01/N03/N07, not a premise proved here. -/
+/-- Independently captured native command outcome. Authenticating its author, identity,
+complete payload and physical writers is outside the model. -/
 structure NativeObservation where
   canonical : List CanonicalBody := []
   native : List NativeBody := []
@@ -283,8 +293,9 @@ def installNative (e : Evidence) (observation : NativeObservation) :
   let _ ← liftQuery (observation.heads.mapM evidence.nativeBody)
   return (evidence, nativeCount, canonicalCount)
 
-/-- This is an observed native export, separately authenticated by N07. It records complete
-input/output observations; an ordinary bookkeeping merge is a different action. -/
+/-- An observed native export. It records the complete input and output observations; an
+ordinary bookkeeping merge is a different action. Authenticating the observation is outside
+the model. -/
 structure ExportObservation where
   input : Physical
   output : Physical
@@ -743,14 +754,17 @@ theorem step_invalidates_source_routes {s t : State} {action : Action}
 def run (initial : State) (actions : List Action) : Except StepError State :=
   actions.foldlM step initial
 
-/-- E1/E2 and recovery exclusions are computed from recorded external effects and intervals.
-Source-domain failures and excluded mid-call outcomes are also retained in this list. -/
+/-- Holds when `outside` is empty: no external effect in the publication, helper or recovery
+window, no source outside the unique-source domain and no failed call. -/
 def inScope (s : State) : Bool := s.outside.isEmpty
 
-/-- Pure frame facts only; these do not discharge an exporter, source or native-call law. -/
+/-- Frame fact: erasing the cache changes only the cache, so the evidence stays. It says nothing
+about an exporter, source or native-call law. -/
 theorem eraseMemo_keeps_evidence (s : State) :
     step s .eraseMemo = .ok { s with memo := {} } := rfl
 
+/-- Frame fact: a restart keeps the saved responsibility. It says nothing about an exporter,
+source or native-call law. -/
 theorem restart_keeps_responsibility (s : State) :
     (step s .restart).map (·.saved) = .ok s.saved := rfl
 

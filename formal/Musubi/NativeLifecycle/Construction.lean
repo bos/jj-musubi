@@ -1,8 +1,12 @@
 /-
-Executable receipt and render construction from raw observations. Encoding tables contain
-independent hashes of complete computed shapes; native field tables contain exact native
-merge inputs/results. Neither table supplies a correct source/ownership/render predicate.
-Authentication and the actual Rust/codec correspondence remain explicit native gates.
+Executable construction of receipts and rendered operations from raw observations.
+`constructReceipt` computes effective drops, contraction images, presence stamps, native
+rewrites and the prepared base from the records, the saved responsibility and the captured
+native and canonical graphs. `constructRender` computes the parents-first suffix, source
+choices, ownership, names, Git fields and body, and only then looks up the hash of that body.
+The encoding table holds independent hashes of complete computed shapes, and the native field
+table holds exact native merge inputs and results; neither supplies a source, ownership or
+render answer. Authenticating the tables and corresponding with the Rust codec are not proved.
 -/
 import Musubi.NativeLifecycle.NativeFacts
 
@@ -128,8 +132,8 @@ def canonicalGeneration (e : Evidence) : Nat → Canonical → Query Nat
     return parents.foldl max 0 + 1
 
 /-- Contraction's generation floor is derived from stored dropped originals. Matching
-these original-named drops to the native receive path's exact canonical versions remains
-part of the raw identity/template simulation obligation. -/
+these drops, named by original, to the exact canonical versions the native receive path
+stores is not modeled. -/
 def rewriteFloor (e : Evidence) (fuel : Nat) (drops : Drops) : Query (Option Nat) := do
   let stored := e.canonical.filter fun body => body.id != e.root && drops.contains body.original
   let generations ← stored.mapM fun body => canonicalGeneration e fuel body.id

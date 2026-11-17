@@ -1,7 +1,8 @@
 /-
-Source selection from raw graph, namespace and record observations. No final owned map,
-overlap bit, current-Git bit or preferred cache alias is an input to these decisions.
-An evidence gap is not a claim that shipping Rust returns a refusal for the same trace.
+Source selection from raw graph, namespace and record observations: which physical operation
+stands for each canonical parent, which workspace names this copy owns, and the prepared base.
+No final owned map, overlap bit, current-Git bit or cached alias is an input. A gap in the
+evidence is reported as a gap; it is not a claim that shipping Rust refuses the same trace.
 -/
 import Musubi.NativeLifecycle.Graph
 
@@ -190,7 +191,7 @@ def ownOfNative (e : Evidence) (fuel : Nat) (me : Copy) (id : Physical) : Query 
     !others.contains name && (literals.contains name || own.contains name ||
       !namesOtherMachine me name machines)
 
-/-- The pinned jj workspace-slot rule, awaiting the independent native-law handoff. -/
+/-- jj's three-way merge of one workspace slot, as pinned. -/
 def mergeBinding (ours base theirs : Option Commit) : Option Commit :=
   if ours = theirs then ours
   else if ours = base then theirs
@@ -573,7 +574,10 @@ theorem chooseSource_prepared (sources : Candidates) (id : Physical)
     chooseSource sources = .selected .prepared id := by
   simp [chooseSource, chooseTier, values, complete]
 
-/-- U is a computed domain restriction, not a new runtime refusal or normalization guard. -/
+/-- Holds when the source query selects exactly one physical operation. This is the model's
+domain U: the inputs for which every source answer is unique. It is a restriction on the
+model's inputs, computed here, not a runtime refusal or a normalization step; outside it the
+model records the gap (`Outside.sources`). -/
 def uniqueSource (sources : Candidates) : Bool :=
   match chooseSource sources with
   | .selected _ _ => true

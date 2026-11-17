@@ -475,10 +475,10 @@ theorem InvR.consistentAnc {s : State} (hI : InvR N s) {n : Nat} (hc : Consisten
 
 /-- The policy, with a hub that may have gone back. It is `PStep` but for two steps. A node
 takes the head in a reply to its own request whenever it differs from the one it knows,
-older or not: the Rust core's `NodeCore::handle_reply` restarts the node (`loseKnown`) and then
-learns it. And it realizes only below a head in the hub's current history: the Rust core
-clears its realization plan whenever `handle` changes `known`, and every sync starts with a
-`Fetch` whose reply sets `known`. -/
+older or not (`NodeCore::handle_reply` restarts the node, as `loseKnown` does, and then
+learns it). And it realizes only below a head in the hub's current history: the core clears
+its realization plan whenever `handle` changes `known`, and every sync starts with a `Fetch`
+whose reply sets `known`. -/
 inductive PStepR (N : Nat) : State → State → Prop
   | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known ≠ ⟨s.hub.seq, s.hub.head⟩) :
       PStepR N s (s.pLearn n)

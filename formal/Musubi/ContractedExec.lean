@@ -1,8 +1,10 @@
 /-
-An explicit extension of the executable original-operation submodel. Survivor advancement,
-atomic prepared adoption and contracted acceptance extend the old transitions; rejection
-also checks the contracted packet. This is not a claim that every raw canonical store
-projects to this original-operation submodel.
+The executable model of `SupersedeExec.lean` extended with three transitions: survivor
+advancement (a node advances to every surviving image of its known head), atomic prepared
+adoption (a node takes announced records and switches its heads in one step), and contracted
+acceptance (the hub accepts a push whose expected head is dropped, by `Below` rather than
+original ancestry). Rejection also checks the contracted packet. This does not claim that
+every raw canonical store projects to the original-operation submodel this file works in.
 -/
 import Musubi.SupersedeExecSound
 import Musubi.ContractedSafety
@@ -38,8 +40,8 @@ theorem cabs_imageAdvance {ses : SEState} {n : Nat} (hlt : ParLt ses.es.parF) :
   congr 1
   exact advanceImages_set hlt
 
-/-- The added finite advance is exactly the proved frontier transition, not an unchecked
-escape from the original executable model. -/
+/-- The finite survivor advance is exactly the proved frontier transition
+(`Contracted.View.advanceImages`). -/
 theorem imageAdvance_safe (h : Contracted.Safe ses.cabs)
     (hg : imageAdvanceB N ses n = true) : Contracted.Safe (ses.imageAdvance n).cabs := by
   simp only [imageAdvanceB, Bool.and_eq_true] at hg
@@ -61,7 +63,7 @@ def SEState.imageAccept (ses : SEState) (n : Nat) (S O : List Nat)
       (.head n .accepted (ses.es.hub.seq + 1) d)).send
       (.notifyAll (ses.es.hub.seq + 1) d)) D
 
-/-- Finite well-formedness premises of the added acceptance. Created operation labels and
+/-- Finite well-formedness premises of contracted acceptance. Created operation labels and
 drop labels must refer to the existing universe, and the root and new head must survive. -/
 def imageAcceptSafeB (ses : SEState) (S : List Nat) (d : Nat)
     (A : List Rec) (D : List Nat) : Bool :=
@@ -88,7 +90,8 @@ theorem imageAccept_drops {ses : SEState} :
     List.contains_iff_mem, mem_takeRecs, acceptDrops, mem_union]
 
 /-- Acceptance preserves the same common store/head safety facts as survivor advancement.
-This proves the added primitive's invariant case; it is not a full union invariant theorem. -/
+This is the invariant case for contracted acceptance alone, not a full invariant theorem for
+the union of all transitions. -/
 theorem imageAccept_safe (h : Contracted.Safe ses.cabs)
     (hg : imageAcceptB ses n S O e d A D = true) :
     Contracted.Safe (ses.imageAccept n S O d D).cabs := by
@@ -128,8 +131,9 @@ theorem imageAccept_safe (h : Contracted.Safe ses.cabs)
     rw [abs_hubStore] at hc'
     exact hc' a ha
 
-/-- While announced records are prepared, the old physical heads still use the previous
-drop set. Switching them expands every old head under the prepared set, as well as known. -/
+/-- While announced records are prepared, the node's physical heads still use its previous
+dropped set. Switching expands every current head, and the known head, under the dropped set
+that includes the prepared records. -/
 def preparedHeads (ses : SEState) (n : Nat) (R : List Rec) : List Nat :=
   let D := (union (ses.nodeDF n) (flat R)).contains
   maxL ses.es.parF (dd (((ses.es.nodeOf n).heads ++ [(ses.es.nodeOf n).known.head]).flatMap
@@ -237,9 +241,10 @@ theorem preparedAdvance_safe (h : Contracted.Safe ses.cabs)
         ((List.all_eq_true.1 hsurvive) x hx')
     · simp only [hm, ↓reduceIte]; exact hf.headsSurvive m x hx
 
-/-- A relation on the finite model itself, extending rather than silently changing SRStep.
-The legacy constructor carries its original soundness theorem. The new constructors name
-the complete checked guards and exact state changes of the added backend boundaries. -/
+/-- The transition relation on the finite model. `legacy` is a step of the supersede model
+(`SRStep`) or no change at all, as `sexec_sound` proves. `advance`, `accept` and `prepared`
+name the guard and exact state change of survivor advancement, contracted acceptance and
+prepared adoption. -/
 inductive ContractedRStep (N : Nat) : SEState → SEState → Prop
   | legacy (s t : SEState)
       (h : SRStep N (sabs s) (sabs t) ∨ sabs t = sabs s) : ContractedRStep N s t
@@ -252,7 +257,8 @@ inductive ContractedRStep (N : Nat) : SEState → SEState → Prop
       (h : preparedAdvanceB N s n R = true) :
       ContractedRStep N s (s.preparedAdvance n R)
 
-/-- A legacy rejection must not contradict an acceptable contracted packet. Normal body
+/-- The supersede model's rejection outcomes must not contradict an acceptable contracted
+packet. Normal body
 loss leaves every retained history entry replayable. Historical objects may be lost, but
 rollback must recover to a closed target; an explicit remake models environment-chosen
 recovery otherwise. This does not model every observable damaged-store prefix. -/
@@ -271,8 +277,9 @@ def legacyOutcomeError : SAction → String
   | .base (.hubRegress ..) => "hubRegress: target incomplete; explicit recovery is required"
   | _ => "hubPushReject: a contracted supersede is acceptable"
 
-/-- Keep the old executable results after checking rejection consistency. An old rejection
-has exactly two additional cases; all other failed guards remain failures. -/
+/-- Run `sexecStep`, then check the outcome with `legacyOutcomeB`. Where `sexecStep` refuses,
+exactly two actions can still succeed, survivor advance and contracted acceptance; every
+other failed guard remains a failure. -/
 def cexecStep (N : Nat) (ses : SEState) (a : SAction) : Except String SEState :=
   match sexecStep N ses a with
   | .ok t => if legacyOutcomeB ses a then .ok t else .error (legacyOutcomeError a)
@@ -286,7 +293,7 @@ def cexecStep (N : Nat) (ses : SEState) (a : SAction) : Except String SEState :=
     | _ => .error error
 
 /-- What `cexecStep` accepting an action says: `sexecStep` accepted it and the rejection check
-passed, or `sexecStep` refused it and one of the two added steps applies. -/
+passed, or `sexecStep` refused it and survivor advance or contracted acceptance applies. -/
 theorem cexecStep_ok (h : cexecStep N ses a = .ok t) :
     (sexecStep N ses a = .ok t ∧ legacyOutcomeB ses a = true) ∨
     (∃ n, a = .base (.advance n) ∧ imageAdvanceB N ses n = true ∧ t = ses.imageAdvance n) ∨
@@ -316,8 +323,8 @@ theorem cexecStep_ok (h : cexecStep N ses a = .ok t) :
       · contradiction
     | _ => contradiction
 
-/-- Every accepted action is an old checked step or one of the two explicit new steps.
-In particular the theorem does not incorrectly identify the new accepts with SRStep. -/
+/-- Every accepted action is a step of the supersede model, or a survivor advance or a
+contracted acceptance. The last two are not `SRStep`s, so they have their own constructors. -/
 theorem cexec_sound (hok : SEOK ses) (h : cexecStep N ses a = .ok t) :
     ContractedRStep N ses t := by
   rcases cexecStep_ok h with ⟨hs, -⟩ | ⟨n, rfl, hg, rfl⟩ | ⟨n, S, O, e, d, A, D, rfl, hg, rfl⟩
@@ -325,8 +332,8 @@ theorem cexec_sound (hok : SEOK ses) (h : cexecStep N ses a = .ok t) :
   · exact .advance _ _ hg
   · exact .accept _ _ _ _ _ _ _ _ hg
 
-/-- The record-custody premise needed by the legacy soundness theorem is kept across the
-new boundaries too. Advancing changes no records; accepting appends at most one record. -/
+/-- The record-custody premise `SEOK` of `sexec_sound` also holds after survivor advance and
+contracted acceptance. Advancing changes no records; accepting appends at most one record. -/
 theorem cexec_ok (hok : SEOK ses) (h : cexecStep N ses a = .ok t) : SEOK t := by
   rcases cexecStep_ok h with ⟨hs, -⟩ | ⟨n, rfl, hg, rfl⟩ | ⟨n, S, O, e, d, A, D, rfl, hg, rfl⟩
   · exact sexec_ok hok hs
@@ -420,7 +427,8 @@ inductive CExecReachable (N : Nat) : SEState → Prop
   | step {s t : SEState} (reach : CExecReachable N s) (a : CAction)
       (h : cexecAction N s a = .ok t) : CExecReachable N t
 
-/-- The soundness premise is invariant from reset, including across added transitions. -/
+/-- `SEOK` holds from reset through every accepted action, including survivor advance and
+contracted acceptance. -/
 theorem cexec_reachable_ok (h : CExecReachable N ses) : SEOK ses := by
   induction h with
   | init => exact seok_init

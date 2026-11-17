@@ -1,7 +1,8 @@
 /-
-Pure obligations discharged by the actual constructors. These do not authenticate the raw
-native tables. The reachable policy invariant and Rust simulation must use these same
-constructors, rather than the prototype receive/prepare observation actions.
+Properties of the constructors, proved from their definitions. They do not authenticate the
+raw native tables. An invariant over reachable states must use these same constructors, not
+the four raw observation actions `receive`, `prepare`, `write` and `helperHeads`, which
+`constructedAction` excludes.
 -/
 import Musubi.NativeLifecycle.Steps
 
@@ -100,8 +101,9 @@ theorem receiptInputMatches_no_extra {build : ReceiptBuild} {observed : Receipt}
   have hall := h.1.2
   exact List.all_eq_true.mp hall row member
 
-/-- An adapter-owned native helper is an actual operation-creating action, but cannot
-silently allocate canonical identities or classify itself as an external E1/E2 actor. -/
+/-- An adapter-owned native helper creates native operations. It allocates no canonical
+identities and is not counted as an external writer in the publication or
+helper window (`Outside.publicationOverlap`, `Outside.helperOverlap`). -/
 theorem ownHelper_frame {s t : State} {index : Nat}
     (success : step s (.ownHelper index) = .ok t) :
     t.outside = s.outside ∧ t.allocatedLabels = s.allocatedLabels ∧
@@ -416,10 +418,10 @@ theorem rawInitial_construction (me : Copy) (evidence : Evidence) (heads : List 
   simp [ConstructionInvariant, rawInitial]
 
 set_option maxHeartbeats 2000000 in
-/-- This is step preservation for the declared constructed sublanguage. No new phase or
-native-call rejection is added: the four existing observation shortcuts stay excluded.
-Origin and policy facts refer to their actual constructor/planning state, including across
-external effects; this does not assert native refinement or policy at the later state. -/
+/-- Step preservation for the constructed sublanguage: every action except the four raw
+observation actions. Origin and policy facts refer to their actual constructor or planning
+state, including across external effects; this does not assert native refinement or policy at
+the later state. -/
 theorem construction_step_preserves {s t : State} {action : Action}
     (before : ConstructionInvariant s) (admitted : constructedAction action = true)
     (success : step s action = .ok t) : ConstructionInvariant t := by

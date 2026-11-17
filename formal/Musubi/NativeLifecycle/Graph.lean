@@ -1,7 +1,8 @@
 /-
-Graph and presence queries over complete finite observations. Fuel exhaustion and unreadable
-bodies are explicit evidence gaps. Raw stamps supply originals; they do not supply ownership.
-Correspondence with native parsers and PresenceContract's stamping remains to be established.
+Graph and presence queries over complete finite observations: ancestry, closest bases, latest
+work and presence stamps. Fuel exhaustion and unreadable bodies are reported as evidence gaps.
+A raw stamp names the originals a body presents, not who owns it. Correspondence with the native
+parsers and with the stamping of `PresenceContract.lean` is not proved.
 -/
 import Musubi.NativeLifecycle.Types
 

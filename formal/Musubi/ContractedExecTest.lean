@@ -1,7 +1,7 @@
 /-
 The receiver has independent work 3 and has dropped the hub's head 2, whose survivor is 1.
-The old sender need not run again: advance adds 1, a merge retains 1 and 3, and the hub takes
-the push with its drop. Original ancestry of 2 is deliberately false at acceptance.
+The node that sent the push need not run again: advance adds 1, a merge retains 1 and 3, and
+the hub takes the push with its drop. Original ancestry of 2 is deliberately false at acceptance.
 -/
 import Musubi.ContractedExec
 import Musubi.ContractedMeasure

@@ -1,8 +1,9 @@
 /-
-Safety facts that do not require accepted original heads to form an ancestry chain.
-The existing SInv implies this view, but a surviving-image advance and a Below acceptance
-need not preserve InvR.histStep. Network custody and concrete-name equality are separate
-obligations; this file does not claim a complete protocol refinement.
+Safety facts that do not require the heads the hub has accepted to form an ancestry chain
+in original history. `SInv` implies these facts (`safe_of_sinv`) but also requires that chain
+(`InvR.histStep`), which a surviving-image advance and a `Below` acceptance need not preserve.
+Network custody and concrete-name equality are separate obligations; this file does not claim a
+complete protocol refinement.
 -/
 import Musubi.SurvivorAdvance
 import Musubi.RetryControl
@@ -51,8 +52,8 @@ noncomputable def ofSState (s : SState) : View := by
   classical
   exact ⟨s.s, fun x => decide (s.hubD x), fun n x => decide (s.nodeD n x)⟩
 
-/-- The legacy invariant is a strictly stronger source of these common facts. In particular,
-this implication does not transfer its original-head-chain theorem to new transitions. -/
+/-- `SInv` is strictly stronger than `Safe`: it implies these facts, but its original-head
+chain does not carry over to survivor advance or `Below` acceptance. -/
 theorem safe_of_sinv (h : SInv N s) : Safe (ofSState s) := by
   classical
   refine {

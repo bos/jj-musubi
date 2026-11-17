@@ -6,12 +6,12 @@ action a step of `SRStep`, or no step at all.
 
 The hub keeps its dropped set as records, in the order it took them, as the implementation
 does, and a push carries the records its node took last, with its dropped set and the head it
-pushes (`sendSup` refuses a head a record the node took drops). The hub refuses a push whose
-records aren't its own (`hubPushRefuse`): its ids aren't the hub's. So it does one whose new
-head it remembers dropping, or the push drops beyond its records (`pendingOf`). Every push the
-hub accepts is taken as a supersede (`hubSupAccept`), which adds a record only if the push drops
-operations the hub hasn't. A node takes the records the hub announces (`adopt`), once none of
-its heads is dropped by them.
+pushes (`sendSup` refuses a head that a record the node took drops). The hub refuses a push
+(`hubPushRefuse`) if the records it carries aren't the hub's, if its new head is one the hub
+remembers dropping, or if its new head is among the operations the push drops beyond those
+records (`pendingOf`). Every push the hub accepts is taken as a supersede (`hubSupAccept`),
+which adds a record only if the push drops operations the hub hasn't. A node takes the records
+the hub announces (`adopt`), once none of its heads is dropped by them.
 
 The hub prunes its first records (`prune`) once every node has taken them, as the reports in
 its nodes' requests say: each a list of records its node held when it sent the request, maybe

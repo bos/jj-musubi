@@ -277,7 +277,7 @@ theorem localName_injective {me : Key} {machines : List Key} {own : List Str}
     have ⟨hp, hw⟩ := split_slash (hsl _ m₁) (hsl _ m₂) h
     exact ⟨congrArg Prod.fst (eq_of_map_nodup hpnd m₁ m₂ hp), hw⟩
 
-/-! Cases where the rule before this one gave two workspaces one name, now apart. -/
+/-! Cases where candidate prefixes collide: every workspace still gets its own name. -/
 
 /-- The names here of each machine's `default`, and of this machine's own `own`. -/
 def namesOf (machines : List Key) (own : List Str) : List Str :=

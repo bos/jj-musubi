@@ -242,7 +242,8 @@ theorem eval_without_known_agrees (resolved : T → Bool) (side : T → Option T
     (eval_computes resolved side (withoutKnown h) m i e' cold)
 
 /-- A recorded fix-up value preserves a pre-contraction expectation without retaining the
-old parents. Establishing that the record contains that value belongs to the fix-up bridge. -/
+old parents. The hypothesis `hc` is `known.or recorded = some e`: the known value if there is
+one, otherwise the recorded value, is `e`. It is assumed here, not proved. -/
 theorem checkpoint (resolved : T → Bool) (side : T → Option T)
     (h : I → Observation I T) (i : I) (e : Option T)
     (hc : (h i).known.or (h i).recorded = some e) :

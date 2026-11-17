@@ -2033,10 +2033,10 @@
       "RecordEpoch"
     ],
     "survivorAdvance": [
-      "SurvivorAdvance"
+      "ContractOrder"
     ],
     "pushSnapshot": [
-      "PacketCoupling"
+      "PacketAcceptance"
     ],
     "headControl": [
       "SerialReply"

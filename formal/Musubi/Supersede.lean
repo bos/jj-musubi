@@ -23,13 +23,23 @@ operation the set leaves, the abandoning machine's own work or the fix-up operat
 
 `SStep` is any `Step` of the protocol, guarded so that the hub takes no new head it remembers
 dropping and, once it has pruned anything, only one pushed with the hub's records, and a node
-never takes a head it dropped (both refuse superseded ids), plus: `sup`, the hub taking a
-supersede with the push it rides on, to a head the push doesn't drop; `abandon`, `jj op
-abandon` on a node, which drops operations below its heads but none of them; `sendSup`, with a
-head no record its node took drops; `sendD`, of at least what the hub remembers; `adopt`, a
-node taking a dropped set the hub announced once no head of its own is in it; and `prune`, the
-hub deleting the ids of some of what it dropped. `SRStep` adds the hub going back, to a head
-it accepted and the dropped and pruned sets it had then (`Regress.lean`).
+never takes a head it dropped (both refuse superseded ids), plus:
+
+- `sup`, the hub taking a supersede with the request it rides on, to a head the request doesn't
+  drop, when every surviving image of the hub's head, under the hub's drops and the request's,
+  is below the new head (`Contract.Below`), whether or not the hub's head itself is;
+- `advance`, a node advancing to what survives of the head it knows: its heads become their
+  frontier with that head (`Contract.frontierSet`), all of it local;
+- `abandon`, `jj op abandon` on a node, which drops operations below its heads but none of them;
+  `sendSup`, with a head no record its node took drops; `sendD`, of at least what the hub
+  remembers; `adopt`, a node taking a dropped set the hub announced once no head of its own is
+  in it;
+- `adoptPrepared`, a node taking an announced dropped set and, at once, the frontier of its heads
+  and known head under what it then drops: so it can take records that drop a head of its own;
+- `prune`, the hub deleting the ids of some of what it dropped.
+
+`SRStep` adds the hub going back, to a head it accepted and still holds the closure of, and the
+dropped and pruned sets it had then (`Regress.lean`).
 
 A hub that has pruned an operation can't refuse a push to it by its id, so the guard is what it
 can check: the push's records are the hub's, so they drop everything it pruned (here, the
@@ -40,30 +50,26 @@ node that did could make the hub take back an operation it pruned.
 
 What holds:
 
-These results concern the original-ancestry abstraction below. Production also accepts a
-push whose expected head contracts into ancestors of its new head without originally being
-one. That case is not represented by `SStep.sup`; `ContractOrder.lean` and the asynchronous
-liveness section of `formal/README.md` describe the remaining refinement gap.
-
-- The protocol's states are those of `Model.lean` (`SReachable.base`) or `Regress.lean`
-  (`SRReachable.base`), so every theorem there holds as stated: `noDuplicateMerge` among
-  them. Copies are no new operations, so they make no merge.
+- Every state satisfies `SInv` (`sinv_reachable`): the universe is a DAG, the hub holds its
+  head's closure and every node its store's (`InvC`); the hub's history is a chain in the hub's
+  own comparison; the hub's head and every node's heads survive their dropped sets; and every
+  operation a node made and kept is below one of its heads. So while the hub doesn't go back, it
+  never takes a head it dropped, though it may have pruned it (`dropped_never_head`); a node
+  that hasn't dropped an operation the hub pruned has no supersede the hub takes
+  (`behind_not_carried`); and once the hub's drops stop growing, every head it accepts descends
+  from the one before (`hub_moves_original`).
 - Dropped sets only grow on every node (`nodeD_grows`), and on the hub while it doesn't go back
   (`hubD_grows`). With `Contract.superseded_ne`, an id that a node's dropped set has superseded
   never reappears on that node (`superseded_never_returns`), nor on the hub while it doesn't go
   back (`superseded_never_returns_hub`).
-- The hub's head and every node's heads survive their dropped sets, and every dropped
-  operation is below a head of a node that dropped it (`SInv`), whatever the hub prunes. So
-  while the hub doesn't go back, it never takes a head it dropped, though it may have pruned it
-  (`dropped_never_head`); and a node that hasn't dropped an operation the hub pruned has no
-  supersede the hub takes (`behind_not_carried`).
 - Liveness, once the hub stops going back, from a state where every node has dropped what the
-  hub pruned (`AllPruned`): the policy with supersedes (`SPStepR`) ends with every node at the
-  hub's head and with the hub's dropped set, which then holds every operation any node dropped
-  (`eventually_convergesS`), though the hub announces only what it remembers. A step keeps
-  `AllPruned` as long as what it prunes, every node had dropped (`allPruned_step`); the
-  executable hub, which prunes only records every node has taken, keeps it in every state it
-  reaches (`Exec.sexec_allPruned`).
+  hub pruned (`AllPruned`) and whose history is an original chain (`SChain`): the policy with
+  supersedes (`SPStepR`) ends with every node at the hub's head and with the hub's dropped set,
+  which then holds every operation any node dropped (`eventually_convergesS`), though the hub
+  announces only what it remembers. A step keeps `AllPruned` as long as what it prunes, every
+  node had dropped (`allPruned_step`); the executable hub, which prunes only records every node
+  has taken, keeps it in every state it reaches (`Exec.sexec_allPruned`). A push that drops the
+  hub's head can break `SChain`; liveness from the states after it is not proved.
 -/
 import Musubi.Regress
 import Musubi.Contract

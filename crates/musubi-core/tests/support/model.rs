@@ -363,7 +363,7 @@ impl HubStorage for FakeHub {
 pub enum Advanced {
     /// To the hub's head, as the original-history model's `advance`.
     Plain,
-    /// To what survives of a head this node dropped (`imageAdvance`, also `advance`).
+    /// To what survives of a head this node dropped (`advance`).
     Images,
     /// While the hub's records are prepared and drop a head: every head and the hub's head
     /// as those records name them, taking the records at once (`advancePrepared`), as a real

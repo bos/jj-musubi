@@ -401,30 +401,35 @@ dropped heads. A cached fix-up accepted after rollback can be an ancestor of a d
 operation, so ancestry alone cannot make this advance unnecessary. If the node has pending
 drops and the hub's records, supersede, instead of an ordinary push.
 
-Properties of the original-ancestry relation in `formal/Musubi/Supersede.lean`:
+Properties of the relation in `formal/Musubi/Supersede.lean`, which accepts a push through the
+surviving images of the hub's head, advances a node to what survives of a head it dropped, and
+takes prepared records together with the frontier they leave:
 
-- Without hub rollback, every safety property above holds in the original-ancestry model,
-  MergeOwnership and no duplicate merges included: renaming creates no operation, and so
-  performs no merge.
 - **DroppedGrows**: `D_node` only grows; `D_hub` too while the hub doesn't go back.
 - **SupersededGone**: an id that a node's dropped set has superseded is never again the id of an
   operation that node shows; on the hub, while it doesn't go back.
-- **HeadsSurvive**: no head is in its holder's dropped set, and every dropped operation is below
-  a head of a node that dropped it.
+- **HeadsSurvive**: no head is in its holder's dropped set, and every operation a node made and
+  hasn't dropped is below one of its heads.
 - **DroppedNeverHead**: once the hub has dropped an operation, it never takes it as its head
   again while it doesn't go back, though it may have pruned it, whatever it prunes.
 - **BehindRefused**: a node that hasn't dropped an operation the hub pruned has no supersede the
   hub takes.
-- Liveness: once users stop and the hub stops going back, if every node has dropped what the
-  hub pruned, as pruning only records every node has taken ensures, every node reaches `heads =
-  {hub.head}` and `D_node = D_hub`, which then holds every operation any node dropped, though
-  the hub sends only the records it remembers.
+- **HubChain**: each head the hub accepts has every surviving image of the one before below it;
+  once the hub's dropped set stops growing, it descends from the one before.
+- Liveness, for a policy that advances, adopts and pushes only along original ancestry
+  (`SPStepR`): once users stop and the hub stops going back, from a state whose accepted heads
+  form an original-ancestry chain and where every dropped operation is below a head of a node
+  that dropped it, if every node has dropped what the hub pruned, as pruning only records every
+  node has taken ensures, every node reaches `heads = {hub.head}` and `D_node = D_hub`, which
+  then holds every operation any node dropped, though the hub sends only the records it
+  remembers.
 
-These theorems apply to that relation. `ContractedExec.lean` extends the executable submodel
-with surviving-image advancement, atomic prepared adoption and contracted acceptance.
-The added primitives preserve the common store and frontier facts in `ContractedSafety`,
-but an accepted expected head need not remain below later heads in original ancestry.
-Full union safety is separate from the raw-namespace asynchronous convergence refinement in
+The properties of the protocol without abandons that rest on original ancestry, such as
+**HubMonotone** and **MergeOwnership**, are not proved for runs with abandons. A push that drops
+the hub's head can leave that head below no later head in original ancestry, and liveness from
+the states after it is not proved.
+
+This model is separate from the raw-namespace asynchronous convergence refinement in
 `FineAssembly.hive_converges_observed` ([#78](https://github.com/bos/jj-musubi/issues/78)). The
 latter derives convergence under explicit source, recovery and fairness contracts, including
 finitely many automatic semantic writes. [Conformance](conformance.md) states the executable

@@ -92,7 +92,7 @@ impl World {
     }
 
     /// Each accepted head descends from the one before, or is above everything that
-    /// survives of it when accepting through a contraction (`imageAccept`'s `acceptDrops`).
+    /// survives of it when accepting through a contraction (`hubSupAccept`'s `acceptDrops`).
     fn check_hub_monotonicity(&self, univ: &Univ) {
         for (seq, pair) in (1..).zip(self.hist.windows(2)) {
             if self.contracted_accepts.contains(&seq) {

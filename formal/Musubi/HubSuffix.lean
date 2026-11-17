@@ -916,13 +916,18 @@ theorem hub_suffix_stabilizes {N : Nat} {E : Nat → Prop} {w : Nat} (run : Nat 
 
 /-! ## What this rests on
 
-Each `Step` constructor must be matched, on hub-space raw operation ids, by PostCut or by the
+Each `Step` constructor must be matched, on hub-space raw operation ids, by the model or by the
 native code:
 
 - `accept`: after the cuts, an accept moves the hub from `e` to `d` with `Anc e d` and `e ≠ d`
-  in the hub store's raw parent graph (PostCut's `post_cut_step` in the model; natively PostCut's
-  R1: once records stop, no renamed version is written; and R2: `descends` is raw ancestry).
-  `pk` holds every push that can still move the hub. PacketCoupling's `packet_sender_aligned`,
+  in the hub store's raw parent graph. In the model, `Supersede.hub_moves_original` says so of
+  every step that leaves the hub's drops as they were, and each step the executable hub takes is a
+  step of `SRStep` (`Exec.sexec_sound`). Natively, with no version-to-original projection, it needs R1: once
+  its records stop changing, `hub::Push::answer` writes no renamed version, since it contracts
+  only by drops it hasn't taken; and R2: with the expected head a current id the hub hasn't
+  dropped, and every pushed drop already taken, `HubAdapter::descends` is ancestry in the hub
+  store's current parent graph. Neither is proved here.
+  `pk` holds every push that can still move the hub. `PacketAcceptance`'s `packet_sender_aligned`,
   coupled to the fixed node-drop sets, identifies the actual sender of each new move-capable
   packet as eligible (`send` needs `E n`). Other nodes may append ledger entries and send
   packets forever; those packets cannot move the hub and are not in `pk`. Idempotent acceptance
@@ -931,15 +936,16 @@ native code:
   knows is one, by `Inv.known`; an older one must be checked to be.
 - `advance`, `merge`, `send`: the policy's guards. Advance only when no head descends from the
   known head; merge only with two heads; push only a single head, naming the known head as
-  expected (`PushPacket.sourceMatchesB` in PacketCoupling). The model asks nothing about whether
-  the pushed head descends from the known head: the hub's own guard refuses a push that doesn't.
+  expected (`PushPacket.sourceMatchesB` in `PacketAcceptance`). The model asks nothing about
+  whether the pushed head descends from the known head: the hub's own guard refuses a push that
+  doesn't.
 - `maintain`: an idle maintenance write leaves one fresh head. `kb` says they stop: an
   assumption, since endless maintenance legitimately keeps moving the hub.
 - `frame`, `grow`: every other step leaves eligible nodes' heads and knowledge and the hub's
   head, sequence and history alone, and the universe only gains operations whose parents it
   has. Ids are a topological order of that growth, which need not be the store's order (an
-  import need not keep parents first); PostCut's R3 is that the accepted closure is finite and
-  acyclic.
+  import need not keep parents first, so storage order alone cannot establish acyclicity). R3,
+  also native, is that the accepted closure is finite and acyclic.
 - A packet's generation tag and `ksq`, and every node's generation `bk`, are ghost state.
 
 Outside this file: aligning misaligned nodes (`E` is fixed; a node joining `E` restarts the

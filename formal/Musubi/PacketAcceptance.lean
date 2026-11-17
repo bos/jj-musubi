@@ -377,7 +377,7 @@ fixed, does not describe this accept, which may change the records.
 Whether the push's records are the hub's is the hub's own comparison of them, count and digest
 (`Checks.recordsMatch`). What an accept does to the records (`set_head` appends the push's
 drops, less what the records drop already, if that leaves any) is not modelled here: the
-ordered-record layer (`RecordCut`, `PacketCoupling`) owns it. -/
+ordered-record layer (`RecordStability`) owns it. -/
 
 namespace Musubi.RawPublish
 

@@ -1,8 +1,9 @@
 /-
-The ancestry check when a push contracts its expected head. A dropped head stands for all
-of its surviving images, not for its original identity. This relation is weaker than
-original ancestry while that head is dropped. Once the dropped set stops changing, heads
-that survived it again form an ordinary ancestry chain.
+The hub's comparison and a node's frontier, computed. A dropped head stands for all of its
+surviving images, not for its original identity: `belowB` checks `Contract.Below` and that the
+images are nonempty, as the hub does, and `frontier` computes `Contract.frontierSet`. Once the
+dropped set stops changing, heads that survived it again form an ordinary ancestry chain
+(`stable_suffix_chain`).
 -/
 import Musubi.Contract
 import Musubi.ExecSound

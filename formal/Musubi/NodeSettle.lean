@@ -1641,8 +1641,8 @@ records, over raw ids:
 - `when_idle`: housekeeping that writes keeps the round going (`maint`); that it eventually stops
   writing is the premise `hmaint`, the idle-maintenance assumption HubSuffix makes too.
 
-Outside this file: that the stable hub accepts what `Emit` sends. The packet coupling
-(`Musubi.PacketCoupling`) and the hub's guards give that, and it contradicts stability, so the
+Outside this file: that the stable hub accepts what `Emit` sends. The packet checks
+(`Musubi.PacketAcceptance`) and the hub's guards give that, and it contradicts stability, so the
 composition takes the right disjunct. Eligibility is a condition on dropped originals, separate
 from applied-record identity. Once the hub is stable, `SysAcceptance.all_eligible` uses the native
 pending-round laws: an ineligible node would force a push whose handling moves the stable hub,

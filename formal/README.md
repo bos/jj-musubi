@@ -323,18 +323,18 @@ least what they drop), `hnormalDef` and `hsend`.
 | File | Contents |
 | --- | --- |
 | `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`, indicators `ind`, shared termination/progress facts (`Steps`, `eventually_done_of_progress`), and traces that stop changing (`nat_trace_stabilizes`, `lex_stabilizes`). |
-| `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree. |
+| `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree; comparing through surviving images (`Below`), and the frontier of heads under a dropped set (`frontierSet`). |
 | `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
-| `Musubi/Invariant.lean` | `Core`, what holds with or without a hub that goes back; the inductive invariant `Inv`, which extends it; and the message invariant `MsgOK`. |
-| `Musubi/PreserveEnv.lean` | `Core` and `Inv` are preserved by `UserOp`, `Merge` and message sends. |
-| `Musubi/PreserveSync.lean` | `Core` is preserved by replacing one node (`Core.setNode`); `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
+| `Musubi/Invariant.lean` | `Base`, what every state satisfies, whatever goes back or is dropped; `Core`, which adds the original history chain and every node's work below its heads; the inductive invariant `Inv`, which extends `Core`; and the message invariant `MsgOK`. |
+| `Musubi/PreserveEnv.lean` | `Base`, `Core` and `Inv` are preserved by `UserOp`, `Merge` and message sends. |
+| `Musubi/PreserveSync.lean` | `Base` and `Core` are preserved by replacing one node (`Base.setNode`, `Core.setNode`); `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
 | `Musubi/Safety.lean` | The safety properties and no feedback. |
 | `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read, with a hub that may have gone back too. |
-| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives (`InvR`, which extends `Core`), and convergence once the hub stops going back. |
+| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives (`InvR`: `Core` with `InvC`, what every step keeps, history chain or not), and convergence once the hub stops going back. |
 | `Musubi/AbandonRefs.lean` | The boundary from contracted survivor heads and saved expected values to one-ref realization and merged publication. |
-| `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`). |
+| `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), accepting a push through the surviving images of the hub's head, advancing to what survives of a dropped head and adopting records with their frontier; its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`) from states whose history is an original chain (`SChain`). |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness; and its senders, attempt by attempt under a deadline, and in time, with sweeps of what has gone untouched. |
@@ -342,24 +342,15 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/ExecSound.lean` | Soundness of `execStep` and of those computations ([below](#the-executable-model-and-the-conformance-oracle)). |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler, which also checks the preconditions of the model functions it calls. |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
-| `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
+| `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and the measures computed (`smeasureE`, `sconvergedE`, and `rmeasureCE` through surviving images). |
 | `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
 | `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix. The convergence proof does not use it. |
 | `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
-| `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
-| `Musubi/SurvivorAdvance.lean` | The complete surviving-image frontier, preservation of local work, and its full-frontier merge. |
+| `Musubi/ContractOrder.lean` | The hub's comparison computed (`belowB`) and the frontier computed (`frontier`), with the frontier's covering, merge and survival facts. |
 | `Musubi/BaseImages.lean` | Every image of the accepted base stays below an op head, through each step that changes the base, the drops or the heads, as stated, unchecked against the code (#138). |
-| `Musubi/ContractedSafety.lean` | Common store and frontier invariants without an original accepted-head chain; local primitive preservation and fixed-drop credit. |
-| `Musubi/ContractedExec.lean` | The explicit executable union with survivor advance, atomic prepared adoption and contracted acceptance and rejection. |
-| `Musubi/ContractedRecordCut.lean` | One record, pruning and node-drop stabilization cut for the executable recovery union. |
-| `Musubi/PostCut.lean` | Strict hub movement after the record cut and finite influence of old ledger targets. |
-| `Musubi/CutHistory.lean` | Survival of each saved hub head under its matching saved records, including rollback. Not used by the convergence proof. |
-| `Musubi/PacketCoupling.lean` | One immutable push's full fields and actual send-time state, including actual-sender alignment. |
-| `Musubi/PacketAcceptance.lean` | Upload coverage and actual packet checks force the executable hub's acceptance decision. |
-| `Musubi/NodeReconcile.lean` | Surviving node heads throughout recovery and immediate adoption at an eligible node. Not used by the convergence proof. |
-| `Musubi/RecordReplies.lean` | Held-prefix custody and reconstruction of fresh serialized ordered-record replies. Not used by the convergence proof. |
+| `Musubi/PacketAcceptance.lean` | One immutable push's fields and send-time state, upload coverage, and actual packet checks that force the executable hub's acceptance decision. |
 | `Musubi/SerialReply.lean` | Serialized calls, own-response recovery, shared request ids and notification scheduling between rounds. |
 | `Musubi/RecordEpoch.lean` | Finite record adoptions and stale-plan reopens after current replies replace obsolete callbacks. |
 | `Musubi/NotificationControl.lean` | Finite old notification handling, counting both in-flight logical frames and queued entries. |
@@ -404,9 +395,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/HubHistory.lean` | The hub's history of the joint run, by sequence number. |
 | `Musubi/RequestBounds.lean` | Derive request bounds, expand actual joint events, and prove the hub stabilizes. |
 | `Musubi/PendingEpoch.lean` | Bound pending alias changes with partial normalization and per-original coherence. |
-| `Musubi/ContractedMeasure.lean` | The record-aware executable progress check through surviving images; agreement with `rmeasureE` when nothing is dropped. |
-| `Musubi/ContractedExecTest.lean` | Build-time checks of independent recovery and mutually exclusive contracted outcomes. |
-| `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
+| `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, including contracted acceptance, survivor advance and prepared adoption, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Expected.lean` | The conflicted-ref history walk, agreement under operation renaming, termination and the import-agreement boundary. |
 | `Musubi/ExpectedExec.lean` | Finite operation DAGs and commit-side selection for the history oracle. |
@@ -628,15 +617,14 @@ case is refused. See the contraction correspondence in
 
 `AbandonRefs.lean` connects the survivor graph to a successful colocated publication with one
 remote ref. Slots and expected-value snapshots are indexed by original operation identity.
-`takeHeads` expands the current heads under the dropped set, adds the incoming
-head, and takes the maximal survivors. `History.publish` contracts the graph and publishes one
-fresh merge together with `Refs.cbeside`'s ref state. `publish_refines` proves surviving ancestry
-and `CInv` together, and that the ref action is a `CStep.beside`. `fixup_retains` states the
-fresh child/saved-expectation boundary: the new operation receives its parent's slot and the
-saved expectation,
-rather than inferred again from contracted ancestry. `abstraction_unique` uses the enforced
-immutable identity premise above; `adoption_composes` connects sequential record contraction
-to the union of dropped originals.
+`takeHeads` is the frontier of the incoming head and the current heads under the dropped set
+(`Contract.frontier`): their surviving images, less those below another. `History.publish`
+contracts the graph and publishes one fresh merge together with `Refs.cbeside`'s ref state.
+`publish_refines` proves surviving ancestry and `CInv` together, and that the ref action is a
+`CStep.beside`. `fixup_retains` states the fresh child/saved-expectation boundary: the new
+operation receives its parent's slot and the saved expectation, rather than inferred again from
+contracted ancestry. `abstraction_unique` uses the enforced immutable identity premise above;
+`adoption_composes` connects sequential record contraction to the union of dropped originals.
 
 The oracle executes those definitions directly for the abandonment/ref race, checking every
 survivor's parents, the normalized merge base, the published merge and its ref state before
@@ -645,23 +633,35 @@ publication. [Conformance and limits](../docs/internals/conformance.md#abandonme
 describes the observation points and premises. This boundary does not replace the network
 model, derive expected values from all jj histories, or prove publication's lock discipline.
 
-`Supersede.lean` models the protocol over each operation's original, so the states of
-`Model.lean` stay as they are, and adds the hub's and each node's dropped sets, and which of the
-hub's it has pruned (`SState`). `SStep` is a `Step` that gives each node no head of its own
-dropped set, and the hub none it remembers dropping and, once it has pruned anything, none
-whose push doesn't carry the hub's records; or one of `sup` (the hub takes a dropped set with
-the push it rides on, to a head the push doesn't drop), `abandon`, `sendSup` (what the records a
-node took drop, its dropped set, and the head of its push, which those records don't drop),
-`sendD` (at least what the hub remembers), `adopt` and `prune` (the hub deletes the ids of some
-of what it dropped); `SRStep` adds the hub going back, to the dropped and pruned sets it had
-with that head.
+`Supersede.lean` models the protocol over each operation's original, and adds the hub's and each
+node's dropped sets, and which of the hub's it has pruned (`SState`). `SStep` is a `Step` of
+`Model.lean` that gives each node no head of its own dropped set, and the hub none it remembers
+dropping and, once it has pruned anything, none whose push doesn't carry the hub's records; or
+one of:
 
-- `SReachable.base`, `SRReachable.base`: every state is one of `Model.lean`, or of
-  `Regress.lean` with the hub going back, so every theorem there holds as stated;
-  `noDuplicateMergeS` restates one.
-- `sinv_reachable`: the invariant `SInv`, whatever the hub prunes. No head is in its holder's
-  dropped set, the root is in none, every dropped operation is below a head of a node that
-  dropped it, and the records a supersede carries drop no head of its push.
+- `sup`: the hub takes a dropped set with the `Cas` or `Push` it rides on, from its head to a
+  new head the request doesn't drop, when every surviving image of its head, under its drops and
+  the request's, is below the new head (`Contract.Below`), whether or not its head itself is;
+- `advance`: a node advances to what survives of the head it knows, its heads becoming their
+  frontier with that head under its dropped set (`Contract.frontierSet`), all of it local;
+- `abandon`; `sendSup` (what the records a node took drop, its dropped set, and the head of its
+  push, which those records don't drop); `sendD` (at least what the hub remembers); `adopt`;
+- `adoptPrepared`: a node takes announced records and, at once, the frontier of its heads and
+  known head under what it then drops, so it can take records that drop a head of its own;
+- `prune`: the hub deletes the ids of some of what it dropped.
+
+`SRStep` adds the hub going back to a head it still holds the closure of, and to the dropped and
+pruned sets it had then. A hub that lost part of that closure is made again instead.
+
+- `sinv_reachable`: the invariant `SInv`, for every step and whatever the hub prunes. The universe
+  is a DAG, the hub holds its head's closure and every node its store's (`InvC`). The hub's
+  history is a chain in its own comparison: each head's surviving images, under the drops the
+  hub took the next head with, are below the next (`histBelow`). No head is in its holder's
+  dropped set, the root is in none, every operation a node made and kept is below one of its
+  heads, and the records a supersede carries drop no head of its push.
+- `hub_moves_original`: a step that accepts a head without adding to the hub's drops moves the
+  hub's head strictly up original ancestry. The hub's head can fail to be below the new head
+  only if the push drops it.
 - `dropped_never_head`: so, while the hub doesn't go back, it never takes a head it dropped,
   though it may have pruned it. `behind_not_carried`: a node that hasn't dropped an operation the
   hub pruned has no supersede the hub takes.
@@ -669,13 +669,22 @@ with that head.
   go back. `superseded_never_returns`, `superseded_never_returns_hub`: so, by `superseded_ne`,
   an id superseded on a node is never again an id of an operation it keeps, nor on the hub
   while it doesn't go back.
+- `SChain`: what the liveness argument needs beyond `SInv`. The hub's history is a chain in
+  original ancestry and every operation a node made is below one of its heads, which with `SInv`
+  is `Regress.lean`'s `InvR` (`SChain.invR`); and every dropped operation is below a head of a
+  node that dropped it (`Kept`). `schain_rstep`: a step keeps it when it moves the hub's head up
+  original ancestry and each node's heads keep what they reached (`ChainOK`), as every policy step
+  does; `schain_of_run`: every state reached by such steps satisfies it. An acceptance whose push
+  dropped the hub's head, or an advance or prepared adoption that leaves work below no head, can
+  reach a state where it fails: liveness from such a state is not proved.
 - `spstepR_reachable`, `smeasure_decreases`, `no_infinite_policy_runS`, `progressS`,
   `converged_quiescentS`, `terminal_iff_convergedS`, `eventually_convergesS`,
   `maximal_run_convergesS`: liveness once the hub stops going back, for the policy `SPStepR`,
-  the steps of `PStepR` and `adopt`, `supPush` and `supFix`, from every reachable state where
-  every node has dropped what the hub pruned (`AllPruned`), though the hub announces only what
-  it remembers. `allPruned_step`: a step keeps `AllPruned` as long as what it prunes, every node
-  had dropped; `Exec.sexec_allPruned`: the executable hub keeps it in every state it reaches.
+  the steps of `PStepR` and `adopt`, `supPush` and `supFix`, from every reachable state that
+  satisfies `SChain` and where every node has dropped what the hub pruned (`AllPruned`), though
+  the hub announces only what it remembers. `allPruned_step`: a step keeps `AllPruned` as long as
+  what it prunes, every node had dropped; `Exec.sexec_allPruned`: the executable hub keeps it in
+  every state it reaches.
 - `converged_all_droppedS`, `converged_all_acceptedS`: once converged, the hub and every node
   have dropped every operation any node dropped, and every operation any node made is below the
   hub's head.
@@ -700,7 +709,7 @@ checks that none of its work is uploaded.
 The measure puts `(drops not yet on the hub, drops not yet on each node)` before `rmeasure`. A
 node can wait on another: with a head the hub dropped, or on a hub head it dropped and isn't
 past. `progressS` shows the node with the newest head above the hub's head can always act, since
-every dropped operation is below a newer head of a node that dropped it.
+in an `SChain` state every dropped operation is below a newer head of a node that dropped it.
 
 `Presence.lean`'s `fixup_present` and `pass_present` say what the fix-up chain does to which
 copies are present; `PresenceContract.lean` that the rewrite itself changes nothing there.
@@ -1043,11 +1052,11 @@ is eventually fixed, and pruning then spends a bounded prefix.
   the end of rollback as assumptions. `adopt_pending_subset`: pending originals shrink under
   `adoptR` when the new record list extends the old dropped union; nothing proves that every
   production adoption extends it.
-- `ContractedRecordCut.lean`: the same cut for the full executable recovery union (survivor
-  advancement, prepared adoption, contracted acceptance), by `cexecAction_record_control`,
-  `contracted_step_node_drop_mono` and `cexec_record_and_drop_sets_stabilize`. It assumes bounded
-  dropped originals and no rollback, and needs no head stability, node record agreement,
-  successful reply or decreasing rank.
+- `sexec_record_and_drop_sets_stabilize` (`RecordStability.lean`): the same cut for every
+  executable run, survivor advance, prepared adoption and contracted acceptance included, by
+  `sexec_record_control` and `sexec_node_drop_mono`. It assumes bounded dropped originals and
+  no rollback, and needs no head stability, node record agreement, successful reply or
+  decreasing rank.
 - `RecordEpoch.lean`: counts the old announcement and received-record debt carried into a
   fixed-record suffix. A fresh `Fetched` announces only the fixed list, taking a list consumes
   every receipt, and receipt debt survives a reopen while the announcement does not. Adoption can
@@ -1067,11 +1076,6 @@ is eventually fixed, and pruning then spends a bounded prefix.
   the recoveries from obsolete requests, given preserved request adequacy and a reset that
   restores it. That adequacy covers the remaining calls of a batch and the truthful have claims,
   not only the stored known head, and must be established after old effects stop.
-- `CutHistory.lean`, `NodeReconcile.lean`, `RecordReplies.lean`: in the executable recovery union,
-  each saved hub head survives the record list saved at the same sequence; every reachable node
-  head survives its dropped set, so an eligible node can adopt a current announcement at once;
-  and held-prefix custody holds, so a fresh response completes from its request prefix or the
-  held pruning boundary.
 
 ### Entry
 
@@ -1123,11 +1127,12 @@ actual sampled daemon events and packet.
   settled hub head. `PacketAcceptance.lean`: the proper packet meets no refusal, rejection,
   idempotence or incomplete closure; upload coverage uses the actual base-image frontier once
   server-generated contraction bodies are present.
-- `PostCut.lean`, `PacketCoupling.lean`: after records stop changing, the hub moves strictly
-  along original ancestry in the finite executable model, with finitely many moves to old ledger
-  targets. `packet_sender_after_cut_aligned`: an accepted packet's sender is eligible throughout
-  the suffix, so other nodes' packets cannot move the hub. The native counterpart works on the
-  hub's raw graph, with no projection from canonical versions to immutable originals.
+- `Supersede.hub_moves_original`: once records stop changing, the hub moves strictly along
+  original ancestry, and from every reachable state each step the executable hub takes is a
+  step of `SRStep` (`Exec.sexec_sound`). `packet_sender_after_cut_aligned` (`PacketAcceptance.lean`): an accepted
+  packet's sender is eligible throughout the suffix, so other nodes' packets cannot move the
+  hub. The native counterpart works on the hub's raw graph, with no projection from canonical
+  versions to immutable originals.
 - The joint system: `NodeSys` keeps each node's scoped embedding into one raw graph and retains
   immutable requests; `HubLedger`, `HubNodeSteps` and `HubAnswers` derive packet coverage, expand
   local events and use the actual accepted request; `SysFreshCuts` derives the cutoffs for
@@ -1222,31 +1227,28 @@ can mark a normal sent body.
 
 ### Contracted ancestry
 
-`SStep.sup` and `SPStepR.supPush` accept a push only when its new head descends from the expected
-head in original ancestry. The shipping hub also accepts a cached fix-up that drops its expected
-head, when the head's surviving images are below the fix-up
-(`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`, after an interrupted adoption and
-a hub rollback). `ContractedExec.lean` extends the original-operation submodel with this
-comparison and leaves `SRStep` unchanged.
+The shipping hub accepts a cached fix-up that drops its expected head, when the head's surviving
+images are below the fix-up (`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`, after
+an interrupted adoption and a hub rollback). `SStep.sup` accepts by that comparison, so this is
+a step of the one relation, and `SInv` holds after it. The hub's history is then a chain only in
+the hub's own comparison (`SInv.histBelow`), and the liveness theorems, which need an original
+chain (`SChain`), say nothing of the states that follow.
 
-- `ContractOrder.lean`: `Below` says every surviving image of the expected head is below the new
-  head, and `belowB` also checks that the image is nonempty, as the hub does. `below_two_step`,
-  `below_contracted_iff`: contracting a contracted history equals contracting by the union, and
-  original and current-graph ancestry of the images agree. For a fixed drop set,
-  `stable_suffix_chain` gives a reflexive original-ancestry chain of surviving heads; it repairs
-  no earlier history and proves neither strict change nor the full protocol invariants. The
+- `Contract.lean`: `Below` says every surviving image of the expected head is below the new
+  head, and `belowB` (`ContractOrder.lean`) also checks that the image is nonempty, as the hub
+  does. `below_two_step`, `below_contracted_iff`: contracting a contracted history equals
+  contracting by the union, and original and current-graph ancestry of the images agree. For a
+  fixed drop set, `stable_suffix_chain` gives a reflexive original-ancestry chain of surviving
+  heads, and `Supersede.hub_moves_original` a strict one once the hub's drops stop growing. The
   real trace checks the accepted push against `belowB` through the `contractedAncestry` route.
 - `RecordStability.eventual_original_chain`: a trace of surviving hub heads compared under each
   resulting dropped set has an eventual original-ancestry chain. The immutable graph and the
   contracted comparisons are premises; their projection onto the physical store and strict head
   changes are not derived.
-- `ContractedExec.cexecAction_sound` targets the union `ContractedRStep`, with advancement through
-  every surviving image and preparation changing frontier and record custody in one boundary.
-  `cexecAction_ok` preserves record custody; `imageAdvance_safe`, `preparedAdvance_safe` and
-  `imageAccept_safe` prove the new primitive cases of `ContractedSafety.Safe`, with no global
-  invariant of the union. `old_expected_accepts_eventually_stop` is a finite credit argument
-  once dropped sets stabilize. The submodel does not prove convergence of every network action;
-  the raw-namespace assembly handles canonical versions and normalization in their birth parents
+- `Exec.sexec_sound`: every step the executable model takes, advance through every surviving
+  image and preparation changing frontier and record custody in one boundary included, is a
+  step of `SRStep` or none. The model does not prove convergence of every network action; the
+  raw-namespace assembly handles canonical versions and normalization in their birth parents
   through its explicit projection.
 
 A failed sync can leave an accepted hub head, partially received data or a newly written fix-up.
@@ -1311,10 +1313,9 @@ local boundaries of the conditional refinement; they do not by themselves establ
 
 ### Results the convergence proof does not use
 
-The whole of `AsyncLiveness.lean`, `CutHistory.lean`, `NodeReconcile.lean`,
-`RecordReplies.lean` and `CallBatch.lean` (which justifies sequential native calls and
-interleaved physical request ids under injective correlation) is not used, nor are these parts
-of other files:
+The whole of `AsyncLiveness.lean` and `CallBatch.lean` (which justifies sequential native calls
+and interleaved physical request ids under injective correlation) is not used, nor are these
+parts of other files:
 
 | File | Not used |
 | --- | --- |
@@ -1322,10 +1323,8 @@ of other files:
 | `RecordStability.lean` | `sexec_record_prefix_stabilizes`, `adopt_pending_subset` |
 | `SerialReply.lean` | the serialized-call model and its invariant (the proof uses `handleHead`, `filteredLearn`, `own_reply_learns`, `object_recoveries_stop`, `wentBack`) |
 | `RecordEpoch.lean` | `exec_sound` and the `Guard` facts |
-| `PostCut.lean` | everything except `execStep_hubPushAccept_guards` |
 | `SysAcceptance/Events.lean` | the answer-observation check (`expectAnswer`, `checkAnswer_expect`, `HubAnswer.observed_step`), `HubAnswer.push_handled`, `NodeIssue.raw_step`, `learn_new_bare` |
-| `PacketCoupling.lean` | the packet-coupling theorems; only `PushPacket` is used |
-| `PacketAcceptance.lean` | `packet_checks_accept`, `packet_upload_closes` and their helpers |
+| `PacketAcceptance.lean` | `packet_checks_accept`, `packet_upload_closes`, the packet-coupling theorems (`packet_sender_aligned` and the rest), and their helpers |
 | `EntryAssembly.lean` | everything except `PendingOriginals`, `eligible_pending_empty` |
 | `PendingEpoch.lean` | `pending_names_settle_with_old_known` (an obsolete known pair), `pending_names_settle_from_sources`, `finite_metadata_output_stabilizes` |
 | `RequestBounds.lean` | `hub_stabilizes_hive` |
@@ -1373,7 +1372,7 @@ of other files:
 - **Relaxations of durability, proved safe.** `loseKnown` lets a restarting node lose `known`
   (reset to `(0, root)`) while keeping `staged`, as the Rust node does. `loseVolatile` lets it
   lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any operations and
-  objects outside `closure(head)` in the original-ancestry relation. The extended executable
+  objects outside `closure(head)` in the original-ancestry relation. The executable
   model preserves operation bodies needed by retained historical heads: an older head can
   be outside the current closure after contracted acceptance. Historical-only objects may
   still be lost. A requested rollback to an incomplete target is an explicit environment choice
@@ -1461,8 +1460,7 @@ that checks the Rust core against the oracle.
    the preconditions of the model functions it calls, and answers a request that fails them with
    `bad request: <reason>`: operations' parents must come before them, heads and indices must be
    in range, current heads must survive the dropped set, and a requested control action must be
-   enabled. The protocol decisions are made by `execStep`, `sexecStep` and the explicit
-   extension `cexecAction`, not by the codec.
+   enabled. The protocol decisions are made by `execStep` and `sexecStep`, not by the codec.
 
 Theorems (`Musubi/ExecSound.lean`):
 
@@ -1512,11 +1510,12 @@ and `HeadsOK` too, and the actions of `SStep`:
 - `smeasureE_eq` and `sconvergedE_iff`: the set-based `smeasure` and `SConverged`.
 - `RecordLiveness.lean` adds `RecordConverged`, requiring the ordered applied records to
   match the hub's too, and `recordMeasure`: `(smeasure, recordLagE)`. `recordMeasureE_eq`
-  and `recordConvergedE_iff` connect their computations to the original model. The extended
-  oracle returns the record-aware `ContractedMeasure.rmeasureCE` suffix as part of
-  `smeasure`, record debt as `recordLag`, and the stronger convergence check as `converged`.
-  `rmeasureCE_without_drops` proves exact agreement when nothing is dropped. Termination of
-  the full union relation is not proved; the generated strict-decrease checks test it.
+  and `recordConvergedE_iff` connect their computations to the original model. The oracle
+  returns `rmeasureCE` (`SupersedeExec.lean`), the measure counted through surviving images, as
+  the suffix of `smeasure`, record debt as `recordLag`, and the stronger convergence check as
+  `converged`. `rmeasureCE_without_drops` proves exact agreement with `rmeasureE` when nothing
+  is dropped. That it decreases from states past a contracted acceptance is not proved; the
+  generated strict-decrease checks test it.
 
 The set abstraction alone does not establish record agreement: after a remake, a machine
 may republish two old drops as one record while another retains two records with the same

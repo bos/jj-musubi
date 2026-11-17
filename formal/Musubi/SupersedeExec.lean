@@ -10,8 +10,13 @@ pushes (`sendSup` refuses a head that a record the node took drops). The hub ref
 (`hubPushRefuse`) if the records it carries aren't the hub's, if its new head is one the hub
 remembers dropping, or if its new head is among the operations the push drops beyond those
 records (`pendingOf`). Every push the hub accepts is taken as a supersede (`hubSupAccept`),
-which adds a record only if the push drops operations the hub hasn't. A node takes the records
-the hub announces (`adopt`), once none of its heads is dropped by them.
+which adds a record only if the push drops operations the hub hasn't; the hub accepts it when
+every surviving image of its head, under its drops and the push's, is below the new head
+(`Contract.belowB`), and rejects it by the same comparison (`hubSupReject`). A node takes the
+records the hub announces (`adopt`), once none of its heads is dropped by them, or together with
+the frontier they leave when they drop one (`advancePrepared`); and it advances to what survives
+of a known head it dropped (`advance`). A plain rejection, forgetting and going back check what
+the hub would otherwise lose (`baseOutcomeB`).
 
 The hub prunes its first records (`prune`) once every node has taken them, as the reports in
 its nodes' requests say: each a list of records its node held when it sent the request, maybe

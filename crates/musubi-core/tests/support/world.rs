@@ -93,7 +93,7 @@ pub struct World {
     /// nothing of supersedes, falls only before.
     dropped_any: bool,
     /// The sequence numbers of the heads the hub accepted through what survives of the head
-    /// it had, not as its descendant in the original history (`imageAccept`).
+    /// it had, not as its descendant in the original history (`hubSupAccept`).
     contracted_accepts: BTreeSet<u64>,
     /// Whether any step left the original-history model: such an acceptance, an advance to
     /// what survives of a dropped head, or one as prepared records name the history.

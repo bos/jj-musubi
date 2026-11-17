@@ -238,6 +238,30 @@ pub struct Workspace {
     pub path: Option<PathBuf>,
 }
 
+/// An operation a rule may act on, printed by what it did and how far back it is, which are
+/// the same from one run of a case to the next, and by id, which is not: jj records each
+/// command's arguments in its operation, temporary paths and all.
+#[derive(Clone)]
+pub struct PastOp {
+    pub id: String,
+    /// The first line of the operation's description.
+    pub description: String,
+    /// How many operations before the machine's head it is.
+    pub back: usize,
+}
+
+impl std::fmt::Debug for PastOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?}, {} back (op {})",
+            self.description,
+            self.back,
+            &self.id[..12]
+        )
+    }
+}
+
 /// What an actual jj command read and wrote, before canonicalization or abandonment can
 /// expand its parent. This is independent source evidence for the reference replay.
 #[derive(Clone)]

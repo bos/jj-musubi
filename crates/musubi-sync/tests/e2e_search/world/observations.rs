@@ -19,6 +19,7 @@ use crate::view::View;
 
 use crate::identity::{HistoryKey, NativeOperation};
 
+use super::BOOKMARKS;
 use super::OP_KEY_TEMPLATE;
 use super::StaleObservation;
 use super::WORKSPACES;
@@ -407,26 +408,98 @@ impl World {
             .collect()
     }
 
-    /// The workspace names machine `m` lists at each of its op heads, read at that operation,
-    /// as `view_at` reads: without `--at-op`, jj would merge divergent op heads first, a change
-    /// no command records, before a rule that reads this can still reject.
-    fn workspace_names_at_heads(&self, m: usize) -> Vec<BTreeSet<String>> {
+    /// The first line of the description of machine `m`'s operation `op`, read at that
+    /// operation: no snapshot, import, or merge.
+    pub fn op_description(&self, m: usize, op: &str) -> String {
+        let described = self.raw_jj(
+            m,
+            &[
+                "--at-op",
+                op,
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                "description.first_line()",
+            ],
+        );
+        described.trim_end().to_owned()
+    }
+
+    /// The first line of the description of each of machine `m`'s newest `limit` operations,
+    /// by id.
+    pub(super) fn op_descriptions(&self, m: usize, limit: usize) -> BTreeMap<String, String> {
+        let limit = limit.to_string();
+        self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                &limit,
+                "-T",
+                r#"id ++ " " ++ description.first_line() ++ "\n""#,
+            ],
+        )
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(id, description)| (id.to_owned(), description.to_owned()))
+        .collect()
+    }
+
+    /// The lines `jj` prints for `args` at each of machine `m`'s op heads, read at that
+    /// operation, as `view_at` reads: without `--at-op`, jj would merge divergent op heads
+    /// first, a change no command records, before a rule that reads this can still reject.
+    fn lines_at_heads(&self, m: usize, args: &[&str]) -> Vec<BTreeSet<String>> {
         self.op_heads(m)
             .iter()
             .map(|head| {
-                let listed = self.raw_jj(
-                    m,
-                    &[
-                        "--at-op",
-                        head,
-                        "workspace",
-                        "list",
-                        "-T",
-                        "name ++ \"\\n\"",
-                    ],
-                );
-                listed.lines().map(str::to_owned).collect()
+                let mut full = vec!["--at-op", head];
+                full.extend_from_slice(args);
+                self.raw_jj(m, &full).lines().map(str::to_owned).collect()
             })
+            .collect()
+    }
+
+    /// The workspace names machine `m` lists at each of its op heads.
+    fn workspace_names_at_heads(&self, m: usize) -> Vec<BTreeSet<String>> {
+        self.lines_at_heads(m, &["workspace", "list", "-T", "name ++ \"\\n\""])
+    }
+
+    /// The local bookmark names machine `m` has at any op head, whatever they point at. Not
+    /// only the view's bookmarks: a conflicted bookmark can have no side that is a commit,
+    /// which `jj log` never shows but `jj bookmark create` refuses. jj makes one where a
+    /// conflict is resolved and deleted concurrently: from `main` at {A, B, C}, moving it to A on
+    /// one machine and deleting it on another leaves {-B, -C} and absent sides, as plain jj
+    /// does for the same two operations in one repository.
+    fn bookmark_names_at_heads(&self, m: usize) -> BTreeSet<String> {
+        self.lines_at_heads(
+            m,
+            &[
+                "bookmark",
+                "list",
+                "-T",
+                r#"if(!remote && present, name ++ "\n")"#,
+            ],
+        )
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Bookmark names from the pool that machine `m` has neither locally, at any op head, nor
+    /// on a real remote (`view`'s `remote_names`): `jj bookmark create` refuses those.
+    pub fn free_bookmark_names(&self, m: usize, view: &View) -> Vec<String> {
+        let existing = self.bookmark_names_at_heads(m);
+        let remote = view.remote_names();
+        BOOKMARKS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .filter(|name| !existing.contains(name) && !remote.contains(name))
             .collect()
     }
 

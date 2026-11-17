@@ -164,6 +164,13 @@ impl World {
 
     /// Machine `m` runs `jj op abandon` of its native operation `op`.
     pub fn op_abandon(&mut self, m: usize, op: &str) {
+        // The id the command records differs between runs of a case; what the operation did
+        // does not.
+        let what = self.op_description(m, op);
+        self.record(format!(
+            "{}: abandoning the operation {what:?}",
+            self.machine(m)
+        ));
         self.abandon_ops(m, op, &[op.to_owned()]);
     }
 

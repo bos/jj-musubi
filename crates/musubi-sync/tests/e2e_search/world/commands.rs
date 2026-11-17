@@ -15,6 +15,7 @@ use crate::view::View;
 use super::CommandOutcome;
 use super::FILES;
 use super::OperationHistory;
+use super::PastOp;
 use super::Workspace;
 use super::World;
 
@@ -66,22 +67,28 @@ enum Completion<'a> {
 impl World {
     /// Operations made since setup that machine `m` can run a command at, other than its
     /// current head. (`jj op log` merges concurrent operations first, like any command.)
-    pub fn older_ops(&mut self, m: usize) -> Vec<String> {
+    pub fn older_ops(&mut self, m: usize) -> Vec<PastOp> {
         // Through a recorded command: it merges concurrent operations first.
         self.jj(m, &["op", "log", "--no-graph", "-n", "8", "-T", "id"]);
+        let descriptions = self.op_descriptions(m, 8);
         self.op_ids_and_keys(m, Some(8))
             .into_iter()
+            .enumerate()
             .skip(1)
-            .filter(|(id, key)| {
+            .filter(|(_, (id, key))| {
                 !self.evidence.baseline_ids[m].contains(id)
                     && !self.evidence.baseline_keys[m].contains(key)
             })
-            .map(|(id, _)| id)
+            .map(|(back, (id, _))| PastOp {
+                description: descriptions[&id].clone(),
+                id,
+                back,
+            })
             .collect()
     }
 
     /// Those of `older_ops` that `jj op abandon` can abandon: not merges, which it refuses.
-    pub fn abandonable_ops(&mut self, m: usize) -> Vec<String> {
+    pub fn abandonable_ops(&mut self, m: usize) -> Vec<PastOp> {
         let older = self.older_ops(m);
         let merges: BTreeSet<String> = self
             .raw_jj(
@@ -102,7 +109,7 @@ impl World {
             .collect();
         older
             .into_iter()
-            .filter(|op| !merges.contains(op))
+            .filter(|op| !merges.contains(&op.id))
             .collect()
     }
 
@@ -164,6 +171,21 @@ impl World {
         else {
             unreachable!("a historical command records its new operation heads");
         };
+    }
+
+    /// Runs `jj undo` on machine `m`. jj refuses to undo another workspace's operation unless
+    /// told to, so when it refuses one, which `checks` confirm is not this workspace's own, the
+    /// user says so.
+    pub fn undo(&mut self, m: usize) {
+        let latest = self.head_op_workspace(m);
+        let refusal = "Refusing to undo operation";
+        match self.try_jj_in(m, 0, &["undo"], &[refusal]) {
+            Ok(_) => self.check_undid_own_operation(m),
+            Err(_) => {
+                self.check_refused_foreign_operation(m, &latest);
+                self.jj(m, &["undo", "--allow-cross-workspace"]);
+            }
+        }
     }
 
     /// Runs one complete actor action: capture inputs, execute, record native sources,
@@ -242,10 +264,12 @@ impl World {
                 let history_before = self.command_history(m);
                 let mut full = vec!["--at-op", op];
                 full.extend_from_slice(args);
+                // The operation's id differs between runs of a case; what it did does not.
                 self.record(format!(
-                    "{}: jj --at-op {} {}",
+                    "{}: jj --at-op {} ({:?}) {}",
                     self.machine(m),
                     &op[..12],
+                    self.op_description(m, op),
                     args.join(" ")
                 ));
                 let output = self.fx.repo(m).jj_output(&full);

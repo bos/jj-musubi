@@ -43,7 +43,7 @@ threads-required = "num-test-threads"
 # Give them a share of the pool large enough that those checks can finish under contention.
 [[profile.default.overrides]]
 platform = 'cfg(target_os = "macos")'
-filter = "test(=e2e_dropped_merge) | test(=e2e_command_above_dropped_merge) | test(=e2e_git_change_while_taking_a_trim) | test(=e2e_smoke)"
+filter = "test(=e2e_dropped_merge) | test(=regressions::e2e_command_above_dropped_merge) | test(=regressions::e2e_git_change_while_taking_a_trim) | test(=e2e_smoke)"
 threads-required = 4
 
 # Keep all 150 oracle cases on CI: Linux and Windows exceeded the default two-minute
@@ -55,7 +55,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # These four-repository survivor cases exceed two minutes on Windows. Leave time for all
 # their steps, including the generated walk and independent convergence/import checks.
 [[profile.ci.overrides]]
-filter = "test(=e2e_dropped_merge) | test(=e2e_command_above_dropped_merge)"
+filter = "test(=e2e_dropped_merge) | test(=regressions::e2e_command_above_dropped_merge)"
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # These six four-repository cases, with separate git directories and fetched histories,

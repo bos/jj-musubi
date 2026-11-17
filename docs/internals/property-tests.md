@@ -61,15 +61,25 @@ drives the sync by hand, which `Realization` cannot express.
 The end-to-end search has three boundaries:
 
 1. [Rules](../../crates/musubi-sync/tests/e2e_search/machine.rs) draw actions from what a machine
-   can do. Candidate selection and fault budgets belong here.
+   can do. Candidate selection and fault budgets belong here. A rule chooses and acts; it
+   judges nothing, not even whether `jj undo` undid an operation of the right workspace.
 2. [The world](../../crates/musubi-sync/tests/e2e_search/world.rs) runs those actions and captures
    their source evidence in `NativeEvidence`, separate from the live actors. Native command
    inputs must be recorded before a later realization or abandonment can rewrite them. A
    canonical marker alone is not proof of native authorship.
-3. [Checks](../../crates/musubi-sync/tests/e2e_search/checks.rs) judge the resulting history.
+3. [Checks](../../crates/musubi-sync/tests/e2e_search/checks.rs) judge the resulting history, and
+   what an undo undid.
    [Imports](../../crates/musubi-sync/tests/e2e_search/imports.rs) checks each machine's private
    Git state; [the reference](../../crates/musubi-sync/tests/e2e_search/reference.rs) rebuilds
    the shared history with jj's own merges.
+
+The scripted tests ([regressions.rs](../../crates/musubi-sync/tests/e2e_search/regressions.rs))
+run fixed sequences through the same world and checks for cases the generated walk rarely lines
+up. A failing generated case prints each draw as what it means: a machine, file or workspace by
+name, an operation by what it did and how far back it is, then its id. The id differs between
+runs, since jj records each command's arguments, temporary paths among them, in its operation,
+so only the description and position identify the operation when reproducing a failure by hand.
+The trace names an operation both ways too.
 
 The reference separates structural comparison, native replay, rewrite evidence and workspace
 certification into child modules. Its adjudication classifies each operation's source, checks

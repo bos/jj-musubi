@@ -40,6 +40,34 @@ impl World {
         self.ledger.reset(&view);
     }
 
+    /// Whether `made_in`, the workspace of an operation as `jj op log` shows it (`default@`,
+    /// `beta/default@` for another machine's, or nothing for one musubi made), is machine `m`'s
+    /// own first workspace. Another machine's operations are another workspace's even when the
+    /// names match.
+    fn made_in_own_workspace(&self, m: usize, made_in: &str) -> bool {
+        let made_in = made_in.trim_end_matches('@').trim_matches('"');
+        made_in.is_empty() || made_in == self.workspaces[m][0].name
+    }
+
+    /// After a `jj undo` that went through, the operation it undid was this workspace's own.
+    /// jj undoes the latest operation when it runs, which can be one it wrote itself first
+    /// (importing git HEAD, say), so this looks at the operation it actually undid.
+    pub(crate) fn check_undid_own_operation(&self, m: usize) {
+        if let Some(undone) = self.undone_workspace(m)
+            && !self.made_in_own_workspace(m, &undone)
+        {
+            self.fail(&format!("`jj undo` undid an operation made in {undone}"));
+        }
+    }
+
+    /// After `jj undo` refused the latest operation, made in `latest`: jj refuses only another
+    /// workspace's.
+    pub(crate) fn check_refused_foreign_operation(&self, m: usize, latest: &str) {
+        if self.made_in_own_workspace(m, latest) {
+            self.fail("`jj undo` refused this workspace's own operation");
+        }
+    }
+
     /// Brings edits, stale workspaces and syncs to rest, recording the operations they make.
     /// This is actor work, so it must finish before the checkpoint's history is inspected.
     fn settle(&mut self) {

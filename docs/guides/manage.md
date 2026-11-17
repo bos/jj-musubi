@@ -5,7 +5,7 @@ Check syncing, rename or remove hives, take machines out, and replace a hub.
 A hub passes shared history between copies; each machine's daemon keeps them in sync.
 See [How jj-musubi works](../how-it-works.md).
 
-For release changes, state migrations and automatic installers, see [Upgrading](upgrading.md).
+For release changes and automatic installers, see [Upgrading](upgrading.md).
 
 ## Check syncing
 
@@ -86,9 +86,8 @@ is dropped.
 
 If the final sync fails, `musubi leave` fails and the repo stays in its hive.
 `musubi leave --force` attempts the same sync but leaves even if it fails; other machines may
-show the copy until one forgets it. See
-[Troubleshooting](../troubleshooting.md#leaving-a-hive-or-forgetting-a-machine) for the
-messages.
+show the copy until one forgets it. Fix the reported cause and retry, or pause background
+traffic with `musubi daemon stop` while deciding what to send.
 
 ### Forget a machine that went away
 
@@ -122,10 +121,10 @@ musubi clone app ~/src/app --lease 6h
 
 `--lease` sets `musubi.forget-after` in this copy's repo config, replacing an existing value.
 A conflicting workspace policy would override that repo value, so the command refuses it;
-[remove the workspace override](../troubleshooting.md#workspace-config-overrides-a-lease)
-and retry. Without `--lease`, joining keeps any configured value, or sets `never` if none is
-configured. To change the policy later, including for copies previously given the agent
-default of `6h`:
+run `jj -R <workspace-path> config unset --workspace musubi.forget-after` for the workspace
+named in the hint, then retry. Without `--lease`, joining keeps any configured value, or sets
+`never` if none is configured. To change the policy later, including for copies previously
+given the agent default of `6h`:
 
 ```sh
 jj config set --repo musubi.forget-after never     # or 30m, '1h 30m', '2 days'
@@ -148,7 +147,7 @@ history and working-copy names along.
 A copy cannot sync again if another machine runs `jj op abandon` while it is away and every
 remaining member takes that abandon: "this repository's history no longer matches the hive's".
 Follow the [recovery
-steps](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
+steps](../troubleshooting.md#rescue-work-in-a-new-copy).
 A copy can also become unable to sync if its first sync after rejoining takes over a day
 ([more](working-across-machines.md#abandoning-operations)).
 

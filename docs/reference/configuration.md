@@ -31,7 +31,7 @@ with `--user`.
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | Override the daemon's control socket with an absolute path or one starting with `~/`. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed` (default): share one connection per hub across repos, adding a connection for each transfer of 16 MiB or more until it finishes. `one`: use one connection per hub even for large transfers, useful when each ssh connection is costly or asks you to log in. |
-| `musubi.upgrade-command` | Installs the jj-musubi release or deployed build named by `$MUSUBI_UPGRADE_TO`. The daemon runs it on finding a newer hub, then restarts from the installed version. Unset by default: no automatic upgrades. See [Upgrade jj-musubi](../guides/upgrading.md) for installer requirements. |
+| `musubi.upgrade-command` | Installs the jj-musubi release named by `$MUSUBI_UPGRADE_TO`. The daemon runs it on finding a newer hub, then restarts from the installed version. Unset by default: no automatic upgrades. See [Upgrade jj-musubi](../guides/upgrading.md) for installer requirements. |
 | `musubi.templates.list` | The jj template for hubs, hives and copies in `musubi list`, unless overridden by `-T`. `musubi list --help` lists keywords. |
 
 The daemon reads `musubi.daemon.*` when it starts, so run `musubi daemon restart` after
@@ -44,8 +44,8 @@ Any jj config level can set these for the repo.
 | Key | Effect |
 | --- | --- |
 | `musubi.forget-after` | Inactivity before forgetting this copy: `never`, or at least a second, such as `30m`, `6h`, `1h 30m`, or `2 days`. Units include `s`, `min` or `m`, `h` or `hours`, `d` or `days`, `w` or `weeks` (`M` means months). `musubi create`, `join`, and `clone` keep any configured value, otherwise set `never`, whether run by a person or agent. `--lease 6h` replaces this copy's repo value. The setting stays local. See [Take a repo or machine out](../guides/manage.md#take-a-repo-or-machine-out). |
-| `musubi.publication.max-files` | Maximum distinct extra file paths across all outgoing snapshots: `100` by default, including current uncommitted work and older snapshots. Explicit change history and already shared content are exempt. `0` disables this limit. Sending pauses above either publication limit; receiving continues. See [snapshot cleanup](../guides/snapshots.md). |
-| `musubi.publication.max-bytes` | Maximum extra content bytes retained by outgoing snapshots: `8 MiB` by default. Accepts jj byte sizes such as `16 MiB`, or a number of bytes. Identical content is counted once across paths and snapshots. `0` disables this limit. |
+| `musubi.publication.max-files` | Maximum distinct extra file paths across all outgoing snapshots: `1000` by default, including current uncommitted work and older snapshots. Explicit change history and already shared content are exempt. `0` disables this limit. Sending pauses above either publication limit; receiving continues. See [snapshot cleanup](../guides/snapshots.md). |
+| `musubi.publication.max-bytes` | Maximum extra content bytes retained by outgoing snapshots: `64 MiB` by default. Accepts jj byte sizes such as `128 MiB`, or a number of bytes. Identical content is counted once across paths and snapshots. `0` disables this limit. |
 | `musubi.clone-config` | Keys whose effective values are recorded at hive creation or recreation after hub loss as defaults for future clones. Default: `["user.name", "user.email"]`; `[]` records none. Clone writes those values to its repo config only if absent from the destination's explicit config; built-in jj defaults do not count. Existing values win. Later edits and joins do not update the recorded defaults. `musubi.forget-after` cannot be selected. |
 | `operation.hostname` | This machine's name in a hive, unless `--machine` gives another. |
 | `git.executable-path` | The `git` jj-musubi runs, as jj does. |
@@ -64,8 +64,7 @@ signing settings. Set protections on each copy that needs them; see
 | `MUSUBI_SSH` | Run this ssh program instead of `ssh`. |
 | `MUSUBI_SOCKET` | Override the daemon's control socket with an absolute path or one starting with `~/`. Same as `--socket`. |
 | `MUSUBI_STATE_DIR` | Overrides the state and daemon socket directories. Use with `JJ_CONFIG` to run a separate instance of `musubi`. If creating the directory yourself, make it writable by you alone (`chmod 700`). |
-| `MUSUBI_UPGRADE_TO` | The daemon sets this for `musubi.upgrade-command`: the release or build to install, as printed by `musubi --version`, such as `0.3.0` or `0.3.0+20261102153012.4a0db205e1f0`. |
-| `MUSUBI_BUILD` | A build-time variable for builds deployed from source. `contrib/upgrade-from-source` sets it to the deployment time and commit, such as `20261102153012.4a0db205e1f0`. It follows the release in `musubi --version`. See [Deploy a build from source](../guides/upgrading.md#deploy-a-build-from-source). |
+| `MUSUBI_UPGRADE_TO` | The daemon sets this for `musubi.upgrade-command`: the release to install, such as `0.6.0`. |
 | `COMPLETE` | Set by your shell to have `musubi` complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
 On macOS and Linux, `musubi daemon install` and `musubi hub install` pass their `PATH`,
@@ -93,8 +92,9 @@ path in its `~/.ssh/authorized_keys` entry:
 `command="/opt/musubi/bin/musubi hub connect"`.
 For a hub serving another directory, add `--dir <dir>` to that command.
 
-For key-file errors, see
-[key repair](../troubleshooting.md#ssh-keygen-could-not-derive-the-missing-public-key).
+If `hub_key.pub` is missing or empty, jj-musubi recreates it from the private key with
+`ssh-keygen`. If that fails, check the reported permissions or passphrase error. For a
+passphrase-protected key, restore `hub_key.pub` and retry. Keep the private key.
 
 ## Logging
 

@@ -421,7 +421,14 @@ remote.
 records an unfinished edit with `jj status`, then syncs the sender and receiver before
 checking its content at the sender's workspace revision, as the setup verification does.
 `publication_budget_inspection_cleanup_and_override` checks that outgoing inspection lists
-the 51st retained path, beyond the old display cap, before approving that exact history.
+the 51st retained path, beyond the old display cap, before approving that exact history. It also
+checks that applying cleanup snapshots edits and deletions without a separate jj command, while
+its dry run leaves the operation head unchanged. The same CLI fixture checks refusal for a
+stale secondary workspace and disables implicit stale recovery in the invoking workspace even
+when jj's automatic recovery setting is enabled.
+`node::publication::tests::cleanup_includes_only_its_own_preflight_snapshots` checks that the
+invocation marker selects the CLI's capture while retaining unselected recovery history and a
+later native snapshot.
 
 The existing `hub_join_sync_clone_and_list` fixture also checks `debug op-id` in both
 directions, with odd-length prefixes, invalid hex, and an absent operation, and in a
@@ -486,16 +493,17 @@ listing snapshot, it waits for both the saved membership and the daemon's report
 count: the daemon saves membership before it finishes cleanup, so the membership file alone cannot
 tell when its thread has stopped.
 
-`recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
-guide with two copies and a real linked workspace whose name contains `/`, including the
-first copy leaving before the other. It removes old remote workspace names, archives both
+`recreating_hives_keeps_work_without_inheriting_remote_workspaces` recreates a hive with two
+copies and a real linked workspace whose name contains `/`, including the first copy leaving
+before the other. It removes old remote workspace names, archives both
 copies' musubi state and the hub, then creates and
 joins a fresh hive. It checks that both copies retain their commits and show exactly the
 local and remote workspaces expected. Omitting the workspace cleanup republishes old remote
 names as new local workspaces. This exercises recreation with the current release, not
 compatibility with an earlier release's files.
 
-`the_quick_start_works_as_written` follows the README's quick start as a new user would:
+`the_quick_start_works_as_written` follows the quick start in `docs/get-started.md` as a new
+user would:
 `musubi hub` run in a repository rather than in the home directory, then the commands it
 prints, pasted as printed, on the hub's machine and over the stand-in for ssh, the refusals a
 new user meets first, and `musubi list` with no `--hub`. Its inline insta snapshot is
@@ -1187,8 +1195,9 @@ origins survive cache loss, but never pass to a replacement copy. Observing an u
 must not canonicalize it. `world::marked_native_repairs_keep_their_author_after_cache_loss`
 checks these boundaries, including a receiver with the same hostname, altered heads and a
 non-Git remote. `world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname`
-checks retained-source classification. The pure namespace controls cover a missing input
-certificate, an owner rename, and an owned literal that collides with a foreign alias.
+checks retained-source classification using constructed operations, without a repository
+fixture. The pure namespace controls cover a missing input certificate, an owner rename, and an
+owned literal that collides with a foreign alias.
 
 To keep the search effective:
 

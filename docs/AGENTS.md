@@ -80,8 +80,8 @@ needs.
   terminal what the sync is doing, as jj shows a fetch, and clears it when done: silence there
   reads as a hang. Nothing shows when output isn't a terminal.
 - An error is one line: what went wrong, in the user's terms, with no explanation of why
-  jj-musubi works that way. A hint, if any, is one more line naming the command to run. Why, and
-  every other way out, belong in [troubleshooting.md](troubleshooting.md).
+  jj-musubi works that way. A hint, if any, is one more line naming the command to run. Put
+  further explanation in the guide that owns the workflow.
 - Output a script reads goes to stdout, everything else to stderr, as in jj.
 
 ## Help and guides
@@ -96,7 +96,9 @@ website displays it and uses the opening paragraph for search and index descript
 
 ## Where to edit
 
-- [README.md](../README.md): what jj-musubi is, installing, and the quick start.
+- [README.md](../README.md): what jj-musubi is and links into the user guide.
+- [get-started.md](get-started.md): installing and connecting the first machines. The website
+  imports this complete page; never assemble a website page from README sections.
 - [how-it-works.md](how-it-works.md): what replicates, what stays local, and how machines'
   changes combine. Keep mechanisms and maintenance procedures in their own guides or internals.
 - [safety.md](safety.md): what jj-musubi promises, and how the proofs and tests check it, for
@@ -110,14 +112,16 @@ website displays it and uses the opening paragraph for search and index descript
   saving, pruning or approving snapshot content. Keep cleanup hazards beside cleanup commands.
 - [guides/manage.md](guides/manage.md): checking sync reports, membership, leases, pause/leave,
   uninstalling, moving copies and replacing hubs.
-- [guides/upgrading.md](guides/upgrading.md): migrations, coordinated upgrades, automatic
-  installers and source deployment.
+- [guides/upgrading.md](guides/upgrading.md): release upgrades by hand or with automatic
+  installers, including building releases from source. Keep intermediate builds out of the
+  user guide.
 - [reference/commands.md](reference/commands.md): command lookup, output contracts, dashboard
   controls, JSON, completion and diagnostic commands. Built-in help owns flag syntax.
 - [reference/configuration.md](reference/configuration.md): setting semantics, environment,
   SSH key and agent details, logging and paths.
-- [troubleshooting.md](troubleshooting.md): symptoms and messages, grouped by failing activity,
-  with immediate safe actions and links to complete workflows. It owns new-copy history rescue.
+- [troubleshooting.md](troubleshooting.md): common symptoms, immediate safe actions and links
+  to complete workflows. It owns new-copy history rescue. Keep it short; do not catalogue errors
+  whose messages and hints already give the recovery action.
 - [comparison.md](comparison.md): other ways to do what jj-musubi does. It cites its sources;
   recheck them, and update its date, when editing it.
 - [README.md](README.md) here: the index, when pages are added or moved.
@@ -127,4 +131,5 @@ When moving a section, update incoming links across the repo and read the result
 pages as a continuous task. Check prerequisites, success checks and consequences at each step.
 
 When a change adds a command, flag, setting, or message a user acts on, update the reference
-and, where users will meet it, the troubleshooting page.
+or owning guide. Update troubleshooting when it changes how a common problem is diagnosed
+or recovered from.

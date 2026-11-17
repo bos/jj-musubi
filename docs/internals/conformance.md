@@ -573,10 +573,13 @@ ending up with both records.
 `canonical::contract::tests::dropping_twice_is_dropping_both` checks the Rust contraction
 against copies of `Contract.cpar` and `cid_eq_mk`: generated parent lists are expanded by index,
 and ids become terms of immutable original identity and parent terms. It compares those terms
-with the stored result, and sequential with union contraction, in shuffled query order. The
-generator permits equal nonparent fields across different parents. If an initial operation
-would duplicate an earlier one's full content, its description is changed to make a distinct
-original. The test also checks that no dropped id returns and original identity stays.
+with the stored result and checks lookup-order independence with shuffled queries. Composing
+image lists checks `Contract.exp_union` for every operation, including the root and dropped
+operations; survivors also require exact raw sequential images, retaining the uniqueness check
+on the unnormalized result. The generator permits equal nonparent fields across different
+parents. If an initial operation would duplicate an earlier one's full content, its description
+is changed to make a distinct original. The test also checks that no dropped id returns and
+original identity stays.
 
 `Contract.cpar_absorbs_subset` and `cid_absorbs_subset` specialize that composition: contracting
 an already contracted body by a subset of its drops preserves its parents and canonical id.
@@ -1224,11 +1227,11 @@ the shipping adapter. A recording made once per test-binary build supplies each 
 own copy and resumed seed counter.
 
 `second_owned_name_survives_complete_native_capture` retains both owned names before a native
-command leaves only the second, then checks an observed empty map after deleting both.
-`foreign_spelling_is_not_owned_overlap` keeps foreign slots in the raw input while checking
-that they are excluded from this copy's owned bindings. These are native binding/namespace
-observations; they do not prove the full private-Git selector or its complete decision table.
-`second_owned_name_selects_current_git` separately publishes a forgotten parent with only `b`,
+command leaves only the second, then checks an observed empty map after deleting both. It
+also keeps foreign slots in the raw input while excluding them from this copy's owned bindings.
+These are native binding/namespace observations; they do not prove the full private-Git selector
+or its complete decision table. `second_name_publication_matches_lifecycle_oracle`, in the
+sibling `native_lifecycle_conformance.rs`, publishes a forgotten parent with only `b`,
 then creates native `a` and moves physical Git forward. Its non-root child still inherits only
 `b`, while the complete current map is `{a,b}`. The actual first export must follow a shared
 merge and the child must retain the independently captured current Git fields.
@@ -1289,9 +1292,10 @@ the same observation stream, with persisted record state captured before the eff
 `native_command_before_validation_forces_refresh` completes a real command between preparation
 and validation. `current_git_merge_precedes_first_export` checks the actual first export's
 shared merge and physical bookmark, then its position before head movement.
-`custody_is_saved_before_named_write` and `move_intent_precedes_old_head_removal` check persisted
-responsibility at real native effects, including an interrupted add-before-remove frontier
-and restart. They do not cover every mid-call error or assert automatic alias normalization.
+`receipt_custody_materialization_matches_lifecycle_oracle` and
+`move_intent_precedes_old_head_removal` check persisted responsibility at real native effects,
+including an interrupted add-before-remove frontier and restart. They do not cover every mid-call
+error or assert automatic alias normalization.
 
 These schedules close E1 (the successful final reread through cleanup) and every included E2
 helper branch/load interval explicitly, including cleanup after publication locks are released.
@@ -1304,7 +1308,12 @@ the actor seed clock and the next actual actor RNG draw against an unobserved re
 It neither canonicalizes unknown operations nor changes the candidate graph. This does not
 discharge purity of the separate end-to-end search observers.
 
-Run this module with `cargo nextest run -p musubi-jj --lib -E 'test(/native_contract_tests::/)'`.
+Run these modules with:
+
+```sh
+cargo nextest run -p musubi-jj --lib -E 'test(/native_contract_tests::|lifecycle_conformance::/)'
+```
+
 `MUSUBI_NATIVE_CONTRACT_TRACE=1` prints raw native inputs and events for a selected control's log.
 For temporary selected mutations, `MUSUBI_NATIVE_CONTRACT_FIXTURE` may name a recording made by
 the unmutated binary, so a mutation is challenged at its assertion instead of corrupting its
@@ -2037,8 +2046,9 @@ decoding.
 Unknown command records exercise `intentKnown = false` and cleanup refusal. The gate runs before
 uploads in the real `Hive` integration fixtures; those assert unwanted commits never reach the
 hub while incoming work still arrives.
-The CLI fixture snapshots inspection, preview, stale application, successful cleanup and exact
-override through real hub and CLI processes. It also checks that inspection includes the
+The CLI fixture snapshots inspection, preview, successful cleanup and exact override through
+real hub and CLI processes. Applying cleanup records current edits and deletions; dry runs leave
+them unsnapshotted. It also checks that inspection includes the
 51st retained path, so approval never depends on a truncated path list. The fixture stops its
 daemons after setup to keep the inspected operation rows reproducible.
 

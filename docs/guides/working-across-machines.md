@@ -2,54 +2,58 @@
 
 See other machines' work, update a stale working copy, undo, and configure each copy.
 
-Keep using `jj` after joining a hive, the group of copies of one project. Their daemons exchange
-history through the hub; each machine keeps its own checkout files.
+With jj-musubi, you use jj normally after joining a hive, the group of copies of one project.
+Their daemons exchange history through the hub.
 
 ## Pick up on another machine
 
-First record and send the source machine's work, then receive and inspect it on the destination.
+By default, jj creates a snapshot of your working directory for almost every command you run. My
+shell prompt includes a call to `jj status`, so my shell creates a snapshot of my working copy
+every time I run any command interactively.
+
+So for me, there's no effort needed to snapshot and send one machine's work. jj-musubi syncs it
+in the background and it shows up on other machines in moments. If you want to do this
+explicitly, you can simply run `jj status` followed by `musubi sync` (which will probably have
+run automatically on your behalf before you finish typing the explicit command).
+
 The examples hand off from a laptop to a devbox; use the workspace names from `musubi status`.
 If jj reports a stale working copy, [update it](#when-another-machine-rewrites-your-working-copy)
 before continuing.
 
-1. On the laptop, save your edits and exclude generated or accidental files before recording:
+1. On your laptop, save your edits:
 
    ```sh
    jj status
-   musubi sync
+   musubi sync    # for convenience, not necessary
    musubi status
    ```
 
-   Check for a recent successful sync and `the hub has all its work`. This covers recorded
-   work, not later edits. If sending is held, follow [snapshot recovery](snapshots.md) before
-   switching machines. Keep secrets ignored; small accidental files can still sync.
+   The `musubi sync` and `musubi status` commands are not usually necessary. Here, they're
+   simply ways for you to verify that that jj-musubi is doing its job.
 
-2. In the devbox's copy, receive and inspect the laptop's recorded change:
+   When you look at the output of those commands, check for a recent successful sync and `the
+   hub has all its work`.
+
+2. In the devbox's repo, check that the laptop's recorded change has been received:
 
    ```sh
-   musubi sync
+   musubi sync    # also for convenience, not necessary
    musubi status
    jj log
    jj diff -r laptop/default@
    ```
 
-   Check the sync report for errors and compare the change with the work you expected.
-   A sender reporting that its work was sent doesn't establish that this receiver has it.
+   As before, `musubi sync` and `musubi status` are just eyeball verification tools. I never run
+   these commands in the normal course of events.
 
-3. Build on it here:
+3. On your devbox, you can now check out the changes that were most recently snapshotted on your
+   laptop:
 
    ```sh
    jj new laptop/default@   # a new change on top of the laptop's
    ```
 
    This checks out a child of the laptop's change without moving the laptop's checkout.
-
-To return to the laptop, repeat the record/send and receive/inspect steps in the other direction,
-then continue there with:
-
-```sh
-jj new devbox/default@
-```
 
 ### Record saves automatically
 
@@ -180,14 +184,14 @@ Join checks destinations at that time; it cannot inspect offline config or preve
 
 After changing a remote URL, run `musubi join` again to register it; the destination must
 still match. See [configuration](../reference/configuration.md) and
-[remote-name refusals](../troubleshooting.md#remote-names--have-different-fetch-or-push-destinations-than-hive--recorded)
+[remote-name refusals](../troubleshooting.md#joining-is-refused)
 if joining is refused.
 
 ## Configure each machine
 
 jj config stays local, including `trunk()`, `immutable_heads()`, `git.private-commits`, aliases
 and signing settings. Clone uses the destination's `trunk()`; its one-time defaults are chosen
-[during setup](setup.md#choose-clone-defaults). See the [configuration
+[during setup](setup.md#optional-clone-defaults). See the [configuration
 reference](../reference/configuration.md#settings) for config scope and reload behavior.
 
 Set protections on every machine that needs them. `immutable_heads()` cannot prevent rewrites
@@ -205,9 +209,16 @@ while a copy was forgotten or out of the hive, that copy cannot sync again. The 
 happen to a copy away before its first `musubi join` or `musubi clone` sync finished: after a
 day without contact, or an hour after a hub restart. It reports "this repository's history
 no longer matches the hive's"; follow the [new-copy recovery
-steps](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
+steps](../troubleshooting.md#rescue-work-in-a-new-copy).
 
 A command already running when the abandon arrives, such as `jj git fetch`, still syncs its
 work. If another command merges it before jj-musubi sees it, bookmarks changed by the first
 command can conflict. Set them again with `jj bookmark set`, as after `jj op abandon` on one
 machine.
+
+A command finishing on an old operation can also repeat a rebase, leaving identical divergent
+changes. Compare them with `jj log -r '<first> | <second>'` and
+`jj diff --from <first> --to <second>`. Only abandon an unused leaf: check
+`jj log -r '<unwanted-commit>::'` for descendants, and check bookmarks, tags and working copies.
+`jj abandon` rebases descendants onto the parents and removes bookmarks; it does not move
+them to the equivalent copy. Keep versions used by other work or references.

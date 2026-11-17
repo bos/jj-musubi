@@ -58,7 +58,7 @@ it on the first day. [docs/AGENTS.md](../AGENTS.md) holds the vocabulary, and sa
 commands print.
 
 Run through the commands the change touches as a user would, from the
-[quick start](../../README.md#quick-start) and the
+[quick start](../get-started.md#quick-start) and the
 [setup guide](../guides/setup.md): read what each prints, in the snapshots of
 `crates/musubi/tests/cli.rs` or in the code that prints it. Look for:
 
@@ -75,7 +75,8 @@ Run through the commands the change touches as a user would, from the
   see;
 - the help, the guide, the reference, the troubleshooting page and the snapshots disagreeing
   with each other or with what the code does;
-- a message a user acts on that the troubleshooting page doesn't list.
+- an error or hint that leaves the user without a safe next step, either in the message or
+  in the guide that owns the workflow.
 
 Read changes to `the_quick_start_works_as_written` as a first session, checking the commands
 and their output against the quick start.

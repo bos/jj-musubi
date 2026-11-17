@@ -3,6 +3,8 @@
 What musubi's tests and proofs must cover, and what evidence each kind of change needs.
 [testing.md](testing.md) describes each layer of tests and what a test of each costs, and
 [efficient-tests.md](efficient-tests.md) how to keep a test cheap.
+[Property tests](property-tests.md) explains the Hegel harnesses' inputs, independent answers
+and composed checks.
 
 ## What a test must protect
 

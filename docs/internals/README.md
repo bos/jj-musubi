@@ -22,6 +22,8 @@ the [user guide](../README.md). These documents use the terms defined in the des
   each kind of change need, and how do you know a test works? This owns testing policy.
 - [Testing](testing.md): Which layers of tests are there, what does each guard against, and
   where does a new test belong?
+- [Property tests](property-tests.md): How are generated cases, independent answers and named
+  laws composed, from small equations to complete repository histories?
 - [Efficient tests](efficient-tests.md): How should a new test be written so that the suite
   stays fast?
 - [Conformance](conformance.md): How are the Rust protocol core, and which copies a hive

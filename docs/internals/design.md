@@ -1304,7 +1304,8 @@ What this means for a machine:
   fetch says so, and it stops, with the message for a history that no longer matches the hive's:
   a new copy takes its work. So does a copy that left, if the hub pruned while it was out,
   before it ran `musubi join` again; from then on the hub waits for it as for a copy new to the
-  hive (`a_copy_joining_again_is_waited_for`, `a_copy_joining_again_away_for_over_a_day_stops`).
+  hive (`a_copy_joining_again_is_waited_for`,
+  `hub::tests::pruning_waits_for_recent_joins_and_restart_grace`).
 - So does a copy joining whose first sync realized the hive's history but stopped before its
   first push landed, and that the hub then didn't hear from for a day, or that was away when
   the hub restarted and for an hour after: the hub no longer waits for it. A copy new to the
@@ -1312,8 +1313,8 @@ What this means for a machine:
   could join again on the root from its view as it is, but merging that view with the hive's
   against the root's, rather than against the head it realized, would bring back the commits
   the hive abandoned since, and those it rewrote as divergent changes; so it stops instead
-  (`a_joining_machine_away_for_over_a_day_stops`,
-  `a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops`).
+  (`hub::tests::pruning_waits_for_recent_joins_and_restart_grace` checks expiry;
+  `a_forgotten_copy_behind_pruned_records_stops` checks the native refusal).
 - One that took the records the hub pruned, but holds fewer now, takes the hub's from them all
   the same. A machine takes the records an old reply announces ([Taking the
   hub's](#taking-the-hubs)), which may be fewer than it said it took, and the hub may prune

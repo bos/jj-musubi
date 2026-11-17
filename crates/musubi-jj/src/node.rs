@@ -7,10 +7,8 @@
 //! views between them (`view`), working copies (`working_copies`), and what can go wrong
 //! (`error`). What a node does only when its backend is git is in `git`.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +57,7 @@ pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
 pub use join::JoinSummary;
+use join::Joins;
 use originals::Originals;
 pub use publication::APPROVAL_FILE;
 pub use publication::CHECKPOINT_ATTRIBUTE;
@@ -93,12 +92,77 @@ struct ReservedNames {
     names: Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
 }
 
+/// Workspace names worked out already, kept to save working them out again. Each is kept with
+/// the operations it was worked out from and used only for those same operations, so none is
+/// ever cleared.
+#[derive(Default)]
+struct NameMemos {
+    /// This machine's own names that could clash with another machine's as of the op heads
+    /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
+    reserved: Option<ReservedNames>,
+    /// The workspace names in the view of the operation `canonical_view` last canonicalized,
+    /// usually the next one's parent.
+    last_view: Mutex<
+        Option<(
+            jj_lib::op_store::OperationId,
+            Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
+        )>,
+    >,
+    /// Private ownership reconstructed from immutable native operation views.
+    private:
+        Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
+    /// This machine's own workspace names as of its latest work, while the hive has forgotten
+    /// it (`own_names_in`): the same for every operation until its next work.
+    worked: Mutex<presence::WorkedNames>,
+}
+
 /// The op heads, base and accepted push an abandon was last looked for at, and not found.
 #[derive(PartialEq, Eq)]
 struct AbandonObservation {
     heads: Vec<LocalOp>,
     base: Option<crate::records::HubOp>,
     accepted_push: Option<crate::records::HubOp>,
+}
+
+/// What `check_abandon` found when it last looked for a `jj op abandon`. It needn't look
+/// again while the op heads, base and accepted push are those it checked, unless
+/// [`Self::recheck`] forgot them, as rewriting local history does.
+#[derive(Default)]
+struct AbandonWatch {
+    /// The op heads, base and accepted push `check_abandon` last checked.
+    checked: Option<AbandonObservation>,
+    /// Whether `check_abandon` noticed a `jj op abandon` since [`NodeRepo::take_abandon_noticed`]
+    /// last said so.
+    noticed: bool,
+}
+
+impl AbandonWatch {
+    /// Whether an abandon was last looked for at `observation`, and not found.
+    fn checked(&self, observation: &AbandonObservation) -> bool {
+        self.checked.as_ref() == Some(observation)
+    }
+
+    /// Records whether looking for an abandon at `observation` `noticed` one.
+    fn found(&mut self, observation: AbandonObservation, noticed: bool) {
+        // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
+        // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
+        // checked again next time.
+        if noticed {
+            self.noticed = true;
+        } else {
+            self.checked = Some(observation);
+        }
+    }
+
+    /// Whether an abandon was noticed since this last said so.
+    fn take_noticed(&mut self) -> bool {
+        std::mem::take(&mut self.noticed)
+    }
+
+    /// Makes the next check look again, whatever it finds, keeping an abandon noticed.
+    fn recheck(&mut self) {
+        self.checked = None;
+    }
 }
 
 /// A local jj repository's identities, translation, and publication state.
@@ -129,41 +193,18 @@ pub struct NodeRepo {
     /// Whether every operation reachable from the op heads has been mapped since opening.
     heads_mapped: bool,
     machine: Machine,
-    /// The canonical join operation each join point maps to, by the join point's
-    /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
-    joins: BTreeMap<String, CanonicalOp>,
-    /// The local join points, as recorded.
-    join_points: Vec<LocalOp>,
-    /// The ancestors of the join points, once needed: the history from before the joins.
-    join_ancestors: Option<Arc<HashSet<LocalOp>>>,
-    /// Local operations found to come from before this repository joined: ancestors of a
-    /// join point, and operations all of whose parents are (see [`Self::canonicalize`]).
-    before_join: BTreeSet<LocalOp>,
+    /// The join points, what they stand for, and the history from before them.
+    joins: Joins,
     /// jj's repo config file for this repository, used to read this copy's expiry policy.
     repo_config: Option<PathBuf>,
     /// Construction context, prepared views, and writes not yet recorded in the map.
     realizing: RealizationState,
     /// Exact native frontier ancestry used when publishing received operations.
     published: PublishedHistoryCache,
-    /// This machine's own names that could clash with another machine's as of the op heads
-    /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
-    reserved_memo: Option<ReservedNames>,
-    /// The workspace names in the view of the operation `canonical_view` last canonicalized,
-    /// usually the next one's parent.
-    last_view_names: Mutex<
-        Option<(
-            jj_lib::op_store::OperationId,
-            Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
-        )>,
-    >,
-    /// Private ownership reconstructed from immutable native operation views.
-    private_names:
-        Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
+    /// Workspace names worked out already.
+    names: NameMemos,
     /// Presence at the canonical operations asked about lately (see [`Self::presence`]).
     presences: Arc<crate::canonical::PresenceMemo>,
-    /// This machine's own workspace names as of its latest work, while the hive has forgotten
-    /// it (`own_names_in`): the same for every operation until its next work.
-    worked_names: Mutex<presence::WorkedNames>,
     /// Merge diagnosis retained across retries and reopening the same repository.
     merge_diagnosis: MergeDiagnosis,
     /// The hive's records this machine took, what it dropped beyond them, and the renamings
@@ -173,11 +214,8 @@ pub struct NodeRepo {
     /// writes that loaded the repository before it, parents first: to reparent onto the
     /// rewrites.
     late: Vec<LocalOp>,
-    /// The op heads, base and accepted push `check_abandon` last checked.
-    abandon_checked: Option<AbandonObservation>,
-    /// Whether `check_abandon` noticed a `jj op abandon` since [`Self::take_abandon_noticed`]
-    /// last said so.
-    abandon_noticed: bool,
+    /// What looking for a `jj op abandon` last found.
+    abandon: AbandonWatch,
 }
 
 impl Drop for NodeRepo {
@@ -259,25 +297,18 @@ impl NodeRepo {
             realizing: RealizationState::default(),
             published: PublishedHistoryCache::default(),
             merge_diagnosis: MergeDiagnosis::default(),
-            private_names: Mutex::new(HashMap::new()),
-            reserved_memo: None,
-            last_view_names: Mutex::new(None),
+            names: NameMemos::default(),
             presences: Arc::default(),
-            worked_names: Mutex::default(),
-            joins: BTreeMap::new(),
-            join_points: vec![],
-            join_ancestors: None,
-            before_join: BTreeSet::new(),
+            joins: Joins::default(),
             repo_config: None,
             machine,
             records: Records::load(&musubi_dir)?,
             late: vec![],
-            abandon_checked: None,
-            abandon_noticed: false,
+            abandon: AbandonWatch::default(),
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
-            node.joins.insert(fingerprint, canonical.clone());
-            node.join_points.push(local.clone());
+            node.joins
+                .record(local.clone(), canonical.clone(), fingerprint);
             node.insert_map(local, canonical)?;
         }
         Ok(node)

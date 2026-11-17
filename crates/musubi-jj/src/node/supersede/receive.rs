@@ -494,7 +494,7 @@ impl NodeRepo {
         let mut stack = heads.to_vec();
         let mut seen = HashSet::new();
         while let Some(local) = stack.pop() {
-            if !seen.insert(local.clone()) || self.before_join.contains(&local) {
+            if !seen.insert(local.clone()) || self.joins.before.contains(&local) {
                 continue;
             }
             if superseded.contains_key(&local) {

@@ -222,7 +222,7 @@ impl<'a> Intent<'a> {
                 true,
             ));
         }
-        if self.node.joins.values().any(|join| join == id) {
+        if self.node.joins.is_join(id) {
             return self.initial_facts(id);
         }
         self.command(op, view)

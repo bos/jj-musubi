@@ -246,7 +246,7 @@ impl NodeRepo {
             if memo.contains_key(&id) {
                 continue;
             }
-            if id == *self.root_op_id() || self.before_join.contains(&id) {
+            if id == *self.root_op_id() || self.joins.before.contains(&id) {
                 memo.insert(id, None);
                 continue;
             }
@@ -264,7 +264,7 @@ impl NodeRepo {
                     .source(&id)
                     .cloned()
                     .or_else(|| self.map.canonical_of(&id).cloned())
-                    .or_else(|| self.joins.get(&fingerprint(&op)).cloned());
+                    .or_else(|| self.joins.join_of(&op).cloned());
                 if let Some(named) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
                     for parent in LocalOp::parents_of(&op) {
                         self.canonicalize_unchecked(&parent)?;
@@ -310,7 +310,7 @@ impl NodeRepo {
                     if !parents.contains(canonical) {
                         parents.push(canonical.clone());
                     }
-                } else if !self.before_join.contains(&parent) {
+                } else if !self.joins.before.contains(&parent) {
                     complete = false;
                 }
             }
@@ -333,7 +333,7 @@ impl NodeRepo {
         let mut renamed = false;
         let mut current = vec![];
         for parent in parents {
-            if self.before_join.contains(parent) {
+            if self.joins.before.contains(parent) {
                 continue;
             }
             let canonical = self
@@ -403,7 +403,7 @@ impl NodeRepo {
             // been walked. Only an actual cache entry lets realization skip that walk.
             if id == *self.root_op_id()
                 || self.map.canonical_of(&id).is_some()
-                || self.before_join.contains(&id)
+                || self.joins.before.contains(&id)
             {
                 continue;
             }
@@ -414,7 +414,7 @@ impl NodeRepo {
             // A join point that `jj op abandon` rewrote, abandoning history from before the
             // join, which no other machine has: its parents are from before the join.
             if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                && let Some(join) = self.joins.get(&fingerprint(&op))
+                && let Some(join) = self.joins.join_of(&op)
             {
                 let join = join.clone();
                 self.insert_map(id, join)?;
@@ -426,7 +426,7 @@ impl NodeRepo {
                 .filter(|parent| {
                     *parent != self.root_op_id()
                         && self.map.canonical_of(parent).is_none()
-                        && !self.before_join.contains(*parent)
+                        && !self.joins.before.contains(*parent)
                 })
                 .cloned()
                 .collect();
@@ -447,7 +447,7 @@ impl NodeRepo {
             } else if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
                 self.realized_canonical(&id, &op, canonical)?
             } else if self.is_before_join(&id, &op)? {
-                self.before_join.insert(id);
+                self.joins.before.insert(id);
                 continue;
             } else {
                 let (parents, renamed) = self.current_parents(&parents)?;
@@ -477,7 +477,7 @@ impl NodeRepo {
         let parents = LocalOp::parents_of(op);
         if parents
             .iter()
-            .all(|parent| self.before_join.contains(parent))
+            .all(|parent| self.joins.before.contains(parent))
         {
             return Ok(!parents.is_empty());
         }
@@ -491,7 +491,7 @@ impl NodeRepo {
     /// history before the joins. A join point `jj op abandon` rewrote is one by its
     /// fingerprint, as `canonicalize` takes it, with the rewritten history below it.
     fn join_ancestors(&mut self) -> Result<Arc<HashSet<LocalOp>>, NodeError> {
-        if let Some(ancestors) = &self.join_ancestors {
+        if let Some(ancestors) = &self.joins.ancestors {
             return Ok(ancestors.clone());
         }
         let op_store = self.loader.op_store().clone();
@@ -504,9 +504,9 @@ impl NodeRepo {
                 continue;
             }
             let op = op_store.read_operation(&id.0).block_on()?;
-            if self.join_points.contains(&id)
+            if self.joins.points.contains(&id)
                 || (!op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                    && self.joins.contains_key(&fingerprint(&op)))
+                    && self.joins.join_of(&op).is_some())
             {
                 below_joins.extend(LocalOp::parents_of(&op));
             } else {
@@ -524,7 +524,7 @@ impl NodeRepo {
             ));
         }
         let ancestors = Arc::new(ancestors);
-        self.join_ancestors = Some(ancestors.clone());
+        self.joins.ancestors = Some(ancestors.clone());
         Ok(ancestors)
     }
 
@@ -591,7 +591,7 @@ impl NodeRepo {
     fn raw_parents(&self, parents: &[LocalOp]) -> Vec<CanonicalOp> {
         let mut raw = vec![];
         for parent in parents {
-            if self.before_join.contains(parent) {
+            if self.joins.before.contains(parent) {
                 continue;
             }
             let parent = self
@@ -654,7 +654,7 @@ impl NodeRepo {
         if local_parents.iter().any(|parent| {
             parent != self.root_op_id()
                 && self.map.canonical_of(parent).is_none()
-                && !self.before_join.contains(parent)
+                && !self.joins.before.contains(parent)
         }) {
             return Ok(None);
         }
@@ -686,7 +686,7 @@ impl NodeRepo {
             };
             (self.canonical.parents(&canonical)? == parents).then_some(canonical)
         } else if self.is_before_join(id, op)? {
-            self.before_join.insert(id.clone());
+            self.joins.before.insert(id.clone());
             None
         } else {
             if renamed && let Some(original) = self.existing_original(id, op)? {

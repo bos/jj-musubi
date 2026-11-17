@@ -45,7 +45,7 @@ impl NodeRepo {
                 unmapped.push((id, op));
                 continue;
             }
-            if !seen.insert(id.clone()) || self.before_join.contains(&id) {
+            if !seen.insert(id.clone()) || self.joins.before.contains(&id) {
                 continue;
             }
             if let Some(canonical) = self.canonical_of(&id) {
@@ -57,7 +57,7 @@ impl NodeRepo {
             }
             let op = op_store.read_operation(&id.0).block_on()?;
             if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                && let Some(join) = self.joins.get(&fingerprint(&op))
+                && let Some(join) = self.joins.join_of(&op)
             {
                 mapped.push((id, join.clone()));
                 continue;
@@ -112,7 +112,7 @@ impl NodeRepo {
                     self.insert_map(id.clone(), canonical)?;
                     found = true;
                 }
-                Ok(None) => found |= self.before_join.contains(id),
+                Ok(None) => found |= self.joins.before.contains(id),
                 // Canonicalizing refuses it too; matching it otherwise is left to the caller.
                 Err(NodeError::Format { .. }) => {}
                 Err(err) => return Err(err),
@@ -156,7 +156,7 @@ impl NodeRepo {
         };
         // A move that taking records left to do, as after an error, is done whether or not
         // the op heads changed since.
-        if self.abandon_checked.as_ref() == Some(&checked) && self.records.realign.is_none() {
+        if self.abandon.checked(&checked) && self.records.realign.is_none() {
             return Ok(false);
         }
         self.realign_heads(&checked.heads)?;
@@ -170,14 +170,7 @@ impl NodeRepo {
             .cloned()
             .collect();
         let noticed = self.notice_abandons(&watched)?;
-        // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
-        // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
-        // checked again next time.
-        if noticed {
-            self.abandon_noticed = true;
-        } else {
-            self.abandon_checked = Some(checked);
-        }
+        self.abandon.found(checked, noticed);
         Ok(noticed)
     }
 
@@ -194,7 +187,7 @@ impl NodeRepo {
             };
             let mut parents = vec![];
             for parent in LocalOp::parents_of(op) {
-                if self.before_join.contains(&parent) {
+                if self.joins.before.contains(&parent) {
                     continue;
                 }
                 // As the records name it now, as counterparts are named, and as canonicalizing
@@ -222,7 +215,7 @@ impl NodeRepo {
     /// Whether [`Self::check_abandon`] noticed a `jj op abandon` since this last said so, by
     /// whatever ran it: what was staged in the history before is stale.
     pub fn take_abandon_noticed(&mut self) -> bool {
-        std::mem::take(&mut self.abandon_noticed)
+        self.abandon.take_noticed()
     }
 
     /// Moves the op heads and the workspaces where records this node took move them, if a

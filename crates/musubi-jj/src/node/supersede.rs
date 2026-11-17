@@ -777,7 +777,7 @@ impl NodeRepo {
         self.invalidate_published_history();
         self.realizing.invalidate();
         self.heads_mapped = false;
-        self.join_ancestors = None;
+        self.joins.forget_ancestors();
     }
 }
 
@@ -845,18 +845,20 @@ impl NodeRepo {
         dropped.sort();
         let mut joins = self
             .joins
-            .iter()
+            .by_fingerprint()
             .map(|(fingerprint, canonical)| (fingerprint.clone(), canonical.0.hex()))
             .collect::<Vec<_>>();
         joins.sort();
         let mut join_points = self
-            .join_points
+            .joins
+            .points
             .iter()
             .map(|id| id.0.hex())
             .collect::<Vec<_>>();
         join_points.sort();
         let mut prejoin = self
-            .before_join
+            .joins
+            .before
             .iter()
             .map(|id| id.0.hex())
             .collect::<Vec<_>>();

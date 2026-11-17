@@ -375,7 +375,8 @@ impl NodeRepo {
             _ => return Ok(own_keys(self, view)),
         };
         let memo = || {
-            self.worked_names
+            self.names
+                .worked
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };

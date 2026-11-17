@@ -674,7 +674,7 @@ impl NodeRepo {
             }
         }
         self.heads_mapped = false;
-        self.abandon_checked = None;
+        self.abandon.recheck();
         self.invalidate_published_history();
         let approval = self.repo_path.join("musubi").join(super::APPROVAL_FILE);
         if let Err(err) = std::fs::remove_file(approval)

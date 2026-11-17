@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::TryStreamExt as _;
 use jj_lib::backend::CommitId;
@@ -100,16 +101,15 @@ impl NodeRepo {
         );
         // In one write, not writeln!'s several, so that a kill seldom tears it.
         file.write_all(line.as_bytes()).map_err(io_err)?;
-        self.joins.insert(fingerprint, canonical.clone());
-        self.join_points.push(local.clone());
-        self.join_ancestors = None;
+        self.joins
+            .record(local.clone(), canonical.clone(), fingerprint);
         self.insert_map(local, canonical)
     }
 
     /// Whether the local operation `op` is a join point, which a canonical join operation
     /// stands for.
     pub(super) fn is_join_point(&self, op: &jj_lib::operation::Operation) -> bool {
-        !self.joins.is_empty() && self.joins.contains_key(&fingerprint(op.store_operation()))
+        self.joins.join_of(op.store_operation()).is_some()
     }
 
     /// Whether `head` descends from history this repository shared with a hive: an operation
@@ -133,7 +133,7 @@ impl NodeRepo {
             }
             let op = op_store.read_operation(&id.0).block_on()?;
             if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                || self.joins.contains_key(&fingerprint(&op))
+                || self.joins.join_of(&op).is_some()
             {
                 return Ok(true);
             }
@@ -353,6 +353,65 @@ fn parse_joins(bytes: &[u8]) -> Vec<(LocalOp, CanonicalOp, String)> {
             ))
         })
         .collect()
+}
+
+/// This repository's join points, the canonical join operations they stand for, and the
+/// history from before them. `ancestors` is kept until a join point is recorded or local
+/// operations are rewritten ([`Self::forget_ancestors`]); `before` is never forgotten.
+#[derive(Default)]
+pub(super) struct Joins {
+    /// The canonical join operation each join point maps to, by the join point's
+    /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
+    by_fingerprint: BTreeMap<String, CanonicalOp>,
+    /// The local join points, as recorded.
+    pub(super) points: Vec<LocalOp>,
+    /// The ancestors of the join points, once needed: the history from before the joins.
+    pub(super) ancestors: Option<Arc<HashSet<LocalOp>>>,
+    /// Local operations found to come from before this repository joined: ancestors of a
+    /// join point, and operations all of whose parents are (see [`NodeRepo::canonicalize`]).
+    pub(super) before: BTreeSet<LocalOp>,
+}
+
+impl Joins {
+    /// Records the join point `local`, whose fingerprint is `fingerprint`, as standing for
+    /// the canonical join operation `canonical`.
+    pub(super) fn record(&mut self, local: LocalOp, canonical: CanonicalOp, fingerprint: String) {
+        self.by_fingerprint.insert(fingerprint, canonical);
+        self.points.push(local);
+        self.ancestors = None;
+    }
+
+    /// Whether this repository has joined no hive.
+    pub(super) fn is_empty(&self) -> bool {
+        self.by_fingerprint.is_empty()
+    }
+
+    /// The canonical join operation the local operation `op` stands for, if it is a join
+    /// point or a copy of one that `jj op abandon` rewrote.
+    pub(super) fn join_of(&self, op: &StoreOperation) -> Option<&CanonicalOp> {
+        // Fingerprinting hashes the whole operation: not for a repository that never joined.
+        if self.is_empty() {
+            return None;
+        }
+        self.by_fingerprint.get(&fingerprint(op))
+    }
+
+    /// Whether `canonical` is a join operation a join point here stands for.
+    pub(super) fn is_join(&self, canonical: &CanonicalOp) -> bool {
+        self.by_fingerprint.values().any(|join| join == canonical)
+    }
+
+    /// The canonical join operation each join point maps to, by its fingerprint.
+    #[cfg(test)]
+    pub(super) fn by_fingerprint(&self) -> impl Iterator<Item = (&String, &CanonicalOp)> {
+        self.by_fingerprint.iter()
+    }
+
+    /// Forgets the ancestors of the join points, which rewriting local operations makes
+    /// stale.
+    pub(super) fn forget_ancestors(&mut self) {
+        self.ancestors = None;
+    }
 }
 
 /// What identifies an operation apart from its parents: its view, metadata, and the

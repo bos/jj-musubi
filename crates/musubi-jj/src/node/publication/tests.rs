@@ -242,7 +242,7 @@ fn compare_model(node: &mut NodeRepo, selected: &[String]) -> ModelCleanup {
             commits.extend(roots.iter().cloned());
         }
         let checkpoint = op.metadata.attributes.contains_key(CHECKPOINT_ATTRIBUTE);
-        let initial = node.joins.values().any(|join| join == id);
+        let initial = node.joins.is_join(id);
         let automatic = !initial
             && (op.metadata.is_snapshot
                 || op.metadata.description == "reconcile divergent operations"

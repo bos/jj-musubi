@@ -204,7 +204,8 @@ impl NodeRepo {
         // Operations are canonicalized parents first, so the one before is usually the parent:
         // its names are known, and it is no realization.
         let last = self
-            .last_view_names
+            .names
+            .last_view
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
@@ -454,7 +455,8 @@ impl NodeRepo {
         PerMachine::strip(&mut view);
         view.wc_commit_ids = workspaces_by_key;
         *self
-            .last_view_names
+            .names
+            .last_view
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((local_op.0.clone(), names_here));
@@ -509,7 +511,8 @@ impl NodeRepo {
         // lacks it. Memoizing immutable operations keeps a line of commands linear.
         let id = jj_lib::op_store::OperationId::new(blake2b_hash(op).to_vec());
         let mut memo = self
-            .private_names
+            .names
+            .private
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stack = vec![(id.clone(), op.clone(), workspaces.clone(), false)];
@@ -521,7 +524,7 @@ impl NodeRepo {
                 .metadata
                 .attributes
                 .contains_key(super::CANONICAL_ATTRIBUTE)
-                || self.joins.contains_key(&super::join::fingerprint(&op))
+                || self.joins.join_of(&op).is_some()
                 || op.parents.is_empty()
             {
                 let names = Namespace::read_attribute(&op.metadata, LOCAL_WORKSPACES)?
@@ -623,7 +626,7 @@ impl NodeRepo {
                 (head, canonical)
             })
             .collect();
-        if let Some(memo) = &self.reserved_memo
+        if let Some(memo) = &self.names.reserved
             && memo.heads == heads
         {
             return Ok(memo.names.clone());
@@ -635,7 +638,7 @@ impl NodeRepo {
         let mut stack: Vec<LocalOp> = heads.iter().map(|(head, _)| head.clone()).collect();
         let mut seen = BTreeSet::new();
         while let Some(local) = stack.pop() {
-            if !seen.insert(local.clone()) || self.before_join.contains(&local) {
+            if !seen.insert(local.clone()) || self.joins.before.contains(&local) {
                 continue;
             }
             let op = op_store.read_operation(&local.0).block_on()?;
@@ -651,7 +654,7 @@ impl NodeRepo {
         }
         names.retain(|name| name.as_str().contains('/'));
         let names = Arc::new(names);
-        self.reserved_memo = Some(ReservedNames {
+        self.names.reserved = Some(ReservedNames {
             heads,
             names: names.clone(),
         });

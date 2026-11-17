@@ -208,7 +208,7 @@ impl NodeRepo {
         let mut stack: Vec<LocalOp> = heads.to_vec();
         let mut seen = HashSet::new();
         while let Some(local) = stack.pop() {
-            if !seen.insert(local.clone()) || self.before_join.contains(&local) {
+            if !seen.insert(local.clone()) || self.joins.before.contains(&local) {
                 continue;
             }
             match self.canonical_of(&local) {

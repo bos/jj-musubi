@@ -5,6 +5,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 
 - The sync protocol of [protocol.md](../docs/internals/protocol.md), with its safety and
   liveness properties, and what still holds when the hub goes back to an earlier head.
+- Convergence of the asynchronous system with loss, retries and abandoned operations in flight,
+  from explicit premises about the native code ([the trusted
+  base](#the-trusted-base-of-convergence); [the bridge](#the-asynchronous-liveness-bridge)).
 - Replicated `jj op abandon`: contracting operations out of a history (`Musubi/Contract.lean`),
   and the protocol with dropped sets (`Musubi/Supersede.lean`; [design.md, "Abandoning
   operations"](../docs/internals/design.md#abandoning-operations)).
@@ -94,14 +97,13 @@ place. Start there:
       `FineAssembly/Honesty.lean` proves the invariant on replies and notifications that
       assembly uses.
 
-Four proof names use the word *fine*. The hive's run includes nodes whose dropped originals
-differ from the hub's records. The *eligible* nodes (`EligibleAt`) drop exactly what the hub's
-records drop. The *fine system* is the hive's run filtered to those nodes (`NodeSysEntry.filt`,
-`hiveSys`): the other nodes' slots are frozen, and their fresh requests and the replies to them
-are left out. Each observed event of the hive becomes a step of the fine system, which the hub
-and node proofs already cover. The *fine cut* (`FineCut`) is the time from which every node has
-entered and has completed an active sample after old effects stopped; the fine system starts
-there. Then:
+The nodes of a hive may differ in which originals they have dropped. The *eligible* nodes
+(`EligibleAt`) drop exactly what the hub's records drop. The *fine system* is the hive's run
+filtered to those nodes (`NodeSysEntry.filt`, `hiveSys`): the other nodes' slots are frozen, and
+their fresh requests and the replies to them are left out. Each observed event of the hive
+becomes a step of the fine system, to which the hub and node proofs apply. The *fine cut*
+(`FineCut`) is the time from which every node has entered and has completed an active sample
+after old effects stopped; the fine system starts there. Three names derive from it:
 
 * `FineStart` is the fine system's starting snapshot at the fine cut;
 * `FineAt` is the fine system's interface from that cut: `FineStart`, its steps, graph law,
@@ -201,7 +203,7 @@ Check these specially:
 | Field | Says | Tag | Why from the cut |
 | --- | --- | --- | --- |
 | `inboxStep` | for every call id `c`, a node's inbox steps by `Retry.InboxStep c`, whose flag says the step finished a pending call with an id below `c`; the flag is set whenever the step handles an own reply to a call below `c` | **correspondence** | |
-| `callIds` | call ids are never reset: a call whose id is not yet issued at `t` is made at or after `t` | **correspondence** | |
+| `callIds` | call ids are never reset: for a call id with an own reply, if the inbox's next id at `t` is at most the id, the call is made at or after `t` | **correspondence** | |
 | `notesOld` | notices published before a cut are finitely many, in flight or queued, and handling one uses it up | **correspondence** | |
 
 ### Knowledge (`Source.Knowledge`)
@@ -338,12 +340,12 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness; and its senders, attempt by attempt under a deadline, and in time, with sweeps of what has gone untouched. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action`s of [conformance.md](../docs/internals/conformance.md), `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
 | `Musubi/ExecSound.lean` | Soundness of `execStep` and of those computations ([below](#the-executable-model-and-the-conformance-oracle)). |
-| `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
+| `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler, which also checks the preconditions of the model functions it calls. |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
 | `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
-| `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix; not yet the full retry bridge. |
+| `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix. The convergence proof uses only `nat_trace_stabilizes`. |
 | `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
 | `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
@@ -351,7 +353,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/BaseImages.lean` | Every image of the accepted base stays below an op head, through each step that changes the base, the drops or the heads, as stated, unchecked against the code (#138). |
 | `Musubi/ContractedSafety.lean` | Common store and frontier invariants without an original accepted-head chain; local primitive preservation and fixed-drop credit. |
 | `Musubi/ContractedExec.lean` | The explicit executable union with survivor advance, atomic prepared adoption and contracted acceptance and rejection. |
-| `Musubi/ContractedRecordCut.lean` | One record, pruning and node-drop stabilization cut for the executable recovery union, without assuming head stability. |
+| `Musubi/ContractedRecordCut.lean` | One record, pruning and node-drop stabilization cut for the executable recovery union. |
 | `Musubi/PostCut.lean` | Strict hub movement after the record cut and finite influence of old ledger targets. |
 | `Musubi/CutHistory.lean` | Survival of each saved hub head under its matching saved records, including rollback. Not used by the convergence proof. |
 | `Musubi/PacketCoupling.lean` | One immutable push's full fields and actual send-time state, including actual-sender alignment. |
@@ -382,7 +384,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/Schedule.lean` | Shared bounds on event indices, sampling order and batch completion. |
 | `Musubi/NodeSysEntry.lean` | Derive node entry and preserve the joint control invariants under individual-call fairness. |
 | `Musubi/HiveFilter.lean` | Observe eligible-node events, project the hive run and preserve its initial invariants. |
-| `Musubi/SysFreshCuts.lean` | Derive cutoffs for consumed old replies and processed old notifications without draining queues. |
+| `Musubi/SysFreshCuts.lean` | Derive cutoffs after which no old reply is consumed and no old notification processed; queues need not drain. |
 | `Musubi/SysAcceptance.lean` | Convergence API: imports all nine layers below. |
 | `Musubi/SysAcceptance/Acceptance.lean` | Actual request decisions and stable-hub acceptance. |
 | `Musubi/SysAcceptance/Pending.lean` | The control/publication contradiction for a node that stays pending. |
@@ -402,7 +404,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/HubHistory.lean` | The hub's history of the joint run, by sequence number. |
 | `Musubi/RequestBounds.lean` | Derive request bounds, expand actual joint events, and prove the hub stabilizes. |
 | `Musubi/PendingEpoch.lean` | Bound pending alias changes with partial normalization and per-original coherence. |
-| `Musubi/ContractedMeasure.lean` | The record-aware executable progress check through surviving images; coincidence with the old check before drops. |
+| `Musubi/ContractedMeasure.lean` | The record-aware executable progress check through surviving images; agreement with `rmeasureE` when nothing is dropped. |
 | `Musubi/ContractedExecTest.lean` | Build-time checks of independent recovery and mutually exclusive contracted outcomes. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
@@ -420,11 +422,10 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/NativeLifecycle/NativeFacts.lean`, `Musubi/NativeLifecycle/Construction.lean` | Native observation tables and executable receipt and render construction. |
 | `Musubi/NativeLifecycle/Steps.lean` | Executable preparation, revalidation and publication actions. |
 | `Musubi/NativeLifecycle/ConstructionSound.lean`, `Musubi/NativeLifecycle/RunSound.lean` | Conditional construction facts and record custody along executable traces. |
-| `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples; native authentication remains a separate obligation. |
+| `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples. They do not authenticate native observations. |
 | `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication and native lifecycle requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
-
 
 ## Correspondence with protocol.md
 
@@ -502,8 +503,8 @@ the full asynchronous system with `N` nodes. The properties are stated in
 Liveness is proved for the policy model `PStep`: users have stopped (there is no `UserOp`), and
 each node takes the policy's actions as atomic request/reply exchanges that succeed, nodes and
 actions scheduled in any order. `Merge` is a policy step, because musubi loads the repository
-and jj merges. [The asynchronous bridge](#the-asynchronous-liveness-bridge)
-explains why this covers the real, lossy system.
+and jj merges. [The asynchronous bridge](#the-asynchronous-liveness-bridge) states what is
+proved of the real, lossy system.
 
 `Converged N s` means that every node `n < N` has `heads = {hub.head}` and
 `known = (hub.seq, hub.head)`.
@@ -626,8 +627,8 @@ case is refused. See the contraction correspondence in
 `AbandonRefs.lean` connects the survivor graph to a successful colocated publication with one
 remote ref. Slots and expected-value snapshots are indexed by original operation identity.
 `takeHeads` expands the current heads under the dropped set, adds the incoming
-head, and takes the maximal survivors. `History.publish` contracts the graph and publishes one fresh
-merge together with `Refs.cbeside`'s ref state. `publish_refines` proves surviving ancestry
+head, and takes the maximal survivors. `History.publish` contracts the graph and publishes one
+fresh merge together with `Refs.cbeside`'s ref state. `publish_refines` proves surviving ancestry
 and `CInv` together, and that the ref action is a `CStep.beside`. `fixup_retains` states the
 fresh child/saved-expectation boundary: the new operation receives its parent's slot and the
 saved expectation,
@@ -948,532 +949,385 @@ Its proofs cover construction origins and record responsibility along the execut
 trace. Missing or ambiguous evidence stays explicit.
 
 These results do not authenticate arbitrary native observations or establish a complete Rust
-refinement. The real adapter fixtures and their schedule restrictions are described in
+refinement. The native fixtures compare the model with the shipping code through the first retry
+after a changed head; retry canonicalization beyond it and the whole publication are not
+simulated. The real adapter fixtures and their schedule restrictions are described in
 [conformance.md](../docs/internals/conformance.md#native-lifecycle-inputs-and-events), which owns
 the correspondence and remaining gaps.
 
 ## The asynchronous liveness bridge
 
-The termination theorems concern successful atomic policy exchanges. `pstep_reachable`
-embeds each policy step into the asynchronous safety model; it does not prove that an
-asynchronous implementation run eventually takes policy steps. `Merged.lean` constructs
-successful merged exchanges with the same measure and convergence result. The Rust
-conformance test checks measure descent at completed, serialized exchanges. None alone
-establishes convergence under arbitrary asynchronous delivery and retries.
+The liveness theorems of `Liveness.lean`, `Regress.lean` and `Supersede.lean` cover atomic policy
+exchanges that succeed. `pstep_reachable` embeds each policy step in the asynchronous model, and
+`Merged.lean` shows that merged exchanges give the same measure and convergence. Neither says
+that an asynchronous run, with lost, duplicated and delayed messages and with retries, takes
+policy steps. This section covers the proofs that do, tracked in
+[#78](https://github.com/bos/jj-musubi/issues/78). They end in
+`FineAssembly.hive_converges_observed`, whose premises [the trusted
+base](#the-trusted-base-of-convergence) lists.
 
-`AsyncLiveness.lean` proves progress at the boundaries that the atomic exchanges hide:
+**Assumes.** The premises of the trusted base. The **correspondence** rows are checked against the
+Rust by tests and not proved, so the result does not verify every Rust execution. The
+environment rows say that the surviving participants are finite and their dropped originals
+bounded; that from some point the hub is not remade, no body is lost or gc'd and no ordinary I/O
+fails; that finitely many user changes happen; and that rounds resume fairly and serial calls
+complete. The correspondence rows also take finite obsolete delivery, that old replies and
+notices are consumed (`inboxStep`, `notesOld`). Permanent repository errors,
+unavailable objects and jj merges the code does not support do not satisfy them. Fairness is
+stated of enabled local work being scheduled (`fair`, `pushFair`); no premise says the progress
+rank decreases.
 
-- `bad_accept_before_reply` and `measureR_accept_before_reply`: a hub acceptance makes
-  its pusher good before the acknowledgement, provided that node still has the single head
-  it pushed and its old `known` belongs to the current hub history. Losing the reply leaves
-  this progress intact. Stores and message bookkeeping do not affect the result.
-- `measureR_delayed_learn`: learning a strictly newer pair from the current hub history
-  decreases `rmeasure`, even when another acceptance has moved the hub beyond that pair.
-  This does not cover a reply from a history the hub lost, or a recovery reset.
-- `settling_hub_stabilizes`: every reachable run of `SettlingStep` eventually has a fixed
-  hub head and sequence number. Its first measure component never increases, and every
-  hub movement strictly decreases it. Local policy steps, including advance and merge,
-  remain allowed, as do delayed consistent learning and bookkeeping. Fix-up creation,
-  hub regression and obsolete-history recovery are excluded from this suffix relation.
+**Scope limits.** The Rust conformance test checks measure descent only at completed, serialized
+exchanges. `autoWritesStop` assumes a node's automatic writes stop; finitely many user and
+configuration changes do not imply it. The writes include those a node makes outside a protocol
+step (housekeeping, the round's prelude) and cleanup inside a busy call, such as working-copy
+replacement inside `advance_to`: its `Advanced(B)` endpoint is a new canonical child of the
+singleton target B, written to replace this machine's abandoned working copy
+(`workspaces::forgotten_working_copies_can_be_abandoned`). An advance with no
+further automatic write has the full-frontier effect, a law the proof uses only after the cutoff.
 
-`RetryControl.lean` proves two finite bounds, with executable boundary checks described in
-[conformance.md](../docs/internals/conformance.md#liveness):
+### Split exchanges (`AsyncLiveness.lean`)
 
-- `old_slots_eventually_stop`: after any finite request-id cut, only finitely many replies
-  can consume a pre-cut live request slot. New requests cannot recharge the budget, and
-  duplicate frames cannot consume a slot twice. This permits infinitely many unmatched
-  duplicates. It assumes ids are never reused; production uses `u64`, so the correspondence
-  excludes exhausting that counter. It does not bound queued notifications or prove that a
-  still-live pre-cut call is eventually retired.
-- `fixup_writes_le_one` and `fixups_eventually_stop`: at most one completed restoring write
-  per node in an epoch with no new abandonment discovery, obsolete-prefix adoption or
-  interrupted write. The first current-epoch adoption may replace pending drops; later
-  adoptions must only remove them, in immutable original-operation names. Clearing the cache
-  after alignment requires empty pending, which cannot then grow. A write produces a finite
-  saved work list and final operation. No bound on network retries is assumed. The
-  real-repository check pins cached reuse and reopening, but does not prove entry into this
-  epoch or the monotonicity premise for all production adoptions. Neutral publication tips
-  are additional work, outside this cached restoring-payload bound.
+- `bad_accept_before_reply`, `measureR_accept_before_reply`: a hub acceptance makes its pusher
+  good before the acknowledgement arrives, if the node still has the single head it pushed and
+  its `known` belongs to the current hub history. Losing the reply keeps the progress.
+- `measureR_delayed_learn`: learning a strictly newer pair from the current hub history lowers
+  `rmeasure`, even when another acceptance has moved the hub past that pair. A reply from a
+  history the hub lost, and a recovery reset, are not covered.
+- `settling_hub_stabilizes`: every reachable run of `SettlingStep` has a fixed hub head and
+  sequence number from some point. Local policy steps, delayed consistent learning and
+  bookkeeping are allowed; fix-up creation, hub regression and recovery from an obsolete history
+  are excluded, so a concrete run must still be shown to have this form.
 
-`Retry.Publication` distinguishes that cached restoring work from a neutral publication tip.
-If pending is nonempty and the head equals the known head, `publication_progress` requires a
-child above the current head even when the restoring work is cached. `publication_retry`
-concerns the helper's result state, whose head is read as no longer known. A restoring write
-can instead recreate the known body: the native post-write equality must be read separately,
-and a neutral tip may follow without another learned head. `NodeSettle.write_known` counts
-that restoring cache change in its rank rather than excluding the case by freshness.
-`publication_tip_cached` proves the tip leaves the restoring cache untouched. These are local
-decision/cache results, not a bound on tips across arbitrary later replies or adoptions.
+`lost_acceptance_and_delayed_fetch_make_progress` checks the first two lemmas
+(`bad_accept_before_reply`, `measureR_delayed_learn`) through the core and the oracle.
 
-`RecordStability.lean` derives part of the epoch argument. After rollback stops, every
-changed full modeled record list appends a nonempty difference, spending a previously unseen
-original drop. Bounded original drops therefore give an eventual fixed ordered list, without
-assuming head stabilization. Pruning then spends a bounded prefix. The executable
-`sexec_record_prefix_stabilizes` discharges the append and pruning premises from the existing
-record constructors; its original-drop bound and cessation of rollback remain assumptions.
-The independent `node_drop_sets_eventually_stabilize` gives a common cut for finitely many
-monotone bounded node drop sets. `adopt_pending_subset` derives pending-original shrink from
-`adoptR` when the new record list extends the old dropped union. These results neither prove
-that every production adoption is such an extension nor repair the ancestry gap below.
-`record_and_drop_sets_stabilize` combines those cuts using only their append, pruning and
-persistent original-drop field effects. It does not require raw local realization, which may
-contract parents, to be an original-history executable step.
+### Request slots and fix-up writes (`RetryControl.lean`)
 
-`ContractedRecordCut.lean` extends that result to the full executable recovery relation.
-`cexecAction_record_control` derives the same record and pruning effects for survivor
-advancement, prepared adoption and contracted acceptance as for the legacy actions.
-`contracted_step_node_drop_mono` also covers every added transition. Together with record
-custody, `cexec_record_and_drop_sets_stabilize` gives one cut after which the ordered hub
-records, pruning boundary and each participant's dropped set stay fixed. Bounded dropped
-originals and cessation of rollback remain premises. The theorem does not assume head
-stabilization, node record agreement, successful replies or a decreasing progress rank.
+Executable boundary checks are in [conformance.md](../docs/internals/conformance.md#liveness).
 
-`CutHistory.lean` supplies the entry invariant that SEOK alone does not give. Each saved hub
-head survives the record list saved at the same sequence. Acceptance updates both slots;
-pruning preserves the current head; rollback restores that matching pair. This needs no
-original-ancestry chain through the pre-cut accepted history.
+- `old_slots_eventually_stop`: after any finite request-id cut, only finitely many replies can
+  consume a pre-cut live request slot, even with infinitely many unmatched duplicates. It assumes
+  ids are never reused; production ids are `u64`, so the correspondence excludes exhausting the
+  counter. It does not bound queued notifications or show that a pre-cut call still live is
+  eventually retired.
+- `fixup_writes_le_one`, `fixups_eventually_stop`: in an epoch with no new abandonment
+  discovery, obsolete-prefix adoption or interrupted write, a node completes at most one
+  restoring write. The first adoption of the epoch may replace pending drops; later ones only
+  remove them, in immutable original-operation names. No bound on network retries is needed.
+  Neutral publication tips are extra work, outside this cached restoring-payload bound. Nothing
+  proves that a run enters such an epoch, or that every production adoption only removes
+  pending drops; the real-repository check pins cached reuse and reopening.
+- `publication_progress`: with pending drops and the head equal to the known head, a child above
+  the current head is required even when the restoring work is cached. `publication_tip_cached`:
+  such a neutral tip leaves the restoring cache untouched. `publication_retry` concerns the
+  helper's result state, where the head reads as no longer known; a restoring write can instead
+  recreate the known body, which the native equality after the write must settle, and
+  `NodeSettle.write_known` counts that cache change in its rank. These are local results, not a
+  bound on tips across later replies or adoptions.
 
-`PostCut.lean` then derives strict original-ancestry movement in the finite executable model
-after records stop changing, and a finite bound on moves to old ledger targets. A ledger
-entry alone does not identify a request: `PacketCoupling.lean` instead ties every accepting
-action to the immutable packet's records, drops, expected head and new head. Under the common
-drop cut, `packet_sender_after_cut_aligned` identifies that packet's actual sender as
-eligible throughout the suffix. Other nodes can keep sending packets; those cannot move
-the hub. The native fixed-record counterpart uses the hub's raw graph, rather than a
-universal projection from canonical versions to immutable originals.
+### Records
 
-`NodeReconcile.lean` proves that every reachable node head survives its own dropped set.
-An eligible node, whose full drop set is the hub's, can therefore immediately adopt a
-current announcement. With current ordered records it has no pending drops, before any
-assumption of hub stabilization. `RecordReplies.lean` preserves held-prefix custody across
-the full recovery union. A fresh response completes either from its matching request prefix
-or from the held pruning boundary. `SerialReply.lean` proves that a live serialized call's
-record snapshot has not changed, and models the actual own-response reset separately from
-filtered notification learning. Other drivers' allocations advance the shared request
-counter without adding a slot in this driver's projection. Notifications are handled only
-outside a running sync round.
+When rollback has stopped, every change to the hub's ordered record list appends a nonempty
+difference that spends a previously unseen original drop. With original drops bounded, the list
+is eventually fixed, and pruning then spends a bounded prefix.
 
-Notifications have no request id. `NotificationControl.lean` instead counts their finite
-old logical frames in flight and in queues: arrival transfers credit and consumption spends
-it. It assumes a consumptive stream/channel, with later publications from the current
-history, rather than arbitrary infinite reinjection of obsolete frames. Fresh notifications
-may continue forever.
+- `RecordStability.lean`: `record_and_drop_sets_stabilize` gives one cut after which the ordered
+  records, the pruning boundary and each node's dropped set stay fixed. It needs only the
+  append, pruning and persistent-drop effects, not that raw local realization, which may contract
+  parents, is a step of the original-history model. `sexec_record_prefix_stabilizes` derives
+  those effects from the executable record constructors, leaving the bound on original drops and
+  the end of rollback as assumptions. `adopt_pending_subset`: pending originals shrink under
+  `adoptR` when the new record list extends the old dropped union; nothing proves that every
+  production adoption extends it.
+- `ContractedRecordCut.lean`: the same cut for the full executable recovery union (survivor
+  advancement, prepared adoption, contracted acceptance), by `cexecAction_record_control`,
+  `contracted_step_node_drop_mono` and `cexec_record_and_drop_sets_stabilize`. It assumes bounded
+  dropped originals and no rollback, and needs no head stability, node record agreement,
+  successful reply or decreasing rank.
+- `RecordEpoch.lean`: counts the old announcement and received-record debt carried into a
+  fixed-record suffix. A fresh `Fetched` announces only the fixed list, taking a list consumes
+  every receipt, and receipt debt survives a reopen while the announcement does not. Adoption can
+  invalidate a retained realization plan; the stale-plan error reopens the daemon, and a finite
+  credit bounds these reopens. Other failures reopen without spending it, and their stopping is
+  the premise `failFinal`. The projection omits knowledge, so it makes no claim that a restart
+  preserves the local progress rank.
+- `NotificationControl.lean`: notifications carry no request id, so the slot bound does not
+  apply. The file counts old logical frames in flight and queued; arrival transfers credit and
+  consumption spends it. It assumes that each frame is delivered once and receipt removes its
+  queue entry, and that later publications come from the current history. Fresh notifications
+  may continue forever.
+- `SerialReply.lean`: `handleHead` models a node's known pair on a head-bearing reply: an own
+  reply that is older or changed first resets knowledge, then `filteredLearn` takes a reply only
+  if it is newer, as for a notification. `own_reply_learns`: an own reply that satisfies `hroot`
+  (sequence 0 names the root) sets the known pair to the reply. `object_recoveries_stop` bounds
+  the recoveries from obsolete requests, given preserved request adequacy and a reset that
+  restores it. That adequacy covers the remaining calls of a batch and the truthful have claims,
+  not only the stored known head, and must be established after old effects stop.
+- `CutHistory.lean`, `NodeReconcile.lean`, `RecordReplies.lean`: in the executable recovery union,
+  each saved hub head survives the record list saved at the same sequence; every reachable node
+  head survives its dropped set, so an eligible node can adopt a current announcement at once;
+  and held-prefix custody holds, so a fresh response completes from its request prefix or the
+  held pruning boundary.
 
-`RecordEpoch.lean` accounts for the old announcement and persistent received-record debt
-carried into a fixed-record suffix. Fresh Fetched replies announce only the fixed list, but
-retain an equal-record announcement while receipts still need reconciliation. Preparing a
-different list can retain its receipt without increasing the old-announcement credit; taking
-it consumes every receipt, including when the applied list stays unchanged. Receipt debt
-survives reopening, unlike the volatile announcement.
-Adoption may invalidate a retained realization plan. A stale-plan error makes the daemon
-reopen, clearing the plan and resetting knowledge. A finite credit bounds these adoptions
-and stale-plan reopens without pretending that knowledge survives an error. Other failures
-can reopen without increasing this credit; their eventual cessation has a separate argument.
-Freshly surveyed realization still requires the adapter's scoped translation and
-object-availability contract.
+### Entry
 
-`EarlyEntry.lean` uses the driver's stronger round scheduling: knowledge cannot chase notices
-inside a running round. Until current records are applied, a push is refused before its
-expected head is read, and therefore cannot change knowledge either. A frozen known pair
-has only finite local closure, plan, advance and merge work before the next RPC or idle.
-A current fetch is reconstructible and adoption runs first at an eligible node.
-`EntryAssembly.lean` derives an eligible node's empty pending list from shared ordered-record
-identity and custody, which disables both core fix-ups and publication tips.
-Finitely many automatic semantic writes remain an explicit premise, distinct from those
-derived core-write bounds. This includes cleanup inside a busy call and writers in the
-round's prelude, as well as idle housekeeping; the boundary is detailed below.
-`HistoryWindow.lean` carries the strict raw history from the earlier record cut to an eligible
-node's entry; nodes need not already know the latest sequence.
+These proofs use the driver's round scheduling: knowledge cannot chase notices inside a running
+round, and until current records are applied a push is refused before its expected head is read.
+`EntryAssembly.eligible_pending_empty` derives an eligible node's empty pending list from
+ordered-record identity and custody, which disables core fix-ups and publication tips.
+`HistoryWindow.lean` carries the strict raw history from the record cut to an eligible node's
+entry; the node need not already know the latest sequence.
 
-The separate `EarlyEntry.Burst` argument counts locality on the fixed raw known closure,
-frontier coverage by the known images, heads, and queued plan entries. A fresh survey spends
-a nonlocal raw operation; a queued realization may already be local because of batching,
-but still dequeues an entry. Its executable `stepB`, proved sound, checks actual core
-snapshots through `localBurst`; forgetting to pop the queue fails the fixed rollback trace.
-`local_burst_conforms_across_a_pending_namespace` also checks the real adapter: it builds the
-combined raw DAG from the hub and node stores, keeping the known operation and its renamed
-node image distinct. This argument ends at the next RPC or core idle. It excludes
-record-taking advances and does not bound subsequent daemon housekeeping. Finite immutable
-metadata support derives fixed image names within a frozen-known prefix; append-only
-successful realizations then derive locality monotonicity (`local_grows_after_inputs`).
-`Control.Naming.settles` derives its cutoff inside the hypothetical unending prefix, using
-partial pending-name normalization and immutable metadata on finite support. It assumes no
-single finite support for all future moving heads. The normalizer's support and
-mapping-retention laws remain native correspondence obligations.
+- `EarlyEntry/Burst.lean`: between RPCs or idle, a node with a frozen known pair has finite local
+  work (closure, plan, advance, merge), ranked by locality and frontier coverage. The executable
+  `stepB` is proved sound and checks the actual core through `localBurst`;
+  `local_burst_conforms_across_a_pending_namespace` checks the real adapter. A burst excludes
+  record-taking advances and does not bound later daemon housekeeping, which the automatic-write
+  premise covers.
+- `Control.Naming.settles`: pending-name changes cease inside a prefix that need not end. Each
+  head has its own finite support, and none is shared by all future heads. The normalizer's
+  support and mapping-retention laws are native correspondence obligations.
+- `EarlyEntry/Control.lean`: extends this across complete metadata calls. `rawControl` and
+  `callB` check the raw survey and the call effects against the shipping core, and
+  `raw_recovery_choices_and_calls_match_the_model` does so on a raw chain with independently
+  missing bodies and objects, different local frontiers, pending drops and record comparisons.
+  The driver must still schedule the next start-fetch after idle and complete each call
+  (`idleStart`, `doneIn`).
+- `fresh_head_reached`: with that scheduling, a node gets a fresh reply to its own head request,
+  and a refusal updates the heard records, so the node does not push again with the same stale
+  record offer. `fresh_fetch_takes`: after a fresh fetch, a six-part rank (counting missing
+  bodies and per-operation objects) forces record-taking or already-current records, using only
+  the active prefix of the round. Equal records can still need adoption to consume custody
+  (`RecordEpoch.needsRecords`).
+- `raw_entry_reached`, `raw_entry_persists`: a node enters on fetch and push replies, and keeps
+  entry once ordinary failures and their reopens stop. An entered node's push cannot cause an
+  incomplete-upload reopen.
 
-`EarlyEntry.Control` extends that argument across complete metadata calls. Its raw survey
-walks through nonlocal operations with bodies; readiness and missing bodies or objects are
-computed from those inputs, with soundness proofs. `rawControl` checks the shipping core's
-choice against this computation, and `callB` checks burst and completed-call field effects.
-The six-part rank additionally counts missing bodies and per-operation objects, with unknown
-bodies never considered object-ready. `raw_recovery_choices_and_calls_match_the_model` checks
-the core's choices and consumed hub replies on a raw chain with independently missing bodies
-and objects, different local frontiers, pending drops and record comparisons.
-`raw_round_yields` reaches the next RPC or core idle before a first fresh observation, without
-assuming current records, a stable hub or a single raw embedding. It excludes the finite
-record-taking steps and checks the remaining local field effects. Driver fairness must still
-schedule the next start-fetch after idle and complete individual calls.
-`fresh_head_reached` uses that scheduling to derive a fresh own head reply: a refusal updates
-heard records, preventing another push with the same stale record offer. It constrains heard
-records only across non-idle core steps, allowing notices between rounds. After a fresh
-fetch, `fresh_fetch_takes` uses canonical bodies at the next decision point, after preparation,
-and lets `GetObjects` bring missing objects. The six-part rank forces record-taking or
-already-current records, using only the active prefix of that round; whole raw-ancestry object
-availability immediately after receipt is not assumed. Equal records can still need adoption
-to consume custody; `RecordEpoch.needsRecords` and its active receipt guard distinguish that case.
-`raw_entry_reached` joins fetch and push replies, excluding an incomplete push by its conditional
-upload-closure law. `raw_entry_persists` retains entry after ordinary failures and their reopens
-stop, deriving that an entered node's push cannot cause an incomplete-upload reopen. These are
-still component results: their inputs must be the actual sampled daemon events and packet.
+`fresh_fetch_takes` takes the premise `hserve` (`EarlyEntry/FreshFetch.lean`) and
+`raw_entry_reached` takes `hroundServe` (`EarlyEntry/RawEntry.lean`): no `GetObjects` of the round
+after a fresh fetch fails. Neither is a law of the run; each is to be derived from the hub keeping
+what it can serve. All of the entry results are component results. Their inputs must be the
+actual sampled daemon events and packet.
 
-`HubSuffix.lean` works on raw operation vertices in a growing acyclic graph. Its packet invariant
-derives, from policy guards, when a current-generation sender still holds the head it sent. Every
-other move-capable packet belongs to a finite earlier list, whose targets pay for its movements.
-Under finite eligible maintenance writes, the hub's head and sequence stabilize; acceptance is not
-assumed finite. `NodeSettle.lean` gives the next local-control argument: its branch-ordered rank
-falls until a node is settled or emits a proper push from the settled hub head.
-`PacketAcceptance.lean` separates its primitive checks from the hub's actual decision and rules
-out refusal, rejection, idempotence and incomplete closure for the proper packet; the assembly
-does not use those packet-check theorems. Upload coverage uses the actual base-image frontier
-after server-generated contraction bodies are present; the raw expected-head difference is only
-the no-renaming case. The observed assembly below uses the joint-system route through
-`eligible_system_converges` and `node_settles_accepted`, and `finite_common_cut` joins all nodes'
-convergence cuts. Of the executable-union results above, `CutHistory`, `NodeReconcile` and
-`RecordReplies`, the strict-movement and old-ledger-target results of `PostCut` (the assembly uses
-only `execStep_hubPushAccept_guards`), the packet-coupling theorems of `PacketCoupling` (it uses
-only `PushPacket`) and the packet-check theorems of `PacketAcceptance` are standalone component
-theorems that the assembly does not use.
+### Hub stabilization
 
-The joint system now supplies per-event refinements. `NodeSys` keeps each node's scoped embedding
-into the same raw graph and retains immutable requests while other nodes run. `HubLedger` derives
-packet coverage from those actual request lists. `HubNodeSteps` expands local events, including a
-full-frontier advance followed by its optional merge; `HubAnswers` uses the actual accepted
-request and guards. `SysFreshCuts` derives both consumed-old-message cutoffs from the joint
-transitions: later calls use fresh slots, and notifications leave their queues exactly once. It
-does not require unread messages to disappear. `CallBatch`, which the assembly does not use,
-justifies sequential native calls and interleaved physical request ids under injective
-correlation. `RequestBounds.hub_stabilizes_sys` now constructs the expansion from those same joint
-events, including finite maintenance: monotone generations cannot hide a maintenance write between
-equal endpoint generations. Initial requests remain in the old-packet budget even if their sender
-is ineligible; alignment is needed only for the actual moving answer's fresh request.
-`SysAcceptance` couples the actual answered request to one executable decision, carrying the
-conditional primitive laws of that same decision. It does not quantify over other executable
-states that happen to have matching head and sequence fields. These primitive laws still need
-their native correspondence; the theorem does not establish them by assuming acceptance.
-`eligible_system_converges` composes the actual hub proof with local settling and retains
-agreement of the physical raw heads with the hub. Only newly issued pushes must finish; orphan
-requests from an old client session need never drain. This is the eligible-suffix component; the
-assembly below derives entry, pending-name stabilization and eligibility of every surviving
-machine. A node with pending drops translates hub operations into its own namespace, so it cannot
-use the eligible node's single raw embedding unchanged.
+- `HubSuffix.lean` (`hub_suffix_stabilizes`): in a growing acyclic raw graph, the hub's head and
+  sequence stabilize if eligible maintenance writes are finite; acceptances need not be. A packet
+  invariant shows that a sender of the current generation still holds the head it sent, and every
+  other packet that can move the hub belongs to a finite earlier list whose targets pay for it.
+- `NodeSettle.lean`: a rank falls until a node is settled or emits a proper push from the
+  settled hub head. `PacketAcceptance.lean`: the proper packet meets no refusal, rejection,
+  idempotence or incomplete closure; upload coverage uses the actual base-image frontier once
+  server-generated contraction bodies are present.
+- `PostCut.lean`, `PacketCoupling.lean`: after records stop changing, the hub moves strictly
+  along original ancestry in the finite executable model, with finitely many moves to old ledger
+  targets. `packet_sender_after_cut_aligned`: an accepted packet's sender is eligible throughout
+  the suffix, so other nodes' packets cannot move the hub. The native counterpart works on the
+  hub's raw graph, with no projection from canonical versions to immutable originals.
+- The joint system: `NodeSys` keeps each node's scoped embedding into one raw graph and retains
+  immutable requests; `HubLedger`, `HubNodeSteps` and `HubAnswers` derive packet coverage, expand
+  local events and use the actual accepted request; `SysFreshCuts` derives the cutoffs for
+  consumed old replies and processed old notifications; `RequestBounds.hub_stabilizes_sys`
+  builds the expansion from these events, finite maintenance included. Initial requests stay in
+  the old-packet budget even when their sender is ineligible.
+- `SysAcceptance` couples the actual answered request to one executable decision with its
+  conditional primitive laws. Those laws need native correspondence; the theorem does not
+  establish them by assuming acceptance. `eligible_system_converges`
+  composes the hub proof with local settling and keeps the physical raw heads in agreement with
+  the hub. Only newly issued pushes must finish; orphan requests of an old client session need
+  not drain.
 
-`SysAcceptance.no_forever_pending` supplies the separate raw-control argument for such a
-node on a stable hub. Finite local and completed-call work derives a pending push; the actual
-raw publication decision would accept it and move the hub, a contradiction. The packet's
-offered records, the records last heard and the hub's current records are bound separately:
-the core's `differ = false` alone does not establish the hub's record comparison. The
-`RawPublish` decision is checked through `rawPush` against all five shipping outcomes. The
-assembly below derives the cuts' guards and uses actual fair-call sampling and the local
-immutable-input and upload/naming contracts. The component theorem does not assume an
-eventual push or identify original-operation ids with raw ids.
+### Ineligible nodes
 
-`NodeSysEntry.filt` constructs the eligible nodes' fine system from a coarser hive observation,
-freezing the other node slots and omitting their fresh requests and replies. `filt_step` proves
-each observed event becomes a fine-system event; noneligible writes become raw graph growth,
-and their fresh answers become frames. Old requests remain in the finite initial budget.
-The observation starts after eligible nodes have handled a fresh post-record-cut head and
-taken current records: before then, even an eligible node's obsolete known head can have a
-different node-space image. Ghost noneligible replies and notifications remain in the coarse
-observation when native consumers take them; its virtual counter is distinct from physical
-call ids. Native assembly must derive that entry cut and the noneligible-answer frame law
-from fixed records and the actual packet decision, rather than hub stability.
-The filter preserves the action label as well as the eligible slots. `hive_filtered` derives
-its initial invariants with inactive root dummy slots for noneligible nodes; those machines
-need no single raw embedding. It also derives the packet-owner alternative: an answered
-packet is from an eligible node or was already in flight at entry. `hub_stabilizes_hive` and
-`FineAt.converges` carry hub stability and eligible physical-head convergence back to
-the coarse observation, transferring actual scheduling, push completion and packet decisions.
+A node with pending drops translates hub operations into its own namespace, so it cannot use the
+eligible node's single raw embedding. `SysAcceptance.no_forever_pending`: on a stable hub such a
+node cannot stay pending forever, since finite local and completed-call work yields a pending
+push that the raw publication decision would accept, moving the hub. It takes the control,
+publication and `survival` interfaces and the premises `hstable` and `hserve`
+(`SysAcceptance/Pending.lean`). The offered records, the
+records last heard and the hub's current records are bound separately, because the core's
+`differ = false` alone does not give the hub's record comparison. `RawPublish` is checked through
+`rawPush` against all five shipping outcomes. No eventual push is a premise, and original-
+operation ids are not identified with raw ids.
 
-`raw_noneligible_answer_frame` derives the fresh noneligible answer's frame from native
-packet/record effects. It splits on offered/current record equality; it does not assume that
-noneligible nodes already applied the current records. In the accepted branch alone, matching
-records, complete custody, unpublished pending originals and current pending-name coverage
-make unchanged ordered records impossible. The coverage law matters: a superseded raw alias
-can name a surviving rewritten original. This algebra needs no original-history executable
-trace or noneligible node embedding. The source bindings below connect it to the actual
-packet and the derived entry cut.
+`raw_noneligible_answer_frame`: from native packet and record effects, a fresh answer to an
+ineligible node leaves the hub unchanged, without assuming the node applied the current records.
+In the accepted branch, matching records, complete custody, unpublished pending originals and
+current pending-name coverage make unchanged ordered records impossible; the coverage matters
+because a superseded raw alias can name a surviving rewritten original.
 
-The conditional `SysAcceptance.hive_converges` assembly now joins record/drop stabilization,
-record-credit cuts, entry and persistence, eligible-system convergence and the noneligible
-contradiction. Its data are sampled from one observation, including the same actual push and
-its handling time; hub stability then derives that decision's frame. A sampled step runs to
-the completion of its request batch. A separate frame connects that result to the next
-post-prelude reading, only where the derived naming cut makes the names and metadata stable.
-It preserves available bodies, objects, locality, the canonical head readings and the retained
-plan. Completing a saved rewrite can still move physical heads. Locality is not required to
-grow while naming changes.
+### The assembly
 
-`NativeEvents` constructs the run recursively from event data. Each event's bindings name
-the individual call's source obligations; `observed_hs` derives the eligible system's steps.
-The filtered run's invariants are carried by induction, including the invariants a later
-reply or notification needs, instead of assuming them separately at every callback.
-`removed_eligible_push` identifies the exact request and packet of a push decision when an
-eligible request leaves. An answer to another machine carries its actual post-answer hub
-snapshot; its binding must establish that the snapshot stayed unchanged, using
-`raw_noneligible_answer_frame`, before that event is filtered as a frame. Classifying its
-sender alone does not supply that fact. Each binding is a local source contract; the replay
-derives a system execution from those contracts and the initial snapshot.
+- `NodeSysEntry.filt` builds the eligible nodes' fine system from the hive observation,
+  freezing the other nodes' slots and omitting their fresh requests and replies. `filt_step`
+  turns each observed event into a fine-system event, ineligible writes into raw graph growth
+  and their fresh answers into frames. The observation starts once eligible nodes have handled
+  a fresh head after the record cut and taken current records, since before that an eligible
+  node's obsolete known head can have a different node-space image. `hive_filtered` derives
+  the initial invariants.
+- `NativeEvents` builds the run recursively from event data. Each event's bindings state that
+  call's source obligations, and `observed_hs` derives the eligible system's steps; invariants
+  that a later reply or notification needs are carried by induction (`FineAssembly/Honesty.lean`).
+  An answer to another machine carries its post-answer hub snapshot, and its binding must show it
+  unchanged, using `raw_noneligible_answer_frame`, before the event is filtered as a frame.
+- `FineAssembly.fineAt_of` assembles the fine system from the replay, and
+  `hive_converges_observed` derives the freshness of consumed replies and notices from the
+  old-effects cutoff and the completed batches: a later completed batch began after an earlier
+  one completed, so its head-bearing reply was requested after the cutoff.
+  `NativeEvents.RecordView` ties the raw observer's applied identity to the fine node's and the
+  original-drop view. Different raw encodings of one dropped-original set are not identified.
+- `SysAcceptance.hive_converges` joins record and drop stabilization, entry, eligible-system
+  convergence and the contradiction for ineligible nodes, on data sampled from one observation,
+  including the same push and its handling time. A sampled step runs to the completion of its
+  request batch.
 
-`FineAssembly.fineAt_of` uses that replay to assemble the fine system. Its history invariant
-keeps previously answered eligible replies and notifications tied to past hub snapshots as
-the hub advances. `hive_converges_observed` supplies the lower assembly's fine-system premise
-from event data, per-call laws and an initial snapshot. It derives the freshness of consumed
-replies and notifications from the old-effects cutoff and completed request batches. A later
-completed batch began after an earlier one completed, so its actual head-bearing reply was
-requested after that cutoff. Notices name the state immediately after the acceptance that
-published them. `NativeEvents.RecordView` connects the raw observer's applied identity, the
-fine node's identity and the original-drop record view. Persistent raw entry fixes the applied
-identity; eligibility and custody imply no raw pending names. A local record-effect binding
-then derives stability of the fine hub's record identity from the original-record cut; it
-does not identify different raw encodings of the same dropped-original set.
+[Reading the integration proofs](#reading-the-integration-proofs) gives the order of the proof.
+`finite_common_cut` (`Basic.lean`) joins every node's cut, and stable-head knowledge with
+`PendingLaws.absurd` excludes the ineligible nodes.
 
-The assembled dependency path starts at `FineAssembly.hive_converges_observed`, which builds
-`FineAt` from event replay and invokes `SysAcceptance.hive_converges`. Record/drop stabilization,
-record-disturbance and old-effect cuts supply entry; `FineAt.converges` filters the actual run to
-eligible nodes. `eligible_system_converges` then invokes `hub_stabilizes_sys` and
-`node_settles_accepted`. Finally, stable-head knowledge and `PendingLaws.absurd` exclude every
-remaining noneligible participant. The two API modules retain their theorem namespaces;
-`EarlyEntry/` separates the entry stages and `SysAcceptance/` separates decisions, pending
-control, eligible-system transfer, event projection, contracts and convergence.
+Two limits of the premises: a native fetch can update knowledge before its following objects
+call finishes, while the system keeps the exchange's starting pair until the batch completes,
+so the latch binding relates completed observations, not every intermediate callback; and
+matching applied records does not make whole normalizers equal, since one machine may have extra
+pending drops. The completion and scheduling premises (`doneIn`, `answer`,
+`EntryLaws.hobjects`, `hstart`) are obligations on the sampled execution, not derived.
 
-Completion belongs among the assumptions as well as local effect correspondence: `doneIn`
-requires each sampled call batch to finish before the next sample, `answer` supplies a later
-handling time for the same actual packet, and `EntryLaws.hobjects`/`hstart` require eventual
-round restarts. Together with the explicit scheduling laws, these are obligations of the
-sampled execution; they are not conclusions of the entry or convergence proofs.
+### Contraction and canonical bodies
 
-The resulting retry/response theorem is conditional on the explicit source contracts and
-environment described below. It derives the progress cuts, eligible-system convergence and
-entry of every remaining participant. Neither a stable hub, eventual eligibility, eventual
-fresh knowledge nor a forever-successful round is a premise. A native fetch can update
-knowledge before its following objects call finishes, while the system retains the
-exchange's starting pair until the batch completes. The latch binding relates completed
-observations; it does not equate every intermediate callback. Likewise, matching applied
-records does not equate whole normalizers: one machine may have additional pending drops.
-`Contract.cpar_absorbs_subset` and `cid_absorbs_subset` instead prove that a body already
-contracted by a larger set stays unchanged under a subset. `image_absorbs_subset` gives the
-singleton image of a surviving body; `anc_cpar_survives` covers its whole closure, including
-the head. When drops name originals, `image_original_survives` and
-`image_ne_dropped_original` exclude every version of a dropped original without assuming
-originals distinguish raw versions. `PresenceContract.sid_absorbs_subset` also keeps the
-presence stamp and the cumulative dropped set. Their native use still requires a complete
-canonical-body construction and survival of the sent head. An incomplete metadata lookup's
-identity fallback supplies neither. None of the source laws may substitute for the progress
-the assembly is meant to derive.
+Because a machine may have more pending drops than another, the assembly needs contracting by a
+subset to leave a body unchanged.
 
-The hub's remembered drops and cached renamings are separate too. A drop republished beside
-the remade hub's current history can have no cached image: `is_superseded` recognizes it,
-while `current` returns its input unchanged. The native store regression
-`a_drop_outside_the_hub_head_is_remembered_without_a_cached_image` checks that case and its
-reopening. The pending proof now uses `not_dropped_of`: whole-ancestry original survival
-excludes remembered names and cached keys, through `NodeSys.Exec.unsuperseded_of_normal`.
-A remembered raw name has a dropped original; a cache key has a dropped original in its raw
-ancestry. With the hub's drops a subset of the node's, neither can mark a normal sent body.
-This needs no equality between the cached lookup and full normalization, and accounts for
-presence stamps without identifying a raw id with an unstamped structural term.
-The earlier fixed-point lemma is retained separately.
+- `Contract.cpar_absorbs_subset`, `cid_absorbs_subset`, `PresenceContract.sid_absorbs_subset`: a
+  history or body already contracted by a larger set keeps its parents and canonical id, with
+  its presence stamp, when a subset is dropped again.
+- `image_absorbs_subset`: a surviving body's singleton image is unchanged. `anc_cpar_survives`:
+  its whole closure, head included, consists of survivors.
+- `image_original_survives`, `image_ne_dropped_original`: when drops name originals, no image is
+  any version of a dropped original, whether or not originals distinguish raw versions.
 
-The environmental premises are explicit: finitely many surviving participants and a bounded
-dropped-original basis; an eventual record-safe suffix with no further hub remake, body loss,
-gc invalidation or ordinary I/O failure; finite user activity and automatic semantic writes;
-fair resumed rounds; correlated serial calls that complete; and consumptive old replies and
-notices. Record identities identify their full ordered lists. The local source contracts
-include canonical closure, object adequacy, custody, naming, metadata, individual call effects
-and the initial snapshot. Focused native checks and executable component checks connect those
-contracts to the code; the theorem does not formally verify every Rust execution.
+Their native use still requires a complete canonical-body construction and survival of the sent
+head; a metadata lookup that falls back to the identity supplies neither.
 
-Automatic semantic writes include workspace restoration before a round; the idle routines;
-working-copy replacement inside `advance_to`; delayed writes
-that notice a user's operation abandonment; and late-operation reparenting after record
-recovery. Protocol merges, realization and record adoption have their own model steps. Git
-export copies keep their canonical form. An advance with no additional automatic write has
-the full-frontier effect; the theorem uses that law only after the automatic-write cutoff.
-It does not prove that finite user and configuration changes make these routines stop.
-`workspaces::forgotten_working_copies_can_be_abandoned` pins why inline cleanup belongs in
-this premise: the actual `Advanced(B)` endpoint is a new canonical child of the singleton
-target B, written to replace this machine's abandoned working copy.
+The hub's remembered drops and its cached renamings are separate: a drop republished beside the
+remade hub's current history can have no cached image, so `is_superseded` recognizes it while
+`current` returns its input unchanged
+(`a_drop_outside_the_hub_head_is_remembered_without_a_cached_image`). `not_dropped_of` shows that
+survival of every original in a body's ancestry excludes remembered names and cached keys
+(`NodeSys.Exec.unsuperseded_of_normal`), so with the hub's drops a subset of the node's, neither
+can mark a normal sent body.
 
-The hub-side event projection separates a push's writes, including generated contraction
-bodies, from its decision. Read replies have a computable observation of the hub before and
-after and the reply's fields: `checkAnswer`, with `HubAnswer.observed_step` proving its
-soundness. The `hubRead` route compares that observation against the shipping `Fetch` and
-`GetObjects` handlers in the native pending-namespace fixture. Full record states are interned
-by equality, including their digests. This does not construct the node's labels, request slots,
-or complete system trace.
+### Contracted ancestry
 
-Own writes need not create new global vertices. The native
-`independent_merges_can_reuse_a_canonical_operation` case makes two copies merge the same
-frontier with equal operation metadata: the second reuses the first copy's canonical id.
-`GrowR` allows that reuse, and `NodeSysExec` checks both writes through the `nodeGrow` route.
-One canonical body retains one raw id; a label is reused too when the node already has it.
-The native case includes a receiver that realizes the merge detached before rollback, then
-recreates that merge while advancing: neither a raw vertex nor a label is added.
-The fine system and its suffix refinement allow fresh raw writes, global reuse, already
-labelled merges and ancestor pruning. jj first removes heads below another head, then merges
-those left; the local rank uses only that the retained heads cover the original frontier.
-The native case also leaves an ancestor beside its merge through the shipping head-store
-update, then checks that the core removes it without changing the complete canonical body set.
-Constructing the full native event projection remains open. Labels for an unknown head's
-ancestry are ghost structural exposure, with availability still false until bytes or
-realizations arrive; receipt of a head alone does not supply its body.
+`SStep.sup` and `SPStepR.supPush` accept a push only when its new head descends from the expected
+head in original ancestry. The shipping hub also accepts a cached fix-up that drops its expected
+head, when the head's surviving images are below the fix-up
+(`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`, after an interrupted adoption and
+a hub rollback). `ContractedExec.lean` extends the original-operation submodel with this
+comparison and leaves `SRStep` unchanged.
 
-The native lifecycle B certificate covers six projected actions through current-Git refresh.
-It omits preparation's unpublished merge-probe writes, so it is not a complete physical trace
-or native simulation. C models those writes explicitly, preserving the complete corpus and
-matching independently replayed native primitives against operands computed from captured
-heads and the rendered result. Its passing finite comparison ends at the first changed-head
-retry. Bypassing the actual retry guard makes C detect an export before a fresh successful
-reread. Later retry canonicalization and whole-publication simulation remain open.
+- `ContractOrder.lean`: `Below` says every surviving image of the expected head is below the new
+  head, and `belowB` also checks that the image is nonempty, as the hub does. `below_two_step`,
+  `below_contracted_iff`: contracting a contracted history equals contracting by the union, and
+  original and current-graph ancestry of the images agree. For a fixed drop set,
+  `stable_suffix_chain` gives a reflexive original-ancestry chain of surviving heads; it repairs
+  no earlier history and proves neither strict change nor the full protocol invariants. The
+  real trace checks the accepted push against `belowB` through the `contractedAncestry` route.
+- `RecordStability.eventual_original_chain`: a trace of surviving hub heads compared under each
+  resulting dropped set has an eventual original-ancestry chain. The immutable graph and the
+  contracted comparisons are premises; their projection onto the physical store and strict head
+  changes are not derived.
+- `ContractedExec.cexecAction_sound` targets the union `ContractedRStep`, with advancement through
+  every surviving image and preparation changing frontier and record custody in one boundary.
+  `cexecAction_ok` preserves record custody; `imageAdvance_safe`, `preparedAdvance_safe` and
+  `imageAccept_safe` prove the new primitive cases of `ContractedSafety.Safe`, with no global
+  invariant of the union. `old_expected_accepts_eventually_stop` is a finite credit argument
+  once dropped sets stabilize. The submodel does not prove convergence of every network action;
+  the raw-namespace assembly handles canonical versions and normalization in their birth parents
+  through its explicit projection.
 
-Physical heads can alias a single canonical body too. The native
-`interrupted_git_export_can_leave_aliased_operation_heads` case makes a real export
-replacement and leaves both physical operations as heads through the shipping head store.
-Reading them gives duplicate canonical heads; the next merge can write a new canonical child
-with their one canonical parent. A native refinement must normalize these physical heads
-before using unique canonical heads in the fine suffix; duplicate readings cannot simply be
-discarded as an invisible step.
+A failed sync can leave an accepted hub head, partially received data or a newly written fix-up.
+`supFix` combines fix-up creation with acceptance, so a failed push leaves the creation without
+its compensating decrease, and the production cache may return no new restoring operation. The
+raw-namespace model separates creation from acceptance and compares actual contracted ids, which
+the original-operation policy cannot do for every native transition. Cached restoring work does
+not by itself publish its drops: when the hub already has the cached fix-up and an abandonment
+is pending, the core requests a neutral child on the current head
+(`pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup`,
+`a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known`). Adopting an obsolete
+ordered-record list can raise `recordLagE` even when no dropped set changes; the record-aware
+theorem covers taking current hub records, not arbitrary old announcements.
 
-Native metadata custody is a separate boundary from local realization. Whole records retain
-the canonical bodies, parent-operation closure and views of their names. Pending names are
-matched by immutable identity to the raw known hub history after local abandon discovery;
-an incoming record clears the same original under another name. The two native regressions
-`record_bodies_keep_pending_drops_named_after_hub_rollback` and
-`lost_records_follow_an_older_name_the_receiver_never_held` exercise both directions, including
-republishing to a replacement hub. `PendingEpoch` proves the finite alias cutoff once pending
-originals stop growing and known heads belong to the fixed-record history window. Its step
-relation allows some originals to normalize while other bodies are still arriving, requiring
-agreement only among aliases of an original whose name changes.
-`pending_names_settle_with_old_known` also handles an obsolete known pair: after old
-observations and reopens stop, knowledge either remains fixed or enters the window. A fixed
-head's own unique originals suffice, without comparing its ancestry to the new window or
-assuming that a fresh observation ever arrives. Native assembly still must establish the
-per-step known-source rule and partial-normalization correspondence. The source-indexed
-variant reserves an index for the obsolete head and indexes the current history by observation
-time; an obsolete native sequence can be higher than the current one after rollback. The
-assembly uses neither of these two results.
+### Native correspondence
 
-The native receipt boundary now keeps records before preparation writes any local operation,
-without counting them as applied or acknowledging them to the hub. Lost receipts become
-pending together with contraction of their local versions. Their effects, once applied, also
-justify retaining their readable prefixes among earlier records. The native departure
-regression checks equal-record receipt recovery against `RecordEpoch.exec`, including its
-decreasing credit, and exercises a successful departure and two rollbacks. Another native
-regression stops before the publisher's fix-up: missing WORK timestamps are recovered from the
-exact original in retained record metadata, without replaying stale payload.
+The hub-side event projection separates a push's writes from its decision. A read reply has a
+computable observation of the hub before and after (`checkAnswer`, sound by
+`HubAnswer.observed_step`), which the `hubRead` route compares against the shipping `Fetch` and
+`GetObjects` handlers in the native pending-namespace fixture. The assembly does not use
+`checkAnswer` or `HubAnswer.observed_step`: they are the soundness proof of the oracle's `hubRead`
+check. Nothing constructs the whole native event projection, including the node's labels and
+request slots. No checker tests the exact relation that `FineSource.replay` and `binds` state,
+and none tests the node-side fields of `binds`; these routes cover parts of the projection.
 
-Raw translation now normalizes known dropped originals through newly received ancestry,
-including old names never previously mapped on this machine. It does not infer an unowned
-abandonment from missing ancestry. The record identity and custody bindings feed the derived
-record-control cutoff and suffix assembly described above.
-The object-transfer contract also checks the saved raw fetch base's objects before using it:
-a restore, abandonment and real jj gc can remove those objects while a local image remains.
-`fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again` covers a live and a
-reopened adapter, including the initial fetch/import before head discovery. Without rechecking
-before that fetch, the hub's omission claim prevents the missing objects from arriving.
-An empty objects reply is also validated: a hub remake can leave a running sync requesting
-an old head without another fetch. `objects::an_empty_object_reply_retries_from_the_remade_hub`
-checks that this fails, reopens and completes a fresh round before another machine republishes.
-The generic `Serial.object_recoveries_stop` credit lemma bounds obsolete-request recoveries
-given preserved request adequacy and a reset that restores it; the source invariant includes
-remaining calls in a batch and truthful have claims, not just the stored known head. It must
-be established after old effects cease, rather than classifying protocol-induced failures as
-ordinary I/O failures assumed to stop.
-An incomplete upload ends a production driver round with its documented refusal; a bounded
-retry trace in the lower-level hive harness alone does not show one endless driver round.
+| Native behavior the model leaves to tests | Check |
+| --- | --- |
+| Own writes can reuse a canonical operation: two copies merge the same frontier with equal metadata and the second reuses the first's id. `GrowR` allows it and `NodeSysExec` checks both writes through `nodeGrow`. | `independent_merges_can_reuse_a_canonical_operation` |
+| Physical heads can alias one canonical body: an interrupted Git export leaves both as heads, and the next merge writes a child with their one canonical parent. | `interrupted_git_export_can_leave_aliased_operation_heads` |
+| Pending names match the raw known hub history by immutable identity, and an incoming record clears the same original under another name, including on a replacement hub. | `record_bodies_keep_pending_drops_named_after_hub_rollback`, `lost_records_follow_an_older_name_the_receiver_never_held` |
+| The saved raw fetch base's objects are checked before use, since a restore, abandonment and jj gc can remove them while a local image remains. | `fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again` |
+| An empty objects reply fails, reopens and completes a fresh round, since a hub remake can leave a sync requesting an old head. | `objects::an_empty_object_reply_retries_from_the_remade_hub` |
+| Records received before preparation writes a local operation are kept without counting as applied or being acknowledged; lost receipts become pending together with the contraction of their local versions. Missing WORK timestamps are recovered from the exact original in retained record metadata. | `received_records_survive_departure_and_drop_local_aliases` (checks equal-record receipt recovery against `RecordEpoch.exec`), `lost_received_records_preserve_work_before_the_fixup_arrives` |
 
-That gap has a real-repository counterexample:
-`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`. After interrupted adoption and
-hub rollback, the hub accepts a cached fix-up that does not originally descend from its
-expected head: the push drops that head, whose surviving images are below the fix-up. The
-trace converges. This is valid contracted ancestry, but `SStep.sup` and `SPStepR.supPush`
-require original ancestry and cannot represent this acceptance. `ContractedExec.lean` now
-extends the core harness's finite original-operation submodel with that comparison; it
-does not change the meaning or claimed invariants of `SRStep`.
+Open obligations for a native refinement:
 
-`ContractOrder.lean` models this comparison as `Below`: every surviving image of the expected
-head is below the new head. `belowB` also checks that the image is nonempty, as the hub does.
-`below_two_step` connects contraction of an already contracted history with contraction by
-the union; `below_contracted_iff` connects original and current-graph ancestry of the images.
-For a fixed drop set, `stable_suffix_chain` recovers a reflexive original-ancestry chain of
-surviving heads. It does not repair the earlier history or establish strict changes, the
-epoch projection, or the full protocol invariants. The real trace checks the accepted push
-against `belowB` through the `contractedAncestry` oracle route, supplying its immutable DAG.
-`RecordStability.lean`'s `eventual_original_chain` composes the record cut with that relational
-argument: a trace of surviving hub heads compared under each resulting dropped set has an
-eventual original-ancestry chain. It takes the immutable graph and contracted comparisons
-as premises; it does not derive their physical-store projection or strict head changes.
+- Aliased physical heads must be normalized before the fine suffix uses unique canonical heads;
+  duplicate readings cannot be dropped as an invisible step.
+- `PendingEpoch.lean` proves a finite cutoff for pending-name aliases once pending originals
+  stop growing and known heads belong to the fixed-record window; the native code must still be
+  shown to meet its per-step known-source rule and partial-normalization steps.
+- Labels for an unknown head's ancestry are ghost structural exposure: availability stays false
+  until bytes or realizations arrive. Raw translation does not infer an abandonment this machine
+  does not own from missing ancestry.
+- A bounded retry trace in the lower-level hive harness alone does not show one endless driver
+  round; production ends a round on an incomplete upload with its documented refusal.
 
-`ContractedExec.cexecAction_sound` targets the explicit union `ContractedRStep`. Old checked
-transitions remain available, with a tighter rejection guard where a contracted packet is
-acceptable. Added advancement uses every surviving image, and preparation changes the
-frontier and record custody in one boundary. `cexecAction_ok` preserves record custody;
-`imageAdvance_safe`, `preparedAdvance_safe` and `imageAccept_safe` prove the new primitive
-cases of `ContractedSafety.Safe`. They do not prove a global invariant of the union relation.
-`old_expected_accepts_eventually_stop` gives a finite credit argument after dropped sets
-stabilize, under its explicit local-step premises. This original-operation component does
-not prove convergence of every network action. The raw-namespace assembly above handles
-canonical versions and normalization in their birth parents through its explicit projection.
+### Transport
 
-Cached restoring work alone does not imply that its drops are published. The real regression
-`pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` reaches equal heads
-and ordered records while an abandonment is still pending, after an orphan realization is
-published without its lost record. Before the fix, both cores and idle maintenance stopped
-there, violating dropped-set convergence. The core now requests a neutral child on the
-current head; it preserves current state and gives the pending push a distinct id.
-The test checks that acceptance publishes the drop, and that an unsubmitted request and a
-restart reuse that child. `a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known`
-also requires the affected node to publish, without waiting for another node.
+`StreamTransport` consumes the matching pending request, removes it on timeout and drains pending
+requests on disconnect, `NodeDriver` processes one protocol call at a time, and the daemon
+handles notifications outside `sync`. So, with ids never reused, a retired call's late reply is
+never assigned to a later request. A call still live can return a reply computed before a hub
+remake, and the safety model allows arbitrary replay and a `known` that moves backwards
+(`learnUnfiltered`). Neither finite obsolete delivery nor monotone `known.seq` follows from it;
+the trusted base takes finite obsolete delivery as the premises `inboxStep` and `notesOld`.
+`replies_only_complete_the_matching_pending_call_once` checks the client's correlation against
+`Retry.Inbox.finish` with obsolete and duplicate frames delivered directly, since service-side
+reply inboxes may discard them first. The transport contract also checks a canceled call's reply
+arriving after a fresh exchange and duplicates of a completed reply. These checks support the
+local boundaries of the conditional refinement; they do not by themselves establish it.
 
-These boundaries motivate the retry/response bridge in
-[#78](https://github.com/bos/jj-musubi/issues/78). A failed sync can leave an accepted hub
-head, partially received data, or a newly written fix-up. `supFix` combines fix-up creation
-with acceptance; a failed push leaves the creation without its compensating decrease.
-The production cache may then return no new restoring operation. A neutral publication tip
-now prevents that cache from causing an aligned node to idle with pending drops. The
-raw-namespace model separates creation from acceptance and compares actual contracted ids;
-the old policy's original-operation identities cannot represent every native transition.
-The record-control, entry and accepted-history arguments above supply the bridge beyond
-the retry bounds alone. Adopting an obsolete
-ordered-record list can increase `recordLagE` even when no dropped set changes. The
-record-aware theorem covers taking current hub records, not arbitrary old announcements.
+### Results the convergence proof does not use
 
-The intended environmental assumptions are eventual cessation of user operations,
-abandonments, hub regressions and disruptive crashes; resumed participating nodes; finite
-influence from obsolete replies; eventually successful honest retries and transfers; and
-fair scheduling of enabled local work. Permanent repository errors, unavailable objects or
-unsupported jj merges do not satisfy those assumptions. Fairness must describe actual
-work being scheduled, rather than assume that the rank eventually decreases. The assembly
-connects the explicit assumptions to finite record/fix-up disturbances and completed
-progress, with the composite repository source contracts described above. Automatic semantic
-writes stopping remains a separate premise; it is not derived from user inactivity.
+The whole of `CutHistory.lean`, `NodeReconcile.lean`, `RecordReplies.lean` and `CallBatch.lean`
+(which justifies sequential native calls and interleaved physical request ids under injective
+correlation) is not used, nor are these parts of other files:
 
-Request correlation is relevant but does not by itself supply that argument.
-`StreamTransport` consumes the matching pending request, removes it on timeout and drains
-pending requests on disconnect. `NodeDriver` processes one protocol call at a time, and
-the daemon handles notifications outside `sync`. These facts exclude assigning a retired
-call's late reply to a later request, assuming request ids are not reused. A still-live call
-can nevertheless return a reply computed before a hub remake. The safety model allows
-arbitrary replay, and `learnUnfiltered` permits `known` to move backwards during recovery;
-neither finite obsolete delivery nor monotone `known.seq` follows from that model.
-
-`lost_acceptance_and_delayed_fetch_make_progress` checks the two split-exchange lemmas
-through the core and the oracle before quiescing. The transport contract checks a canceled
-call's reply arriving after a fresh exchange and duplicates of a completed reply.
-`replies_only_complete_the_matching_pending_call_once` also sends obsolete and duplicate
-frames directly through the stream client's receiver in a fixed order, since service-side
-reply inboxes may discard them before they become frames. These checks support the local
-boundaries used by the conditional reverse refinement above; they do not by themselves
-establish that refinement.
+| File | Not used |
+| --- | --- |
+| `AsyncLiveness.lean` | everything except `nat_trace_stabilizes` (a nonincreasing natural-number trace is eventually constant) |
+| `RetryControl.lean` | `fixup_writes_le_one`, `fixups_eventually_stop`, `publication_retry`, `publication_tip_cached` |
+| `RecordStability.lean` | `sexec_record_prefix_stabilizes`, `adopt_pending_subset` |
+| `SerialReply.lean` | the serialized-call model and its invariant (the proof uses `handleHead`, `filteredLearn`, `own_reply_learns`, `object_recoveries_stop`, `wentBack`) |
+| `RecordEpoch.lean` | `exec_sound` and the `Guard` facts |
+| `PostCut.lean` | everything except `execStep_hubPushAccept_guards` |
+| `SysAcceptance/Events.lean` | the answer-observation check (`expectAnswer`, `checkAnswer_expect`, `HubAnswer.observed_step`), `HubAnswer.push_handled`, `NodeIssue.raw_step`, `learn_new_bare` |
+| `PacketCoupling.lean` | the packet-coupling theorems; only `PushPacket` is used |
+| `PacketAcceptance.lean` | `packet_checks_accept`, `packet_upload_closes` and their helpers |
+| `EntryAssembly.lean` | everything except `PendingOriginals`, `eligible_pending_empty` |
+| `PendingEpoch.lean` | `pending_names_settle_with_old_known` (an obsolete known pair), `pending_names_settle_from_sources`, `finite_metadata_output_stabilizes` |
+| `RequestBounds.lean` | `hub_stabilizes_hive` |
+| `EarlyEntry/Burst.lean` | `no_infinite_burst`, `localFromImages`, `local_grows_after_inputs` |
+| `EarlyEntry/Control.lean` | `no_infinite_calls`, `raw_round_yields` |
 
 ## Modeling choices
 
@@ -1519,9 +1373,9 @@ establish that refinement.
   objects outside `closure(head)` in the original-ancestry relation. The extended executable
   model preserves operation bodies needed by retained historical heads: an older head can
   be outside the current closure after contracted acceptance. Historical-only objects may
-  still be lost. A requested rollback to an incomplete target takes an explicit environment
-  recovery choice, remaking the hive. This does not claim that native startup detects every
-  damaged prefix or add a hub durability requirement; that physical interval remains open.
+  still be lost. A requested rollback to an incomplete target is an explicit environment choice
+  that remakes the hive. Whether native startup detects every damaged prefix is not modeled, and
+  the model adds no hub durability requirement.
 - **Ghost state.** `creator`, `isMerge` and `birth` record each op's creator, whether it is a
   merge, and the hub `seq` at its creation; `hist` records the history of accepted heads.
 - **Original operations.** `Supersede.lean` identifies each canonical operation a drop renamed
@@ -1529,16 +1383,16 @@ establish that refinement.
   objects, as an abstraction of the real node, which keeps only survivors; the real hub's
   closure check, and a node's realization, are then taken over survivors, which contraction
   keeps in the same ancestry (`anc_cpar_iff`). Within this fixed-birth-graph abstraction,
-  the names are `cid` under each dropped set. Arbitrary native versions can already carry
-  normalization in their birth parents; an original label and a party's current drop set
-  alone do not give a complete physical-store projection.
+  the names are `cid` under each dropped set. A native version can carry normalization in its
+  birth parents, so an original label and a party's current drop set do not by themselves give a
+  complete physical-store projection.
 - **Translation layer.** It is not modeled. The model assumes what [protocol.md, "Translation
   layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
   reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
   operation. Under those assumptions, the properties over canonical ids carry over to each node's
-  local op log. The abandonment/ref boundary test checks selected properties before and immediately after
-  publication; the generated end-to-end tests check all of them at every full convergence
-  ([testing.md](../docs/internals/testing.md#generated-end-to-end-tests)).
+  local op log. The abandonment/ref boundary test checks selected properties before and
+  immediately after publication; the generated end-to-end tests check all of them at every full
+  convergence ([testing.md](../docs/internals/testing.md#generated-end-to-end-tests)).
 
 ## What the proofs assume of the implementation
 
@@ -1574,15 +1428,14 @@ rest on:
   still needs, with `renew` plus the longest wait between touches within `life`
   (`fair_unswept`, `fair_finishes`).
 
-The real repository's `advance` can also finish taking records. It holds them in the same
-save that counts their renaming before moving heads; after an interrupted move, recovery
-finishes the heads and workspace records. Holding them only in a later `Adopted` step lost
-the responsibility to republish a drop if the hub rolled back in between, and the machine
-could retry the same rejected push indefinitely. The real-repository races
+The real repository's `advance` can also finish taking records. It holds them in the same save
+that counts their renaming, before moving heads, and after an interrupted move recovery finishes
+the heads and workspace records. Holding them only in a later `Adopted` step would lose the
+responsibility to republish a drop if the hub rolled back in between, and the machine could
+retry the same rejected push forever. The real-repository races
 `a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` and
 `taking_an_abandon_resumes_where_it_stopped` check the completed advance and its internal
-save/head/workspace boundaries. They close that concrete implementation gap, not the full
-retry/response refinement in [#78](https://github.com/bos/jj-musubi/issues/78).
+save, head and workspace boundaries.
 
 ## The executable model and the conformance oracle
 
@@ -1601,8 +1454,12 @@ that checks the Rust core against the oracle.
    compared as sets.
 2. **Executable to oracle.** `Oracle.lean` reads requests and writes replies, one JSON object
    per line, flushing after each. A rejected or malformed request leaves the state unchanged.
-   Decoding, encoding and the request loop are in `Musubi/ExecJson.lean`; all protocol
-   logic is in `execStep`, `sexecStep` and the explicit extension `cexecAction`.
+   `Musubi/ExecJson.lean` decodes requests, encodes replies and dispatches them. It also checks
+   the preconditions of the model functions it calls, and answers a request that fails them with
+   `bad request: <reason>`: operations' parents must come before them, heads and indices must be
+   in range, current heads must survive the dropped set, and a requested control action must be
+   enabled. The protocol decisions are made by `execStep`, `sexecStep` and the explicit
+   extension `cexecAction`, not by the codec.
 
 Theorems (`Musubi/ExecSound.lean`):
 
@@ -1655,8 +1512,8 @@ and `HeadsOK` too, and the actions of `SStep`:
   and `recordConvergedE_iff` connect their computations to the original model. The extended
   oracle returns the record-aware `ContractedMeasure.rmeasureCE` suffix as part of
   `smeasure`, record debt as `recordLag`, and the stronger convergence check as `converged`.
-  `rmeasureCE_without_drops` proves exact agreement before drops. Its new component facts
-  and the generated strict-decrease checks do not establish full union termination.
+  `rmeasureCE_without_drops` proves exact agreement when nothing is dropped. Termination of
+  the full union relation is not proved; the generated strict-decrease checks test it.
 
 The set abstraction alone does not establish record agreement: after a remake, a machine
 may republish two old drops as one record while another retains two records with the same
@@ -1667,13 +1524,13 @@ so it comes last. `recordLag_adopt_lt` and `recordLag_le` bound repairs by the n
 machines while the hub is fixed. `record_finish` proves finite completion from abstract
 convergence where every node has dropped what the hub pruned (`AllPruned`, as
 `sexec_allPruned` gives), preserving the entire abstract state. `reconcile_executable` checks
-the announced-record adoption, its head guard and its pruned-prefix check. `NodeCore` already
-follows this rule: it adopts differing record lists even with no missing drop, opening the
-executable push guard.
-The oracle/harness check both record debt and concrete convergence independently of the
-set measure. This does not prove the asynchronous reply/retry scheduling bridge (#78) or
-collision resistance of record digests; see [conformance.md, "Liveness"](
-../docs/internals/conformance.md#liveness).
+the announced-record adoption, its head guard and its pruned-prefix check. `NodeCore` follows
+this rule: it adopts differing record lists even with no missing drop, opening the
+executable push guard. The oracle and harness check record debt and concrete convergence
+independently of the set measure. Collision resistance of record digests is not proved, and
+asynchronous reply and retry scheduling is covered by [the
+bridge](#the-asynchronous-liveness-bridge) under its premises; see [conformance.md,
+"Liveness"](../docs/internals/conformance.md#liveness).
 
 It is stricter than `SRStep` where the implementation is. The hub takes every push it
 accepts as a supersede, carrying the node's dropped set and the records the node took last
@@ -1722,21 +1579,32 @@ are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on 
 with jj's merges as a table each request carries, and the oracle answers refs requests with them
 ([conformance.md, "Per-machine refs"](../docs/internals/conformance.md#per-machine-refs)).
 
-
 ## Snapshot publication budgets
 
-`Publication.lean` accounts for unique extra paths and content bytes across outgoing operation
-history, excluding shared and intentional versions. Exact plans govern approval. Cleanup
-freezes source intent before contracting operation parents with `Contract.cpar`, retains the
-current view and context, and adds a checkpoint referencing every intentional commit version.
-It proves retained intentional file closure, survivor ancestry, stale-source refusal, and the
-view/context checks at installation. The oracle evaluates these same definitions, with native
-jj fixtures comparing exact sets and applied effects; see
-[conformance](../docs/internals/conformance.md#snapshot-publication).
+`Publication.lean` counts the unique extra paths and content bytes that outgoing operation
+history adds, excluding files in commits the hub already knows and files of intentional
+commits, and decides whether a plan may be sent (`maySend`).
 
-An unknown native command record sets `intentKnown` false, refusing cleanup while still
-allowing exact publication approval. The full object closure, jj transaction facts and selected
-revision decoding, opaque canonical context, and guarded physical identity mapping are native
-contracts, not theorems about jj itself. The existing convergence
-results do not prove progress through a deliberate publication hold: they require holds to be
-resolved, disabled or approved eventually.
+- `protected_not_charged`, `known_not_charged`, `protected_content_free`: no file of an
+  intentional or known commit is charged.
+- `changed_plan_held`: a plan over the limits cannot be sent under the approval of a different
+  plan.
+- Cleanup freezes source intent, contracts operation parents with `Contract.cpar` and adds a
+  checkpoint that references every intentional commit version. `cleanup_keeps_current_view`,
+  `cleanup_keeps_context` and `cleanup_keeps_unselected` (a surviving operation keeps its
+  required commits and intent) say what stays. `cleanup_requires_intentional` and
+  `cleanup_keeps_intentional_files`: every intentional commit and its files are still
+  referenced. `survivor_parent_survives`, `survivor_ancestry`: contraction keeps survivor
+  ancestry.
+- `applyCleanup` installs a prepared result only if its checks pass: `stale_cleanup_refused`
+  (the expected heads differ), `uncertain_cleanup_refused` (`intentKnown` is false), and
+  `installed_keeps_view_context`, `installed_keeps_intentional_files` for what it installs.
+
+The oracle evaluates these same definitions, with native jj fixtures comparing exact sets and
+applied effects; see [conformance](../docs/internals/conformance.md#snapshot-publication).
+
+An unknown native command record sets `intentKnown` false, which refuses cleanup and still allows
+exact publication approval. The full object closure, jj transaction facts, selected revision
+decoding, opaque canonical context and guarded physical identity mapping are native contracts,
+not theorems about jj. The convergence results require publication holds to be resolved,
+disabled or approved eventually; they do not prove progress through a deliberate hold.

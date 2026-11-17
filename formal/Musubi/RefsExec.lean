@@ -13,6 +13,7 @@ request needs; one it didn't send gives `unknown`, which the test refuses.
 -/
 import Musubi.Refs
 import Musubi.AbandonRefs
+import Musubi.ParentsBefore
 
 namespace Musubi.Refs.Exec
 
@@ -152,7 +153,7 @@ def run (tb : Table) : Call → Answer
           | some (_, s, e) => ⟨s.toSlot, e⟩
           | none => ⟨⟨unknown, unknown, unknown⟩, unknown⟩ }
     let merged := h.merged first
-    let valid := ps.zipIdx.all (fun (pp, x) => pp.all (· < x)) &&
+    let valid := parentsBefore ps &&
       incoming < ps.length && heads.all (· < ps.length) &&
       drops.all (fun x => x != 0 && x < ps.length) &&
       heads.length == 1 && !h.dropped h.own && !h.dropped incoming &&

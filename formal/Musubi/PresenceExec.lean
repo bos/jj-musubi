@@ -6,6 +6,7 @@ The presence rule (`Presence.lean`) on a finite history, executable, for the ora
 for the small histories the conformance test makes.
 -/
 import Musubi.Presence
+import Musubi.ParentsBefore
 
 namespace Musubi.Presence
 
@@ -32,13 +33,13 @@ def hist : Hist where
   forget x k := forgetB ops x k = true
 
 /-- Whether each operation's parents come before it. -/
-def orderedB : Bool := (List.range ops.length).all fun x => (par ops x).all (· < x)
+def orderedB : Bool := parentsBefore (ops.map (·.parents))
 
 theorem parLt (ho : orderedB ops = true) : ParLt (par ops) := by
   intro y p hp
   by_cases hy : y < ops.length
-  · simp only [orderedB, List.all_eq_true, List.mem_range, decide_eq_true_eq] at ho
-    exact ho y hy p hp
+  · exact parentsBefore_lt ho (i := y) (q := par ops y)
+      (by simp [par, opAt, List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hy]) hp
   · have : opAt ops y = {} := by
       simp [opAt, List.getD_eq_getElem?_getD, List.getElem?_eq_none (Nat.le_of_not_lt hy)]
     simp [par, this] at hp

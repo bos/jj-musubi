@@ -1,5 +1,6 @@
 /- The finite operation DAG and commit observations used by expected-value conformance. -/
 import Musubi.Expected
+import Musubi.ParentsBefore
 
 namespace Musubi.Refs.Expected.Exec
 
@@ -38,7 +39,7 @@ def observe (nodes : List Node) (i : Nat) : Observation Nat Nat :=
 
 /-- Parents precede children. Reject malformed tables rather than hiding fuel exhaustion. -/
 def valid (nodes : List Node) (head : Nat) : Bool :=
-  head < nodes.length && (nodes.zipIdx.all fun (node, i) => node.parents.all (· < i))
+  head < nodes.length && parentsBefore (nodes.map (·.parents))
 
 def run (tb : Table) (nodes : List Node) (head : Nat) : Option (Option Nat) :=
   if valid nodes head then eval tb.resolved.contains tb.side (observe nodes) (nodes.length + 1) head

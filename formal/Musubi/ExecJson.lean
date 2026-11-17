@@ -8,6 +8,7 @@ example that parents precede their children) and report a model's refusal as an 
 import Lean.Data.Json
 import Init.Data.List.Sort.Lemmas
 import Musubi.Publication
+import Musubi.ParentsBefore
 import Musubi.Exec
 import Musubi.SupersedeExec
 import Musubi.PresenceExec
@@ -588,7 +589,7 @@ def contractedAncestryReply (j : Json) : Except String Json := do
   let dropped ← getNats j "dropped"
   let expected ← getNat j "expected"
   let head ← getNat j "head"
-  unless (List.range parents.size).all (fun x => (parents[x]!).all (· < x)) do
+  unless parentsBefore parents.toList do
     throw "an operation's parents must come before it"
   unless expected < parents.size && head < parents.size do
     throw "head outside the history"
@@ -604,7 +605,7 @@ def survivorAdvanceReply (j : Json) : Except String Json := do
   let dropped ← getNats j "dropped"
   let heads ← getNats j "heads"
   let known ← getNat j "known"
-  unless (List.range parents.size).all (fun x => (parents[x]!).all (· < x)) do
+  unless parentsBefore parents.toList do
     throw "an operation's parents must come before it"
   unless known < parents.size && heads.all (· < parents.size) do
     throw "head outside the history"
@@ -725,8 +726,7 @@ def decodeGrowObs (j : Json) : Except String NodeSys.Exec.GrowObs := do
   let labels ← j.getObjValAs? (Array (List Nat)) "parents"
   let emb ← j.getObjValAs? (Array Nat) "embedding"
   unless emb.size = labels.size do throw "each label needs an embedding"
-  unless (List.range raw.size).all (fun x => (raw[x]!).all (· < x)) &&
-      (List.range labels.size).all (fun x => (labels[x]!).all (· < x)) do
+  unless parentsBefore raw.toList && parentsBefore labels.toList do
     throw "an operation's parents must come before it"
   pure ⟨raw.size, labels.size, fun x => raw[x]?.getD [], fun x => labels[x]?.getD [],
     fun x => emb[x]?.getD 0⟩
@@ -813,7 +813,7 @@ def burstReply (s : SEState) (j : Json) : Except String Json := do
 def rawBurstReply (j : Json) : Except String Json := do
   let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
   let parents := rows.toList.map Array.toList
-  if !(parents.zipIdx.all fun (ps, i) => ps.all (fun p => p < i)) then
+  if !parentsBefore parents then
     throw "raw burst parents must be older than their operation"
   let raw ← getNats j "rawClosure"
   let images ← getNats j "images"
@@ -842,7 +842,7 @@ available, not object ids. The six primitive bits are read independently of the 
 def rawControlReply (j : Json) : Except String Json := do
   let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
   let parents := rows.toList.map Array.toList
-  if !(parents.zipIdx.all fun (ps, i) => ps.all (fun p => p < i)) then
+  if !parentsBefore parents then
     throw "raw control parents must be older than their operation"
   let par := fun x => (parents[x]?).getD []
   let raw ← getNats j "rawClosure"

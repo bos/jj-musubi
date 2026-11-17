@@ -27,7 +27,10 @@ structure Table where
   /-- `(a, b, c, m)`: jj merges `a` with the change from `b` to `c` to `m`. -/
   merges : List (Nat × Nat × Nat × Nat)
 
-/-- The merge a request needed and its test didn't send. -/
+/-- Stands for a target no one numbered: what `Table.merge` gives for a merge a request needed
+and its test didn't send. A test numbers its targets by counting up from `1` (`0` is none), so
+every number it sends is small. `2^32 - 1`, the largest `u32`, is one it never reaches, so it
+equals no real target, and it stands out in a reply, which the test refuses. -/
 def unknown : Nat := 4294967295
 
 def Table.merge (tb : Table) (a b c : Nat) : Nat :=

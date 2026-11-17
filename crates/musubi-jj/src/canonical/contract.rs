@@ -24,6 +24,7 @@ use super::presence::PresenceMemo;
 use super::presence::Work;
 use super::presence::merge;
 use super::presence::stamp_name;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::presence::Kind;
 use crate::presence::Presence;
@@ -241,7 +242,7 @@ impl Contraction {
         parents: &[CanonicalOp],
         was: &Presence<Work>,
     ) -> Result<(), CanonicalError> {
-        operation.metadata.attributes.remove(origin::PRESENCE);
+        OpAttrs(&mut operation.metadata.attributes).remove_presence();
         let mut of_parents = Vec::with_capacity(parents.len());
         for parent in parents {
             of_parents.push((parent.clone(), self.presences.presence(store, parent)?));
@@ -263,10 +264,7 @@ impl Contraction {
                 .is_some(),
                 "unreadable stamp {stamp:?}"
             );
-            operation
-                .metadata
-                .attributes
-                .insert(origin::PRESENCE.to_owned(), stamp);
+            OpAttrs(&mut operation.metadata.attributes).set_presence(stamp);
         }
         Ok(())
     }

@@ -54,7 +54,7 @@ pub const WORKED_AT_ATTRIBUTE: &str = "musubi.worked-at";
 pub struct NodeOp(pub CanonicalOp);
 
 /// The attribute that marks an operation of a fix-up, whose canonical view is its parent's.
-pub(super) const FIXUP_ATTRIBUTE: &str = "musubi.fixup";
+pub(crate) const FIXUP_ATTRIBUTE: &str = "musubi.fixup";
 
 /// What a node keeps about the hive's records.
 #[derive(Default)]

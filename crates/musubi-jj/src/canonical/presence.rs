@@ -19,6 +19,7 @@ use jj_lib::op_store::OperationId;
 use super::CanonicalError;
 use super::CanonicalStore;
 use super::origin;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::presence::Kind;
 use crate::presence::Presence;
@@ -229,7 +230,7 @@ struct Walked {
 impl Walked {
     fn of(op: Operation) -> Self {
         let kind = Kind::of(&op.metadata);
-        let keep = kind.work.is_some() || op.metadata.attributes.contains_key(origin::PRESENCE);
+        let keep = kind.work.is_some() || OpAttrs(&op.metadata.attributes).presence().is_some();
         Self {
             parents: CanonicalOp::parents_of(&op),
             kind,
@@ -258,7 +259,7 @@ fn at(
     };
     let merged = merge(store, parents)?;
     let original = origin::identity(op)?;
-    if let Some(stamp) = op.metadata.attributes.get(origin::PRESENCE) {
+    if let Some(stamp) = OpAttrs(&op.metadata.attributes).presence() {
         return Ok(Arc::new(read_stamp(id, &original, stamp, &merged)?));
     }
     let work = Work {
@@ -303,7 +304,7 @@ fn read_stamp(
 /// Refuses `op`, received from a peer, if it has a stamp that isn't one: presence at it and
 /// everything after would be unreadable.
 pub(super) fn check_stamp(op: &Operation) -> Result<(), ()> {
-    let Some(stamp) = op.metadata.attributes.get(origin::PRESENCE) else {
+    let Some(stamp) = OpAttrs(&op.metadata.attributes).presence() else {
         return Ok(());
     };
     let parse = |hex: &str| {

@@ -18,7 +18,6 @@ use pollster::FutureExt as _;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::CHECKPOINT_ATTRIBUTE;
 use super::Checkpoint;
 use super::NodeError;
 use super::NodeRepo;
@@ -26,6 +25,7 @@ use super::PublicationCache;
 use super::PublicationReport;
 use super::intent::view_roots;
 use crate::node::PublicationError;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -295,10 +295,8 @@ impl NodeRepo {
             };
             let operation = self.loader.op_store().read_operation(&local.0).block_on()?;
             if operation.metadata.is_snapshot
-                && operation
-                    .metadata
-                    .attributes
-                    .get("args")
+                && OpAttrs(&operation.metadata.attributes)
+                    .args()
                     .is_some_and(|args| args.contains(invocation))
             {
                 snapshots.push(local.0.hex());
@@ -527,11 +525,9 @@ impl NodeRepo {
                 let (_, frozen, namespace) = source_facts
                     .get(&id)
                     .ok_or(PublicationError::MissingSourceFacts)?;
-                let encoded: Vec<_> = frozen.iter().map(|id| id.hex()).collect();
-                operation.metadata.attributes.insert(
-                    super::INTENT_ATTRIBUTE.to_owned(),
-                    serde_json::to_string(&encoded).map_err(PublicationError::Json)?,
-                );
+                OpAttrs(&mut operation.metadata.attributes)
+                    .set_intent(frozen)
+                    .map_err(PublicationError::Json)?;
                 operation.metadata.attributes.extend(namespace.clone());
                 for commit in frozen {
                     operation
@@ -560,10 +556,7 @@ impl NodeRepo {
             .unwrap_or_else(|| vec![head.0.clone()]);
         let mut checkpoint = None;
         for (step, mut attributes) in attrs.into_iter().enumerate() {
-            attributes.insert(
-                CHECKPOINT_ATTRIBUTE.to_owned(),
-                format!("{}:{step}", plan.token),
-            );
+            OpAttrs(&mut attributes).set_checkpoint(&plan.token, step);
             let mut tx = repo.start_transaction();
             for (key, value) in attributes {
                 tx.set_attribute(key, value);

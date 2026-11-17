@@ -19,9 +19,9 @@ use super::dedup;
 use super::fixup::Expectation;
 
 use crate::canonical::Contraction;
-use crate::node::CANONICAL_ATTRIBUTE;
 use crate::node::git;
 use crate::node::join::fingerprint;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -266,13 +266,11 @@ impl NodeRepo {
             }
             let changed = new != *c
                 || (counterparts.contains_key(&template)
-                    && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE))
+                    && OpAttrs(&op.metadata.attributes).canonical().is_none())
                 || op.parents != parents
-                || op
-                    .metadata
-                    .attributes
-                    .get(CANONICAL_ATTRIBUTE)
-                    .is_some_and(|hex| *hex != new.0.hex());
+                || OpAttrs(&op.metadata.attributes)
+                    .canonical()
+                    .is_some_and(|hex| hex != new.0.hex());
             let rewrite = if changed {
                 let view = op_store.read_view(&op.view_id).block_on()?;
                 let own = self.own_of_view(view.wc_commit_ids, c, &op)?;
@@ -281,9 +279,7 @@ impl NodeRepo {
                 // The translation map is disposable. Without a durable marker, translating
                 // this rewrite after cache loss would mint an origin from its new parents.
                 // It also prevents jj's local content addressing from coalescing originals.
-                op.metadata
-                    .attributes
-                    .insert(CANONICAL_ATTRIBUTE.to_owned(), new.0.hex());
+                OpAttrs(&mut op.metadata.attributes).set_canonical(&new);
                 LocalOp(op_store.write_operation(&op).block_on()?)
             } else {
                 template.clone()
@@ -319,10 +315,7 @@ impl NodeRepo {
                 let mut op = op.clone();
                 op.parents = parents.into_iter().map(|parent| parent.0).collect();
                 if let Some(context) = context {
-                    op.metadata.attributes.insert(
-                        crate::canonical::namespace::ATTRIBUTE.to_owned(),
-                        context.to_owned(),
-                    );
+                    OpAttrs(&mut op.metadata.attributes).set_namespace(context.to_owned());
                 }
                 LocalOp(op_store.write_operation(&op).block_on()?)
             };

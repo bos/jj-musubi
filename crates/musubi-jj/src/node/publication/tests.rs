@@ -1369,11 +1369,13 @@ fn raw_tree_walk_includes_directory_sides_of_file_directory_conflicts() {
 fn retained_intent_is_referenced_and_its_encoding_is_pinned() {
     let commit = CommitId::from_bytes(&[0xab; 20]);
     let mut op = Operation::make_root(jj_lib::op_store::ViewId::from_bytes(&[0; 64]));
-    let encoded = serde_json::to_string(&vec![commit.hex()]).unwrap();
-    assert_eq!(encoded, r#"["abababababababababababababababababababab"]"#);
-    op.metadata
-        .attributes
-        .insert(INTENT_ATTRIBUTE.to_owned(), encoded);
+    crate::op_attrs::OpAttrs(&mut op.metadata.attributes)
+        .set_intent([&commit])
+        .unwrap();
+    assert_eq!(
+        op.metadata.attributes[INTENT_ATTRIBUTE],
+        r#"["abababababababababababababababababababab"]"#
+    );
     assert!(retained_publication_intent(&op).is_err());
     op.commit_predecessors = Some(BTreeMap::from([(commit.clone(), vec![])]));
     assert_eq!(

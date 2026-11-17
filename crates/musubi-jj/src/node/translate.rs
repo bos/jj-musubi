@@ -13,16 +13,15 @@ use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
 use pollster::FutureExt as _;
 
-use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::join::fingerprint;
-use super::supersede::FIXUP_ATTRIBUTE;
 use crate::canonical::CanonicalError;
 use crate::canonical::CanonicalStore;
 use crate::canonical::Work;
 use crate::format_guard;
 use crate::format_guard::FormatError;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::Kind;
@@ -92,7 +91,7 @@ impl NodeRepo {
                 parents.push(parent.0);
             }
             if parents == op.parents
-                && op.metadata.attributes.get(CANONICAL_ATTRIBUTE) == Some(&canonical.0.hex())
+                && OpAttrs(&op.metadata.attributes).canonical() == Some(canonical.0.hex().as_str())
             {
                 continue;
             }
@@ -102,9 +101,7 @@ impl NodeRepo {
             let own = self.own_of_view(view.wc_commit_ids, &canonical, &op)?;
             self.record_private_workspaces(&mut op.metadata, own.into_keys(), &canonical)?;
             op.parents = parents;
-            op.metadata
-                .attributes
-                .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical.0.hex());
+            OpAttrs(&mut op.metadata.attributes).set_canonical(&canonical);
             let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);
             self.insert_map(rewrite.clone(), canonical)?;
             rewrites.insert(local.clone(), rewrite);
@@ -136,11 +133,8 @@ impl NodeRepo {
         for (id, op) in unmapped {
             if op.parents == [self.root_op_id().0.clone()]
                 && op.metadata.workspace_name.is_some()
-                && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                && !op
-                    .metadata
-                    .attributes
-                    .contains_key(crate::canonical::namespace::ATTRIBUTE)
+                && OpAttrs(&op.metadata.attributes).canonical().is_none()
+                && !OpAttrs(&op.metadata.attributes).has_namespace()
                 && self.records.source(id).is_none()
                 && !self.is_before_join(id, op)?
                 && roots.insert(fingerprint(op), id.clone()).is_some()
@@ -265,7 +259,7 @@ impl NodeRepo {
                     .cloned()
                     .or_else(|| self.map.canonical_of(&id).cloned())
                     .or_else(|| self.joins.join_of(&op).cloned());
-                if let Some(named) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+                if let Some(named) = OpAttrs(&op.metadata.attributes).canonical() {
                     for parent in LocalOp::parents_of(&op) {
                         self.canonicalize_unchecked(&parent)?;
                     }
@@ -274,7 +268,7 @@ impl NodeRepo {
                         .filter(|id| self.canonical.has_operation(id))
                         .ok_or_else(|| NodeError::DanglingAttribute {
                             op: id.0.hex(),
-                            canonical: named.clone(),
+                            canonical: named.to_owned(),
                         })?;
                     if !self.original_realization(&named, &LocalOp::parents_of(&op))? {
                         return Err(NodeError::RewrittenRealization);
@@ -413,7 +407,7 @@ impl NodeRepo {
             };
             // A join point that `jj op abandon` rewrote, abandoning history from before the
             // join, which no other machine has: its parents are from before the join.
-            if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            if OpAttrs(&op.metadata.attributes).canonical().is_none()
                 && let Some(join) = self.joins.join_of(&op)
             {
                 let join = join.clone();
@@ -444,7 +438,7 @@ impl NodeRepo {
                     self.late.push(id.clone());
                 }
                 source
-            } else if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+            } else if let Some(canonical) = OpAttrs(&op.metadata.attributes).canonical() {
                 self.realized_canonical(&id, &op, canonical)?
             } else if self.is_before_join(&id, &op)? {
                 self.joins.before.insert(id);
@@ -505,7 +499,7 @@ impl NodeRepo {
             }
             let op = op_store.read_operation(&id.0).block_on()?;
             if self.joins.points.contains(&id)
-                || (!op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                || (OpAttrs(&op.metadata.attributes).canonical().is_none()
                     && self.joins.join_of(&op).is_some())
             {
                 below_joins.extend(LocalOp::parents_of(&op));
@@ -669,7 +663,7 @@ impl NodeRepo {
             || local_parents
                 .iter()
                 .any(|parent| self.late.contains(parent));
-        let found = if let Some(named) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+        let found = if let Some(named) = OpAttrs(&op.metadata.attributes).canonical() {
             let Some(named) = OperationId::try_from_hex(named)
                 .map(CanonicalOp)
                 .filter(|c| self.canonical.has_operation(c))
@@ -719,18 +713,15 @@ impl NodeRepo {
         let mut metadata = op.metadata.clone();
         let mut commit_predecessors = op.commit_predecessors.clone();
         if let Some(roots) = self.publication_git_intent(op, &view)? {
-            metadata.attributes.insert(
-                super::INTENT_ATTRIBUTE.to_owned(),
-                serde_json::to_string(&roots.iter().map(|id| id.hex()).collect::<Vec<_>>())
-                    .map_err(super::PublicationError::Json)?,
-            );
+            OpAttrs(&mut metadata.attributes)
+                .set_intent(&roots)
+                .map_err(super::PublicationError::Json)?;
             let records = commit_predecessors.get_or_insert_default();
             for root in roots {
                 records.entry(root).or_default();
             }
         }
-        metadata.attributes.remove(super::view::LOCAL_WORKSPACES);
-        metadata.attributes.remove(super::view::RESERVED_WORKSPACES);
+        OpAttrs(&mut metadata.attributes).remove_private_workspaces();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&LocalOp(target))
             && self.canonical.is_ancestor(&canonical, &parents)?
@@ -739,7 +730,7 @@ impl NodeRepo {
         }
         // jj records the command that made an operation, which may name an http(s) URL with
         // a token meant for this machine only.
-        if let Some(args) = metadata.attributes.get_mut("args") {
+        if let Some(args) = OpAttrs(&mut metadata.attributes).args_mut() {
             *args = without_credentials(args);
         }
         // Which workspace made an operation is per-machine, like the view's working copies:
@@ -750,20 +741,14 @@ impl NodeRepo {
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
         // Context is local to the machine that captured it. Carry it through native
         // descendants until their canonical views and presence again describe all aliases.
-        if !metadata
-            .attributes
-            .contains_key(crate::canonical::namespace::ATTRIBUTE)
-        {
+        if !OpAttrs(&metadata.attributes).has_namespace() {
             for parent in &parents {
                 let parent_op = self.canonical.read_operation(parent)?;
                 if let Some(context) =
                     crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
                     && context.source == self.machine.key()
                 {
-                    metadata.attributes.insert(
-                        crate::canonical::namespace::ATTRIBUTE.to_owned(),
-                        context.encode(),
-                    );
+                    OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
                     break;
                 }
             }
@@ -783,36 +768,29 @@ impl NodeRepo {
                 &Kind::of(&metadata),
                 &metadata,
             )?;
-            metadata.attributes.insert(
-                crate::canonical::namespace::ATTRIBUTE.to_owned(),
-                self.workspace_context_of_view(&source_view, &source_presence)?,
-            );
+            let context = self.workspace_context_of_view(&source_view, &source_presence)?;
+            OpAttrs(&mut metadata.attributes).set_namespace(context);
         }
         if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
             let mut known = std::collections::BTreeSet::new();
             for parent in &parents {
                 known.extend(self.presence(parent)?.known().iter().cloned());
             }
+            let mut attributes = OpAttrs(&mut metadata.attributes);
             if !changed_parents
                 && context.known.is_subset(&known)
-                && !metadata
-                    .attributes
-                    .contains_key(super::CHECKPOINT_ATTRIBUTE)
-                && !metadata.attributes.contains_key(super::INTENT_ATTRIBUTE)
+                && !attributes.is_checkpoint()
+                && !attributes.has_intent()
             {
-                metadata
-                    .attributes
-                    .remove(crate::canonical::namespace::ATTRIBUTE);
+                attributes.remove_namespace();
             }
         }
         let kind = Kind::of(&metadata);
         // A fix-up changes no view: it restores what musubi works out from history alone.
         let (view_id, presence) = match parents.as_slice() {
             [parent]
-                if metadata.attributes.contains_key(FIXUP_ATTRIBUTE)
-                    && !metadata
-                        .attributes
-                        .contains_key(crate::canonical::namespace::ATTRIBUTE) =>
+                if OpAttrs(&metadata.attributes).is_fixup()
+                    && !OpAttrs(&metadata.attributes).has_namespace() =>
             {
                 (
                     self.canonical.read_operation(parent)?.view_id,

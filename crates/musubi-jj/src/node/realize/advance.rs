@@ -16,7 +16,6 @@ use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use pollster::FutureExt as _;
 
-use super::super::CANONICAL_ATTRIBUTE;
 use super::super::NodeError;
 use super::super::NodeRepo;
 use super::super::git::Colocation;
@@ -25,6 +24,7 @@ use super::super::native_contract;
 use super::super::translate::target_of;
 use super::super::view::PerMachine;
 use super::with_kept;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -59,7 +59,7 @@ impl NodeRepo {
     /// another machine's workspace by a name that is a workspace of this machine's own there.
     fn realized_beside_other_heads(&mut self, local: &LocalOp) -> Result<bool, NodeError> {
         let op = self.loader.op_store().read_operation(&local.0).block_on()?;
-        if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+        if OpAttrs(&op.metadata.attributes).canonical().is_none()
             || self
                 .reserved_names()?
                 .is_subset(&super::super::view::reserved_of(&op.metadata)?)
@@ -199,7 +199,7 @@ impl NodeRepo {
                 let raw = self.loader.op_store().read_operation(&local.0).block_on()?;
                 // An original native operation is its own authority; only prepared
                 // realizations can depend on stale parent aliases or private root context.
-                if !raw.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) {
+                if OpAttrs(&raw.metadata.attributes).canonical().is_none() {
                     continue;
                 }
                 cached = Some(raw);
@@ -283,9 +283,7 @@ impl NodeRepo {
         op.view_id = store.write_view(&view).block_on()?;
         // This may be a local original rather than a received realization. Keep its
         // identity explicit across translation-cache loss and a later jj op abandon.
-        op.metadata
-            .attributes
-            .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical.0.hex());
+        OpAttrs(&mut op.metadata.attributes).set_canonical(canonical);
         Ok(LocalOp(store.write_operation(&op).block_on()?))
     }
 

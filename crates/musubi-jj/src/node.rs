@@ -80,9 +80,12 @@ use realize::PublishedHistoryCache;
 pub use realize::REALIZE_AT_ONCE;
 use realize::State as RealizationState;
 pub use supersede::ACCEPTED_PUSH;
+pub(crate) use supersede::FIXUP_ATTRIBUTE;
 pub use supersede::NodeOp;
 use supersede::Records;
 pub use supersede::WORKED_AT_ATTRIBUTE;
+pub(crate) use view::LOCAL_WORKSPACES;
+pub(crate) use view::RESERVED_WORKSPACES;
 
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";

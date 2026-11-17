@@ -10,6 +10,7 @@ pub mod git_command;
 pub mod inherited_remotes;
 pub mod node;
 pub mod objects;
+mod op_attrs;
 pub mod op_id;
 pub mod presence;
 mod protobuf;

@@ -14,7 +14,7 @@ mod codec;
 mod contract;
 mod log;
 pub(crate) mod namespace;
-mod origin;
+pub(crate) mod origin;
 mod presence;
 mod transfer;
 mod validate;

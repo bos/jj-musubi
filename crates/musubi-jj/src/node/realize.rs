@@ -23,12 +23,12 @@ use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
-use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::translate::target_of;
 use super::view::LocalView;
 use super::view::PerMachine;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -300,9 +300,7 @@ impl NodeRepo {
         metadata.workspace_name = metadata
             .workspace_name
             .map(|key| self.realized_workspace_name(&key, &prefixes));
-        metadata
-            .attributes
-            .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.0.hex());
+        OpAttrs(&mut metadata.attributes).set_canonical(canonical_id);
         // The id the op store gives it, worked out as it does.
         let local_op = StoreOperation {
             view_id: id,

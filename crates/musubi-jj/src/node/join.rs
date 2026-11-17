@@ -24,11 +24,11 @@ use jj_lib::repo::Repo as _;
 use jj_lib::revset::RevsetExpression;
 use pollster::FutureExt as _;
 
-use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
 use crate::objects::Backend;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence;
@@ -132,7 +132,7 @@ impl NodeRepo {
                 return Ok(true);
             }
             let op = op_store.read_operation(&id.0).block_on()?;
-            if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            if OpAttrs(&op.metadata.attributes).canonical().is_some()
                 || self.joins.join_of(&op).is_some()
             {
                 return Ok(true);

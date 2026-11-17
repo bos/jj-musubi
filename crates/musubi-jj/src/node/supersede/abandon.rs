@@ -17,8 +17,8 @@ use super::dedup;
 
 use crate::canonical::Contraction;
 use crate::node::AbandonObservation;
-use crate::node::CANONICAL_ATTRIBUTE;
 use crate::node::join::fingerprint;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::records::HubOp;
@@ -56,7 +56,7 @@ impl NodeRepo {
                 }
             }
             let op = op_store.read_operation(&id.0).block_on()?;
-            if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            if OpAttrs(&op.metadata.attributes).canonical().is_none()
                 && let Some(join) = self.joins.join_of(&op)
             {
                 mapped.push((id, join.clone()));
@@ -322,12 +322,8 @@ impl NodeRepo {
         // anchors have already contracted to root. Its immutable source body is still an
         // anchor: jj can trim its parents before the next sync notices that realization.
         for (_, op) in &unmapped {
-            if let Some(named) = op
-                .metadata
-                .attributes
-                .get(CANONICAL_ATTRIBUTE)
-                .and_then(OperationId::try_from_hex)
-                .map(CanonicalOp)
+            if let Some(named) = OpAttrs(&op.metadata.attributes)
+                .canonical_op()
                 .filter(|id| self.canonical.has_operation(id))
             {
                 bases.extend(self.current_ids(&named)?);
@@ -348,11 +344,8 @@ impl NodeRepo {
         }
         let marked = |unmapped: &[(LocalOp, StoreOperation)]| {
             unmapped.iter().any(|(_, op)| {
-                op.metadata
-                    .attributes
-                    .get(CANONICAL_ATTRIBUTE)
-                    .and_then(OperationId::try_from_hex)
-                    .map(CanonicalOp)
+                OpAttrs(&op.metadata.attributes)
+                    .canonical_op()
                     .is_some_and(|id| self.canonical.has_operation(&id))
             })
         };
@@ -364,11 +357,8 @@ impl NodeRepo {
             (mapped, unmapped) = self.local_walk(&heads)?;
             reached = self.reaches(&bases, &mapped)?;
             has_marked = unmapped.iter().any(|(_, op)| {
-                op.metadata
-                    .attributes
-                    .get(CANONICAL_ATTRIBUTE)
-                    .and_then(OperationId::try_from_hex)
-                    .map(CanonicalOp)
+                OpAttrs(&op.metadata.attributes)
+                    .canonical_op()
                     .is_some_and(|id| self.canonical.has_operation(&id))
             });
         }
@@ -428,13 +418,7 @@ impl NodeRepo {
                 .records
                 .source(id)
                 .cloned()
-                .or_else(|| {
-                    op.metadata
-                        .attributes
-                        .get(CANONICAL_ATTRIBUTE)
-                        .and_then(OperationId::try_from_hex)
-                        .map(CanonicalOp)
-                })
+                .or_else(|| OpAttrs(&op.metadata.attributes).canonical_op())
                 .filter(|c| self.canonical.has_operation(c));
             let named = match named {
                 Some(c) => match self.current_ids(&c)?.as_slice() {

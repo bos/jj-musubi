@@ -26,17 +26,18 @@ use super::is_visible;
 use super::translate::target_of;
 use crate::canonical::Work;
 use crate::canonical::namespace::Namespace;
+use crate::op_attrs::OpAttrs;
 use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
 
 /// Names retained only in this copy after their shared history was trimmed away.
-pub(super) const LOCAL_WORKSPACES: &str = "musubi.local-workspaces";
+pub(crate) const LOCAL_WORKSPACES: &str = "musubi.local-workspaces";
 
 /// The names a realization showed other machines' workspaces clear of beyond its canonical
 /// view's own: this machine's own in the op heads it was made beside (`reserved_names`), as a
 /// JSON array. Local to this copy, like [`LOCAL_WORKSPACES`]: canonicalizing drops it.
-pub(super) const RESERVED_WORKSPACES: &str = "musubi.reserved-workspaces";
+pub(crate) const RESERVED_WORKSPACES: &str = "musubi.reserved-workspaces";
 
 /// The names an operation records in [`RESERVED_WORKSPACES`].
 pub(super) fn reserved_of(
@@ -274,9 +275,7 @@ impl NodeRepo {
             Namespace::read(metadata)?.filter(|context| context.source == self.machine.key());
         if let Some(context) = &context {
             let initial = canonical_parents == [self.canonical.root_operation_id().clone()];
-            let fixup = metadata
-                .attributes
-                .contains_key(super::supersede::FIXUP_ATTRIBUTE);
+            let fixup = OpAttrs(&metadata.attributes).is_fixup();
             let parent_names = if initial || fixup {
                 BTreeSet::new()
             } else {
@@ -305,9 +304,7 @@ impl NodeRepo {
         let mut local = std::mem::take(&mut view.wc_commit_ids);
         // Existing fix-up WORK transitions restore each copy's bindings too, where the
         // entire accepted base left no view from which to inherit them.
-        if metadata
-            .attributes
-            .contains_key(super::supersede::FIXUP_ATTRIBUTE)
+        if OpAttrs(&metadata.attributes).is_fixup()
             && let Some(copy) = &kind.work
         {
             for (name, key) in &others {
@@ -520,10 +517,7 @@ impl NodeRepo {
             if memo.contains_key(&id) {
                 continue;
             }
-            if op
-                .metadata
-                .attributes
-                .contains_key(super::CANONICAL_ATTRIBUTE)
+            if OpAttrs(&op.metadata.attributes).canonical().is_some()
                 || self.joins.join_of(&op).is_some()
                 || op.parents.is_empty()
             {

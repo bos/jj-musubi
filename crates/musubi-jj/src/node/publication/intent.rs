@@ -15,6 +15,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::content::ContentGraph;
 use crate::node::PublicationError;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 
 pub const CHECKPOINT_ATTRIBUTE: &str = "musubi.publication-checkpoint";
@@ -25,13 +26,12 @@ pub(crate) const INTENT_ATTRIBUTE: &str = "musubi.publication-intent";
 pub(crate) fn retained_publication_intent(
     op: &Operation,
 ) -> Result<Option<BTreeSet<CommitId>>, PublicationError> {
-    let Some(text) = op.metadata.attributes.get(INTENT_ATTRIBUTE) else {
+    let Some(ids) = OpAttrs(&op.metadata.attributes).intent()? else {
         return Ok(None);
     };
-    let ids: Vec<String> = serde_json::from_str(text).map_err(PublicationError::MalformedIntent)?;
     let mut roots = BTreeSet::new();
     for id in ids {
-        let id = CommitId::try_from_hex(&id).ok_or(PublicationError::InvalidIntentCommit)?;
+        let id = id?;
         if !op
             .commit_predecessors
             .as_ref()
@@ -181,10 +181,9 @@ pub fn explicit_git_import(mut args: &str) -> bool {
 }
 
 fn recorded_explicit_import(op: &Operation) -> bool {
-    op.metadata
-        .attributes
-        .get("args")
-        .is_some_and(|args| explicit_git_import(args))
+    OpAttrs(&op.metadata.attributes)
+        .args()
+        .is_some_and(explicit_git_import)
 }
 
 pub(super) fn automatic_git_bookkeeping(op: &Operation) -> bool {
@@ -212,7 +211,7 @@ impl<'a> Intent<'a> {
         if let Some(roots) = retained_publication_intent(op)? {
             return Ok((roots, true));
         }
-        if op.metadata.attributes.contains_key(CHECKPOINT_ATTRIBUTE) {
+        if OpAttrs(&op.metadata.attributes).is_checkpoint() {
             return Ok((
                 op.commit_predecessors
                     .iter()
@@ -265,7 +264,7 @@ impl<'a> Intent<'a> {
                 roots.extend(intent);
                 continue;
             }
-            if op.metadata.attributes.contains_key(CHECKPOINT_ATTRIBUTE) {
+            if OpAttrs(&op.metadata.attributes).is_checkpoint() {
                 roots.extend(
                     op.commit_predecessors
                         .iter()
@@ -332,7 +331,7 @@ impl<'a> Intent<'a> {
         view: &View,
     ) -> Result<Option<BTreeSet<CommitId>>, NodeError> {
         if !["import git refs", "import git head"].contains(&op.metadata.description.as_str())
-            || op.metadata.attributes.contains_key(INTENT_ATTRIBUTE)
+            || OpAttrs(&op.metadata.attributes).has_intent()
             || Self::automatic(op)
             || !recorded_explicit_import(op)
         {

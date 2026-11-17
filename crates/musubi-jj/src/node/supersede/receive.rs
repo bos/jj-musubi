@@ -16,6 +16,7 @@ use super::TakingStop;
 use super::digests;
 
 use crate::canonical::Contraction;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::records::HubOp;
@@ -542,12 +543,7 @@ impl NodeRepo {
             .filter_map(|(local, canonical)| {
                 let op = self.loader.op_store().read_operation(&local.0).block_on();
                 match op {
-                    Ok(op)
-                        if !op
-                            .metadata
-                            .attributes
-                            .contains_key(crate::node::CANONICAL_ATTRIBUTE) =>
-                    {
+                    Ok(op) if OpAttrs(&op.metadata.attributes).canonical().is_none() => {
                         Some(Ok((local.clone(), canonical.clone())))
                     }
                     Ok(_) => None,

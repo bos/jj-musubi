@@ -42,13 +42,19 @@ that justify them. `quiesce` then makes delivery reliable and checks eventual co
 retention; with an oracle it also checks the model's decreasing progress measures. A targeted
 prefix can feed a rare state into the same generated walk and the same final checks.
 
-[Refs conformance](../../crates/musubi-sync/tests/races/refs.rs) composes a `Realization` from
-the peer's `RefCommand`, its order relative to local work, physical export access, and an
-optional local command. The same scenarios serve regression examples and generated rules.
+[Refs conformance](../../crates/musubi-sync/tests/races/refs.rs) composes a `Realization`
+([scenario.rs](../../crates/musubi-sync/tests/races/refs/scenario.rs)) from the peer's
+`RefCommand`, its order relative to local work, physical export access, and an optional local
+command. The same scenarios serve the [regression
+examples](../../crates/musubi-sync/tests/races/refs/examples.rs) and the generated rules.
 Each phase captures its history, checks the peer's native command, then compares realization
-with the model; a bookmark move cannot carry an unrelated fetch target. `SharedRefs` names the
-shared fields being compared, and `ModelAtOperation` pairs each model snapshot with its native
-operation.
+with the model; a bookmark move cannot carry an unrelated fetch target. [The
+model](../../crates/musubi-sync/tests/races/refs/model.rs) holds `SharedRefs`, which names the
+shared fields being compared, and `judge`, which only compares the real repository with the
+model; the state machine's `check` moves the snapshots on separately, and `ModelAtOperation`
+pairs each model snapshot with its native operation. The one example that is not a scenario,
+[taking another machine's abandon](../../crates/musubi-sync/tests/races/refs/abandon.rs),
+drives the sync by hand, which `Realization` cannot express.
 
 ## Real repository histories
 

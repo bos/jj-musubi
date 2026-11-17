@@ -80,11 +80,11 @@ inductive RecordPolicy (N : Nat) : SEState → SEState → Prop
 
 /-- Both kinds of effective progress decrease the refined well-founded measure. -/
 theorem recordMeasure_decreases {N : Nat} {ses ses' : SEState}
-    (hr : SRReachable N (sabs ses)) (hA : AllPruned N (sabs ses))
+    (hr : SRReachable N (sabs ses)) (hC : SChain N (sabs ses)) (hA : AllPruned N (sabs ses))
     (hp : RecordPolicy N ses ses') :
     RecordLex (recordMeasure N ses') (recordMeasure N ses) := by
   cases hp with
-  | projected h => exact Prod.Lex.left _ _ (smeasure_decreases hr hA h)
+  | projected h => exact Prod.Lex.left _ _ (smeasure_decreases hr hC hA h)
   | reconcile n hn hm hsub _ =>
     have he := sabs_adoptR_same hsub
     unfold recordMeasure
@@ -92,9 +92,9 @@ theorem recordMeasure_decreases {N : Nat} {ses ses' : SEState}
     exact Prod.Lex.right _ (recordLag_adopt_lt hn hm)
 
 theorem recordPolicy_wf : WellFounded
-    (fun ses' ses => (SRReachable N (sabs ses) ∧ AllPruned N (sabs ses)) ∧
+    (fun ses' ses => (SRReachable N (sabs ses) ∧ SChain N (sabs ses) ∧ AllPruned N (sabs ses)) ∧
       RecordPolicy N ses ses') :=
-  Subrelation.wf (fun ⟨⟨hr, hA⟩, hp⟩ => recordMeasure_decreases hr hA hp)
+  Subrelation.wf (fun ⟨⟨hr, hC, hA⟩, hp⟩ => recordMeasure_decreases hr hC hA hp)
     (InvImage.wf (recordMeasure N) recordLex_wf)
 
 /-- An actual executable adoption after announcing current records, with exactly the head
@@ -150,7 +150,7 @@ inductive RecordSteps (N : Nat) : SEState → SEState → Prop
 /-- Abstract convergence suffices for a finite completion with exactly the hub's ordered
 records. All these remaining steps preserve the abstract state, including the hub. -/
 theorem record_finish {N : Nat} {ses : SEState} (hr : SRReachable N (sabs ses))
-    (hA : AllPruned N (sabs ses)) (hc : SConverged N (sabs ses)) :
+    (hC : SChain N (sabs ses)) (hA : AllPruned N (sabs ses)) (hc : SConverged N (sabs ses)) :
     ∃ ses', RecordSteps N ses ses' ∧
       sabs ses' = sabs ses ∧ RecordConverged N ses' := by
   induction ses using (recordPolicy_wf (N := N)).induction with
@@ -163,9 +163,10 @@ theorem record_finish {N : Nat} {ses : SEState} (hr : SRReachable N (sabs ses))
       | projected hp => exact False.elim (converged_quiescentS hr hc hp)
       | reconcile n _ _ hsub _ => exact sabs_adoptR_same hsub
     have hr' : SRReachable N (sabs next) := by rw [he]; exact hr
+    have hC' : SChain N (sabs next) := by rw [he]; exact hC
     have hA' : AllPruned N (sabs next) := by rw [he]; exact hA
     have hc' : SConverged N (sabs next) := by rw [he]; exact hc
-    obtain ⟨last, steps, same, done⟩ := ih next ⟨⟨hr, hA⟩, hp⟩ hr' hA' hc'
+    obtain ⟨last, steps, same, done⟩ := ih next ⟨⟨hr, hC, hA⟩, hp⟩ hr' hC' hA' hc'
     exact ⟨last, .head hp steps, same.trans he, done⟩
 
 end Musubi.Exec

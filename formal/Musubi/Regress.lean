@@ -356,16 +356,16 @@ number stays. -/
 theorem step_hub {s t : State} (hs : Step N s t) :
     (t.hub.seq = s.hub.seq ∧ t.hub.head = s.hub.head ∧ t.hub.hist = s.hub.hist) ∨
       (t.hub.seq = s.hub.seq + 1 ∧ (∀ i, i ≤ s.hub.seq → t.hub.hist i = s.hub.hist i) ∧
-        t.hub.hist (s.hub.seq + 1) = t.hub.head ∧ t.U = s.U ∧
+        t.hub.hist (s.hub.seq + 1) = t.hub.head ∧ t.U = s.U ∧ t.node = s.node ∧
         Anc s.U.par s.hub.head t.hub.head ∧ s.hub.head ≠ t.hub.head) := by
   rcases hs with hs | hs
   · cases hs <;> exact Or.inl ⟨rfl, rfl, rfl⟩
   · cases hs with
     | casAccept n e d hm hne he ha =>
-      exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (by omega), upd_same _ _ _, rfl, he ▸ ha, hne⟩
+      exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (by omega), upd_same _ _ _, rfl, rfl, he ▸ ha, hne⟩
     | hubPushAccept n S O e d hm hne he ha =>
       exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (show i ≠ s.hub.seq + 1 by omega),
-        upd_same _ _ _, rfl, he ▸ ha, hne⟩
+        upd_same _ _ _, rfl, rfl, he ▸ ha, hne⟩
     | _ => exact Or.inl ⟨rfl, rfl, rfl⟩
 
 /-- A step of the protocol keeps the operations created so far as they were. -/
@@ -448,7 +448,7 @@ theorem histStep_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
   obtain ⟨-, hpar⟩ := step_par hs
   have keep : ∀ {a x}, x < s.U.next → Anc s.U.par a x → Anc t.U.par a x := fun hx ha =>
     (Contract.anc_congr hI.parLt (fun y hy => (hpar y (Nat.lt_of_le_of_lt hy hx)).symm)).1 ha
-  rcases step_hub hs with ⟨hq, -, hh⟩ | ⟨hq, hold, hnew, hU, ha, hne⟩
+  rcases step_hub hs with ⟨hq, -, hh⟩ | ⟨hq, hold, hnew, hU, -, ha, hne⟩
   · intro i hi
     rw [hh]; rw [hq] at hi
     obtain ⟨h1, h2⟩ := hI.histStep i hi
@@ -462,42 +462,45 @@ theorem histStep_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
     · rw [hold i (by omega), hold (i + 1) (by omega)]
       exact hI.histStep i (by omega)
 
-/-- A step keeps every operation a node made below one of its heads. -/
-theorem ownInHeads_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
-    ∀ n x, x < t.U.next → t.U.creator x = some n →
-      ∃ h, (t.node n).heads h ∧ Anc t.U.par x h := by
-  intro n x hx hc
+/-- A step keeps an operation a node made below one of its heads, if it was before: a new
+operation is a head of the node that made it, and a node's heads keep what they reached. -/
+theorem own_step {s t : State} (hI : InvC N s) (hs : Step N s t) {n x : Nat}
+    (hx : x < t.U.next) (hc : t.U.creator x = some n)
+    (hown : x < s.U.next → s.U.creator x = some n → ∃ h, (s.node n).heads h ∧ Anc s.U.par x h) :
+    ∃ h, (t.node n).heads h ∧ Anc t.U.par x h := by
+  have old : x < s.U.next → s.U.creator x = some n → ∃ h, (t.node n).heads h ∧ Anc t.U.par x h :=
+    fun hx hc => step_heads_cover hI hs (hown hx hc)
   rcases hs with hs | hs
   · cases hs with
     | userOp m p O hm hp =>
-      have H := fun y => userOp_heads_iff_of (y := y) hI.parLt (hI.lLt m p hp)
-        (fun _ h => hI.headsLt h) (hI.headsAnti m)
-      have hC : Core N (s.userOp m p O) := Core.createOp hI.toCore hm
-        (by intro q hq; simp at hq; subst hq; exact hp) (by simp) ((H _).2 (Or.inl rfl))
-        (fun y hy => by
-          rcases (H y).1 hy with h | ⟨h, -⟩
-          · exact Or.inr h
-          · exact Or.inl h)
-        (fun x y hx hy hA => hx.2 y hy.1 hA)
-        (fun x h hh hA => by
-          simpa [State.userOp, State.createOp] using
-            step_heads_cover hI.toInvC (Or.inl (EnvStep.userOp s m p O hm hp)) ⟨h, hh, hA⟩)
-      exact hC.ownInHeads n x hx hc
+      simp only [State.userOp, createOp_U, create_next, create_creator] at hx hc
+      by_cases hxo : x = s.U.next
+      · subst hxo
+        rw [upd_same] at hc
+        cases hc
+        have H := fun y => userOp_heads_iff_of (y := y) hI.parLt (hI.lLt n p hp)
+          (fun _ h => hI.headsLt h) (hI.headsAnti n)
+        exact ⟨s.U.next, by simpa [State.userOp] using (H _).2 (Or.inl rfl), Anc.refl⟩
+      · rw [upd_ne _ _ hxo] at hc
+        exact old (by omega) hc
     | merge m L O hm hL h2 =>
-      have hLlt : ∀ q ∈ L, q < s.U.next := fun q hq => hI.headsLt ((hL q).1 hq)
-      obtain ⟨a, b, ha, hb, hab⟩ := h2
-      have hC : Core N (s.mergeOp m L O) := Core.createOp hI.toCore hm
-        (fun q hq => hI.headsLocal m q ((hL q).1 hq))
-        (by intro h; rw [h] at ha; simp at ha) rfl (fun y hy => Or.inr hy)
-        (fun x y hx hy _ => by rw [hx, hy])
-        (fun x h hh hA => ⟨s.U.next, rfl, (anc_upd_new hI.parLt hLlt).2
-          (Or.inr ⟨h, (hL h).2 hh, hA⟩)⟩)
-      exact hC.ownInHeads n x hx hc
+      simp only [State.mergeOp, createOp_U, create_next, create_creator] at hx hc
+      by_cases hxo : x = s.U.next
+      · subst hxo
+        rw [upd_same] at hc
+        cases hc
+        exact ⟨s.U.next, by simp [State.mergeOp], Anc.refl⟩
+      · rw [upd_ne _ _ hxo] at hc
+        exact old (by omega) hc
   · have hU := noFeedback hs
-    rw [hU] at hx hc ⊢
-    obtain ⟨h, hh, hA⟩ := hI.ownInHeads n x hx hc
-    have := step_heads_cover hI.toInvC (Or.inr hs) ⟨h, hh, hA⟩
-    rwa [hU] at this
+    rw [hU] at hx hc
+    exact old hx hc
+
+/-- A step keeps every operation a node made below one of its heads. -/
+theorem ownInHeads_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
+    ∀ n x, x < t.U.next → t.U.creator x = some n →
+      ∃ h, (t.node n).heads h ∧ Anc t.U.par x h :=
+  fun _ _ hx hc => own_step hI.toInvC hs hx hc (hI.ownInHeads _ _)
 
 theorem invR_step {s s' : State} (hI : InvR N s) (h : Step N s s') : InvR N s' :=
   { invC_step hI.toInvC h with
@@ -1023,9 +1026,8 @@ theorem measureR_pushAccept {s : State} (hI : InvR N s) {n hd : Nat} (hn : n < N
         · rw [histOld (by omega)]; exact hcmp j (by omega)
   · exact ⟨n, hn, hbad, fun h => h hgood⟩
 
-theorem measureR_decreases {s s' : State} (h : RReachable N s) (hp : PStepR N s s') :
+theorem measureR_decreases {s s' : State} (hI : InvR N s) (hp : PStepR N s s') :
     Lex6 (rmeasure N s') (rmeasure N s) := by
-  have hI := invR_reachable h
   cases hp with
   | learn n hn hs =>
     refine measureR_learn hI hn ⟨rfl, rfl, rfl, rfl, fun i hi => ?_⟩ ?_ ?_ hs
@@ -1052,7 +1054,7 @@ theorem measureR_decreases {s s' : State} (h : RReachable N s) (hp : PStepR N s 
 /-! ### Termination -/
 
 theorem pstepR_wf : WellFounded (fun s' s => RReachable N s ∧ PStepR N s s') :=
-  Subrelation.wf (fun ⟨h, hp⟩ => measureR_decreases h hp) (InvImage.wf (rmeasure N) lex6_wf)
+  Subrelation.wf (fun ⟨h, hp⟩ => measureR_decreases (invR_reachable h) hp) (InvImage.wf (rmeasure N) lex6_wf)
 
 /-- **Termination** once the hub stops going back: no infinite sequence of policy steps
 starts from a state of the extended system, whatever the scheduling. -/
@@ -1064,9 +1066,8 @@ theorem no_infinite_policy_runR {s : State} (h : RReachable N s) :
 
 /-- **Progress**: in every state of the extended system that is not converged, some policy
 step is enabled. -/
-theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
+theorem progressR {s : State} (hI : InvR N s) (hc : ¬ Converged N s) :
     ∃ s', PStepR N s s' := by
-  have hI := invR_reachable h
   unfold Converged at hc
   rw [Classical.not_forall] at hc
   obtain ⟨n, hc⟩ := hc
@@ -1118,9 +1119,8 @@ theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
 /-! ### Convergence -/
 
 /-- Converged states enable no policy step. -/
-theorem converged_quiescentR {s : State} (h : RReachable N s) (hc : Converged N s)
+theorem converged_quiescentR {s : State} (hI : InvR N s) (hc : Converged N s)
     {s' : State} : ¬ PStepR N s s' := by
-  have hI := invR_reachable h
   intro hp
   cases hp with
   | learn n hn hs => exact hs (hc n hn).2
@@ -1138,25 +1138,27 @@ theorem converged_quiescentR {s : State} (h : RReachable N s) (hc : Converged N 
 conversely. -/
 theorem terminal_iff_convergedR {s : State} (h : RReachable N s) :
     (∀ s', ¬ PStepR N s s') ↔ Converged N s :=
-  terminal_iff_of_progress (progressR h) (fun hc _ => converged_quiescentR h hc)
+  terminal_iff_of_progress (progressR (invR_reachable h))
+    (fun hc _ => converged_quiescentR (invR_reachable h) hc)
 
 /-- **A remade hive fills from its machines**: once converged, every operation any node
 created is in `anc*(hub.head)`, however much the hub lost on the way. -/
-theorem converged_all_acceptedR {s : State} (h : RReachable N s) (hc : Converged N s)
+theorem converged_all_acceptedR {s : State} (hI : InvR N s) (hc : Converged N s)
     {x : Nat} (hx : x < s.U.next) : Anc s.U.par x s.hub.head :=
-  (invR_reachable h).toCore.converged_all_accepted hc hx
+  hI.toCore.converged_all_accepted hc hx
 
 /-- **Liveness** once the hub stops going back: from every state of the extended system,
 policy steps reach a converged state. -/
 theorem eventually_convergesR {s : State} (h : RReachable N s) :
     ∃ s', PStepsR N s s' ∧ Converged N s' :=
   eventually_done_of_progress (inv := RReachable N) (done := Converged N) pstepR_wf
-    pstepR_reachable progressR h
+    pstepR_reachable (fun h => progressR (invR_reachable h)) h
 
 /-- **Liveness**, maximal-run form: every policy run from a state of the extended system that
 cannot be extended ends in a converged state. -/
 theorem maximal_run_convergesR {s s' : State} (h : RReachable N s) (hr : PStepsR N s s')
     (hmax : ∀ s'', ¬ PStepR N s' s'') : Converged N s' :=
-  done_of_maximal_run (inv := RReachable N) pstepR_reachable progressR h hr hmax
+  done_of_maximal_run (inv := RReachable N) pstepR_reachable
+    (fun h => progressR (invR_reachable h)) h hr hmax
 
 end Musubi

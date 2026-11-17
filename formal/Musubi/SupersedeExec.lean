@@ -27,10 +27,11 @@ can't complete from what it holds now, it ignores, and the next one starts from 
 -/
 import Musubi.Exec
 import Musubi.Supersede
+import Musubi.ContractOrder
 
 namespace Musubi.Exec
 
-open Musubi
+open Musubi Contract
 
 /-- A record: operations the hub dropped at once. -/
 abbrev Rec := List Nat
@@ -178,6 +179,12 @@ inductive SAction
   remembers dropping. -/
   | hubPushRefuse (node : Nat) (ops objs : List Nat) (expected new : Nat)
       (applied : List Rec) (dropped : List Nat)
+  /-- The hub rejects a push whose node has its records, by the comparison it accepts with. -/
+  | hubSupReject (node : Nat) (ops objs : List Nat) (expected new : Nat) (applied : List Rec)
+      (dropped : List Nat)
+  /-- `node` takes announced records that drop one of its heads, replacing its heads by their
+  frontier with its known head under the records at once. -/
+  | advancePrepared (node : Nat) (records : List Rec)
   /-- The hub prunes its first `count` records, which every node has taken, now or before. -/
   | prune (count : Nat)
   deriving Repr
@@ -243,21 +250,145 @@ def SEState.adoptR (ses : SEState) (n : Nat) (R : List Rec) : SEState :=
     applied := (n, R) :: ses.applied.filter (fun p => p.1 != n)
     held := (n, R :: ses.heldF n) :: ses.held.filter (fun p => p.1 != n) }
 
+/-! ## What the hub compares, and how a node advances, through surviving images -/
+
+/-- What the hub's comparison drops for a push that drops `Δ`: everything its records ever
+dropped, pruned or not, and the push's drops. -/
+def acceptDrops (ses : SEState) (Δ : List Nat) : List Nat := union ses.hubDL Δ
+
+/-- The hub with a push stored and its new head accepted, the reply sent and every node
+notified. -/
+def EState.acceptPush (es : EState) (n : Nat) (S O : List Nat) (d : Nat) : EState :=
+  (((es.hubStore S O).hubAccept d).send (.head n .accepted (es.hub.seq + 1) d)).send
+    (.notifyAll (es.hub.seq + 1) d)
+
+/-- The push's supersede is in flight: from `n`, with records `A`, dropping `Δ`, to `d`. -/
+def ledgerB (ses : SEState) (n d : Nat) (A : List Rec) (Δ : List Nat) : Bool :=
+  ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped Δ && s.head == d
+
+/-- What `hubSupAccept` checks: the supersede is in flight with the hub's records and a head
+neither they nor the push drops; the push is in flight, from the hub's head to another; every
+surviving image of the hub's head, under the hub's drops and the push's, is below the new head
+(`Contract.belowB`), whether or not the hub's head itself is; and the hub holds the new head's
+closure. -/
+def acceptB (ses : SEState) (n : Nat) (S O : List Nat) (e d : Nat) (A : List Rec)
+    (Δ : List Nat) : Bool :=
+  ledgerB ses n d A Δ && recEq A ses.recs && !ses.remDL.contains d &&
+    !(pendingOf A Δ).contains d && ses.es.inNet (.push n S O e d) &&
+    decide (ses.es.hub.head ≠ d) && decide (ses.es.hub.head = e) &&
+    belowB ses.es.parF (acceptDrops ses Δ).contains e d && (ses.es.hubStore S O).closedB d
+
+/-- Which of `acceptB`'s checks fails first. -/
+def acceptError (ses : SEState) (n : Nat) (S O : List Nat) (e d : Nat) (A : List Rec)
+    (Δ : List Nat) : String :=
+  if !ledgerB ses n d A Δ then
+    s!"hubSupAccept: no supersede {showL Δ} from node {n} with {d} in net"
+  else if !recEq A ses.recs then s!"hubSupAccept: node {n}'s records are not the hub's"
+  else if ses.remDL.contains d || (pendingOf A Δ).contains d then
+    s!"hubSupAccept: new head {d} is dropped"
+  else if !ses.es.inNet (.push n S O e d) then
+    s!"hubSupAccept: push({e}, {d}) from node {n} not in net"
+  else if ses.es.hub.head = d then s!"hubSupAccept: head is already {d} (idempotent)"
+  else if ses.es.hub.head ≠ e then
+    s!"hubSupAccept: head {ses.es.hub.head} is not expected {e}"
+  else if !belowB ses.es.parF (acceptDrops ses Δ).contains e d then
+    s!"hubSupAccept: a surviving image of {e} is not below {d}"
+  else
+    s!"hubSupAccept: closure of {d} not stored at hub ({(ses.es.hubStore S O).missingMsg d})"
+
+/-- What `hubSupReject` checks: the push carries the hub's records and a head they don't drop,
+and is from another head than the hub's, or complete and not past the hub's head by the
+comparison `hubSupAccept` makes. So the hub never both accepts and rejects one push. -/
+def rejectB (ses : SEState) (n : Nat) (S O : List Nat) (e d : Nat) (A : List Rec)
+    (Δ : List Nat) : Bool :=
+  ledgerB ses n d A Δ && recEq A ses.recs && !ses.remDL.contains d &&
+    !(pendingOf A Δ).contains d &&
+    (!decide (ses.es.hub.head = e) ||
+      ((ses.es.hubStore S O).closedB d && !belowB ses.es.parF (acceptDrops ses Δ).contains e d))
+
+/-- What the base actions also check here: a plain rejection is of no push in flight that the
+hub would accept; the hub forgets nothing a head it can go back to needs; and it goes back only
+to a head whose closure it holds. -/
+def baseOutcomeB (ses : SEState) : Action → Bool
+  | .hubPushReject n S O e d =>
+    !(ses.sups.any fun p => p.node == n && p.head == d && acceptB ses n S O e d p.applied p.dropped)
+  | .hubForget S O =>
+    (List.range (ses.es.hub.seq + 1)).all fun i =>
+      (ancL ses.es.parF (ses.es.hub.histF i)).all (ses.es.forget S O).hub.ops.contains
+  | .hubRegress i => ses.es.closedB (ses.es.hub.histF i)
+  | _ => true
+
+def baseOutcomeError : Action → String
+  | .hubForget .. => "hubForget: an operation needed by retained history is missing"
+  | .hubRegress .. => "hubRegress: target incomplete; explicit recovery is required"
+  | _ => "hubPushReject: a supersede the hub would accept is in flight"
+
+/-- Node `n`'s heads become their frontier with its known head, under the dropped set `D`. -/
+def SEState.advanceTo (ses : SEState) (n : Nat) (D : List Nat) : SEState :=
+  { ses with es := ses.es.setNode n { ses.es.nodeOf n with
+      heads := frontier ses.es.parF D.contains
+        ((ses.es.nodeOf n).heads ++ [(ses.es.nodeOf n).known.head]) } }
+
+/-- An advance of node `n` to its known head when it dropped that head: it advances to what
+survives of it. -/
+def SEState.droppedKnown (ses : SEState) : Action → Option Nat
+  | .advance n => if (ses.nodeDF n).contains (ses.es.nodeOf n).known.head then some n else none
+  | _ => none
+
+/-- What an advance to what survives of the known head checks: the head has a surviving image,
+no head of the node is past all of them, and the frontier is local. -/
+def advanceB (N : Nat) (ses : SEState) (n : Nat) : Bool :=
+  let nd := ses.es.nodeOf n
+  let D := (ses.nodeDF n).contains
+  decide (n < N) && !(exp ses.es.parF D nd.known.head).isEmpty &&
+    (frontier ses.es.parF D (nd.heads ++ [nd.known.head])).all nd.lops.contains &&
+    !(nd.heads.any (belowB ses.es.parF D nd.known.head))
+
+/-- Node `n` takes records `R`, its heads becoming their frontier with its known head under
+what it has dropped with them, in one step: it never shows a head the records drop. -/
+def SEState.preparedAdvance (ses : SEState) (n : Nat) (R : List Rec) : SEState :=
+  (ses.advanceTo n (union (ses.nodeDF n) (flat R))).adoptR n R
+
+/-- What `advancePrepared` checks: the records were announced to the node, which has held them
+as far as they were pruned; they drop one of its heads; and the frontier is local. -/
+def preparedB (N : Nat) (ses : SEState) (n : Nat) (R : List Rec) : Bool :=
+  let nd := ses.es.nodeOf n
+  decide (n < N) &&
+    (ses.dmsgs.any fun e =>
+      e.node == n && recEq e.log.recs R && ses.heldPrefix n e.log.recs e.log.pruned) &&
+    nd.heads.any (flat R).contains &&
+    (frontier ses.es.parF (union (ses.nodeDF n) (flat R)).contains
+      (nd.heads ++ [nd.known.head])).all nd.lops.contains
+
+/-- A protocol action, with the hub's records kept as of a head it accepts and taken back as of
+one it goes back to. -/
+def baseCore (N : Nat) (ses : SEState) (a : Action) : Except String SEState :=
+  match execStep N ses.es a with
+  | .error e => .error e
+  | .ok es' =>
+    match a.regressSeq with
+    | some i => .ok { ses with es := es', recs := ses.recHistF i, pruned := ses.prunedHistF i }
+    | none =>
+      req (headOKB ses es')
+        (fun _ => s!"supersede: the hub's new head {es'.hub.head} comes without its records, \
+          or is one it dropped") fun _ =>
+      req (headsOKB ses es')
+        (fun _ => "supersede: a node's new head is one it dropped") fun _ =>
+      .ok (ses.withBase es')
+
 /-- One step, with every guard checked. Errors are `"<action>: <failed guard>"`. -/
 def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
   | .base a =>
-    match execStep N ses.es a with
-    | .error e => .error e
-    | .ok es' =>
-      match a.regressSeq with
-      | some i => .ok { ses with es := es', recs := ses.recHistF i, pruned := ses.prunedHistF i }
-      | none =>
-        req (headOKB ses es')
-          (fun _ => s!"supersede: the hub's new head {es'.hub.head} comes without its records, \
-            or is one it dropped") fun _ =>
-        req (headsOKB ses es')
-          (fun _ => "supersede: a node's new head is one it dropped") fun _ =>
-        .ok (ses.withBase es')
+    match ses.droppedKnown a with
+    | some n =>
+      req (advanceB N ses n)
+        (fun _ => s!"advance: node {n}'s known head has no local surviving frontier, or a head \
+          is past it") fun _ =>
+      .ok (ses.advanceTo n (ses.nodeDF n))
+    | none =>
+      match baseCore N ses a with
+      | .error e => .error e
+      | .ok t => req (baseOutcomeB ses a) (fun _ => baseOutcomeError a) fun _ => .ok t
   | .abandon n D =>
     req (decide (n < N)) (fun _ => s!"abandon: node {n} out of range") fun _ =>
     req (D.all fun x => (ses.es.nodeOf n).heads.any fun h => ancB ses.es.parF x h)
@@ -284,19 +415,8 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
       (fun _ => s!"adopt: records drop a head of node {n}") fun _ =>
     .ok (ses.adoptR n R)
   | .hubSupAccept n S O e d A Δ =>
-    req (ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped Δ && s.head == d)
-      (fun _ => s!"hubSupAccept: no supersede {showL Δ} from node {n} with {d} in net")
-      fun _ =>
-    req (recEq A ses.recs)
-      (fun _ => s!"hubSupAccept: node {n}'s records are not the hub's") fun _ =>
-    req (!ses.remDL.contains d && !(pendingOf A Δ).contains d)
-      (fun _ => s!"hubSupAccept: new head {d} is dropped") fun _ =>
-    match execStep N ses.es (.hubPushAccept n S O e d) with
-    | .error e => .error e
-    | .ok es' =>
-      req (headsOKB ses es')
-        (fun _ => "supersede: a node's new head is one it dropped") fun _ =>
-      .ok (ses.supAccept es' Δ)
+    req (acceptB ses n S O e d A Δ) (fun _ => acceptError ses n S O e d A Δ) fun _ =>
+    .ok (ses.supAccept (ses.es.acceptPush n S O d) Δ)
   | .hubPushRefuse n S O e d A Δ =>
     req (ses.es.inNet (.push n S O e d))
       (fun _ => s!"hubPushRefuse: push({e}, {d}) from node {n} not in net") fun _ =>
@@ -307,6 +427,16 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
       (fun _ => s!"hubPushRefuse: node {n}'s records are the hub's, and {d} isn't dropped")
       fun _ =>
     .ok ses
+  | .hubSupReject n S O e d A Δ =>
+    req (rejectB ses n S O e d A Δ)
+      (fun _ => s!"hubSupReject: push({e}, {d}) from node {n} is acceptable, or not its \
+        supersede with the hub's records") fun _ =>
+    baseCore N ses (.hubPushReject n S O e d)
+  | .advancePrepared n R =>
+    req (preparedB N ses n R)
+      (fun _ => s!"advancePrepared: records {repr R} not announced to node {n}, dropping none \
+        of its heads, or leaving a frontier not local") fun _ =>
+    .ok (ses.preparedAdvance n R)
   | .prune k =>
     req (decide (ses.pruned ≤ k))
       (fun _ => s!"prune: pruned {ses.pruned} records already, more than {k}") fun _ =>
@@ -320,6 +450,13 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
 def sexecStep (N : Nat) (ses : SEState) (a : SAction) : Except String SEState :=
   req ses.es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
   sexecCore N ses a
+
+/-- Surviving images of the known head that no current head covers. A survivor advance replaces
+a dropped known head by several heads, which raises the count of heads `mMulti` counts; this
+count falls instead. -/
+def uncoveredImages (par : Nat → List Nat) (D : Nat → Bool) (heads : List Nat)
+    (known : Nat) : Nat :=
+  ((exp par D known).filter (fun p => !heads.any (ancB par p))).length
 
 /-! ## The liveness measure
 
@@ -357,6 +494,43 @@ def recordMeasureE (N : Nat) (ses : SEState) := (ses.smeasureE N, ses.recordLagE
 def recordConvergedE (N : Nat) (ses : SEState) : Bool :=
   ses.sconvergedE N && (List.range N).all fun n => recEq (ses.appliedF n) ses.recs
 
+/-- `mAdv` through surviving images: what of node `n`'s known head no head covers. -/
+def advCE (ses : SEState) (n : Nat) : Nat :=
+  uncoveredImages ses.es.parF (ses.nodeDF n).contains
+    (ses.es.nodeOf n).heads (ses.es.nodeOf n).known.head
+
+/-- `settledE` through surviving images: one head, accepted, past what survives of its known
+head, and comparable with what survives of every head in the hub's history. -/
+def settledCE (ses : SEState) (n : Nat) : Bool :=
+  match (ses.es.nodeOf n).heads with
+  | [] => false
+  | x :: _ =>
+    (ses.es.nodeOf n).heads.all (· == x) && ancB ses.es.parF x ses.es.hub.head &&
+      (!(ses.nodeDF n).contains (ses.es.nodeOf n).known.head ||
+        belowB ses.es.parF (ses.nodeDF n).contains (ses.es.nodeOf n).known.head x) &&
+      (List.range (ses.es.hub.seq + 1)).all fun i =>
+        (exp ses.es.parF (ses.nodeDF n).contains (ses.es.hub.histF i)).all fun p =>
+          ancB ses.es.parF x p || ancB ses.es.parF p x
+
+/-- `rmeasureE` through surviving images. -/
+def rmeasureCE (N : Nat) (ses : SEState) : Nat × Nat × Nat × Nat × Nat × Nat :=
+  (cntE N (fun n => !(ses.es.consistentE n && ses.settledCE n)),
+    cntE N (fun n => !ses.es.consistentE n), sumN N ses.es.staleRE,
+    sumN N ses.es.missE, sumN N ses.advCE, sumN N ses.es.multiE)
+
+def recordMeasureCE (N : Nat) (ses : SEState) :=
+  ((ses.pendE N, ses.lagE N, ses.rmeasureCE N), ses.recordLagE N)
+
+def recordRankCE (N : Nat) (ses : SEState) : List Nat :=
+  let ((p, l, a, b, c, d, e, f), records) := ses.recordMeasureCE N
+  [p, l, a, b, c, d, e, f, records]
+
 end SEState
+
+/-- The lexicographic order used by the Rust harness's vector comparison. -/
+def rankLess : List Nat → List Nat → Bool
+  | [], ys => !ys.isEmpty
+  | _ :: _, [] => false
+  | x :: xs, y :: ys => if x == y then rankLess xs ys else decide (x < y)
 
 end Musubi.Exec

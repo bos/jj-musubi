@@ -18,13 +18,7 @@ import Musubi.AsyncLiveness
 import Musubi.RetryControl
 import Musubi.RecordStability
 import Musubi.ContractOrder
-import Musubi.SurvivorAdvance
 import Musubi.BaseImages
-import Musubi.ContractedExec
-import Musubi.ContractedRecordCut
-import Musubi.CutHistory
-import Musubi.PacketCoupling
-import Musubi.RecordReplies
 import Musubi.RecordEpoch
 import Musubi.NotificationControl
 import Musubi.SerialReply
@@ -40,7 +34,6 @@ import Musubi.HubHistory
 import Musubi.SysFreshCuts
 import Musubi.SysAcceptance
 import Musubi.RequestBounds
-import Musubi.ContractedMeasure
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.AbandonRefs
@@ -119,21 +112,8 @@ open Musubi
 #assert_axioms Schedule.before_of_done_before
 #assert_axioms FineAssembly.hive_converges_observed
 
-#assert_axioms Exec.cexec_sound
-#assert_axioms Exec.cexec_ok
-#assert_axioms Exec.cexecAction_sound
-#assert_axioms Exec.cexecAction_ok
-#assert_axioms Exec.cexec_reachable_step
-#assert_axioms Exec.cexecAction_record_control
-#assert_axioms Exec.contracted_step_node_drop_mono
-#assert_axioms Exec.cexec_record_prefix_stabilizes
-#assert_axioms Exec.cexec_record_and_drop_sets_stabilize
-#assert_axioms Exec.cutInv_step
-#assert_axioms Exec.cutHistory_step
-#assert_axioms Exec.cutHistory_run
-#assert_axioms Exec.post_cut_run
-#assert_axioms Exec.stale_accepts_stop
-#assert_axioms Exec.fresh_accept_aligned
+#assert_axioms Exec.sexec_record_and_drop_sets_stabilize
+#assert_axioms Exec.sexec_node_drop_mono
 #assert_axioms Exec.packet_source_drops
 #assert_axioms Exec.packet_accept_fields
 #assert_axioms Exec.packet_accept_fixed_drops
@@ -146,10 +126,6 @@ open Musubi
 #assert_axioms Exec.packet_upload_closes_split
 #assert_axioms Exec.packet_checks_of_emit
 #assert_axioms Exec.packet_checks_force_accept
-#assert_axioms Exec.cexec_reachable_heads_survive
-#assert_axioms Exec.current_adoption_enabled
-#assert_axioms Exec.aligned_records_no_pending
-#assert_axioms Exec.cexecAction_held
 #assert_axioms PendingEpoch.pending_names_settle
 #assert_axioms PendingEpoch.pending_names_fixed
 #assert_axioms PendingEpoch.pending_names_settle_with_old_known
@@ -215,9 +191,6 @@ open Musubi
 #assert_axioms NodeSysEntry.runOK_filt_init
 #assert_axioms Recovery.HubSys.hive_filtered
 #assert_axioms Recovery.HubSys.hub_stabilizes_hive
-#assert_axioms Exec.current_pruned_reply_reconstructs
-#assert_axioms Exec.fresh_record_reply_completes
-#assert_axioms Exec.serialized_record_reply_completes
 #assert_axioms Retry.project_own_start
 #assert_axioms Retry.project_reserve
 #assert_axioms Retry.project_other_start
@@ -287,20 +260,14 @@ open Musubi
 #assert_axioms Exec.uncoveredImages_after_advance
 #assert_axioms Exec.uncoveredImages_singleton_zero
 #assert_axioms Exec.rmeasureCE_without_drops
-#assert_axioms Exec.preparedAdvance_safe
-#assert_axioms Exec.imageAdvance_safe
-#assert_axioms Exec.imageAccept_safe
-#assert_axioms Contracted.step_safe
-#assert_axioms Contracted.step_retains
-#assert_axioms Contracted.old_expected_accepts_eventually_stop
 
-#assert_axioms Contract.advanceImages_set
-#assert_axioms Contract.advanceImages_nodup
-#assert_axioms Contract.advanceImages_survives
-#assert_axioms Contract.advanceImages_covers
-#assert_axioms Contract.advanceImages_singleton_ready
-#assert_axioms Contract.advanceImages_merge_ready
-#assert_axioms Contract.advanceImages_merge_keeps
+#assert_axioms Contract.frontierSet_covers
+#assert_axioms Contract.setP_frontier
+#assert_axioms Contract.frontier_nodup
+#assert_axioms Contract.frontier_covers
+#assert_axioms Contract.frontier_singleton_below
+#assert_axioms Contract.frontier_merge_below
+#assert_axioms Contract.frontier_merge_keeps
 #assert_axioms Contract.covered_drops
 #assert_axioms Contract.covered_image
 #assert_axioms Contract.covered_upd
@@ -571,10 +538,10 @@ open Musubi
 #assert_axioms PresenceContract.sid_superseded_ne
 
 -- Replicated op abandon
-#assert_axioms SReachable.base
-#assert_axioms SRReachable.base
-#assert_axioms noDuplicateMergeS
 #assert_axioms sinv_reachable
+#assert_axioms hub_moves_original
+#assert_axioms schain_rstep
+#assert_axioms schain_of_run
 #assert_axioms nodeD_grows
 #assert_axioms hubD_grows
 #assert_axioms superseded_never_returns

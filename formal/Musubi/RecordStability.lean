@@ -24,60 +24,48 @@ theorem sexec_record_control {N : Nat} {s t : SEState} {a : SAction}
     (t.recs = s.recs ∨ ∃ D, t.recs = s.takeRecs D) ∧ s.pruned ≤ t.pruned := by
   simp only [sexecStep] at h
   peel h with _
+  have core : ∀ {b : Action} {t : SEState}, b.goesBack = false → baseCore N s b = .ok t →
+      t.recs = s.recs ∧ t.pruned = s.pruned := by
+    intro b t hb hc
+    rcases baseCore_ok hc with ⟨i, -, -, hr, -⟩ | ⟨_, -, -, -, -, rfl⟩
+    · have := regressSeq_some hr
+      subst b
+      simp [Action.goesBack] at hb
+    · exact ⟨rfl, rfl⟩
   cases a with
   | base b =>
-    cases hs : execStep N s.es b with
-    | error e => simp [sexecCore, hs] at h
-    | ok es' =>
-      cases hr : b.regressSeq with
-      | some i =>
-        have hb := regressSeq_some hr
-        subst b
-        simp [SAction.goesBack, Action.goesBack] at hnr
-      | none =>
-        simp only [sexecCore, hs, hr] at h
-        peel h with _ _
-        cases h
-        exact ⟨Or.inl rfl, Nat.le_refl _⟩
+    rcases sexecCore_base h with ⟨n, -, -, rfl⟩ | ⟨-, hc⟩
+    · exact ⟨Or.inl rfl, Nat.le_refl _⟩
+    · obtain ⟨hr, hp⟩ := core (by simpa [SAction.goesBack] using hnr) hc
+      exact ⟨Or.inl hr, hp ▸ Nat.le_refl _⟩
   | abandon n D =>
-    simp only [sexecCore] at h
-    peel h with _ _ _ _
-    cases h
+    unstep [sexecCore] h with _ _ _ _
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | sendSup n d =>
-    simp only [sexecCore] at h
-    peel h with _ _
-    cases h
+    unstep [sexecCore] h with _ _
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | sendD n =>
-    simp only [sexecCore] at h
-    peel h with _
-    cases h
+    unstep [sexecCore] h with _
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | adopt n R =>
-    simp only [sexecCore] at h
-    peel h with _ _ _
-    cases h
+    unstep [sexecCore] h with _ _ _
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | hubSupAccept n S O e d A D =>
-    simp only [sexecCore] at h
-    peel h with _ _ _
-    cases hs : execStep N s.es (.hubPushAccept n S O e d) with
-    | error e => rw [hs] at h; cases h
-    | ok es' =>
-      rw [hs] at h
-      peel h with _
-      cases h
-      exact ⟨Or.inr ⟨D, rfl⟩, Nat.le_refl _⟩
+    unstep [sexecCore] h with _
+    exact ⟨Or.inr ⟨D, rfl⟩, Nat.le_refl _⟩
   | hubPushRefuse n S O e d A D =>
+    unstep [sexecCore] h with _ _ _
+    exact ⟨Or.inl rfl, Nat.le_refl _⟩
+  | hubSupReject n S O e d A D =>
     simp only [sexecCore] at h
-    peel h with _ _ _
-    cases h
+    peel h with _
+    obtain ⟨hr, hp⟩ := core rfl h
+    exact ⟨Or.inl hr, hp ▸ Nat.le_refl _⟩
+  | advancePrepared n R =>
+    unstep [sexecCore] h with _
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | prune k =>
-    simp only [sexecCore] at h
-    peel h with hp _ _
-    cases h
+    unstep [sexecCore] h with hp _ _
     exact ⟨Or.inl rfl, of_decide_eq_true hp⟩
 
 theorem takeRecs_grows (s : SEState) (D : List Nat) {x : Nat}
@@ -324,7 +312,7 @@ theorem node_drop_sets_eventually_stabilize (N B : Nat) (run : Nat → SEState)
 /-- The record list, pruned prefix and every node's original-drop set eventually stop changing
 together. Only the field effects are assumed: record append and prune, and nodes keeping the
 original drops they have learned. Local raw operations may contract parents, so they need not
-simulate an original-history `cexecAction` for this theorem to apply. -/
+simulate an executable step for this theorem to apply. -/
 theorem record_and_drop_sets_stabilize (N B : Nat) (run : Nat → SEState)
     (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
       ∃ D, (run (i + 1)).recs = (run i).takeRecs D)
@@ -343,5 +331,36 @@ theorem record_and_drop_sets_stabilize (N B : Nat) (run : Nat → SEState)
   · exact (hr i (by omega)).trans (hr (max r d) (by omega)).symm
   · intro n hn x
     exact (hd i (by omega) n hn x).trans (hd (max r d) (by omega) n hn x).symm
+
+/-- A node's dropped set only grows, whatever the step, the hub going back included. -/
+theorem sexec_node_drop_mono {N : Nat} {s t : SEState} {a : SAction} (hok : SEOK s)
+    (h : sexecStep N s a = .ok t) {n x : Nat} (hx : x ∈ s.nodeDF n) : x ∈ t.nodeDF n := by
+  rcases sexec_sound hok h with h' | e
+  · exact nodeD_grows h' (n := n) (x := x) hx
+  · have : (sabs t).nodeD n x := by rw [e]; exact hx
+    exact this
+
+/-- The ordered records, pruning boundary and all participants' dropped sets admit one common
+cut for every executable run without rollback. This does not assume that the nodes' record
+lists agree or that obsolete announcements have stopped arriving. -/
+theorem sexec_record_and_drop_sets_stabilize (N B : Nat) (run : Nat → SEState)
+    (actions : Nat → SAction) (hok : SEOK (run 0))
+    (hs : ∀ i, sexecStep N (run i) (actions i) = .ok (run (i + 1)))
+    (hnr : ∀ i, (actions i).goesBack = false)
+    (hhub : ∀ i x, x ∈ (run i).hubDL → x < B)
+    (hnode : ∀ i n, n < N → ∀ x, x ∈ (run i).nodeDF n → x < B) :
+    ∃ k, ∀ i, k ≤ i →
+      ((run i).recs, (run i).pruned) = ((run k).recs, (run k).pruned) ∧
+      ∀ n, n < N → ∀ x, x ∈ (run i).nodeDF n ↔ x ∈ (run k).nodeDF n := by
+  have hi : ∀ i, SEOK (run i) := by
+    intro i
+    induction i with
+    | zero => exact hok
+    | succ i ih => exact sexec_ok ih (hs i)
+  exact record_and_drop_sets_stabilize N B run
+    (fun i => (sexec_record_control (hs i) (hnr i)).1)
+    (fun i => (sexec_record_control (hs i) (hnr i)).2)
+    (fun i => (hi i).pruned)
+    (fun i _ _ _ hx => sexec_node_drop_mono (hi i) (hs i) hx) hhub hnode
 
 end Musubi.Exec

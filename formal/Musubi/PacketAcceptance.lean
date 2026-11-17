@@ -11,13 +11,148 @@ The convergence proof uses this file except the executable-model upload and pack
 theorems (`packet_checks_accept`, `packet_upload_closes` and their helpers), which are not used by
 the assembly and stand alone.
 -/
-import Musubi.PacketCoupling
-import Musubi.CutHistory
 import Musubi.NodeSettle
+import Musubi.RecordStability
 
 namespace Musubi.Exec
 
 open Musubi Contract
+
+/-! ## One push -/
+
+/-- One push: the sender, its writes, the expected and new heads, and the sender's applied
+records and pending drops at send time. -/
+structure PushPacket where
+  node : Nat
+  ops : List Nat
+  objs : List Nat
+  expected : Nat
+  /-- Ghost send-time sequence; the wire carries the expected head, not this value. -/
+  knownSeq : Nat
+  new : Nat
+  applied : List Rec
+  pending : List Nat
+  deriving Repr
+
+/-- Every drop the packet carries: those of its applied records plus its pending ones. -/
+def PushPacket.allDrops (p : PushPacket) : List Nat := union (flat p.applied) p.pending
+
+/-- The hub's acceptance action built from the packet's own fields. -/
+def PushPacket.accept (p : PushPacket) : SAction :=
+  .hubSupAccept p.node p.ops p.objs p.expected p.new p.applied p.allDrops
+
+/-- The packet's semantic fields all come from the send-time state `s`. Request and session
+ids are transport control and are tied to slots separately. -/
+def PushPacket.sourceMatchesB (N : Nat) (s : SEState) (p : PushPacket) : Bool :=
+  decide (p.node < N) && recEq p.applied (s.appliedF p.node) &&
+    seteq p.allDrops (s.nodeDF p.node) &&
+    decide (p.expected = (s.es.nodeOf p.node).known.head) &&
+    decide (p.knownSeq = (s.es.nodeOf p.node).known.seq) &&
+    (s.es.nodeOf p.node).heads.contains p.new &&
+    (s.es.nodeOf p.node).heads.all (· == p.new) &&
+    p.pending.all (fun x => !(flat p.applied).contains x)
+
+/-- Equal record lists drop the same ids. -/
+theorem mem_flat_of_recEq {A B : List Rec} (h : recEq A B = true) (x : Nat) :
+    x ∈ flat A ↔ x ∈ flat B := by
+  have e := congrFun (recEq_flat h) x
+  simp only [setP] at e
+  exact Iff.of_eq e
+
+/-- Set-equal lists have the same members. -/
+theorem mem_of_seteq {a b : List Nat} (h : seteq a b = true) (x : Nat) : x ∈ a ↔ x ∈ b := by
+  have e := congrFun (seteq_setP h) x
+  simp only [setP] at e
+  exact Iff.of_eq e
+
+/-- Every drop of an applied record is carried by the packet. -/
+theorem packet_custody (p : PushPacket) {x : Nat} (hx : x ∈ flat p.applied) :
+    x ∈ p.allDrops := mem_union.2 (.inl hx)
+
+/-- The packet's drops are the sender's drops in the source state. -/
+theorem packet_source_drops {N : Nat} {s : SEState} {p : PushPacket}
+    (h : p.sourceMatchesB N s = true) (x : Nat) :
+    x ∈ p.allDrops ↔ x ∈ s.nodeDF p.node := by
+  have he : seteq p.allDrops (s.nodeDF p.node) = true := by
+    simp only [PushPacket.sourceMatchesB, Bool.and_eq_true] at h
+    exact h.1.1.1.1.1.2
+  exact mem_of_seteq he x
+
+/-- The sender's known position in the source state is `⟨knownSeq, expected⟩`. -/
+theorem packet_source_known {N : Nat} {s : SEState} {p : PushPacket}
+    (h : p.sourceMatchesB N s = true) :
+    (s.es.nodeOf p.node).known = ⟨p.knownSeq, p.expected⟩ := by
+  simp only [PushPacket.sourceMatchesB, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact Known.ext h.1.1.1.2.symm h.1.1.1.1.2.symm
+
+/-- The sender's only head in the source state is the packet's new head. -/
+theorem packet_source_heads {N : Nat} {s : SEState} {p : PushPacket}
+    (h : p.sourceMatchesB N s = true) (x : Nat) :
+    x ∈ (s.es.nodeOf p.node).heads ↔ x = p.new := by
+  simp only [PushPacket.sourceMatchesB, Bool.and_eq_true] at h
+  have hm := List.contains_iff_mem.1 h.1.1.2
+  have hall := List.all_eq_true.1 h.1.2
+  exact ⟨fun hx => by simpa using hall x hx, fun he => he ▸ hm⟩
+
+/-- A packet matching its source names a node below `N`. -/
+theorem packet_source_node {N : Nat} {s : SEState} {p : PushPacket}
+    (h : p.sourceMatchesB N s = true) : p.node < N := by
+  simp only [PushPacket.sourceMatchesB, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact h.1.1.1.1.1.1.1
+
+/-- If the hub accepts the packet, its applied records are the hub's, and the result's records
+drop the packet's drops. Only packet fields are used, never current node state. -/
+theorem packet_accept_fields {N : Nat} {s t : SEState} {p : PushPacket}
+    (h : sexecStep N s p.accept = .ok t) :
+    recEq p.applied s.recs = true ∧ t.recs = s.takeRecs p.allDrops := by
+  unstep [PushPacket.accept, sexecStep, sexecCore] h with - hg
+  simp only [acceptB, Bool.and_eq_true] at hg
+  exact ⟨hg.1.1.1.1.1.1.1.2, rfl⟩
+
+/-- If acceptance leaves the records unchanged, the packet's drops are exactly the hub's
+dropped set. This uses the packet's send-time custody, not the sender's state at acceptance. -/
+theorem packet_accept_fixed_drops {N : Nat} {s t : SEState} {p : PushPacket}
+    (h : sexecStep N s p.accept = .ok t) (hfix : t.recs = s.recs) (x : Nat) :
+    x ∈ p.allDrops ↔ x ∈ s.hubDL := by
+  obtain ⟨hrec, heffect⟩ := packet_accept_fields h
+  have hsub := (takeRecs_eq_iff s p.allDrops).1 (heffect.symm.trans hfix)
+  constructor
+  · exact hsub x
+  · intro hx
+    exact packet_custody p ((mem_flat_of_recEq hrec x).2 hx)
+
+/-- A packet matching its source state, accepted with records unchanged, shows the source
+sender's dropped set equals the hub's. The sender is identified by the packet, not by a ledger
+entry naming the same head. -/
+theorem packet_sender_aligned {N : Nat} {source s t : SEState} {p : PushPacket}
+    (hsource : p.sourceMatchesB N source = true)
+    (haccept : sexecStep N s p.accept = .ok t) (hfix : t.recs = s.recs) (x : Nat) :
+    x ∈ source.nodeDF p.node ↔ x ∈ s.hubDL :=
+  (packet_source_drops hsource x).symm.trans (packet_accept_fixed_drops haccept hfix x)
+
+/-- If records and every node's drop set are fixed from step `k`, then a packet sent and
+accepted after `k` shows its sender's dropped set equals the hub's at every step from `k`. The
+sender is identified by the packet's own send-time snapshot. -/
+theorem packet_sender_after_cut_aligned {N k sent accepted : Nat}
+    {run : Nat → SEState} {p : PushPacket}
+    (hrec : ∀ i, k ≤ i → (run i).recs = (run k).recs)
+    (hdrop : ∀ i, k ≤ i → ∀ n, n < N → ∀ x,
+      x ∈ (run i).nodeDF n ↔ x ∈ (run k).nodeDF n)
+    (hsource : p.sourceMatchesB N (run sent) = true)
+    (hsent : k ≤ sent) (haccepted : k ≤ accepted)
+    (haccept : sexecStep N (run accepted) p.accept = .ok (run (accepted + 1))) :
+    ∀ i, k ≤ i → ∀ x, x ∈ (run i).nodeDF p.node ↔ x ∈ (run i).hubDL := by
+  have hn := packet_source_node hsource
+  have hfix : (run (accepted + 1)).recs = (run accepted).recs :=
+    (hrec _ (by omega)).trans (hrec _ haccepted).symm
+  have halign := packet_sender_aligned hsource haccept hfix
+  intro i hi x
+  have hd := (hdrop i hi p.node hn x).trans (hdrop sent hsent p.node hn x).symm
+  have hh : (run accepted).hubDL = (run i).hubDL := by
+    simp only [SEState.hubDL, hrec accepted haccepted, hrec i hi]
+  exact hd.trans ((halign x).trans (by rw [hh]))
+
+/-! ## Upload coverage -/
 
 /-- The packet uploads every op and object reachable from `new` but not from `expected`.
 When pending drops rename the base, native `ops_between` instead excludes the union of the
@@ -127,15 +262,12 @@ adapter supplies survival, comparison and closure. The fields are checks: neithe
 outcome nor a rank decrease is one of them. -/
 structure PacketPrimitives (s : SEState) (p : PushPacket) : Prop where
   par : s.es.parOK = true
-  ledger : (s.sups.any fun q => q.node == p.node && recEq q.applied p.applied &&
-    seteq q.dropped p.allDrops && q.head == p.new) = true
+  ledger : ledgerB s p.node p.new p.applied p.allDrops = true
   survives : !s.remDL.contains p.new = true
   pending : !(pendingOf p.applied p.allDrops).contains p.new = true
   sent : s.es.inNet (.push p.node p.ops p.objs p.expected p.new) = true
-  descends : belowB s.es.parF (acceptDrops s p.applied p.allDrops).contains
-    p.expected p.new = true
+  descends : belowB s.es.parF (acceptDrops s p.allDrops).contains p.expected p.new = true
   closed : (s.es.hubStore p.ops p.objs).closedB p.new = true
-  wellFormed : imageAcceptSafeB s p.ops p.new p.applied p.allDrops = true
 
 /-- `PacketPrimitives`, plus: the packet's records are the hub's, its new head differs from the
 hub's head, and its expected head is the hub's head. -/
@@ -163,77 +295,48 @@ theorem packet_checks_of_emit {c : NodeSettle.Ctx} {σ σ1 : NodeSettle.NS} {new
     exact Ne.symm hne
   · rw [hhead, hexpected, hk]
 
-/-- `PacketChecks` imply the executable acceptance guard `imageAcceptB`. -/
+/-- `PacketChecks` imply the executable acceptance guard `acceptB`. -/
 theorem packet_checks_acceptB {s : SEState} {p : PushPacket} (h : PacketChecks s p) :
-    imageAcceptB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = true := by
-  simp only [imageAcceptB, Bool.and_eq_true, decide_eq_true_eq]
-  exact ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h.par, h.ledger⟩, h.records⟩, h.survives⟩, h.pending⟩,
-    h.sent⟩, h.different⟩, h.expected⟩, h.descends⟩, h.closed⟩, h.wellFormed⟩
+    acceptB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = true := by
+  simp only [acceptB, Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨⟨⟨⟨⟨⟨⟨⟨h.ledger, h.records⟩, h.survives⟩, h.pending⟩, h.sent⟩, h.different⟩,
+    h.expected⟩, h.descends⟩, h.closed⟩
 
 /-- An accepted packet moves the hub to the packet's new head, with sequence plus one. -/
 theorem packet_accept_effect {N : Nat} {s t : SEState} {p : PushPacket}
-    (h : cexecAction N s p.accept = .ok t) :
+    (h : sexecStep N s p.accept = .ok t) :
     t.es.hub.head = p.new ∧ t.es.hub.seq = s.es.hub.seq + 1 := by
-  simp only [PushPacket.accept, cexecAction, cexecStep] at h
-  cases hs : sexecStep N s
-      (.hubSupAccept p.node p.ops p.objs p.expected p.new p.applied p.allDrops) with
-  | ok result =>
-    rw [hs] at h
-    simp only at h
-    split at h
-    · cases h
-      peel hs with -
-      simp only [sexecCore] at hs
-      peel hs with - - -
-      split at hs
-      · cases hs
-      · rename_i es' he
-        peel hs with -
-        cases hs
-        obtain ⟨-, -, -, hh, hseq⟩ := execStep_hubPushAccept_guards he
-        exact ⟨hh, hseq⟩
-    · contradiction
-  | error error =>
-    rw [hs] at h
-    simp only at h
-    split at h
-    · cases h
-      simp [SEState.imageAccept, SEState.supAccept, send_hub, EState.hubAccept,
-        EState.hubStore, EState.hubStoreOps, EState.hubStoreObjs]
-    · contradiction
+  unstep [PushPacket.accept, sexecStep, sexecCore] h with - -
+  obtain ⟨hseq, hhead⟩ := acceptPush_hub s.es p.node p.ops p.objs p.new
+  exact ⟨hhead, hseq⟩
 
-/-- `PacketChecks` make `cexecAction` accept the packet, by either the ordinary or the
-surviving-image path, and the hub moves to the packet's new head with sequence plus one. -/
+/-- `PacketChecks` make `sexecStep` accept the packet, and the hub moves to the packet's new
+head with sequence plus one. -/
 theorem packet_checks_accept {N : Nat} {s : SEState} {p : PushPacket}
     (h : PacketChecks s p) :
-    ∃ t, cexecAction N s p.accept = .ok t ∧
+    ∃ t, sexecStep N s p.accept = .ok t ∧
       t.es.hub.head = p.new ∧ t.es.hub.seq = s.es.hub.seq + 1 := by
   have hg := packet_checks_acceptB h
-  have hex : ∃ t, cexecAction N s p.accept = .ok t := by
-    simp only [PushPacket.accept, cexecAction, cexecStep]
-    cases hs : sexecStep N s
-        (.hubSupAccept p.node p.ops p.objs p.expected p.new p.applied p.allDrops) with
-    | ok result => exact ⟨result, by simp [legacyOutcomeB]⟩
-    | error error =>
-      exact ⟨s.imageAccept p.node p.ops p.objs p.new p.allDrops, by simp [hg]⟩
-  obtain ⟨t, ht⟩ := hex
-  exact ⟨t, ht, packet_accept_effect ht⟩
+  have ht : sexecStep N s p.accept =
+      .ok (s.supAccept (s.es.acceptPush p.node p.ops p.objs p.new) p.allDrops) := by
+    simp [PushPacket.accept, sexecStep, sexecCore, req, h.par, hg]
+  exact ⟨_, ht, packet_accept_effect ht⟩
 
 /-- `PacketChecks` make the packet's rejection guard false. -/
 theorem packet_checks_no_reject {s : SEState} {p : PushPacket} (h : PacketChecks s p) :
-    imageRejectB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = false := by
-  simp [imageRejectB, h.expected, h.descends]
+    rejectB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = false := by
+  simp [rejectB, h.expected, h.descends]
 
 /-- Every decision the hub can make on this packet: acceptance, refusal, idempotence, rejection
 or incompleteness. The refusal guard is checked before idempotence, ancestry or closure, as in
 `Push::answer`. `packet_checks_force_accept` shows that `PacketChecks` leave only acceptance. -/
 inductive PacketHandled (N : Nat) (s : SEState) (p : PushPacket) : SEState → Prop
-  | accept {t : SEState} (h : cexecAction N s p.accept = .ok t) : PacketHandled N s p t
+  | accept {t : SEState} (h : sexecStep N s p.accept = .ok t) : PacketHandled N s p t
   | refused (t : SEState) (h : (!recEq p.applied s.recs || s.remDL.contains p.new ||
       (pendingOf p.applied p.allDrops).contains p.new) = true) : PacketHandled N s p t
   | idempotent (t : SEState) (h : s.es.hub.head = p.new) : PacketHandled N s p t
   | rejected (t : SEState)
-      (h : imageRejectB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = true) :
+      (h : rejectB s p.node p.ops p.objs p.expected p.new p.applied p.allDrops = true) :
       PacketHandled N s p t
   | incomplete (t : SEState) (h : (s.es.hubStore p.ops p.objs).closedB p.new = false) :
       PacketHandled N s p t
@@ -242,7 +345,7 @@ inductive PacketHandled (N : Nat) (s : SEState) (p : PushPacket) : SEState → P
 new head with sequence plus one. -/
 theorem packet_checks_force_accept {N : Nat} {s t : SEState} {p : PushPacket}
     (hc : PacketChecks s p) (hh : PacketHandled N s p t) :
-    cexecAction N s p.accept = .ok t ∧
+    sexecStep N s p.accept = .ok t ∧
       t.es.hub.head = p.new ∧ t.es.hub.seq = s.es.hub.seq + 1 := by
   cases hh with
   | accept h => exact ⟨h, packet_accept_effect h⟩

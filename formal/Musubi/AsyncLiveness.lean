@@ -146,7 +146,7 @@ theorem settling_decreases {s t : State} (hr : RReachable N s) (hs : SettlingSte
       ((t.hub.seq, t.hub.head) ≠ (s.hub.seq, s.hub.head) → mBad N t < mBad N s) := by
   cases hs with
   | policy hp hh hseq =>
-    exact ⟨lex6_first_le (measureR_decreases hr hp), fun h => False.elim (h (by rw [hh, hseq]))⟩
+    exact ⟨lex6_first_le (measureR_decreases (invR_reachable hr) hp), fun h => False.elim (h (by rw [hh, hseq]))⟩
   | delayed hn hc hsq hh hlt f hheads hknown =>
     exact ⟨lex6_first_le (measureR_delayed_learn hn hc hsq hh hlt f hheads hknown),
       fun h => False.elim (h (by rw [f.head, f.seq]))⟩

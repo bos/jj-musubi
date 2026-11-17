@@ -20,7 +20,6 @@ import Musubi.SupersedeExec
 import Musubi.SupersedeExecSound
 import Musubi.RecordLiveness
 import Musubi.SupersedeExecTest
-import Musubi.ContractedExecTest
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.AbandonRefs

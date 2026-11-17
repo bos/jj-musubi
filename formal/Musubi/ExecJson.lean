@@ -18,10 +18,6 @@ import Musubi.Names
 import Musubi.RefsExec
 import Musubi.RetryControl
 import Musubi.ContractOrder
-import Musubi.SurvivorAdvance
-import Musubi.ContractedExec
-import Musubi.ContractedMeasure
-import Musubi.PacketCoupling
 import Musubi.SerialReply
 import Musubi.RecordEpoch
 import Musubi.EarlyEntry
@@ -126,19 +122,12 @@ def decodeSAction (j : Json) : Except String SAction := do
   | "adopt" => return .adopt (← node) (← getRecs j "records")
   | "hubSupAccept" => push .hubSupAccept
   | "hubPushRefuse" => push .hubPushRefuse
+  | "hubPushReject" =>
+    if (j.getObjVal? "applied").isOk then push .hubSupReject
+    else return .base (← decodeAction j)
+  | "advancePrepared" => return .advancePrepared (← node) (← getRecs j "records")
   | "prune" => return .prune (← getNat j "count")
   | _ => return .base (← decodeAction j)
-
-def decodeCAction (j : Json) : Except String CAction := do
-  let kind ← j.getObjValAs? String "kind"
-  if kind == "advancePrepared" then
-    return .advancePrepared (← getNat j "node") (← getRecs j "records")
-  else if kind == "hubPushReject" && (j.getObjVal? "applied").isOk then
-    return .reject (← getNat j "node") (← getNats j "ops") (← getNats j "objs")
-      (← getNat j "expected") (← getNat j "new") (← getRecs j "applied")
-      (← getNats j "dropped")
-  else
-    return .old (← decodeSAction j)
 
 /-! ## Encoding -/
 
@@ -682,7 +671,7 @@ def survivorAdvanceReply (j : Json) : Except String Json := do
   let D := fun x => dropped.contains x
   let images := Contract.exp par D known
   unless !images.isEmpty do throw "known head has no surviving image"
-  let next := Contract.advanceImages par D heads known
+  let next := Contract.frontier par D (heads ++ [known])
   pure (Json.mkObj [("ok", toJson true), ("images", toJson images),
     ("heads", toJson next), ("merge", toJson (decide (next.length > 1)))])
 
@@ -1081,10 +1070,10 @@ def sessionOps : List (String × (Nat × SEState → Json → Except String Json
 
 /-- A `step`: the action's refusal by the model is reported as it is, not as a bad request. -/
 def handleStep (N : Nat) (es : SEState) (j : Json) : Json × Session :=
-  match j.getObjVal? "action" >>= decodeCAction with
+  match j.getObjVal? "action" >>= decodeSAction with
   | .error e => (errReply (badRequest e), some (N, es))
   | .ok a =>
-    match cexecAction N es a with
+    match sexecStep N es a with
     | .error e => (errReply e, some (N, es))
     | .ok es' => (okReply N es', some (N, es'))
 

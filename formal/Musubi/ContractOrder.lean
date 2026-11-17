@@ -9,68 +9,6 @@ import Musubi.ExecSound
 
 namespace Musubi.Contract
 
-/-- Every surviving image of `a` is below `b`. The image's nonemptiness is a separate
-guard, as on the shipping hub; the relational lemmas do not assume rooted histories. -/
-def Below (par : Nat → List Nat) (D : Nat → Bool) (a b : Nat) : Prop :=
-  ∀ p ∈ exp par D a, Anc par p b
-
-theorem below_refl (hlt : ParLt par) (D : Nat → Bool) (a : Nat) :
-    Below par D a a :=
-  fun _ hp => (mem_exp hlt hp).2
-
-theorem below_survivor_iff (hlt : ParLt par) (ha : D a = false) :
-    Below par D a b ↔ Anc par a b := by
-  simp [Below, exp_eq hlt, ha]
-
-/-- The images survive, so their ancestry can equivalently be checked in the contracted
-graph, as the hub does with current canonical ids. -/
-theorem below_contracted_iff (hlt : ParLt par) :
-    Below par D a b ↔ ∀ p ∈ exp par D a, Anc (cpar par D) p b := by
-  constructor
-  · intro h p hp
-    exact (anc_cpar_iff hlt (mem_exp hlt hp).1).2 (h p hp)
-  · intro h p hp
-    exact (anc_cpar_iff hlt (mem_exp hlt hp).1).1 (h p hp)
-
-/-- Expanding a current head under a new pending drop set is the same comparison as
-contracting the original history by both sets. -/
-theorem below_two_step (hlt : ParLt par) (ha : D a = false) :
-    Below (cpar par D) E a b ↔ Below par (union D E) a b := by
-  have himages : ∀ p, p ∈ exp (cpar par D) E a ↔ p ∈ exp par (union D E) a := by
-    intro p
-    have he := (exp_union hlt D E a).mem (a := p)
-    simpa [exp_eq hlt, ha] using he
-  have hsurvives : ∀ p, p ∈ exp par (union D E) a → D p = false := by
-    intro p hp
-    have h := (mem_exp hlt hp).1
-    have hh : D p = false ∧ E p = false := by simpa [union] using h
-    exact hh.1
-  constructor
-  · intro h p hp
-    exact (anc_cpar_iff hlt (hsurvives p hp)).1 (h p ((himages p).2 hp))
-  · intro h p hp
-    have hm := (himages p).1 hp
-    exact (anc_cpar_iff hlt (hsurvives p hm)).2 (h p hm)
-
-/-- Contracting more operations preserves every comparison already made. -/
-theorem below_mono (hlt : ParLt par) (hDE : ∀ x, D x = true → E x = true)
-    (h : Below par D a b) : Below par E a b := by
-  intro p hp
-  obtain ⟨hpE, hpa⟩ := mem_exp hlt hp
-  have hpD : D p = false := by
-    cases hd : D p
-    · rfl
-    · have := hDE p hd
-      simp_all
-  obtain ⟨q, hq, hpq⟩ := exp_covers hlt hpa hpD
-  exact hpq.trans (h q hq)
-
-theorem below_trans (hlt : ParLt par) (hab : Below par D a b)
-    (hbc : Below par D b c) : Below par D a c := by
-  intro p hp
-  obtain ⟨q, hq, hpq⟩ := exp_covers hlt (hab p hp) (mem_exp hlt hp).1
-  exact hpq.trans (hbc q hq)
-
 /-- The executable hub check also refuses an empty image. -/
 def belowB (par : Nat → List Nat) (D : Nat → Bool) (a b : Nat) : Bool :=
   let images := exp par D a
@@ -170,19 +108,6 @@ theorem frontier_singleton_below (hlt : ParLt par) {hs : List Nat} {B k h : Nat}
   obtain ⟨q, hq, hpq⟩ := frontier_covers_image hlt hb hk hp
   rw [he] at hq
   exact (List.mem_singleton.1 hq) ▸ hpq
-
-/-- Fresh operations do not change the images of an older head. -/
-theorem exp_upd (hlt : ParLt par) (hL : ∀ p ∈ L, p < o) (hx : x < o) :
-    exp (upd par o L) D x = exp par D x := by
-  have hlt' := parLt_upd hlt hL
-  induction x using Nat.strongRecOn with
-  | ind x ih =>
-    rw [exp_eq hlt', exp_eq hlt, upd_ne _ _ (Nat.ne_of_lt hx)]
-    split
-    · apply flatMap_congr_mem
-      intro p hp
-      exact ih p (hlt x p hp) (by have := hlt x p hp; omega)
-    · rfl
 
 /-- A merge of the frontier is past every input, in the hub's comparison: its expected head may
 be dropped, so this is `Below`, not original ancestry. -/

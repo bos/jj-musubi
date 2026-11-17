@@ -25,6 +25,7 @@ use super::NodeRepo;
 use super::PublicationCache;
 use super::PublicationReport;
 use super::intent::view_roots;
+use crate::node::PublicationError;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -45,10 +46,6 @@ struct CleanupWorkspace {
     locked: Box<dyn LockedWorkingCopy>,
 }
 
-fn invalid(message: impl Into<String>) -> NodeError {
-    NodeError::Publication(message.into())
-}
-
 impl NodeRepo {
     /// Lock metadata before op heads, as jj does. Cleanup keeps the current view, so
     /// every local working copy needs that exact recorded commit as its snapshot basis.
@@ -57,7 +54,7 @@ impl NodeRepo {
         let repo = self.repo_at(head)?;
         let canonical = self
             .canonical_of(head)
-            .ok_or_else(|| invalid("the current operation changed; run the cleanup again"))?;
+            .ok_or(PublicationError::LockedHeadChanged)?;
         let mut own: BTreeSet<_> = self
             .own_workspaces(&repo, &canonical)?
             .into_keys()
@@ -75,31 +72,37 @@ impl NodeRepo {
             match self.loader.workspace_store().get_workspace_path(name) {
                 Ok(Some(path)) => {
                     let path = path.canonicalize().map_err(|err| {
-                        invalid(format!(
-                            "cannot read workspace {label} at {}: {err}",
-                            path.display()
-                        ))
+                        PublicationError::UnreadableWorkspace {
+                            name: label.to_owned(),
+                            path: path.clone(),
+                            reason: err.to_string(),
+                        }
                     })?;
                     match paths.entry(path) {
                         Entry::Vacant(entry) => {
                             entry.insert(name.clone());
                         }
                         Entry::Occupied(entry) => {
-                            return Err(invalid(format!(
-                                "workspaces {} and {label} share a registered path at {}; restore their paths or forget the obsolete workspace before pruning",
-                                entry.get().as_str(),
-                                entry.key().display()
-                            )));
+                            return Err(PublicationError::SharedWorkspacePath {
+                                first: entry.get().as_str().to_owned(),
+                                second: label.to_owned(),
+                                path: entry.key().clone(),
+                            }
+                            .into());
                         }
                     }
                 }
                 Ok(None) if !own.contains(name) => {}
                 Ok(None) => {
-                    return Err(invalid(format!(
-                        "cannot locate workspace {label}; recreate or forget it before pruning"
-                    )));
+                    return Err(PublicationError::MissingWorkspace(label.to_owned()).into());
                 }
-                Err(err) => return Err(invalid(format!("cannot locate workspace {label}: {err}"))),
+                Err(err) => {
+                    return Err(PublicationError::UnlocatableWorkspace {
+                        name: label.to_owned(),
+                        reason: err.to_string(),
+                    }
+                    .into());
+                }
             }
         }
         let expected_repo = self
@@ -112,11 +115,10 @@ impl NodeRepo {
         let mut locked = Vec::new();
         for (root, name) in paths {
             let label = name.as_str();
-            let cannot_read = |err: &dyn std::fmt::Display| {
-                invalid(format!(
-                    "cannot read workspace {label} at {}: {err}",
-                    root.display()
-                ))
+            let cannot_read = |err: &dyn std::fmt::Display| PublicationError::UnreadableWorkspace {
+                name: label.to_owned(),
+                path: root.clone(),
+                reason: err.to_string(),
             };
             let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
                 .create(&root)
@@ -134,10 +136,11 @@ impl NodeRepo {
                     .map_err(|err| cannot_read(&err))?
                     != expected_repo
             {
-                return Err(invalid(format!(
-                    "workspace {label} at {} no longer identifies this repo; recreate or forget it before pruning",
-                    root.display()
-                )));
+                return Err(PublicationError::ForeignWorkspace {
+                    name: label.to_owned(),
+                    path: root.clone(),
+                }
+                .into());
             }
             let guard = workspace
                 .working_copy()
@@ -156,19 +159,19 @@ impl NodeRepo {
                 .read_view(&recorded.view_id)
                 .block_on()
                 .map_err(|err| cannot_read(&err))?;
-            let current = repo.view().get_wc_commit_id(&name).ok_or_else(|| {
-                invalid(format!(
-                    "workspace {label} is no longer in the current view"
-                ))
-            })?;
+            let current = repo
+                .view()
+                .get_wc_commit_id(&name)
+                .ok_or_else(|| PublicationError::WorkspaceLeftView(label.to_owned()))?;
             let commit = repo.store().get_commit_async(current).block_on()?;
             if view.wc_commit_ids.get(&name) != Some(current)
                 || guard.old_tree().tree_ids_and_labels() != commit.tree().tree_ids_and_labels()
             {
-                return Err(invalid(format!(
-                    "workspace {label} must be updated before pruning\nHint: run `jj status` in {}",
-                    root.display()
-                )));
+                return Err(PublicationError::StaleWorkspace {
+                    name: label.to_owned(),
+                    path: root.clone(),
+                }
+                .into());
             }
             locked.push(CleanupWorkspace {
                 name,
@@ -217,16 +220,14 @@ impl NodeRepo {
         ops: &[CanonicalOp],
     ) -> Result<BTreeSet<LocalOp>, NodeError> {
         if selectors.is_empty() {
-            return Err(invalid(
-                "choose at least one unpublished operation to prune",
-            ));
+            return Err(PublicationError::NothingSelected.into());
         }
         let offered = self.publication_offered_origins()?;
         let local: Vec<_> = ops.iter().filter_map(|id| self.local_of(id)).collect();
         let mut selected = BTreeSet::new();
         for prefix in selectors {
             if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(invalid(format!("{prefix:?} is not a jj operation id")));
+                return Err(PublicationError::NotOperationId(prefix.clone()).into());
             }
             let matches: Vec<_> = local
                 .iter()
@@ -237,14 +238,10 @@ impl NodeRepo {
                     selected.insert((*one).clone());
                 }
                 [] => {
-                    return Err(invalid(format!(
-                        "operation {prefix} is not unpublished work; run `musubi sync --outgoing`"
-                    )));
+                    return Err(PublicationError::NotUnpublished(prefix.clone()).into());
                 }
                 _ => {
-                    return Err(invalid(format!(
-                        "operation prefix {prefix} is ambiguous; use more of its id"
-                    )));
+                    return Err(PublicationError::AmbiguousPrefix(prefix.clone()).into());
                 }
             }
         }
@@ -252,10 +249,7 @@ impl NodeRepo {
             if let Some(canonical) = self.canonical_of(id)
                 && offered.contains(&self.canonical.original_id(&canonical)?)
             {
-                return Err(invalid(format!(
-                    "operation {} was offered to the hub or predates publication tracking; this cleanup only removes history known never to have been offered",
-                    id.0.hex()
-                )));
+                return Err(PublicationError::AlreadyOffered(id.0.hex()).into());
             }
         }
         Ok(selected)
@@ -269,10 +263,9 @@ impl NodeRepo {
         for id in ops {
             let op = self.canonical.read_operation(id)?;
             if self.publication_intent_is_uncertain(id, &op)? {
-                return Err(invalid(format!(
-                    "cannot safely prune this history: jj did not record enough information to preserve changes from {:?}\nHint: run `musubi sync --outgoing` to inspect or approve this work",
-                    op.metadata.description,
-                )));
+                return Err(
+                    PublicationError::UncertainIntent(op.metadata.description.clone()).into(),
+                );
             }
             roots.extend(self.publication_intentional(
                 id,
@@ -292,7 +285,7 @@ impl NodeRepo {
         invocation: &str,
     ) -> Result<Vec<String>, NodeError> {
         if invocation.is_empty() {
-            return Err(invalid("the snapshot invocation marker is empty"));
+            return Err(PublicationError::EmptyInvocation.into());
         }
         let (_, pending) = self.publication_pending()?;
         let mut snapshots = Vec::new();
@@ -325,15 +318,13 @@ impl NodeRepo {
         let (base, ops) = self.publication_pending()?;
         let heads = self.local_heads()?;
         if heads.len() != 1 {
-            return Err(invalid(
-                "reconcile this workspace's operations with `jj status` before choosing snapshots to prune",
-            ));
+            return Err(PublicationError::DivergentHeads.into());
         }
         let selected = self.publication_selection(selectors, &ops)?;
         let before = self.publication_report(&ops, &base, cache)?;
         let canonical_head = self
             .canonical_of(&heads[0])
-            .ok_or_else(|| invalid("the current operation changed; inspect outgoing work again"))?;
+            .ok_or(PublicationError::PreviewHeadChanged)?;
         let mut operation = self.canonical.read_operation(&canonical_head)?;
         let current = self.canonical.read_view(&operation.view_id)?;
         let intentional = self.publication_kept_versions(&ops)?;
@@ -373,7 +364,7 @@ impl NodeRepo {
         hash.update(&(current.wc_commit_ids.len() as u64).to_le_bytes());
         let repo = self.repo_at(&heads[0])?;
         let context = self.publication_state_attributes(&repo, &canonical_head)?;
-        hash.update(&serde_json::to_vec(&context).map_err(|err| invalid(err.to_string()))?);
+        hash.update(&serde_json::to_vec(&context).map_err(PublicationError::Json)?);
         let token = hash.finalize().to_hex().to_string();
         Ok(PublicationCleanup {
             token,
@@ -405,26 +396,26 @@ impl NodeRepo {
     ) -> Result<CleanupEffect, NodeError> {
         let plan = self.preview_publication_cleanup(selectors, cache)?;
         if token != plan.token {
-            return Err(invalid("outgoing work changed; run the cleanup again"));
+            return Err(PublicationError::OutgoingChanged.into());
         }
         let (base, ops) = self.publication_pending()?;
         let selected = self.publication_selection(selectors, &ops)?;
         let source = LocalOp(
             OperationId::try_from_hex(&plan.heads[0])
-                .ok_or_else(|| invalid("invalid cleanup source operation"))?,
+                .ok_or(PublicationError::InvalidCleanupSource)?,
         );
         let workspaces = self.lock_cleanup_workspaces(&source)?;
         let op_heads = self.loader.op_heads_store().clone();
         let lock = op_heads.lock().block_on()?;
         let heads = self.local_heads()?;
         if heads.iter().map(|id| id.0.hex()).collect::<Vec<_>>() != plan.heads {
-            return Err(invalid("outgoing work changed; run the cleanup again"));
+            return Err(PublicationError::OutgoingChanged.into());
         }
         let head = heads[0].clone();
         let selected_ids: HashSet<_> = selected.iter().map(|id| id.0.clone()).collect();
         let canonical_head = self
             .canonical_of(&head)
-            .ok_or_else(|| invalid("the current operation changed"))?;
+            .ok_or(PublicationError::AppliedHeadChanged)?;
         let intentional = self.publication_kept_versions(&ops)?;
         let repo = self.repo_at(&head)?;
         let attrs = self.publication_state_attributes(&repo, &canonical_head)?;
@@ -535,11 +526,11 @@ impl NodeRepo {
                 operation.parents = parents;
                 let (_, frozen, namespace) = source_facts
                     .get(&id)
-                    .ok_or_else(|| invalid("the source of an unpublished operation is missing"))?;
+                    .ok_or(PublicationError::MissingSourceFacts)?;
                 let encoded: Vec<_> = frozen.iter().map(|id| id.hex()).collect();
                 operation.metadata.attributes.insert(
                     super::INTENT_ATTRIBUTE.to_owned(),
-                    serde_json::to_string(&encoded).map_err(|err| invalid(err.to_string()))?,
+                    serde_json::to_string(&encoded).map_err(PublicationError::Json)?,
                 );
                 operation.metadata.attributes.extend(namespace.clone());
                 for commit in frozen {
@@ -553,9 +544,7 @@ impl NodeRepo {
                 if written != id
                     && (source_ids.contains(&written) || !created.insert(written.clone()))
                 {
-                    return Err(invalid(
-                        "jj would give distinct operations the same identity; this selection cannot be pruned safely",
-                    ));
+                    return Err(PublicationError::IdentityCollision.into());
                 }
                 vec![written]
             };
@@ -594,26 +583,19 @@ impl NodeRepo {
             parents = vec![id.clone()];
             checkpoint = Some(id);
         }
-        let checkpoint =
-            checkpoint.ok_or_else(|| invalid("could not prepare the cleanup checkpoint"))?;
+        let checkpoint = checkpoint.ok_or(PublicationError::NoCheckpoint)?;
         // Validate the *prepared native bodies* through the real canonicalization path,
         // not a second planner projection. Failure leaves the source op heads untouched.
         let prepared = self.canonicalize_unchecked(&LocalOp(checkpoint.clone()))?;
         if self.canonical.read_operation(&prepared)?.view_id != expected_view {
-            return Err(invalid(
-                "this cleanup cannot preserve the current repository view",
-            ));
+            return Err(PublicationError::ViewChanged.into());
         }
         if self.publication_foreign_presence(&prepared)? != expected_foreign {
-            return Err(invalid(
-                "this selection would change another copy's activity or membership; choose different snapshots or approve publication",
-            ));
+            return Err(PublicationError::ForeignPresenceChanged.into());
         }
         let prepared_repo = self.repo_at(&LocalOp(checkpoint.clone()))?;
         if self.publication_state_attributes(&prepared_repo, &prepared)? != expected_context {
-            return Err(invalid(
-                "this cleanup cannot preserve the current workspace and Git-ref state",
-            ));
+            return Err(PublicationError::StateChanged.into());
         }
         for (old, now) in &movements {
             if selected.contains(old) {
@@ -622,15 +604,13 @@ impl NodeRepo {
             if let (Some((view, frozen, _)), [now]) = (source_facts.get(&old.0), now.as_slice()) {
                 let current = self
                     .canonical_of(now)
-                    .ok_or_else(|| invalid("a prepared operation is missing"))?;
+                    .ok_or(PublicationError::MissingPrepared)?;
                 let operation = self.canonical.read_operation(&current)?;
                 let current_view = self.canonical.read_view(&operation.view_id)?;
                 if operation.view_id != *view
                     || self.publication_intentional(&current, &operation, &current_view)? != *frozen
                 {
-                    return Err(invalid(
-                        "this cleanup would change an unselected operation's saved state",
-                    ));
+                    return Err(PublicationError::UnselectedChanged.into());
                 }
             }
         }
@@ -646,16 +626,12 @@ impl NodeRepo {
         if !intentional.is_subset(&required)
             || self.publication_kept_versions(&prepared_ops)? != intentional
         {
-            return Err(invalid(
-                "this cleanup would discard intentional change history",
-            ));
+            return Err(PublicationError::IntentLost.into());
         }
         let actual =
             self.publication_report(&prepared_ops, &base, &mut PublicationCache::default())?;
         if actual.content != plan.after.content || actual.bytes != plan.after.bytes {
-            return Err(invalid(
-                "the prepared cleanup differs from its preview; no history was pruned",
-            ));
+            return Err(PublicationError::PreviewMismatch.into());
         }
         op_heads
             .update_op_heads(std::slice::from_ref(&head.0), &checkpoint)
@@ -685,10 +661,7 @@ impl NodeRepo {
         // A later jj command can finish on old unpublished ancestry. It is checked by the
         // same publication guard; pruning never grants approval to that late work.
         if !finish_errors.is_empty() {
-            return Err(invalid(format!(
-                "cleanup finished, but workspace metadata could not be updated for {}",
-                finish_errors.join("; ")
-            )));
+            return Err(PublicationError::WorkspacesNotUpdated(finish_errors).into());
         }
         Ok((plan.selected.len(), contraction, checkpoint))
     }

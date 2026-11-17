@@ -722,7 +722,7 @@ impl NodeRepo {
             metadata.attributes.insert(
                 super::INTENT_ATTRIBUTE.to_owned(),
                 serde_json::to_string(&roots.iter().map(|id| id.hex()).collect::<Vec<_>>())
-                    .map_err(|err| NodeError::Publication(err.to_string()))?,
+                    .map_err(super::PublicationError::Json)?,
             );
             let records = commit_predecessors.get_or_insert_default();
             for root in roots {

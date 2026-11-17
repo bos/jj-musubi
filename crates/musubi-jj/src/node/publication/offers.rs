@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use super::NodeError;
 use super::NodeRepo;
+use crate::node::PublicationError;
 use crate::op_id::CanonicalOp;
 
 pub(super) const OFFERS_FILE: &str = "publication-offers.json";
@@ -48,11 +49,7 @@ impl NodeRepo {
                             id.as_bytes().len()
                                 == self.canonical.root_operation_id().0.as_bytes().len()
                         })
-                        .ok_or_else(|| {
-                            NodeError::Publication(format!(
-                                "cannot establish publication history from {name}"
-                            ))
-                        })?;
+                        .ok_or(PublicationError::UnreadableMarker(name))?;
                     heads.push(CanonicalOp(id));
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -85,18 +82,11 @@ impl NodeRepo {
             path: path.clone(),
             source,
         })?;
-        let encoded: PublicationOffers = serde_json::from_str(&text).map_err(|err| {
-            NodeError::Publication(format!(
-                "cannot read this copy's record of attempted publications: {err}"
-            ))
-        })?;
-        let body = serde_json::to_vec(&encoded.heads)
-            .map_err(|err| NodeError::Publication(err.to_string()))?;
+        let encoded: PublicationOffers = serde_json::from_str(&text)
+            .map_err(|err| PublicationError::UnreadableOffers(err.to_string()))?;
+        let body = serde_json::to_vec(&encoded.heads).map_err(PublicationError::Json)?;
         if blake3::hash(&body).to_hex().as_str() != encoded.checksum {
-            return Err(NodeError::Publication(
-                "cannot read this copy's record of attempted publications: checksum mismatch"
-                    .to_owned(),
-            ));
+            return Err(PublicationError::UnreadableOffers("checksum mismatch".to_owned()).into());
         }
         encoded
             .heads
@@ -107,13 +97,9 @@ impl NodeRepo {
                         id.as_bytes().len() == self.canonical.root_operation_id().0.as_bytes().len()
                     })
                     .map(CanonicalOp)
-                    .ok_or_else(|| {
-                        NodeError::Publication("invalid attempted publication identity".to_owned())
-                    })?;
+                    .ok_or(PublicationError::InvalidOfferedId)?;
                 if !self.canonical.has_operation(&id) {
-                    return Err(NodeError::Publication(
-                        "the source history of an attempted publication is missing".to_owned(),
-                    ));
+                    return Err(PublicationError::MissingOfferedHistory.into());
                 }
                 Ok(id)
             })
@@ -123,13 +109,12 @@ impl NodeRepo {
     fn encode_publication_offers(heads: &[CanonicalOp]) -> Result<Vec<u8>, NodeError> {
         let values: BTreeSet<_> = heads.iter().map(|id| id.0.hex()).collect();
         let heads: Vec<_> = values.into_iter().collect();
-        let body =
-            serde_json::to_vec(&heads).map_err(|err| NodeError::Publication(err.to_string()))?;
+        let body = serde_json::to_vec(&heads).map_err(PublicationError::Json)?;
         let offers = PublicationOffers {
             heads,
             checksum: blake3::hash(&body).to_hex().to_string(),
         };
-        serde_json::to_vec(&offers).map_err(|err| NodeError::Publication(err.to_string()))
+        Ok(serde_json::to_vec(&offers).map_err(PublicationError::Json)?)
     }
 
     fn write_publication_offers(&self, heads: &[CanonicalOp]) -> Result<(), NodeError> {

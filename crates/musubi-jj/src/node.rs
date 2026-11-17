@@ -52,6 +52,7 @@ mod view;
 mod working_copies;
 
 pub use error::NodeError;
+pub use error::PublicationError;
 pub use expiry::Activity;
 pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;

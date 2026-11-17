@@ -14,6 +14,7 @@ use pollster::FutureExt as _;
 use super::NodeError;
 use super::NodeRepo;
 use super::content::ContentGraph;
+use crate::node::PublicationError;
 use crate::op_id::CanonicalOp;
 
 pub const CHECKPOINT_ATTRIBUTE: &str = "musubi.publication-checkpoint";
@@ -23,21 +24,20 @@ pub(crate) const INTENT_ATTRIBUTE: &str = "musubi.publication-intent";
 /// The declarations are also predecessor-record roots, not just exemptions from accounting.
 pub(crate) fn retained_publication_intent(
     op: &Operation,
-) -> Result<Option<BTreeSet<CommitId>>, String> {
+) -> Result<Option<BTreeSet<CommitId>>, PublicationError> {
     let Some(text) = op.metadata.attributes.get(INTENT_ATTRIBUTE) else {
         return Ok(None);
     };
-    let ids: Vec<String> =
-        serde_json::from_str(text).map_err(|err| format!("invalid retained intent: {err}"))?;
+    let ids: Vec<String> = serde_json::from_str(text).map_err(PublicationError::MalformedIntent)?;
     let mut roots = BTreeSet::new();
     for id in ids {
-        let id = CommitId::try_from_hex(&id).ok_or("invalid retained intent commit id")?;
+        let id = CommitId::try_from_hex(&id).ok_or(PublicationError::InvalidIntentCommit)?;
         if !op
             .commit_predecessors
             .as_ref()
             .is_some_and(|writes| writes.contains_key(&id))
         {
-            return Err("retained intent is not referenced by its operation".to_owned());
+            return Err(PublicationError::UnreferencedIntent);
         }
         roots.insert(id);
     }
@@ -209,7 +209,7 @@ impl<'a> Intent<'a> {
         op: &Operation,
         view: &View,
     ) -> Result<(BTreeSet<CommitId>, bool), NodeError> {
-        if let Some(roots) = retained_publication_intent(op).map_err(NodeError::Publication)? {
+        if let Some(roots) = retained_publication_intent(op)? {
             return Ok((roots, true));
         }
         if op.metadata.attributes.contains_key(CHECKPOINT_ATTRIBUTE) {
@@ -246,9 +246,10 @@ impl<'a> Intent<'a> {
     /// Pre-join native history supplies intrinsic command facts, never a reconstruction
     /// of before/after roles. Missing or unrecognized facts also block destructive cleanup.
     fn initial_facts(&self, join: &CanonicalOp) -> Result<(BTreeSet<CommitId>, bool), NodeError> {
-        let source = self.node.local_of(join).ok_or_else(|| {
-            NodeError::Publication("the initial join's source history is missing".to_owned())
-        })?;
+        let source = self
+            .node
+            .local_of(join)
+            .ok_or(PublicationError::MissingJoinSource)?;
         let store = self.node.loader.op_store();
         let mut stack = vec![source.0];
         let mut seen = HashSet::new();
@@ -260,9 +261,7 @@ impl<'a> Intent<'a> {
             }
             let op = store.read_operation(&id).block_on()?;
             stack.extend(op.parents.iter().cloned());
-            if let Some(intent) =
-                retained_publication_intent(&op).map_err(NodeError::Publication)?
-            {
+            if let Some(intent) = retained_publication_intent(&op)? {
                 roots.extend(intent);
                 continue;
             }

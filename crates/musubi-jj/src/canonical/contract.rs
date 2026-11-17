@@ -322,6 +322,8 @@ pub fn current<Op: Clone + Eq + Hash>(superseded: &HashMap<Op, Vec<Op>>, op: &Op
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::collections::BTreeSet;
+
     use hegel::TestCase;
     use hegel::generators as gs;
     use jj_lib::backend::CommitId;
@@ -426,14 +428,18 @@ mod tests {
     }
 
     impl Content {
-        fn draw(tc: &TestCase) -> Self {
-            match tc.draw(gs::integers::<u8>().max_value(6)) {
-                3 => Self::WorkByC3,
-                4 => Self::LeasedWorkByC4,
-                5 => Self::ForgetC3,
-                6 => Self::ForgetC4,
-                symbol => Self::Plain(symbol),
-            }
+        /// Every variant, plain operations first so a shrunk history has none of the
+        /// others.
+        fn generator() -> impl hegel::generators::PrintableGenerator<Self> {
+            gs::sampled_from(vec![
+                Self::Plain(0),
+                Self::Plain(1),
+                Self::Plain(2),
+                Self::WorkByC3,
+                Self::LeasedWorkByC4,
+                Self::ForgetC3,
+                Self::ForgetC4,
+            ])
         }
 
         fn apply(self, op: &mut Operation, index: usize) {
@@ -497,45 +503,50 @@ mod tests {
 
     /// The shared input for every contraction law: a small DAG and two possibly overlapping
     /// drop sets. All laws use this one history and store.
+    #[derive(Debug)]
     struct ContractionCase {
         parents: Vec<Vec<usize>>,
-        first: HashSet<usize>,
-        second: HashSet<usize>,
+        first: BTreeSet<usize>,
+        second: BTreeSet<usize>,
+    }
+
+    /// Drawn as one value, so a failure prints the graph and both drop sets once.
+    #[hegel::composite]
+    fn contraction_case(tc: &TestCase) -> ContractionCase {
+        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
+        let parents = (1..=count)
+            .map(|i| {
+                // One or two parents, the first kept if both are the same operation.
+                let drawn = tc.draw(
+                    gs::vecs(gs::integers::<usize>().max_value(i - 1))
+                        .min_size(1)
+                        .max_size(2),
+                );
+                if drawn.len() == 2 && drawn[0] == drawn[1] {
+                    return vec![drawn[0]];
+                }
+                drawn
+            })
+            .collect();
+        let ops: Vec<usize> = (1..=count).collect();
+        let first = ops
+            .iter()
+            .copied()
+            .filter(|_| tc.draw(gs::booleans()))
+            .collect();
+        let second = ops
+            .iter()
+            .copied()
+            .filter(|_| tc.draw(gs::booleans()))
+            .collect();
+        ContractionCase {
+            parents,
+            first,
+            second,
+        }
     }
 
     impl ContractionCase {
-        fn draw(tc: &TestCase) -> Self {
-            let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
-            let parents = (1..=count)
-                .map(|i| {
-                    let first = tc.draw(gs::integers::<usize>().max_value(i - 1));
-                    if tc.draw(gs::booleans()) {
-                        let second = tc.draw(gs::integers::<usize>().max_value(i - 1));
-                        if second != first {
-                            return vec![first, second];
-                        }
-                    }
-                    vec![first]
-                })
-                .collect();
-            let ops: Vec<usize> = (1..=count).collect();
-            let first = ops
-                .iter()
-                .copied()
-                .filter(|_| tc.draw(gs::booleans()))
-                .collect();
-            let second = ops
-                .iter()
-                .copied()
-                .filter(|_| tc.draw(gs::booleans()))
-                .collect();
-            Self {
-                parents,
-                first,
-                second,
-            }
-        }
-
         fn drops(&self, op: usize) -> bool {
             self.first.contains(&op) || self.second.contains(&op)
         }
@@ -643,18 +654,19 @@ mod tests {
     /// identities (`cid_eq_mk`), and presence preservation (`PresenceContract.pres_eq`).
     #[hegel::test(test_cases = 200)]
     fn dropping_twice_is_dropping_both(tc: TestCase) {
-        let case = ContractionCase::draw(&tc);
+        let case = tc.draw(contraction_case());
         let count = case.parents.len();
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-        let contents: Vec<Content> = (0..count).map(|_| Content::draw(&tc)).collect();
+        let contents = tc.draw(
+            gs::vecs(Content::generator())
+                .min_size(count)
+                .max_size(count),
+        );
         let ids = history(&store, &case.parents, &contents);
 
         // Query a separate contraction in arbitrary order, as a machine's translation does.
-        let mut order: Vec<usize> = (1..=count).collect();
-        for i in (1..order.len()).rev() {
-            order.swap(i, tc.draw(gs::integers::<usize>().max_value(i)));
-        }
+        let order = tc.draw(gs::permutations((1..=count).collect::<Vec<usize>>()));
         let mut shuffled = Contraction::new(
             &store,
             case.first.union(&case.second).map(|&i| ids[i].clone()),

@@ -291,10 +291,25 @@ fn a_client_bounds_its_unanswered_calls() {
     });
 }
 
+/// How a request ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    Answered,
+    Canceled,
+    TimedOut,
+    Disconnected,
+}
+
 #[hegel::test(test_cases = 80)]
 fn requests_release_their_inbox_at_every_end(tc: TestCase) {
-    let end = tc.draw(gs::integers::<u8>().max_value(3));
-    let payload = Bytes::from(vec![b'x'; tc.draw(gs::integers::<usize>().max_value(32))]);
+    let end = tc.draw(gs::sampled_from(vec![
+        End::Answered,
+        End::Canceled,
+        End::TimedOut,
+        End::Disconnected,
+    ]));
+    let size = tc.draw(gs::integers::<usize>().max_value(32));
+    let payload = Bytes::from(vec![b'x'; size]);
     // Include cancellation before any bytes are written, inside the length/fields/payload,
     // and after the whole request. The next frame must still start at its own boundary.
     let len = Frame::Req {
@@ -317,7 +332,7 @@ fn requests_release_their_inbox_at_every_end(tc: TestCase) {
         assert_eq!(client.shared.lock().pending.len(), 1);
         let mut bytes = vec![0; len];
         peer.read_exact(&mut bytes[..cut]).await.unwrap();
-        if end == 0 {
+        if end == End::Canceled {
             drop(call);
             assert!(
                 client.shared.lock().pending.is_empty(),
@@ -325,17 +340,17 @@ fn requests_release_their_inbox_at_every_end(tc: TestCase) {
             );
         } else {
             match end {
-                1 => {
+                End::TimedOut => {
                     tokio::time::advance(Duration::from_secs(60)).await;
                     assert!(matches!(call.await, Err(TransportError::Timeout)));
                 }
-                2 => {
+                End::Disconnected => {
                     drop(peer);
                     assert!(matches!(call.await, Err(TransportError::Disconnected)));
                     assert!(client.shared.lock().pending.is_empty());
                     return;
                 }
-                _ => {
+                End::Answered | End::Canceled => {
                     peer.read_exact(&mut bytes[cut..]).await.unwrap();
                     peer.write_all(
                         &Frame::Reply {
@@ -351,7 +366,7 @@ fn requests_release_their_inbox_at_every_end(tc: TestCase) {
             }
             assert!(client.shared.lock().pending.is_empty());
         }
-        if end != 3 {
+        if end != End::Answered {
             peer.read_exact(&mut bytes[cut..]).await.unwrap();
         }
         let request = Frame::decode(Bytes::copy_from_slice(&bytes[4..])).unwrap();
@@ -459,10 +474,11 @@ fn fragmented_reads_deliver_only_complete_frames(tc: TestCase) {
 
 #[hegel::test(test_cases = 80)]
 fn fragmented_writes_preserve_frames_or_end_the_connection(tc: TestCase) {
+    let size = tc.draw(gs::integers::<usize>().max_value(9000));
     let frames = [
         Frame::Pub {
             subject: "head".into(),
-            payload: Bytes::from(vec![b'x'; tc.draw(gs::integers::<usize>().max_value(9000))]),
+            payload: Bytes::from(vec![b'x'; size]),
         }
         .encode(),
         Frame::Reply {

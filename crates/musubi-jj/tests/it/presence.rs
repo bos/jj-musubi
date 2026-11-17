@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 
+use hegel::Generator as _;
 use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -38,31 +39,36 @@ const OPS: usize = 12;
 
 /// An operation: its parents, all earlier, and what it is to presence, as musubi makes
 /// operations: work by one copy, or a forget of some, never both.
+#[derive(Debug)]
 struct Op {
     parents: Vec<usize>,
     work: Option<u64>,
     forgets: BTreeSet<u64>,
 }
 
+/// Drawn as one value, so a failure prints the history once, as the operations it has.
+#[hegel::composite]
 fn history(tc: &TestCase) -> Vec<Op> {
     let len = tc.draw(gs::integers::<usize>().min_value(1).max_value(OPS));
     let copy = || gs::integers::<u64>().max_value(COPIES - 1);
     (0..len)
         .map(|x| {
-            let mut parents = BTreeSet::new();
-            if x > 0 {
-                let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(x.min(3)));
-                for _ in 0..count {
-                    parents.insert(tc.draw(gs::integers::<usize>().max_value(x - 1)));
-                }
-            }
-            let work = tc.draw(gs::booleans()).then(|| tc.draw(copy()));
-            let mut forgets = BTreeSet::new();
-            if work.is_none() {
-                for _ in 0..tc.draw(gs::integers::<usize>().max_value(2)) {
-                    forgets.insert(tc.draw(copy()));
-                }
-            }
+            let parents = if x == 0 {
+                BTreeSet::new()
+            } else {
+                tc.draw(
+                    gs::btree_sets(gs::integers::<usize>().max_value(x - 1))
+                        .min_size(1)
+                        .max_size(x.min(3)),
+                )
+            };
+            // No work is the ordinary operation: it forgets nothing either, once shrunk.
+            let work = tc.draw(gs::optional(copy()));
+            let forgets = if work.is_none() {
+                tc.draw(gs::btree_sets(copy()).max_size(2))
+            } else {
+                BTreeSet::new()
+            };
             Op {
                 parents: parents.into_iter().collect(),
                 work,
@@ -143,7 +149,7 @@ fn conformance(tc: TestCase) {
     // One oracle for every case: presence requests leave it as they found it.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    let ops = history(&tc);
+    let ops = tc.draw(history());
     let (computed, modelled) = (computed(&ops), modelled(&mut oracle, &ops));
     ORACLE.set(Some(oracle));
     for (x, (computed, modelled)) in computed.iter().zip(&modelled).enumerate() {
@@ -214,8 +220,19 @@ fn contracted(
 fn contraction_keeps_presence(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    let ops = history(&tc);
-    let dropped: BTreeSet<usize> = (0..ops.len()).filter(|_| tc.draw(gs::booleans())).collect();
+    let ops = tc.draw(history());
+    // Each operation dropped or not, independently and evenly, so that most cases drop some but
+    // not all of a history's operations, however long it is. Printed as the set dropped.
+    let dropped = tc.draw(
+        gs::vecs(gs::booleans())
+            .min_size(ops.len())
+            .max_size(ops.len())
+            .map(|drop| {
+                (0..drop.len())
+                    .filter(|&x| drop[x])
+                    .collect::<BTreeSet<usize>>()
+            }),
+    );
     let (contracted, modelled) = (contracted(&ops, &dropped), modelled(&mut oracle, &ops));
     ORACLE.set(Some(oracle));
     for (x, (contracted, modelled)) in contracted.iter().zip(&modelled).enumerate() {

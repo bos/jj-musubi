@@ -3,9 +3,10 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 
+use hegel::Generator as _;
+use hegel::PrintableGenerator;
 use hegel::TestCase;
 use hegel::generators as gs;
 use jj_lib::backend::CommitId;
@@ -29,76 +30,88 @@ use jj_lib::simple_op_store::SimpleOpStore;
 use musubi_jj::format_guard;
 use pollster::FutureExt as _;
 
-fn bytes(tc: &TestCase, len: usize) -> Vec<u8> {
-    (0..len).map(|_| tc.draw(gs::integers::<u8>())).collect()
+// Each generator below is a composite, or built from generators, so that a failing case prints
+// the view or operation once as a value, not the hundreds of draws that made it.
+
+/// `len` arbitrary bytes, as one draw.
+fn bytes(len: usize) -> impl PrintableGenerator<Vec<u8>> {
+    gs::binary().min_size(len).max_size(len)
 }
 
-fn small(tc: &TestCase, max: usize) -> usize {
-    tc.draw(gs::integers::<usize>().max_value(max))
+/// One of five names with the prefix, so that keys of different maps collide.
+fn name(prefix: &'static str) -> impl PrintableGenerator<String> {
+    gs::integers::<usize>()
+        .max_value(4)
+        .map(move |n| format!("{prefix}{n}"))
 }
 
-fn name(tc: &TestCase, prefix: &str) -> String {
-    format!("{prefix}{}", small(tc, 4))
+fn commit_id() -> impl PrintableGenerator<CommitId> {
+    bytes(20).map(CommitId::new)
 }
 
-fn commit_id(tc: &TestCase) -> CommitId {
-    CommitId::new(bytes(tc, 20))
-}
-
+/// A conflict of one, three or five terms, any of them absent.
+#[hegel::composite]
 fn ref_target(tc: &TestCase) -> RefTarget {
-    let terms = 1 + 2 * small(tc, 2);
-    Merge::from_vec(
-        (0..terms)
-            .map(|_| tc.draw(gs::booleans()).then(|| commit_id(tc)))
-            .collect::<Vec<_>>(),
-    )
+    let terms = 1 + 2 * tc.draw(gs::integers::<usize>().max_value(2));
+    let terms = tc.draw(
+        gs::vecs(gs::optional(commit_id()))
+            .min_size(terms)
+            .max_size(terms),
+    );
+    Merge::from_vec(terms)
 }
 
-fn targets<K: Ord>(tc: &TestCase, key: impl Fn(&TestCase) -> K) -> BTreeMap<K, RefTarget> {
-    (0..small(tc, 3))
-        .map(|_| (key(tc), ref_target(tc)))
-        .collect()
-}
-
-fn remote_refs(tc: &TestCase) -> BTreeMap<jj_lib::ref_name::RefNameBuf, RemoteRef> {
-    (0..small(tc, 3))
-        .map(|_| {
-            let state = if tc.draw(gs::booleans()) {
-                RemoteRefState::Tracked
-            } else {
-                RemoteRefState::New
-            };
-            let target = ref_target(tc);
-            (name(tc, "b").into(), RemoteRef { target, state })
-        })
-        .collect()
-}
-
-fn view(tc: &TestCase) -> View {
-    View {
-        head_ids: (0..small(tc, 3))
-            .map(|_| commit_id(tc))
-            .collect::<HashSet<_>>(),
-        local_bookmarks: targets(tc, |tc| name(tc, "b").into()),
-        local_tags: targets(tc, |tc| name(tc, "t").into()),
-        remote_views: (0..small(tc, 2))
-            .map(|_| {
-                let remote = ["origin", "git", "upstream"][small(tc, 2)];
-                let remote_view = RemoteView {
-                    bookmarks: remote_refs(tc),
-                    tags: remote_refs(tc),
-                };
-                (remote.into(), remote_view)
-            })
-            .collect(),
-        git_refs: targets(tc, |tc| format!("refs/heads/{}", name(tc, "b")).into()),
-        git_heads: targets(tc, |tc| name(tc, "ws").into()),
-        wc_commit_ids: (0..small(tc, 2))
-            .map(|_| (name(tc, "ws").into(), commit_id(tc)))
-            .collect(),
+#[hegel::composite]
+fn remote_ref(tc: &TestCase) -> RemoteRef {
+    // Tracked, the shrink target, is the ordinary state: jj tracks every tag and `@git` bookmark.
+    let state = if tc.draw(gs::booleans()) {
+        RemoteRefState::New
+    } else {
+        RemoteRefState::Tracked
+    };
+    RemoteRef {
+        target: tc.draw(ref_target()),
+        state,
     }
 }
 
+#[hegel::composite]
+fn remote_view(tc: &TestCase) -> RemoteView {
+    let refs = || gs::btree_maps(name("b").map(Into::into), remote_ref()).max_size(3);
+    RemoteView {
+        bookmarks: tc.draw(refs()),
+        tags: tc.draw(refs()),
+    }
+}
+
+#[hegel::composite]
+fn view(tc: &TestCase) -> View {
+    let targets = || gs::btree_maps(name("b").map(Into::into), ref_target()).max_size(3);
+    let heads = tc.draw(gs::vecs(commit_id()).max_size(3));
+    View {
+        head_ids: heads.into_iter().collect::<HashSet<_>>(),
+        local_bookmarks: tc.draw(targets()),
+        local_tags: tc.draw(gs::btree_maps(name("t").map(Into::into), ref_target()).max_size(3)),
+        remote_views: tc.draw(
+            gs::btree_maps(
+                gs::sampled_from(vec!["origin", "git", "upstream"]).map(Into::into),
+                remote_view(),
+            )
+            .max_size(2),
+        ),
+        git_refs: tc.draw(
+            gs::btree_maps(
+                name("b").map(|name| format!("refs/heads/{name}").into()),
+                ref_target(),
+            )
+            .max_size(3),
+        ),
+        git_heads: tc.draw(gs::btree_maps(name("ws").map(Into::into), ref_target()).max_size(3)),
+        wc_commit_ids: tc.draw(gs::btree_maps(name("ws").map(Into::into), commit_id()).max_size(2)),
+    }
+}
+
+#[hegel::composite]
 fn timestamp(tc: &TestCase) -> Timestamp {
     Timestamp {
         timestamp: MillisSinceEpoch(tc.draw(gs::integers::<i64>())),
@@ -106,35 +119,29 @@ fn timestamp(tc: &TestCase) -> Timestamp {
     }
 }
 
+#[hegel::composite]
 fn operation(tc: &TestCase) -> Operation {
-    let predecessors = tc.draw(gs::booleans()).then(|| {
-        (0..small(tc, 3))
-            .map(|_| {
-                (
-                    commit_id(tc),
-                    (0..small(tc, 2)).map(|_| commit_id(tc)).collect(),
-                )
-            })
-            .collect()
-    });
+    let predecessors = tc.draw(gs::optional(
+        gs::btree_maps(commit_id(), gs::vecs(commit_id()).max_size(2)).max_size(3),
+    ));
     Operation {
-        view_id: ViewId::new(bytes(tc, 64)),
-        parents: (0..1 + small(tc, 2))
-            .map(|_| OperationId::new(bytes(tc, 64)))
+        view_id: ViewId::new(tc.draw(bytes(64))),
+        parents: tc
+            .draw(gs::vecs(bytes(64)).min_size(1).max_size(3))
+            .into_iter()
+            .map(OperationId::new)
             .collect(),
         metadata: OperationMetadata {
             time: TimestampRange {
-                start: timestamp(tc),
-                end: timestamp(tc),
+                start: tc.draw(timestamp()),
+                end: tc.draw(timestamp()),
             },
             description: tc.draw(gs::text()),
             hostname: tc.draw(gs::text()),
             username: tc.draw(gs::text()),
             is_snapshot: tc.draw(gs::booleans()),
-            workspace_name: tc.draw(gs::booleans()).then(|| name(tc, "ws").into()),
-            attributes: (0..small(tc, 2))
-                .map(|_| (name(tc, "k"), tc.draw(gs::text())))
-                .collect(),
+            workspace_name: tc.draw(gs::optional(name("ws").map(Into::into))),
+            attributes: tc.draw(gs::btree_maps(name("k"), gs::text()).max_size(2)),
         },
         commit_predecessors: predecessors,
     }
@@ -156,7 +163,8 @@ fn with_unknown_field(mut encoded: Vec<u8>) -> Vec<u8> {
 #[hegel::test(test_cases = 200)]
 fn guard_accepts_jj_views_and_rejects_unknown_fields(tc: TestCase) {
     let (dir, store) = store();
-    let id = store.write_view(&view(&tc)).block_on().unwrap();
+    let view = tc.draw(view());
+    let id = store.write_view(&view).block_on().unwrap();
     let encoded = std::fs::read(dir.path().join("views").join(id.hex())).unwrap();
     assert_eq!(format_guard::check_view(&encoded), Ok(()));
     assert!(format_guard::check_view(&with_unknown_field(encoded)).is_err());
@@ -165,7 +173,8 @@ fn guard_accepts_jj_views_and_rejects_unknown_fields(tc: TestCase) {
 #[hegel::test(test_cases = 200)]
 fn guard_accepts_jj_operations_and_rejects_unknown_fields(tc: TestCase) {
     let (dir, store) = store();
-    let id = store.write_operation(&operation(&tc)).block_on().unwrap();
+    let operation = tc.draw(operation());
+    let id = store.write_operation(&operation).block_on().unwrap();
     let encoded = std::fs::read(dir.path().join("operations").join(id.hex())).unwrap();
     assert_eq!(format_guard::check_operation(&encoded), Ok(()));
     assert!(format_guard::check_operation(&with_unknown_field(encoded)).is_err());

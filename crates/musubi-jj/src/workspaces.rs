@@ -332,19 +332,22 @@ mod tests {
             "mac-aaaa1111/default",
             "mac-aaaa-aaaa/x",
         ];
-        let pick = |n: usize| tc.draw(gs::integers::<usize>().max_value(n - 1));
-        let key = || {
-            format!(
-                "{}#{}",
-                NAMES[pick(NAMES.len())],
-                SUFFIXES[pick(SUFFIXES.len())]
-            )
-        };
+        let keys: Vec<String> = NAMES
+            .iter()
+            .flat_map(|name| {
+                SUFFIXES
+                    .iter()
+                    .map(move |suffix| format!("{name}#{suffix}"))
+            })
+            .collect();
         // This machine is among the machines named, as `NodeRepo::local_names` names them.
-        let me = key();
-        let mut machines: BTreeSet<String> = (0..pick(5)).map(|_| key()).collect();
-        machines.insert(me.clone());
-        let own: BTreeSet<&str> = (0..pick(4)).map(|_| OWN[pick(OWN.len())]).collect();
+        let me = tc.draw(gs::sampled_from(keys.clone()));
+        let others = tc.draw(gs::vecs(gs::sampled_from(keys)).max_size(4));
+        let machines: BTreeSet<String> = others.into_iter().chain([me.clone()]).collect();
+        let own: BTreeSet<&str> = tc
+            .draw(gs::vecs(gs::sampled_from(OWN.to_vec())).max_size(3))
+            .into_iter()
+            .collect();
         let names = display_names(&machines, |prefix| {
             own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
         });

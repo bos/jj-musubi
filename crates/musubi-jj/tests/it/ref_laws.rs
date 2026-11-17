@@ -38,6 +38,7 @@ fn merge(a: &RefTarget, b: &RefTarget, c: &RefTarget) -> RefTarget {
 }
 
 /// A target: absent, one commit, or a conflict of three or five terms, any of them absent.
+#[hegel::composite]
 fn target(tc: &TestCase) -> RefTarget {
     let term = || {
         let n = tc.draw(gs::integers::<u8>().max_value(5));
@@ -51,9 +52,9 @@ fn target(tc: &TestCase) -> RefTarget {
 
 #[hegel::test(test_cases = 300)]
 fn merge_ref_targets_obeys_ref_alg(tc: TestCase) {
-    let a = target(&tc);
-    let b = target(&tc);
-    let c = target(&tc);
+    let a = tc.draw(target());
+    let b = tc.draw(target());
+    let c = tc.draw(target());
     assert_eq!(merge(&a, &b, &b), a, "merge_unchanged_other");
     assert_eq!(merge(&b, &b, &c), c, "merge_unchanged_self");
     assert_eq!(merge(&a, &b, &a), a, "merge_same_change");

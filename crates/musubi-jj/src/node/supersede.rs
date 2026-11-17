@@ -1009,15 +1009,6 @@ mod tests {
             .count()
     }
 
-    /// How much of `formatted` an append wrote: all of it, or as far as a crash cut it.
-    fn written(tc: &TestCase, formatted: &str) -> usize {
-        if tc.draw(gs::booleans()) {
-            tc.draw(gs::integers::<usize>().max_value(formatted.len()))
-        } else {
-            formatted.len()
-        }
-    }
-
     /// Renamings appended, each whole or cut anywhere as a crash leaves the end of an append,
     /// with more appended after: a line torn names nothing, the whole ones are read, a
     /// number's last block counting, and a block that lacks a line is known to.
@@ -1054,7 +1045,11 @@ mod tests {
             }
             let alias_start = lines.len();
             lines.extend(sources.iter().map(|_| None));
-            let written = written(&tc, &formatted);
+            // Where a crash cut the append, if it did, drawn here so a failure names it.
+            let cut = tc.draw(gs::optional(
+                gs::integers::<usize>().max_value(formatted.len()),
+            ));
+            let written = cut.unwrap_or(formatted.len());
             let whole = whole_lines(&formatted, written);
             if whole >= 2 {
                 let (mut block, mut drops, mut aliases) = Step::default();
@@ -1120,7 +1115,10 @@ mod tests {
                 lines.push((digest.clone(), Err(renaming.len())));
                 lines.extend(renaming.iter().map(|pair| (digest.clone(), Ok(pair))));
             }
-            let written = written(&tc, &formatted);
+            let cut = tc.draw(gs::optional(
+                gs::integers::<usize>().max_value(formatted.len()),
+            ));
+            let written = cut.unwrap_or(formatted.len());
             for (digest, line) in &lines[1..whole_lines(&formatted, written)] {
                 match line {
                     Err(count) => {

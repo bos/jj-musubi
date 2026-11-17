@@ -579,6 +579,15 @@ mod tests {
         end: u64,
     }
 
+    /// How a crash can damage the tail of the log.
+    #[derive(Clone, Copy, Debug)]
+    enum Damage {
+        Cut,
+        Zeroed,
+        Garbled,
+        Grown,
+    }
+
     /// Bytes from `seed`, varied enough that zstd can't make them vanish.
     fn bytes(seed: u64, len: usize) -> Vec<u8> {
         let mut x = seed | 1;
@@ -661,7 +670,7 @@ mod tests {
             // Whether each is a view, its id and contents, and whether it was written before.
             let mut batch = vec![];
             for _ in 0..size {
-                if !written.is_empty() && tc.draw(gs::integers::<u8>().max_value(15)) == 0 {
+                if !written.is_empty() && tc.draw(gs::weighted_booleans(1.0 / 16.0)) {
                     let again =
                         &written[tc.draw(gs::integers::<usize>().max_value(written.len() - 1))];
                     batch.push((again.view, again.id.clone(), again.contents.clone(), true));
@@ -736,17 +745,22 @@ mod tests {
             file.seek(SeekFrom::Start(at)).unwrap();
             file.write_all(bytes).unwrap();
         };
-        match tc.draw(gs::integers::<u8>().max_value(3)) {
-            0 => file.set_len(at).unwrap(),
-            1 => overwrite(&vec![0; (len - at) as usize]),
-            2 => {
+        match tc.draw(gs::sampled_from(vec![
+            Damage::Cut,
+            Damage::Zeroed,
+            Damage::Garbled,
+            Damage::Grown,
+        ])) {
+            Damage::Cut => file.set_len(at).unwrap(),
+            Damage::Zeroed => overwrite(&vec![0; (len - at) as usize]),
+            Damage::Garbled => {
                 let span = tc.draw(gs::integers::<u64>().min_value(1).max_value(64));
                 overwrite(&bytes(
                     tc.draw(gs::integers::<u64>()),
                     span.min(len - at) as usize,
                 ));
             }
-            _ => file
+            Damage::Grown => file
                 .set_len(len + tc.draw(gs::integers::<u64>().min_value(1).max_value(4096)))
                 .unwrap(),
         }

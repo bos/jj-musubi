@@ -1550,41 +1550,58 @@ mod tests {
     /// target, or at either commit, tracked or not; and `git_refs` absent or at the first
     /// commit. Not every one is a view jj makes, but musubi's realization makes some that
     /// jj doesn't (`realize_not_WF`).
-    fn slot(tc: &TestCase, commits: &[CommitId; 4]) -> Slot {
+    ///
+    /// A composite, so a failure prints each slot it drew once, as the slot.
+    #[hegel::composite]
+    fn slot(tc: &TestCase, commits: [CommitId; 4]) -> Slot {
         let target = |n: usize| match n {
             0 => RefTarget::absent(),
             n => RefTarget::normal(commits[n - 1].clone()),
         };
-        let r = tc.draw(gs::integers::<usize>().max_value(2));
+        let l = target(tc.draw(gs::integers::<usize>().max_value(2)));
+        let r = target(tc.draw(gs::integers::<usize>().max_value(2)));
         Slot {
-            l: target(tc.draw(gs::integers::<usize>().max_value(2))),
-            r: target(r),
+            l,
+            r,
             tr: tc.draw(gs::booleans()),
             k: target(tc.draw(gs::integers::<usize>().max_value(1))),
         }
     }
 
+    /// Which side, if either, keeps the base's per-machine fields, so that the shortcut applies.
+    #[derive(Clone, Copy, Debug)]
+    enum Keeps {
+        Neither,
+        Theirs,
+        Ours,
+    }
+
     #[hegel::test(test_cases = 200)]
     fn merges_conform_to_refs_model(tc: TestCase) {
         REPO.with(|(_, repo, commits)| {
-            let b = slot(&tc, commits);
+            let b = tc.draw(slot(commits.clone()));
             // Often one side keeps the base's per-machine fields, where the shortcut applies.
-            let mut v = slot(&tc, commits);
-            let mut w = slot(&tc, commits);
-            match tc.draw(gs::integers::<usize>().max_value(2)) {
-                0 => {
+            let mut v = tc.draw(slot(commits.clone()));
+            let mut w = tc.draw(slot(commits.clone()));
+            let keeps = tc.draw(gs::sampled_from(vec![
+                Keeps::Neither,
+                Keeps::Theirs,
+                Keeps::Ours,
+            ]));
+            match keeps {
+                Keeps::Theirs => {
                     w = Slot {
                         l: w.l,
                         ..b.clone()
                     }
                 }
-                1 => {
+                Keeps::Ours => {
                     v = Slot {
                         l: v.l,
                         ..b.clone()
                     }
                 }
-                _ => {}
+                Keeps::Neither => {}
             }
             check(repo, &b, &v, &w);
         });

@@ -156,6 +156,148 @@ pub(super) struct LocalView {
     pub(super) prefixes: BTreeMap<String, String>,
 }
 
+/// The local parents of an operation being canonicalized, read for `NodeRepo::canonical_view`.
+struct LocalParents {
+    /// The workspace names in the view of the parent canonicalized just before, if one was.
+    last: Option<Arc<BTreeSet<WorkspaceNameBuf>>>,
+    /// The other parents.
+    ops: Vec<StoreOperation>,
+    /// A realization among the local parents named its canonical operation's workspaces
+    /// clear of the names it records too (`RESERVED_WORKSPACES`): this machine's own in the
+    /// op heads it was made beside, as a merge with them has them. By the canonical
+    /// operations current for each.
+    reserved_at: BTreeMap<CanonicalOp, BTreeSet<WorkspaceNameBuf>>,
+}
+
+impl LocalParents {
+    /// The workspace names in the parents' views, all together.
+    fn names(&self, node: &NodeRepo) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
+        let mut names = self.last.as_deref().cloned().unwrap_or_default();
+        for parent in &self.ops {
+            let view = node
+                .loader
+                .op_store()
+                .read_view(&parent.view_id)
+                .block_on()?;
+            names.extend(view.wc_commit_ids.into_keys());
+        }
+        Ok(names)
+    }
+}
+
+/// What an operation's canonical parents, and the namespace it records, say of the names in
+/// its local view, for `NodeRepo::canonical_view`.
+#[derive(Default)]
+struct Inherited {
+    /// The names under which this machine showed the parents' other workspaces, exactly as
+    /// `realize_one` named them, with their keys.
+    others: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
+    /// The heads of the parents' views.
+    parent_heads: BTreeSet<CommitId>,
+    /// Every machine the parents' histories have known.
+    machines: BTreeSet<String>,
+    /// This machine's own names, in the parents and private to it here.
+    own_names: BTreeSet<WorkspaceNameBuf>,
+    /// The names of `others` that a recorded namespace gives, standing for the views the
+    /// operation started from (`ContextBasis::captures`).
+    captured: BTreeSet<WorkspaceNameBuf>,
+}
+
+/// What a namespace an operation records is taken against.
+enum ContextBasis {
+    /// The operation is on the root alone, as after a full native trim: the namespace stands
+    /// for the views it started from.
+    Initial,
+    /// A fix-up, whose accepted base left no view to go by: likewise.
+    FixUp,
+    /// Otherwise, the workspace names in the views of its local parents, beyond which the
+    /// namespace gives no other machine's.
+    Parents(BTreeSet<WorkspaceNameBuf>),
+}
+
+impl ContextBasis {
+    fn is_initial(&self) -> bool {
+        matches!(self, Self::Initial)
+    }
+
+    /// Whether the namespace stands for the views the operation started from.
+    fn captures(&self) -> bool {
+        !matches!(self, Self::Parents(_))
+    }
+
+    /// Whether the namespace gives `name` to another machine's workspace.
+    fn admits(&self, name: &WorkspaceNameBuf) -> bool {
+        match self {
+            Self::Parents(names) => names.contains(name),
+            Self::Initial | Self::FixUp => true,
+        }
+    }
+}
+
+/// The workspace names and heads of a local operation's parents' views, read when first
+/// needed (`NodeRepo::parents_names_and_heads`).
+struct ParentsBefore<'a> {
+    local_op: &'a LocalOp,
+    read: Option<(BTreeSet<WorkspaceNameBuf>, BTreeSet<CommitId>)>,
+}
+
+impl<'a> ParentsBefore<'a> {
+    fn new(local_op: &'a LocalOp) -> Self {
+        Self {
+            local_op,
+            read: None,
+        }
+    }
+
+    fn get(
+        &mut self,
+        node: &NodeRepo,
+    ) -> Result<&(BTreeSet<WorkspaceNameBuf>, BTreeSet<CommitId>), NodeError> {
+        let read = match self.read.take() {
+            Some(read) => read,
+            None => node.parents_names_and_heads(self.local_op)?,
+        };
+        Ok(self.read.insert(read))
+    }
+}
+
+/// Existing fix-up WORK transitions restore each copy's bindings too, where the entire
+/// accepted base left no view from which to inherit them: `copy`'s workspaces among `others`,
+/// at their commits in `local`, where `workspaces_by_key` has none.
+fn restore_fixup_bindings(
+    copy: &str,
+    others: &BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
+    local: &BTreeMap<WorkspaceNameBuf, CommitId>,
+    workspaces_by_key: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
+) {
+    for (name, key) in others {
+        if workspaces::split_key(key.as_str()).is_some_and(|(owner, _)| owner == copy)
+            && let Some(commit) = local.get(name)
+        {
+            workspaces_by_key
+                .entry(key.clone())
+                .or_insert_with(|| commit.clone());
+        }
+    }
+}
+
+/// The workspaces of `workspaces_by_key` that this operation didn't move, `moved_here`.
+/// Another machine's workspace forgotten here can't be moved by jj; follow the rewrites this
+/// operation records instead.
+fn forgotten_workspaces(
+    workspaces_by_key: &BTreeMap<WorkspaceNameBuf, CommitId>,
+    moved_here: &BTreeSet<WorkspaceNameBuf>,
+    predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
+) -> BTreeMap<WorkspaceNameBuf, CommitId> {
+    let mut forgotten: BTreeMap<WorkspaceNameBuf, CommitId> = workspaces_by_key
+        .iter()
+        .filter(|(key, _)| !moved_here.contains(*key))
+        .map(|(key, commit)| (key.clone(), commit.clone()))
+        .collect();
+    workspaces::follow_rewrites(&mut forgotten, predecessors);
+    forgotten
+}
+
 impl NodeRepo {
     /// The canonical form of a local view, of an operation of `kind`: no records of this
     /// machine's `.git`, and the workspaces of every machine present (see `crate::presence`)
@@ -185,12 +327,6 @@ impl NodeRepo {
             !kind.forgets.contains(machine)
                 && (kind.work.as_deref() == Some(machine) || merged.is_present(machine))
         };
-        // The names under which this machine showed the parents' other workspaces, exactly
-        // as `realize_one` named them, and every machine their histories have known.
-        let mut others: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf> = BTreeMap::new();
-        let mut parent_heads: BTreeSet<CommitId> = BTreeSet::new();
-        let mut machines: BTreeSet<String> = BTreeSet::new();
-        let mut own_names: BTreeSet<WorkspaceNameBuf> = BTreeSet::new();
         let raw = self
             .loader
             .op_store()
@@ -201,7 +337,6 @@ impl NodeRepo {
         } else {
             self.private_workspace_names(&raw, &view.wc_commit_ids)?
         };
-        own_names.extend(private.iter().cloned());
         // Operations are canonicalized parents first, so the one before is usually the parent:
         // its names are known, and it is no realization.
         let last = self
@@ -212,11 +347,70 @@ impl NodeRepo {
             .clone();
         let names_here: Arc<BTreeSet<WorkspaceNameBuf>> =
             Arc::new(view.wc_commit_ids.keys().cloned().collect());
-        // A realization among the local parents named its canonical operation's workspaces
-        // clear of the names it records too (`RESERVED_WORKSPACES`): this machine's own in the
-        // op heads it was made beside, as a merge with them has them.
+        let local_parents = self.read_local_parents(&raw, last)?;
+        let mut inherited =
+            self.inherited_from_parents(&parent_presences, &private, &local_parents.reserved_at)?;
+        self.apply_namespace_context(&mut inherited, local_op, canonical_parents, metadata)?;
+
+        let mut workspaces_by_key = self.present_workspaces(&parent_presences, &present)?;
+        workspaces_by_key.retain(|key, _| !self.is_own_key(key));
+        let mut local = std::mem::take(&mut view.wc_commit_ids);
+        if OpAttrs(&metadata.attributes).is_fixup()
+            && let Some(copy) = &kind.work
+            && present(copy)
+        {
+            restore_fixup_bindings(copy, &inherited.others, &local, &mut workspaces_by_key);
+        }
+        let moved_here = self.move_others_here(
+            &raw,
+            &local_parents,
+            &inherited,
+            &mut local,
+            &mut workspaces_by_key,
+        )?;
+        let forgotten = forgotten_workspaces(&workspaces_by_key, &moved_here, predecessors);
+        let mut before = ParentsBefore::new(local_op);
+        self.keep_forgotten_visible(
+            local_op,
+            canonical_parents,
+            &inherited,
+            &forgotten,
+            &mut view,
+            &mut before,
+        )?;
+        workspaces_by_key.extend(forgotten);
+        self.drop_stale_names(local_op, &inherited, &mut local, &mut before)?;
+        if present(self.machine.key()) {
+            for (workspace, commit) in local {
+                workspaces_by_key.insert(
+                    workspaces::workspace_key(self.machine.key(), workspace.as_str()),
+                    commit,
+                );
+            }
+        }
+        PerMachine::strip(&mut view);
+        view.wc_commit_ids = workspaces_by_key;
+        *self
+            .names
+            .last_view
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((local_op.0.clone(), names_here));
+        Ok((view, merged))
+    }
+
+    /// The local parents of `raw`, but `last`, the one canonicalized just before, if it is
+    /// one, and the names realizations among them reserved.
+    fn read_local_parents(
+        &self,
+        raw: &StoreOperation,
+        last: Option<(
+            jj_lib::op_store::OperationId,
+            Arc<BTreeSet<WorkspaceNameBuf>>,
+        )>,
+    ) -> Result<LocalParents, NodeError> {
         let mut reserved_at: BTreeMap<CanonicalOp, BTreeSet<WorkspaceNameBuf>> = BTreeMap::new();
-        let mut parent_ops = vec![];
+        let mut ops = vec![];
         for parent in &raw.parents {
             if last.as_ref().is_some_and(|(id, _)| id == parent) {
                 continue;
@@ -233,107 +427,121 @@ impl NodeRepo {
                         .extend(reserved.iter().cloned());
                 }
             }
-            parent_ops.push(parent_op);
+            ops.push(parent_op);
         }
-        let parent_names = || -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
-            let mut names: BTreeSet<WorkspaceNameBuf> = match &last {
-                Some((id, names)) if raw.parents.contains(id) => (**names).clone(),
-                _ => BTreeSet::new(),
-            };
-            for parent in &parent_ops {
-                let view = self
-                    .loader
-                    .op_store()
-                    .read_view(&parent.view_id)
-                    .block_on()?;
-                names.extend(view.wc_commit_ids.into_keys());
-            }
-            Ok(names)
+        let last = last.and_then(|(id, names)| raw.parents.contains(&id).then_some(names));
+        Ok(LocalParents {
+            last,
+            ops,
+            reserved_at,
+        })
+    }
+
+    /// What the canonical parents say of an operation's names, given those `private` to
+    /// this machine here and those `reserved_at` each parent.
+    fn inherited_from_parents(
+        &self,
+        parent_presences: &[(CanonicalOp, Arc<Presence<Work>>)],
+        private: &BTreeSet<WorkspaceNameBuf>,
+        reserved_at: &BTreeMap<CanonicalOp, BTreeSet<WorkspaceNameBuf>>,
+    ) -> Result<Inherited, NodeError> {
+        let mut inherited = Inherited {
+            own_names: private.clone(),
+            ..Inherited::default()
         };
-        for (parent, presence) in &parent_presences {
+        for (parent, presence) in parent_presences {
             if parent == self.canonical.root_operation_id() {
                 continue;
             }
             let parent_view = self.canonical.read_operation_view(parent)?;
-            parent_heads.extend(parent_view.head_ids.iter().cloned());
-            machines.extend(self.machines_of(&parent_view, presence.known()));
-            own_names.extend(self.own_names_in(&parent_view, presence)?);
+            inherited
+                .parent_heads
+                .extend(parent_view.head_ids.iter().cloned());
+            inherited
+                .machines
+                .extend(self.machines_of(&parent_view, presence.known()));
+            inherited
+                .own_names
+                .extend(self.own_names_in(&parent_view, presence)?);
             let mut clear_of = private.clone();
             clear_of.extend(reserved_at.get(parent).into_iter().flatten().cloned());
             let prefixes = self.prefixes_with_own(&parent_view, presence, &clear_of)?;
             for (key, name) in self.names_of(&parent_view, &prefixes) {
                 if !self.is_own_key(&key) {
-                    others.insert(name, key);
+                    inherited.others.insert(name, key);
                 }
             }
         }
-        // A full native trim can leave unpublished work directly on root. Its captured
-        // namespace identifies foreign aliases without claiming erased source parents, and
-        // stands for the views such an operation started from (`started_from`, below).
-        let mut captured = BTreeSet::new();
-        let context =
-            Namespace::read(metadata)?.filter(|context| context.source == self.machine.key());
-        if let Some(context) = &context {
-            let initial = canonical_parents == [self.canonical.root_operation_id().clone()];
-            let fixup = OpAttrs(&metadata.attributes).is_fixup();
-            let parent_names = if initial || fixup {
-                BTreeSet::new()
-            } else {
-                self.parents_names_and_heads(local_op)?.0
-            };
-            machines.extend(context.known.iter().cloned());
-            for (name, key) in &context.names {
-                let key = WorkspaceNameBuf::from(key.clone());
-                let name = WorkspaceNameBuf::from(name.clone());
-                if self.is_own_key(&key) {
-                    if initial {
-                        own_names.insert(name);
-                    }
-                } else if !own_names.contains(&name)
-                    && (initial || fixup || parent_names.contains(&name))
-                {
-                    if initial || fixup {
-                        captured.insert(name.clone());
-                    }
-                    others.entry(name).or_insert(key);
+        Ok(inherited)
+    }
+
+    /// Adds to `inherited` what the namespace `metadata` records gives, where this machine
+    /// recorded it. A full native trim can leave unpublished work directly on root. Its
+    /// captured namespace identifies foreign aliases without claiming erased source parents,
+    /// and stands for the views such an operation started from (`move_others_here`).
+    fn apply_namespace_context(
+        &self,
+        inherited: &mut Inherited,
+        local_op: &LocalOp,
+        canonical_parents: &[CanonicalOp],
+        metadata: &jj_lib::op_store::OperationMetadata,
+    ) -> Result<(), NodeError> {
+        let Some(context) =
+            Namespace::read(metadata)?.filter(|context| context.source == self.machine.key())
+        else {
+            return Ok(());
+        };
+        let basis = if canonical_parents == [self.canonical.root_operation_id().clone()] {
+            ContextBasis::Initial
+        } else if OpAttrs(&metadata.attributes).is_fixup() {
+            ContextBasis::FixUp
+        } else {
+            ContextBasis::Parents(self.parents_names_and_heads(local_op)?.0)
+        };
+        inherited.machines.extend(context.known.iter().cloned());
+        for (name, key) in &context.names {
+            let key = WorkspaceNameBuf::from(key.clone());
+            let name = WorkspaceNameBuf::from(name.clone());
+            if self.is_own_key(&key) {
+                if basis.is_initial() {
+                    inherited.own_names.insert(name);
                 }
+            } else if !inherited.own_names.contains(&name) && basis.admits(&name) {
+                if basis.captures() {
+                    inherited.captured.insert(name.clone());
+                }
+                inherited.others.entry(name).or_insert(key);
             }
         }
-        let mut workspaces_by_key = self.present_workspaces(&parent_presences, &present)?;
-        workspaces_by_key.retain(|key, _| !self.is_own_key(key));
-        let mut local = std::mem::take(&mut view.wc_commit_ids);
-        // Existing fix-up WORK transitions restore each copy's bindings too, where the
-        // entire accepted base left no view from which to inherit them.
-        if OpAttrs(&metadata.attributes).is_fixup()
-            && let Some(copy) = &kind.work
-        {
-            for (name, key) in &others {
-                if workspaces::split_key(key.as_str()).is_some_and(|(owner, _)| owner == copy)
-                    && present(copy)
-                    && let Some(commit) = local.get(name)
-                {
-                    workspaces_by_key
-                        .entry(key.clone())
-                        .or_insert_with(|| commit.clone());
-                }
-            }
-        }
-        // A `jj` command here that adds a name none of the views it started from has makes a
-        // workspace of this machine's own, even one named as another machine's shows here, as
-        // after forgetting that one here: judged below, it never moves the other machine's.
-        // musubi's own operations make none, but show the others' again under their names.
+        Ok(())
+    }
+
+    /// Moves other machines' workspaces that this operation moved from `local` to
+    /// `workspaces_by_key`, returning their keys. A `jj` command here that adds a name none
+    /// of the views it started from has makes a workspace of this machine's own, even one
+    /// named as another machine's shows here, as after forgetting that one here: judged
+    /// here, it never moves the other machine's. musubi's own operations make none, but show
+    /// the others' again under their names.
+    fn move_others_here(
+        &self,
+        raw: &StoreOperation,
+        local_parents: &LocalParents,
+        inherited: &Inherited,
+        local: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
+        workspaces_by_key: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
+    ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
         let started_from = if raw.metadata.workspace_name.is_some()
-            && others.keys().any(|name| local.contains_key(name))
+            && inherited.others.keys().any(|name| local.contains_key(name))
         {
-            Some(self.names_started_from(&raw, parent_names)?)
+            Some(self.names_started_from(raw, || local_parents.names(self))?)
         } else {
             None
         };
         let mut moved_here = BTreeSet::new();
-        for (name, key) in &others {
+        for (name, key) in &inherited.others {
             if started_from
                 .as_ref()
-                .is_some_and(|names| !names.contains(name) && !captured.contains(name))
+                .is_some_and(|names| !names.contains(name) && !inherited.captured.contains(name))
             {
                 continue;
             }
@@ -344,32 +552,38 @@ impl NodeRepo {
                 moved_here.insert(key.clone());
             }
         }
-        // Another machine's workspace forgotten here can't be moved by jj; follow the
-        // rewrites this operation records instead.
-        let mut forgotten: BTreeMap<WorkspaceNameBuf, CommitId> = workspaces_by_key
-            .iter()
-            .filter(|(key, _)| !moved_here.contains(*key))
-            .map(|(key, commit)| (key.clone(), commit.clone()))
-            .collect();
-        workspaces::follow_rewrites(&mut forgotten, predecessors);
-        // Forgetting a workspace abandons its working-copy commit if it's empty, as
-        // `jj workspace forget` does. Forgetting another machine's workspace here mustn't
-        // abandon that machine's working copy: keep the commit visible, in the operation
-        // that forgot the workspace and in every later one. But not once this machine
-        // abandons the commit itself, as it can while the commit is visible here: had the
-        // workspace been here, jj would have given it a new commit. And only while its
-        // parents are visible here: jj, no longer seeing the commit, doesn't rebase it when
-        // this machine rewrites or abandons them, and keeping it would bring them back.
-        // Either way, its machine then replaces it, as if jj had abandoned it here
-        // (`replace_abandoned_working_copies`). Nor at a merge where a parent hid it, having
-        // had it at the merge base: a rewrite there, before a forget of the machine, moved
-        // the workspace in a view the merge leaves out (`present_workspaces`), and keeping
-        // the commit would show it beside its rewrite (`merged_heads`).
+        Ok(moved_here)
+    }
+
+    /// Keeps visible in `view` the working-copy commits of the `forgotten` workspaces that
+    /// forgetting them here would abandon.
+    ///
+    /// Forgetting a workspace abandons its working-copy commit if it's empty, as
+    /// `jj workspace forget` does. Forgetting another machine's workspace here mustn't
+    /// abandon that machine's working copy: keep the commit visible, in the operation
+    /// that forgot the workspace and in every later one. But not once this machine
+    /// abandons the commit itself, as it can while the commit is visible here: had the
+    /// workspace been here, jj would have given it a new commit. And only while its
+    /// parents are visible here: jj, no longer seeing the commit, doesn't rebase it when
+    /// this machine rewrites or abandons them, and keeping it would bring them back.
+    /// Either way, its machine then replaces it, as if jj had abandoned it here
+    /// (`replace_abandoned_working_copies`). Nor at a merge where a parent hid it, having
+    /// had it at the merge base: a rewrite there, before a forget of the machine, moved
+    /// the workspace in a view the merge leaves out (`present_workspaces`), and keeping
+    /// the commit would show it beside its rewrite (`merged_heads`).
+    fn keep_forgotten_visible(
+        &self,
+        local_op: &LocalOp,
+        canonical_parents: &[CanonicalOp],
+        inherited: &Inherited,
+        forgotten: &BTreeMap<WorkspaceNameBuf, CommitId>,
+        view: &mut View,
+        before: &mut ParentsBefore<'_>,
+    ) -> Result<(), NodeError> {
         let mut repo = None;
-        let mut before = None;
         let mut merged_heads = None;
-        for (key, commit) in &forgotten {
-            if !parent_heads.contains(commit) || view.head_ids.contains(commit) {
+        for (key, commit) in forgotten {
+            if !inherited.parent_heads.contains(commit) || view.head_ids.contains(commit) {
                 continue;
             }
             if canonical_parents.len() > 1 {
@@ -381,11 +595,9 @@ impl NodeRepo {
                     continue;
                 }
             }
-            let (names, heads) = match &before {
-                Some(before) => before,
-                None => before.insert(self.parents_names_and_heads(local_op)?),
-            };
-            let forgotten_here = others
+            let (names, heads) = before.get(self)?;
+            let forgotten_here = inherited
+                .others
                 .iter()
                 .any(|(name, other)| other == key && names.contains(name));
             // Forgotten before, and visible until this operation abandoned it.
@@ -405,59 +617,53 @@ impl NodeRepo {
                 view.head_ids.insert(commit.clone());
             }
         }
-        workspaces_by_key.extend(forgotten);
-        // What's left is this machine's own, but for other machines' workspaces under names
-        // the hive no longer gives them, as `jj undo` brings back. They are not this
-        // machine's to publish. A name this machine's own already had stays its own; and so
-        // does one this operation made, there in none of its parents' views. An operation
-        // that restores an older view makes none: its names are its own if they were in the
-        // view it restores, or, for a revert, in that operation's parents'.
+        Ok(())
+    }
+
+    /// Removes from `local` other machines' workspaces under names the hive no longer gives
+    /// them, as `jj undo` brings back. They are not this machine's to publish. A name this
+    /// machine's own already had stays its own; and so does one this operation made, there
+    /// in none of its parents' views. An operation that restores an older view makes none:
+    /// its names are its own if they were in the view it restores, or, for a revert, in that
+    /// operation's parents'.
+    fn drop_stale_names(
+        &self,
+        local_op: &LocalOp,
+        inherited: &Inherited,
+        local: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
+        before: &mut ParentsBefore<'_>,
+    ) -> Result<(), NodeError> {
         let stale: Vec<WorkspaceNameBuf> = local
             .keys()
-            .filter(|name| !own_names.contains(*name) && self.names_other_machine(name, &machines))
+            .filter(|name| {
+                !inherited.own_names.contains(*name)
+                    && self.names_other_machine(name, &inherited.machines)
+            })
             .cloned()
             .collect();
-        if !stale.is_empty() {
-            let op = self
-                .loader
-                .op_store()
-                .read_operation(&local_op.0)
-                .block_on()?;
-            let restored = match target_of(&op.metadata.description) {
-                Some((_, target)) => Some(self.restored_own_names(&LocalOp(target))?),
-                None => None,
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let op = self
+            .loader
+            .op_store()
+            .read_operation(&local_op.0)
+            .block_on()?;
+        let restored = match target_of(&op.metadata.description) {
+            Some((_, target)) => Some(self.restored_own_names(&LocalOp(target))?),
+            None => None,
+        };
+        let (names, _) = before.get(self)?;
+        for name in stale {
+            let own = match &restored {
+                Some(restored) => restored.contains(&name),
+                None => !names.contains(&name),
             };
-            let (names, _) = match &before {
-                Some(before) => before,
-                None => before.insert(self.parents_names_and_heads(local_op)?),
-            };
-            for name in stale {
-                let own = match &restored {
-                    Some(restored) => restored.contains(&name),
-                    None => !names.contains(&name),
-                };
-                if !own {
-                    local.remove(&name);
-                }
+            if !own {
+                local.remove(&name);
             }
         }
-        if present(self.machine.key()) {
-            for (workspace, commit) in local {
-                workspaces_by_key.insert(
-                    workspaces::workspace_key(self.machine.key(), workspace.as_str()),
-                    commit,
-                );
-            }
-        }
-        PerMachine::strip(&mut view);
-        view.wc_commit_ids = workspaces_by_key;
-        *self
-            .names
-            .last_view
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((local_op.0.clone(), names_here));
-        Ok((view, merged))
+        Ok(())
     }
 
     pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {

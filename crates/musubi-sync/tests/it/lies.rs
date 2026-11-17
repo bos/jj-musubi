@@ -23,6 +23,8 @@ use musubi_sync::Attachment;
 use musubi_sync::OpId;
 use musubi_sync::hive::Hive;
 use musubi_sync::node::Clock;
+use musubi_sync::wire::map_reply;
+use musubi_sync::wire::map_request;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -53,9 +55,16 @@ fn nodes_recover_from_wrong_replies(tc: TestCase) {
     let synced = hive.sync_through(ALPHA, &mut |request, reply| {
         seen.request(request);
         seen.reply(&reply);
-        if lies > 0 && tc.draw(gs::booleans()) {
+        if lies > 0 && tc.draw_named("lie_here", gs::booleans()) {
             lies -= 1;
-            lie(&tc, &seen)
+            let wrong = lie(&tc, &seen);
+            tc.note(&format!(
+                "to {}, instead of {}, the hub says {}",
+                seen.describe_request(request),
+                seen.describe(&reply),
+                seen.describe(&wrong),
+            ));
+            wrong
         } else {
             reply
         }
@@ -159,6 +168,42 @@ impl Seen {
         }
     }
 
+    /// `op` as `op#n`, by when alpha first saw it: ids differ between runs, this doesn't.
+    fn name(&self, op: &OpId) -> String {
+        self.ops
+            .iter()
+            .position(|seen| seen == op)
+            .map_or_else(|| "op#?".to_owned(), |n| format!("op#{n}"))
+    }
+
+    fn describe_attachment(attachment: &Attachment) -> String {
+        match attachment {
+            Attachment::None => "none".to_owned(),
+            Attachment::Bundle(_) | Attachment::File(_) => "a bundle".to_owned(),
+            Attachment::Haves(commits) => format!("{} haves", commits.len()),
+        }
+    }
+
+    /// A reply with its operations by [`Self::name`], its attachments by kind, and no more
+    /// than a few hundred characters.
+    fn describe(&self, reply: &Reply<OpId, Attachment>) -> String {
+        let reply = map_reply(
+            reply.clone(),
+            |op| self.name(&op),
+            |attachment| Ok(Self::describe_attachment(&attachment)),
+        );
+        brief(&format!("{:?}", reply.unwrap()))
+    }
+
+    fn describe_request(&self, request: &Request<OpId, Attachment>) -> String {
+        let request = map_request(
+            request.clone(),
+            |op| self.name(&op),
+            |attachment| Ok(Self::describe_attachment(&attachment)),
+        );
+        brief(&format!("{:?}", request.unwrap()))
+    }
+
     fn reply(&mut self, reply: &Reply<OpId, Attachment>) {
         match reply {
             Reply::Head {
@@ -208,35 +253,70 @@ impl Seen {
     }
 }
 
+/// What a lie is made of.
+#[derive(Clone, Copy, Debug)]
+enum Lie {
+    Head,
+    Fetched,
+    Objects,
+    /// The reply to another request, as from a hub that mixed them up.
+    Another,
+}
+
 /// A reply made of what alpha has seen, the real reply to this request last among them:
 /// a head, a fetch or objects with any of their parts wrong, or the reply to another
 /// request, as from a hub that mixed them up.
+#[hegel::test_helper]
 fn lie(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
-    match tc.draw(gs::integers::<u8>().max_value(3)) {
-        0 => Reply::Head {
-            kind: tc.draw(gs::sampled_from(vec![
+    let mut kinds = vec![Lie::Head, Lie::Fetched];
+    // None until a request or a reply has carried a bundle.
+    if !seen.attachments.is_empty() {
+        kinds.push(Lie::Objects);
+    }
+    kinds.push(Lie::Another);
+    let kind = tc.draw(gs::sampled_from(kinds));
+    match kind {
+        Lie::Head => {
+            let head_kind = tc.draw(gs::sampled_from(vec![
                 HeadKind::Head,
                 HeadKind::Accepted,
                 HeadKind::Rejected,
                 HeadKind::Incomplete,
                 HeadKind::Notify,
-            ])),
-            seq: seq(tc, seen),
-            head: pick(tc, &seen.ops).clone(),
-            records: pick(tc, &seen.records).clone(),
-        },
-        1 => fetched(tc, seen),
-        2 => Reply::Objects {
+            ]));
+            Reply::Head {
+                kind: head_kind,
+                seq: seq(tc, seen),
+                head: pick(tc, &seen.ops).clone(),
+                records: pick(tc, &seen.records).clone(),
+            }
+        }
+        Lie::Fetched => fetched(tc, seen),
+        Lie::Objects => Reply::Objects {
             for_ops: ops(tc, seen),
             attachment: pick(tc, &seen.attachments).clone(),
         },
-        _ => pick(tc, &seen.replies).clone(),
+        Lie::Another => pick(tc, &seen.replies).clone(),
     }
+}
+
+/// What a fetch's operations suffer, if anything.
+#[derive(Clone, Copy, Debug)]
+enum OpsDamage {
+    Untouched,
+    /// One is missing.
+    Dropped,
+    /// One comes twice.
+    Repeated,
+    Reversed,
+    /// One has other parents.
+    Reparented,
 }
 
 /// A fetch alpha was sent, or an empty one, with any of its parts wrong: its head, its
 /// operations dropped, repeated, reordered or with other parents, its bundles others alpha
 /// sent or was sent, or its records others alpha has seen.
+#[hegel::test_helper]
 fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     let fetches: Vec<_> = seen
         .replies
@@ -271,31 +351,43 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     else {
         unreachable!()
     };
-    if tc.draw(gs::booleans()) {
+    let other_seq = tc.draw(gs::booleans());
+    if other_seq {
         seq = self::seq(tc, seen);
     }
-    if tc.draw(gs::booleans()) {
+    let other_head = tc.draw(gs::booleans());
+    if other_head {
         head = pick(tc, &seen.ops).clone();
     }
     if !ops.is_empty() {
         let at = tc.draw(gs::integers::<usize>().max_value(ops.len() - 1));
-        match tc.draw(gs::integers::<u8>().max_value(4)) {
-            0 => {
+        let damage = tc.draw(gs::sampled_from(vec![
+            OpsDamage::Untouched,
+            OpsDamage::Dropped,
+            OpsDamage::Repeated,
+            OpsDamage::Reversed,
+            OpsDamage::Reparented,
+        ]));
+        match damage {
+            OpsDamage::Untouched => {}
+            OpsDamage::Dropped => {
                 ops.remove(at);
             }
-            1 => ops.insert(at, ops[at].clone()),
-            2 => ops.reverse(),
-            3 => ops[at].parents = self::ops(tc, seen),
-            _ => {}
+            OpsDamage::Repeated => ops.insert(at, ops[at].clone()),
+            OpsDamage::Reversed => ops.reverse(),
+            OpsDamage::Reparented => ops[at].parents = self::ops(tc, seen),
         }
     }
-    if tc.draw(gs::booleans()) {
+    let other_ops_attachment = tc.draw(gs::booleans());
+    if other_ops_attachment {
         ops_attachment = pick(tc, &seen.attachments).clone();
     }
-    if tc.draw(gs::booleans()) {
+    let other_objects = tc.draw(gs::booleans());
+    if other_objects {
         objects = pick(tc, &seen.attachments).clone();
     }
-    if tc.draw(gs::booleans()) {
+    let other_records = tc.draw(gs::booleans());
+    if other_records {
         records = pick(tc, &seen.records).clone();
     }
     Reply::Fetched {
@@ -311,30 +403,70 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     }
 }
 
+/// How a lie's sequence number differs from one alpha has seen.
+#[derive(Clone, Copy, Debug)]
+enum SeqLie {
+    Same,
+    Before,
+    After,
+    Largest,
+}
+
 /// A sequence number near one alpha has seen, or the largest.
+#[hegel::test_helper]
 fn seq(tc: &TestCase, seen: &Seen) -> u64 {
     let near = if seen.seqs.is_empty() {
         0
     } else {
         *pick(tc, &seen.seqs)
     };
-    match tc.draw(gs::integers::<u8>().max_value(3)) {
-        0 => near.saturating_sub(1),
-        1 => near,
-        2 => near.saturating_add(1),
-        _ => u64::MAX,
+    let shift = tc.draw(gs::sampled_from(vec![
+        SeqLie::Same,
+        SeqLie::Before,
+        SeqLie::After,
+        SeqLie::Largest,
+    ]));
+    match shift {
+        SeqLie::Same => near,
+        SeqLie::Before => near.saturating_sub(1),
+        SeqLie::After => near.saturating_add(1),
+        SeqLie::Largest => u64::MAX,
     }
 }
 
 /// A few operations alpha has seen.
+#[hegel::test_helper]
 fn ops(tc: &TestCase, seen: &Seen) -> Vec<OpId> {
-    (0..tc.draw(gs::integers::<usize>().max_value(3)))
-        .map(|_| pick(tc, &seen.ops).clone())
-        .collect()
+    let count = tc.draw(gs::integers::<usize>().max_value(3));
+    (0..count).map(|_| pick(tc, &seen.ops).clone()).collect()
 }
 
 fn pick<'a, T>(tc: &TestCase, items: &'a [T]) -> &'a T {
     &items[tc.draw(gs::integers::<usize>().max_value(items.len() - 1))]
+}
+
+/// `text` with each record digest, 32 or 64 numbers, elided, and then cut to a few hundred
+/// characters, for a note.
+fn brief(text: &str) -> String {
+    const LIMIT: usize = 600;
+    const DIGEST: &str = "digest: [";
+    let mut compact = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(DIGEST) {
+        let (head, tail) = rest.split_at(start + DIGEST.len());
+        compact.push_str(head);
+        let Some(end) = tail.find(']') else {
+            rest = tail;
+            break;
+        };
+        compact.push_str("..");
+        rest = &tail[end..];
+    }
+    compact.push_str(rest);
+    match compact.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &compact[..end]),
+        None => compact,
+    }
 }
 
 /// The environment's clock, for its nodes, so that a case replays exactly.

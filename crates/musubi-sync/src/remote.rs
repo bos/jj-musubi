@@ -1199,7 +1199,8 @@ mod tests {
         let seed = tc.draw(gs::integers::<usize>().max_value(250));
         let blob: Vec<u8> = (0..len).map(|i| ((i * 7 + seed) % 251) as u8).collect();
         let id = BlobId::of_bytes(&blob);
-        let plans: VecDeque<(usize, usize)> = (0..tc.draw(gs::integers::<usize>().max_value(12)))
+        let cut_calls = tc.draw(gs::integers::<usize>().max_value(12));
+        let plans: VecDeque<(usize, usize)> = (0..cut_calls)
             .map(|_| {
                 let delivered = tc.draw(gs::integers::<usize>().max_value(WINDOW));
                 // A download's chunk reaches the node only with its reply.
@@ -1284,13 +1285,16 @@ mod tests {
                 Err(err) => assert!(timed_out(&err), "{err:#}"),
             }
             assert!(call < calls, "the transfer did not finish in {calls} calls");
-            if tc.draw(gs::integers::<u8>().max_value(5)) == 0 {
+            // A sixth of the time each; Hegel shrinks a boolean to false, the ordinary case.
+            let sweeps = tc.draw(gs::weighted_booleans(1.0 / 6.0));
+            if sweeps {
                 // What a sweep of the receiver's partial blob leaves.
                 std::fs::remove_file(link.receiver.join("partial").join(id.hex())).ok();
                 steps.push(json!({"sweep": {"partial": true, "stored": false}}));
                 windows.push(None);
             }
-            if tc.draw(gs::integers::<u8>().max_value(5)) == 0 {
+            let restarts = tc.draw(gs::weighted_booleans(1.0 / 6.0));
+            if restarts {
                 remote = start();
                 steps.push(json!({"restart": true}));
                 windows.push(None);

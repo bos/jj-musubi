@@ -106,7 +106,7 @@ impl Ref {
 
     /// One of `refs`, drawn.
     fn draw(tc: &TestCase, refs: &[Self]) -> Self {
-        refs[tc.draw(gs::integers::<usize>().max_value(refs.len() - 1))]
+        tc.draw_named("ref", gs::sampled_from(refs))
     }
 }
 
@@ -566,6 +566,42 @@ struct ModelAtOperation {
     model: Model,
 }
 
+/// The commits the fixture's bookmarks name, as targets: the root; `base`, `one` and `two`, each
+/// the one before's child; and `three`, another child of `base`, which a bookmark of its own
+/// keeps visible.
+#[derive(Clone)]
+struct Commits {
+    root: RefTarget,
+    base: RefTarget,
+    one: RefTarget,
+    two: RefTarget,
+    three: RefTarget,
+}
+
+/// A target for a ref to move to, which a failure prints by name, not as a commit id.
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    Absent,
+    Root,
+    Base,
+    One,
+    Two,
+    Three,
+}
+
+impl Commits {
+    fn get(&self, target: Target) -> RefTarget {
+        match target {
+            Target::Absent => RefTarget::absent(),
+            Target::Root => self.root.clone(),
+            Target::Base => self.base.clone(),
+            Target::One => self.one.clone(),
+            Target::Two => self.two.clone(),
+            Target::Three => self.three.clone(),
+        }
+    }
+}
+
 struct Refs {
     fixture: Fixture,
     alg: Alg,
@@ -578,8 +614,7 @@ struct Refs {
     /// This machine's op head and model when both machines last synced, where the other
     /// machine's operations start.
     synced: ModelAtOperation,
-    /// The root, then `base`, `one`, `two` and `three`.
-    commits: Vec<CommitId>,
+    commits: Commits,
     /// `y` in `origin`.
     upstream: RefTarget,
 }
@@ -607,13 +642,14 @@ impl Refs {
         let two = commit("keep-two");
         let one = parent(&two);
         let base = parent(&one);
-        let commits = vec![
-            repo.store().root_commit_id().clone(),
-            base,
-            one.clone(),
-            two,
-            commit("keep-three"),
-        ];
+        let normal = |id: &CommitId| RefTarget::normal(id.clone());
+        let commits = Commits {
+            root: normal(repo.store().root_commit_id()),
+            base: normal(&base),
+            one: normal(&one),
+            two: normal(&two),
+            three: normal(&commit("keep-three")),
+        };
         let model = Model(Ref::ALL.map(|r| {
             let (v, g) = read(&repo, r);
             Machine {
@@ -638,8 +674,8 @@ impl Refs {
             latest: head.clone(),
             older: head.clone(),
             synced: head,
+            upstream: commits.one.clone(),
             commits,
-            upstream: RefTarget::normal(one),
         };
         refs.check();
         refs
@@ -647,16 +683,23 @@ impl Refs {
 
     /// A target other than `not`, the value it would replace, so that every action changes
     /// something: absent, or one of the commits, the root among them if `root`.
+    #[hegel::test_helper]
     fn target(&self, tc: &TestCase, root: bool, not: &RefTarget) -> RefTarget {
-        let first = if root { 0 } else { 1 };
-        let choices: Vec<RefTarget> = self.commits[first..]
+        let places = [
+            Target::Root,
+            Target::Base,
+            Target::One,
+            Target::Two,
+            Target::Three,
+            Target::Absent,
+        ];
+        let choices: Vec<Target> = places[usize::from(!root)..]
             .iter()
-            .map(|id| RefTarget::normal(id.clone()))
-            .chain([RefTarget::absent()])
-            .filter(|target| target != not)
+            .copied()
+            .filter(|&place| &self.commits.get(place) != not)
             .collect();
-        let n = tc.draw(gs::integers::<usize>().max_value(choices.len() - 1));
-        choices[n].clone()
+        let target = tc.draw(gs::sampled_from(choices));
+        self.commits.get(target)
     }
 
     /// The real state is the model's, and the model's invariants hold.
@@ -731,7 +774,7 @@ impl Refs {
         if l == current {
             jj(&["status"]);
         } else if let Some(id) = l.as_normal() {
-            let rev = if id == &self.commits[0] {
+            let rev = if l == &self.commits.root {
                 "root()".to_owned()
             } else {
                 id.hex()
@@ -1252,7 +1295,9 @@ impl Refs {
     fn jj_runs(&mut self, tc: TestCase) {
         let bookmark = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
         let current = self.imported(bookmark);
-        let l = if tc.draw(gs::booleans()) {
+        // False, a command that changes nothing, is the ordinary case Hegel shrinks to.
+        let moves = tc.draw(gs::booleans());
+        let l = if moves {
             self.target(&tc, true, &current)
         } else {
             current
@@ -1274,10 +1319,15 @@ impl Refs {
     /// both machines last synced at.
     #[rule]
     fn jj_restores(&mut self, tc: TestCase) {
-        let target = match tc.draw(gs::integers::<u8>().max_value(2)) {
-            0 => None,
-            1 => Some(self.older.op.clone()),
-            _ => Some(self.synced.op.clone()),
+        let restore = tc.draw(gs::sampled_from(vec![
+            Restore::Undo,
+            Restore::ToOlder,
+            Restore::ToSynced,
+        ]));
+        let target = match restore {
+            Restore::Undo => None,
+            Restore::ToOlder => Some(self.older.op.clone()),
+            Restore::ToSynced => Some(self.synced.op.clone()),
         };
         self.jj_restores_to(target);
     }
@@ -1289,56 +1339,103 @@ impl Refs {
         self.jj_fetches_from(upstream);
     }
 
-    /// The other machine moves `x` or `t`, or fetches `y` after it moved in `origin`, with
-    /// or without this machine's latest operations, and both sync (`musubi_realizes_with`).
-    #[rule(weight = 2)]
-    fn musubi_realizes(&mut self, tc: TestCase) {
-        let order = if tc.draw(gs::booleans()) {
-            PeerOrder::Concurrent
+    /// The other machine moves `x` or `t`, with or without this machine's latest operations,
+    /// and both sync (`musubi_realizes_with`).
+    #[rule]
+    fn musubi_realizes_a_move(&mut self, tc: TestCase) {
+        let order = tc.draw(gs::sampled_from(vec![
+            PeerOrder::Following,
+            PeerOrder::Concurrent,
+        ]));
+        let export = tc.draw(gs::sampled_from(vec![
+            GitExport::Writable,
+            GitExport::XLocked,
+        ]));
+        let r = Ref::draw(&tc, &[Ref::X, Ref::T]);
+        // The other machine's: as when they last synced, if it is behind, or else as here.
+        let current = if order == PeerOrder::Concurrent {
+            self.synced.model.get(r).v.l.clone()
         } else {
-            PeerOrder::Following
+            self.model.get(r).v.l.clone()
         };
-        let fetch = tc.draw(gs::booleans());
-        let export = if tc.draw(gs::booleans()) {
-            GitExport::XLocked
-        } else {
-            GitExport::Writable
-        };
-        let moved = (!fetch).then(|| {
-            let r = Ref::draw(&tc, &[Ref::X, Ref::T]);
-            // The other machine's: as when they last synced, if it is behind, or else as
-            // here.
-            let current = if order == PeerOrder::Concurrent {
-                self.synced.model.get(r).v.l.clone()
-            } else {
-                self.model.get(r).v.l.clone()
-            };
-            (r, self.target(&tc, true, &current))
-        });
-        // Keep this draw in both branches so stored Hegel examples retain their meaning.
-        let upstream = self.target(&tc, false, &self.upstream);
-        let command = match moved {
-            Some((r, target)) => RefCommand::Sets(r, target),
-            None => RefCommand::Fetches(upstream),
-        };
-        // A `jj` command here that the realization is beside, where the records agree.
-        let beside = (self.model.records_agree() && tc.draw(gs::booleans())).then(|| {
-            if tc.draw(gs::booleans()) {
-                // Something other than this machine has, but perhaps what the other fetched.
-                let origin = &self.model.get(Ref::Origin).g;
-                RefCommand::Fetches(self.target(&tc, false, origin))
-            } else {
-                let r = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
-                let current = self.imported(r);
-                RefCommand::Sets(r, self.target(&tc, true, &current))
-            }
-        });
+        let target = self.target(&tc, true, &current);
+        let beside = self.beside(&tc);
         self.musubi_realizes_with(Realization {
-            command,
+            command: RefCommand::Sets(r, target),
             order,
             export,
             beside,
         });
+    }
+
+    /// The other machine fetches `y` after it moved in `origin`, with or without this
+    /// machine's latest operations, and both sync (`musubi_realizes_with`).
+    #[rule]
+    fn musubi_realizes_a_fetch(&mut self, tc: TestCase) {
+        let order = tc.draw(gs::sampled_from(vec![
+            PeerOrder::Following,
+            PeerOrder::Concurrent,
+        ]));
+        let export = tc.draw(gs::sampled_from(vec![
+            GitExport::Writable,
+            GitExport::XLocked,
+        ]));
+        let upstream = self.target(&tc, false, &self.upstream);
+        let beside = self.beside(&tc);
+        self.musubi_realizes_with(Realization {
+            command: RefCommand::Fetches(upstream),
+            order,
+            export,
+            beside,
+        });
+    }
+}
+
+/// What a `jj` command here, beside a realization, does.
+#[derive(Clone, Copy, Debug)]
+enum Beside {
+    Nothing,
+    /// Fetches something other than this machine has, but perhaps what the other fetched.
+    Fetch,
+    Set,
+}
+
+/// How `jj_restores` restores.
+#[derive(Clone, Copy, Debug)]
+enum Restore {
+    Undo,
+    /// `jj op restore` to the operation before the latest action.
+    ToOlder,
+    /// `jj op restore` to the operation both machines last synced at.
+    ToSynced,
+}
+
+impl Refs {
+    /// A `jj` command here that the realization is beside, where the records agree; half the
+    /// time none.
+    #[hegel::test_helper]
+    fn beside(&self, tc: &TestCase) -> Option<RefCommand> {
+        if !self.model.records_agree() {
+            return None;
+        }
+        let beside = tc.draw(gs::sampled_from(vec![
+            Beside::Nothing,
+            Beside::Nothing,
+            Beside::Fetch,
+            Beside::Set,
+        ]));
+        match beside {
+            Beside::Nothing => None,
+            Beside::Fetch => {
+                let origin = &self.model.get(Ref::Origin).g;
+                Some(RefCommand::Fetches(self.target(tc, false, origin)))
+            }
+            Beside::Set => {
+                let r = Ref::draw(tc, &[Ref::X, Ref::T, Ref::Y]);
+                let current = self.imported(r);
+                Some(RefCommand::Sets(r, self.target(tc, true, &current)))
+            }
+        }
     }
 }
 
@@ -1353,8 +1450,13 @@ fn bookmarks_conform_to_refs_model(tc: TestCase) {
 #[test]
 fn a_pending_git_move_does_not_change_the_other_machines_import_record() {
     let mut refs = Refs::new();
-    let [root, base, one, two, three] =
-        [0, 1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    let Commits {
+        root,
+        base,
+        one,
+        two,
+        three,
+    } = refs.commits.clone();
     refs.git_moves_to(Ref::Origin, base.clone());
     refs.jj_sets(Ref::X, one);
     refs.git_moves_to(Ref::Origin, two);
@@ -1374,16 +1476,14 @@ fn a_pending_git_move_does_not_change_the_other_machines_import_record() {
 #[test]
 fn undo_of_an_unexportable_bookmark_keeps_it() {
     let mut refs = Refs::new();
-    refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[0].clone()));
-    refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[3].clone()));
+    let Commits { root, two, .. } = refs.commits.clone();
+    refs.jj_sets(Ref::X, root.clone());
+    refs.jj_sets(Ref::X, two);
     refs.jj_restores_to(None);
     assert!(refs.model.get(Ref::X).restored);
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
-    assert_eq!(
-        refs.model.get(Ref::X).v.l,
-        RefTarget::normal(refs.commits[0].clone())
-    );
+    assert_eq!(refs.model.get(Ref::X).v.l, root);
 }
 
 /// Concurrent fetches conflict `y@origin`; a fetch here settles it, then a restore brings
@@ -1392,7 +1492,13 @@ fn undo_of_an_unexportable_bookmark_keeps_it() {
 #[test]
 fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
     let mut refs = Refs::new();
-    let [base, _, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    let Commits {
+        base,
+        one,
+        two,
+        three,
+        ..
+    } = refs.commits.clone();
     refs.jj_fetches_from(two);
     refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(three)));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
@@ -1403,7 +1509,7 @@ fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
     assert!(!origin.v.r.is_resolved() && !origin.restored, "{origin:?}");
     assert_eq!(origin.g, base);
     let x = refs.model.get(Ref::X).v.l.clone();
-    let moved = RefTarget::normal(refs.commits[if x == base { 2 } else { 1 }].clone());
+    let moved = if x == base { one } else { base.clone() };
     refs.musubi_realizes_with(Realization::following(RefCommand::Sets(Ref::X, moved)));
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
@@ -1426,7 +1532,13 @@ fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
 #[test]
 fn realization_beside_a_fetch_keeps_the_fetch() {
     let mut refs = Refs::new();
-    let [root, base, one, two] = [0, 1, 2, 3].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    let Commits {
+        root,
+        base,
+        one,
+        two,
+        ..
+    } = refs.commits.clone();
     refs.musubi_realizes_with(Realization::following(RefCommand::Fetches(two)));
     refs.jj_fetches_from(base.clone());
     refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(one)));
@@ -1483,7 +1595,13 @@ fn a_resolved_merge_is_its_own_expected_value() {
 #[test]
 fn realization_beside_a_fetch_here_keeps_the_fetch() {
     let mut refs = Refs::new();
-    let [base, one, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    let Commits {
+        base,
+        one,
+        two,
+        three,
+        ..
+    } = refs.commits.clone();
     refs.jj_fetches_from(two.clone());
     refs.musubi_realizes_with(Realization::concurrent(RefCommand::Fetches(three)));
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
@@ -1963,13 +2081,14 @@ fn refs_cases() -> u64 {
 #[test]
 fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
     let mut refs = Refs::new();
-    let three = RefTarget::normal(refs.commits[4].clone());
-    let base = RefTarget::normal(refs.commits[1].clone());
+    let Commits {
+        base, one, three, ..
+    } = refs.commits.clone();
     refs.musubi_realizes_with(
         Realization::following(RefCommand::Fetches(three))
             .beside(RefCommand::Fetches(base.clone())),
     );
-    refs.jj_sets_at_older_op(Ref::Y, RefTarget::normal(refs.commits[2].clone()));
+    refs.jj_sets_at_older_op(Ref::Y, one);
 }
 
 /// A restore first exports what an earlier export left undone, as any integrated command
@@ -1982,7 +2101,9 @@ fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
 #[test]
 fn a_restore_first_exports_what_a_lock_held_back() {
     let mut refs = Refs::new();
-    let [root, base, one] = [0, 1, 2].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    let Commits {
+        root, base, one, ..
+    } = refs.commits.clone();
     refs.jj_sets(Ref::X, root.clone());
     refs.musubi_realizes_with(
         Realization::following(RefCommand::Sets(Ref::X, base.clone())).with_locked_export(),

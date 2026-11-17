@@ -481,6 +481,24 @@ mod tests {
         assert_eq!(received, Received::Prefix(0));
     }
 
+    /// What a chunk of `receive_follows_the_prefix_model` carries wrong, if anything.
+    #[derive(Clone, Copy, Debug)]
+    enum DataDamage {
+        Honest,
+        /// The first byte's low bit flipped.
+        Flipped,
+        /// A byte too many.
+        Extra,
+    }
+
+    /// The blob's total length, as a chunk of `receive_follows_the_prefix_model` claims it.
+    #[derive(Clone, Copy, Debug)]
+    enum TotalClaim {
+        Honest,
+        OneShort,
+        OneLong,
+    }
+
     /// A step the test took, and what `BlobStore` made of it: its reply to a chunk (none
     /// for a sweep), the partial blob, and whether it has the blob.
     struct Taken {
@@ -544,8 +562,11 @@ mod tests {
             });
             received
         };
-        for _ in 0..tc.draw(gs::integers::<usize>().max_value(40)) {
-            if tc.draw(gs::integers::<u8>().max_value(7)) == 0 {
+        let rounds = tc.draw(gs::integers::<usize>().max_value(40));
+        for _ in 0..rounds {
+            // An eighth of the steps; Hegel shrinks a boolean to false, the ordinary chunk.
+            let sweeps = tc.draw(gs::weighted_booleans(1.0 / 8.0));
+            if sweeps {
                 // `sweepPartial`, `sweepStored`, or both.
                 let partial = tc.draw(gs::booleans());
                 let stored = tc.draw(gs::booleans());
@@ -566,17 +587,31 @@ mod tests {
             }
             // `send` or `inject`, then `recv`.
             let offset = tc.draw(gs::integers::<usize>().max_value(len + 1));
-            let end = (offset + tc.draw(gs::integers::<usize>().max_value(chunk))).min(len);
+            let size = tc.draw(gs::integers::<usize>().max_value(chunk));
+            let end = (offset + size).min(len);
             let mut data = blob[offset.min(len)..end.max(offset.min(len))].to_vec();
-            match tc.draw(gs::integers::<u8>().max_value(9)) {
-                0 if !data.is_empty() => data[0] ^= 1,
-                1 => data.push(0),
-                _ => {}
+            // Honest eight times in ten, a flipped bit and an extra byte one in ten each, and
+            // honest listed first, where a failure shrinks to.
+            let mut damages = vec![DataDamage::Honest; 8];
+            damages.push(if data.is_empty() {
+                DataDamage::Honest
+            } else {
+                DataDamage::Flipped
+            });
+            damages.push(DataDamage::Extra);
+            let damage = tc.draw(gs::sampled_from(damages));
+            match damage {
+                DataDamage::Honest => {}
+                DataDamage::Flipped => data[0] ^= 1,
+                DataDamage::Extra => data.push(0),
             }
-            let total = match tc.draw(gs::integers::<u8>().max_value(9)) {
-                0 => len.saturating_sub(1),
-                1 => len + 1,
-                _ => len,
+            let mut claims = vec![TotalClaim::Honest; 8];
+            claims.extend([TotalClaim::OneShort, TotalClaim::OneLong]);
+            let claim = tc.draw(gs::sampled_from(claims));
+            let total = match claim {
+                TotalClaim::Honest => len,
+                TotalClaim::OneShort => len.saturating_sub(1),
+                TotalClaim::OneLong => len + 1,
             };
             if let Received::Prefix(have) = step(&mut taken, total, offset, &data) {
                 told = usize::try_from(have).unwrap();

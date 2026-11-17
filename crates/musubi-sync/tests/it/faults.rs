@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,7 +89,8 @@ fn hub_survives_malformed_requests(tc: TestCase) {
     // Partway through a real session: blobs half uploaded, the head moved or not.
     let replayed = tc.draw(gs::integers::<usize>().max_value(session.seen.requests.len()));
     let mut hub = session.hub_after(replayed, &dir.path().join("hub"));
-    for _ in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(6)) {
+    let rounds = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+    for _ in 0..rounds {
         let heads = heads(&hub, session);
         for request in malformed(&tc, &session.seen, &heads) {
             let before = hub.hub().head();
@@ -142,28 +144,22 @@ fn hub_survives_malformed_requests(tc: TestCase) {
 fn calls_finish_once_the_link_is_back(tc: TestCase) {
     let session = session();
     let call = pick(&tc, &session.calls);
+    tc.note(&call.describe());
     let at = tc.draw(gs::integers::<usize>().max_value(call.requests));
-    let fault = tc.draw(gs::sampled_from(vec![
-        Fault::Lost,
-        Fault::ReplyLost,
-        Fault::Stall,
-    ]));
+    let fault = link_fault(&tc);
     run_local(async {
-        let dir = musubi_testutil::tempdir();
-        let hub_dir = dir.path().join("hub");
-        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
-        let hub = session.hub_after(call.start, &hub_dir);
-        serve(hub, Arc::new(network.connect())).await;
-        let link = Link::new(Arc::new(network.connect()), &hub_dir, Some((at, fault)));
-        let blobs = dir.path().join("node");
-        let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
-        let mut reply = remote.call(call.request(&session.seen, &blobs)).await;
+        let served = Served::new(session, call, MAX_PAYLOAD).await;
+        let link = served.link(Some((at, fault)));
+        let remote = served.remote(link.clone(), TIMEOUT);
+        let blobs = &served.blobs;
+        let mut reply = remote.call(call.request(&session.seen, blobs)).await;
         link.check_progress();
         let mut moved = false;
         if reply.is_err() {
             let seen = Seen::new(link.sent());
-            let stranger = network.connect();
-            for _ in 0..tc.draw(gs::integers::<usize>().max_value(3)) {
+            let stranger = served.network.connect();
+            let strangers = tc.draw(gs::integers::<usize>().max_value(3));
+            for _ in 0..strangers {
                 for request in malformed(&tc, &seen, &[]) {
                     let reply = stranger.request(RPC, request.into(), TIMEOUT).await;
                     if let Ok(reply) = reply
@@ -176,11 +172,12 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
                     }
                 }
             }
-            if tc.draw(gs::booleans()) {
-                an_hour_passes(&hub_dir);
+            let hour = tc.draw(gs::booleans());
+            if hour {
+                an_hour_passes(&served.hub_dir);
             }
             link.heal();
-            reply = remote.call(call.request(&session.seen, &blobs)).await;
+            reply = remote.call(call.request(&session.seen, blobs)).await;
             link.check_progress();
         }
         let reply = map_reply(reply.unwrap(), |id| id.to_bytes(), |_| Ok(())).unwrap();
@@ -200,6 +197,7 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
 fn calls_survive_malformed_replies(tc: TestCase) {
     let session = session();
     let call = pick(&tc, &session.calls);
+    tc.note(&call.describe());
     // The call's requests by kind, so that the one protocol request among a download's
     // dozens of chunks is as likely to get a bad reply as they are.
     let mut kinds: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
@@ -214,28 +212,28 @@ fn calls_survive_malformed_replies(tc: TestCase) {
     }
     let kinds: Vec<Vec<usize>> = kinds.into_values().collect();
     let mut garbled = BTreeMap::new();
-    for _ in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(3)) {
+    let replies = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+    for _ in 0..replies {
         let at = *pick(&tc, pick(&tc, &kinds));
-        garbled.insert(at, malformed_reply(&tc, session, call.start + at));
+        let reply = malformed_reply(&tc, session, call.start + at);
+        tc.note(&format!(
+            "to request {at} of the call, {}, the hub replies {}",
+            describe_request(&session.seen.requests[call.start + at]),
+            describe_reply(&reply),
+        ));
+        garbled.insert(at, reply);
     }
     run_local(async {
-        let dir = musubi_testutil::tempdir();
-        let hub_dir = dir.path().join("hub");
-        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
-        serve(
-            session.hub_after(call.start, &hub_dir),
-            Arc::new(network.connect()),
-        )
-        .await;
-        let link = Link::new(Arc::new(network.connect()), &hub_dir, None);
+        let served = Served::new(session, call, MAX_PAYLOAD).await;
+        let link = served.link(None);
         link.garble(garbled);
-        let blobs = dir.path().join("node");
-        let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+        let remote = served.remote(link.clone(), TIMEOUT);
+        let blobs = &served.blobs;
         // Whatever it makes of them, as long as it gets there.
-        drop(remote.call(call.request(&session.seen, &blobs)).await);
+        drop(remote.call(call.request(&session.seen, blobs)).await);
         link.check_progress();
         link.heal();
-        let reply = remote.call(call.request(&session.seen, &blobs)).await;
+        let reply = remote.call(call.request(&session.seen, blobs)).await;
         link.check_progress();
         let reply = map_reply(reply.unwrap(), |id| id.to_bytes(), |_| Ok(())).unwrap();
         assert_eq!(reply, call.reply);
@@ -262,11 +260,7 @@ fn node_recovers_when_its_link_fails_partway(tc: TestCase) {
         // alpha downloads beta's commit and uploads its own, each several windows of chunks.
         big_commit(&alpha, "from alpha");
         let at = tc.draw(gs::integers::<usize>().max_value(50));
-        let fault = tc.draw(gs::sampled_from(vec![
-            Fault::Lost,
-            Fault::ReplyLost,
-            Fault::Stall,
-        ]));
+        let fault = link_fault(&tc);
         let link = Link::new(Arc::new(network.connect()), &hub_dir, Some((at, fault)));
         let mut alpha_node = driver(&alpha, link.clone());
         // It fails, unless the fault comes after its last request or it gets past it.
@@ -275,7 +269,8 @@ fn node_recovers_when_its_link_fails_partway(tc: TestCase) {
 
         let seen = Seen::new(link.sent());
         let stranger = network.connect();
-        for _ in 0..tc.draw(gs::integers::<usize>().max_value(3)) {
+        let strangers = tc.draw(gs::integers::<usize>().max_value(3));
+        for _ in 0..strangers {
             for request in malformed(&tc, &seen, &[]) {
                 stranger.request(RPC, request.into(), TIMEOUT).await.ok();
             }
@@ -283,7 +278,8 @@ fn node_recovers_when_its_link_fails_partway(tc: TestCase) {
         beta.write_file("more", "more");
         beta.jj(&["commit", "-m", "more from beta"]);
         beta_node.sync().await.unwrap();
-        if tc.draw(gs::booleans()) {
+        let hour = tc.draw(gs::booleans());
+        if hour {
             an_hour_passes(&hub_dir);
         }
 
@@ -392,26 +388,18 @@ fn blobs_last_while_chunks_of_them_move() {
             })
             .unwrap_or_else(|| panic!("no {kind} of the session moves two blobs"));
         run_local(async {
-            let dir = musubi_testutil::tempdir();
-            let hub_dir = dir.path().join("hub");
-            let network = MemoryNetwork::new(1, max_payload);
-            serve(
-                session.hub_after(call.start, &hub_dir),
-                Arc::new(network.connect()),
-            )
-            .await;
+            let served = Served::new(session, call, max_payload).await;
             let link = Arc::new(Ageing {
-                inner: Arc::new(network.connect()),
-                hub_dir: hub_dir.clone(),
+                inner: Arc::new(served.network.connect()),
+                hub_dir: served.hub_dir.clone(),
                 requests: AtomicUsize::new(0),
                 moved: Mutex::new(BTreeSet::new()),
                 blobs: Mutex::new(BTreeMap::new()),
                 asked: Mutex::new(None),
             });
-            let blobs = dir.path().join("node");
-            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+            let remote = served.remote(link.clone(), TIMEOUT);
             let reply = remote
-                .call(call.request(&session.seen, &blobs))
+                .call(call.request(&session.seen, &served.blobs))
                 .await
                 .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
             // Some blob waits, untouched but for chunks that move nothing, for over an hour:
@@ -459,22 +447,14 @@ fn calls_finish_on_a_link_that_cuts_every_window_short() {
             })
             .unwrap_or_else(|| panic!("no {kind} of the session moves two blobs"));
         run_local(async {
-            let dir = musubi_testutil::tempdir();
-            let hub_dir = dir.path().join("hub");
-            let network = MemoryNetwork::new(1, max_payload);
-            serve(
-                session.hub_after(call.start, &hub_dir),
-                Arc::new(network.connect()),
-            )
-            .await;
+            let served = Served::new(session, call, max_payload).await;
             let link = Arc::new(Cutting {
-                inner: Arc::new(network.connect()),
+                inner: Arc::new(served.network.connect()),
                 state: Mutex::new(CuttingState::default()),
             });
-            let blobs = dir.path().join("node");
-            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+            let remote = served.remote(link.clone(), TIMEOUT);
             let reply = remote
-                .call(call.request(&session.seen, &blobs))
+                .call(call.request(&session.seen, &served.blobs))
                 .await
                 .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
             let cut = link.state.lock().unwrap().cut;
@@ -620,23 +600,15 @@ fn calls_finish_on_a_slow_link() {
             })
             .unwrap_or_else(|| panic!("no {kind} of the session moves a window of chunks"));
         run_paused(async {
-            let dir = musubi_testutil::tempdir();
-            let hub_dir = dir.path().join("hub");
-            let network = MemoryNetwork::new(1, MAX_PAYLOAD);
-            serve(
-                session.hub_after(call.start, &hub_dir),
-                Arc::new(network.connect()),
-            )
-            .await;
+            let served = Served::new(session, call, MAX_PAYLOAD).await;
             let link = Throttled::new(
-                Arc::new(network.connect()),
+                Arc::new(served.network.connect()),
                 Duration::from_secs(80) / u32::try_from(chunk).unwrap(),
             );
-            let blobs = dir.path().join("node");
-            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, REQUEST_TIMEOUT).unwrap();
+            let remote = served.remote(link.clone(), REQUEST_TIMEOUT);
             let started = tokio::time::Instant::now();
             let reply = remote
-                .call(call.request(&session.seen, &blobs))
+                .call(call.request(&session.seen, &served.blobs))
                 .await
                 .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
             let took = started.elapsed();
@@ -810,24 +782,12 @@ fn calls_give_up_on_a_request_never_answered() {
         .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
         .unwrap();
     run_local(async {
-        let dir = musubi_testutil::tempdir();
-        let hub_dir = dir.path().join("hub");
         // Small enough that the push goes as a blob.
-        let network = MemoryNetwork::new(1, 256);
-        serve(
-            session.hub_after(call.start, &hub_dir),
-            Arc::new(network.connect()),
-        )
-        .await;
-        let link = Link::new(
-            Arc::new(network.connect()),
-            &hub_dir,
-            Some((0, Fault::Unanswered)),
-        );
-        let blobs = dir.path().join("node");
-        let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+        let served = Served::new(session, call, 256).await;
+        let link = served.link(Some((0, Fault::Unanswered)));
+        let remote = served.remote(link.clone(), TIMEOUT);
         let err = remote
-            .call(call.request(&session.seen, &blobs))
+            .call(call.request(&session.seen, &served.blobs))
             .await
             .unwrap_err();
         link.check_progress();
@@ -983,30 +943,17 @@ fn calls_leave_no_uploads_behind() {
         .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
         .unwrap();
     run_local(async {
-        let dir = musubi_testutil::tempdir();
-        let hub_dir = dir.path().join("hub");
-        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
-        serve(
-            session.hub_after(call.start, &hub_dir),
-            Arc::new(network.connect()),
-        )
-        .await;
-        let blobs = dir.path().join("node");
+        let served = Served::new(session, call, MAX_PAYLOAD).await;
+        let blobs = &served.blobs;
         let stored = || std::fs::read_dir(blobs.join("complete")).unwrap().count();
 
-        let link = Link::new(
-            Arc::new(network.connect()),
-            &hub_dir,
-            Some((1, Fault::Lost)),
-        );
-        let remote = RemoteHub::new(link, RPC.into(), &blobs, TIMEOUT).unwrap();
-        let reply = remote.call(call.request(&session.seen, &blobs)).await;
+        let remote = served.remote(served.link(Some((1, Fault::Lost))), TIMEOUT);
+        let reply = remote.call(call.request(&session.seen, blobs)).await;
         assert!(reply.is_err());
         assert_eq!(stored(), 0);
 
-        let remote =
-            RemoteHub::new(Arc::new(network.connect()), RPC.into(), &blobs, TIMEOUT).unwrap();
-        let mut reply = Box::pin(remote.call(call.request(&session.seen, &blobs)));
+        let remote = served.remote(Arc::new(served.network.connect()), TIMEOUT);
+        let mut reply = Box::pin(remote.call(call.request(&session.seen, blobs)));
         // The hub can't answer until this yields, so the upload has begun and waits.
         assert!(futures::poll!(reply.as_mut()).is_pending());
         assert!(stored() > 0);
@@ -1030,18 +977,11 @@ fn calls_leave_no_downloads_behind() {
         .find(|call| matches!(call.request, Request::Fetch { .. }) && call.requests > 1)
         .unwrap();
     run_local(async {
-        let dir = musubi_testutil::tempdir();
-        let hub_dir = dir.path().join("hub");
-        let network = MemoryNetwork::new(1, 512);
-        serve(
-            session.hub_after(call.start, &hub_dir),
-            Arc::new(network.connect()),
-        )
-        .await;
+        let served = Served::new(session, call, 512).await;
         // Record this read-only fetch at this payload size before choosing its failure
         // point. An indirect reply may precede the two retained attachment downloads.
-        let probe = Link::new(Arc::new(network.connect()), &hub_dir, None);
-        let probe_dir = dir.path().join("probe");
+        let probe = served.link(None);
+        let probe_dir = served.dir.path().join("probe");
         let remote = RemoteHub::new(probe.clone(), RPC.into(), &probe_dir, TIMEOUT).unwrap();
         drop(
             remote
@@ -1063,26 +1003,19 @@ fn calls_leave_no_downloads_behind() {
         let (_, last) = downloads.last().unwrap();
         let second = downloads.iter().find(|(_, blob)| blob == last).unwrap().0;
         assert!(downloads.iter().filter(|(_, blob)| blob == last).count() >= 2);
-        let blobs = dir.path().join("node");
+        let blobs = &served.blobs;
         let stored = |sub: &str| std::fs::read_dir(blobs.join(sub)).unwrap().count();
-        let failing = |at| {
-            let link = Link::new(
-                Arc::new(network.connect()),
-                &hub_dir,
-                Some((at, Fault::Lost)),
-            );
-            RemoteHub::new(link, RPC.into(), &blobs, TIMEOUT).unwrap()
-        };
+        let failing = |at| served.remote(served.link(Some((at, Fault::Lost))), TIMEOUT);
 
         // The link fails just after the second download's first chunk.
         let reply = failing(second + 1)
-            .call(call.request(&session.seen, &blobs))
+            .call(call.request(&session.seen, blobs))
             .await;
         assert!(reply.is_err());
         assert_eq!(stored("complete"), 0);
         assert_eq!(stored("partial"), 1);
         // A later call keeps the partial download until it has gone a day untouched.
-        let request = call.request(&session.seen, &blobs);
+        let request = call.request(&session.seen, blobs);
         assert!(failing(0).call(request).await.is_err());
         assert_eq!(stored("partial"), 1);
         let partial = std::fs::read_dir(blobs.join("partial"))
@@ -1097,13 +1030,12 @@ fn calls_leave_no_downloads_behind() {
             .unwrap()
             .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600))
             .unwrap();
-        let request = call.request(&session.seen, &blobs);
+        let request = call.request(&session.seen, blobs);
         assert!(failing(0).call(request).await.is_err());
         assert_eq!(stored("partial"), 0);
 
-        let remote =
-            RemoteHub::new(Arc::new(network.connect()), RPC.into(), &blobs, TIMEOUT).unwrap();
-        let mut reply = Box::pin(remote.call(call.request(&session.seen, &blobs)));
+        let remote = served.remote(Arc::new(served.network.connect()), TIMEOUT);
+        let mut reply = Box::pin(remote.call(call.request(&session.seen, blobs)));
         // Until the first download is done, and the second waits on the hub.
         while stored("complete") == 0 {
             assert!(futures::poll!(reply.as_mut()).is_pending());
@@ -1113,7 +1045,7 @@ fn calls_leave_no_downloads_behind() {
         assert_eq!(stored("complete"), 0);
 
         let reply = remote
-            .call(call.request(&session.seen, &blobs))
+            .call(call.request(&session.seen, blobs))
             .await
             .unwrap();
         assert_eq!(stored("complete"), 2);
@@ -1263,6 +1195,57 @@ impl Transport for Link {
     }
 }
 
+/// How a link fails, drawn: any of the ways a link comes back from. Hegel shrinks to the
+/// first, the wifi going off.
+fn link_fault(tc: &TestCase) -> Fault {
+    tc.draw_named(
+        "fault",
+        gs::sampled_from(vec![Fault::Lost, Fault::ReplyLost, Fault::Stall]),
+    )
+}
+
+/// A hub as the session left it just before a call, listening on a network of its own, and
+/// where a node keeps its blobs.
+struct Served {
+    dir: tempfile::TempDir,
+    network: MemoryNetwork,
+    hub_dir: PathBuf,
+    /// A node's blob store, for [`Self::remote`].
+    blobs: PathBuf,
+}
+
+impl Served {
+    /// The hub as it was when `call` began, on a network carrying messages of at most
+    /// `max_payload` bytes.
+    async fn new(session: &Session, call: &Call, max_payload: usize) -> Self {
+        let dir = musubi_testutil::tempdir();
+        let hub_dir = dir.path().join("hub");
+        let network = MemoryNetwork::new(1, max_payload);
+        serve(
+            session.hub_after(call.start, &hub_dir),
+            Arc::new(network.connect()),
+        )
+        .await;
+        let blobs = dir.path().join("node");
+        Self {
+            dir,
+            network,
+            hub_dir,
+            blobs,
+        }
+    }
+
+    /// A node's link to the hub, failing as `fault` says.
+    fn link(&self, fault: Option<(usize, Fault)>) -> Arc<Link> {
+        Link::new(Arc::new(self.network.connect()), &self.hub_dir, fault)
+    }
+
+    /// A node that reaches the hub over `link`.
+    fn remote(&self, link: Arc<dyn Transport>, timeout: Duration) -> RemoteHub {
+        RemoteHub::new(link, RPC.into(), &self.blobs, timeout).unwrap()
+    }
+}
+
 /// What an hour without a word from a node does at the hub: its sweep removes the
 /// transfers in progress, uploads and prepared downloads alike.
 fn an_hour_passes(hub_dir: &Path) {
@@ -1343,6 +1326,19 @@ struct Call {
 }
 
 impl Call {
+    /// Which call of the session this is, for a note.
+    fn describe(&self) -> String {
+        let kind = match self.request {
+            Request::Fetch { .. } => "a fetch",
+            Request::GetObjects { .. } => "a request for objects",
+            Request::Push { .. } => "a push",
+        };
+        format!(
+            "the call is {kind}, {} requests from request {} of the session",
+            self.requests, self.start
+        )
+    }
+
     /// The calls of a session's requests.
     fn all(requests: &[Vec<u8>], replies: &BTreeMap<usize, Vec<u8>>) -> Vec<Self> {
         let requests: Vec<HubRequest> = requests
@@ -1479,7 +1475,13 @@ fn read_frames(path: &Path) -> Vec<Vec<u8>> {
     frames
 }
 
-/// What some requests carried, to build malformed ones from.
+/// What some requests carried, to build malformed ones from. Each list but `numbers` is in the
+/// order its items first appeared, which is the same in every run, so that an index Hegel
+/// draws, and replays exactly, names the same item. Sorted by id, it would not: operation ids
+/// differ between runs, as jj records each command's arguments, which hold the test's temporary
+/// paths, in its operation, and so do the ids of blobs that carry operations, which hash their
+/// contents. Commit ids are the same in every run, as `TestEnv` seeds jj's randomness and the
+/// times it records, so a `Haves` list, which comes sorted by commit id, comes in the same order.
 #[derive(Default)]
 struct Seen {
     requests: Vec<Vec<u8>>,
@@ -1492,14 +1494,25 @@ struct Seen {
     pushes: Vec<WireRequest>,
     /// Operation and commit ids.
     ids: Vec<Vec<u8>>,
-    /// Offsets, lengths, and totals.
+    /// Offsets, lengths, and totals, smallest first and each once: sizes of what was sent,
+    /// which don't depend on any id, so that a drawn index names the same number, and a
+    /// smaller one a smaller number.
     numbers: Vec<u64>,
+}
+
+/// `item` at the end of `list` unless it is there already.
+fn push_new<T: PartialEq>(list: &mut Vec<T>, item: T) {
+    if !list.contains(&item) {
+        list.push(item);
+    }
 }
 
 impl Seen {
     fn new(requests: Vec<Vec<u8>>) -> Self {
         let mut seen = Self::default();
+        // The chunks of each blob uploaded, and the blobs in the order their uploads began.
         let mut chunks: BTreeMap<BlobId, BTreeMap<u64, Vec<u8>>> = BTreeMap::new();
+        let mut uploaded = vec![];
         for bytes in &requests {
             let Ok(request) = Envelope::<HubRequest>::decode(bytes) else {
                 continue;
@@ -1512,13 +1525,15 @@ impl Seen {
                     data,
                 } => {
                     seen.numbers.extend([total, offset]);
+                    push_new(&mut seen.blobs, blob);
+                    push_new(&mut uploaded, blob);
                     chunks.entry(blob).or_default().insert(offset, data);
                 }
                 HubRequest::GetChunk { blob, offset, len } => {
-                    seen.blobs.push(blob);
+                    push_new(&mut seen.blobs, blob);
                     seen.numbers.extend([offset, len]);
                 }
-                HubRequest::Indirect { blob } => seen.blobs.push(blob),
+                HubRequest::Indirect { blob } => push_new(&mut seen.blobs, blob),
                 HubRequest::Protocol(request) => {
                     if let Request::Push { .. } = request {
                         seen.pushes.push(request.clone());
@@ -1526,7 +1541,7 @@ impl Seen {
                     let mut attachments = vec![];
                     map_request(
                         request,
-                        |id| seen.ids.push(id),
+                        |id| push_new(&mut seen.ids, id),
                         |attachment| {
                             attachments.push(attachment);
                             Ok(())
@@ -1537,22 +1552,25 @@ impl Seen {
                         match attachment {
                             WireAttachment::None => {}
                             WireAttachment::Blob { blob, len } => {
-                                seen.blobs.push(blob);
+                                push_new(&mut seen.blobs, blob);
                                 seen.numbers.push(len);
                             }
                             WireAttachment::Inline(bytes) => seen.payloads.push(bytes),
-                            WireAttachment::Haves(ids) => seen.ids.extend(ids),
+                            WireAttachment::Haves(ids) => {
+                                for id in ids {
+                                    push_new(&mut seen.ids, id);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        for (blob, chunks) in chunks {
-            seen.blobs.push(blob);
+        for blob in uploaded {
             let mut content = vec![];
-            for (offset, data) in chunks {
+            for (offset, data) in &chunks[&blob] {
                 let have = content.len() as u64;
-                if offset <= have && offset + data.len() as u64 > have {
+                if *offset <= have && offset + data.len() as u64 > have {
                     content.extend_from_slice(&data[usize::try_from(have - offset).unwrap()..]);
                 }
             }
@@ -1561,10 +1579,6 @@ impl Seen {
                 seen.contents.insert(blob, content);
             }
         }
-        seen.blobs.sort();
-        seen.blobs.dedup();
-        seen.ids.sort();
-        seen.ids.dedup();
         seen.numbers.sort_unstable();
         seen.numbers.dedup();
         seen.requests = requests;
@@ -1572,53 +1586,121 @@ impl Seen {
     }
 }
 
+/// How `malformed` makes a request no honest node sends.
+#[derive(Clone, Copy, Debug)]
+enum BadRequest {
+    Garbage,
+    /// A real request cut short, corrupted, or spliced.
+    Mutated,
+    PutChunk,
+    GetChunk,
+    /// A request that arrives as a blob, and is itself malformed or indirect.
+    ThroughBlob,
+    Protocol,
+    /// A real push with one of its bundles damaged.
+    DamagedPush,
+    /// From a peer of another version, whose name for it can be too long to quote whole.
+    OtherVersion,
+}
+
 /// Requests no honest node sends, built from what `seen` carried, as requests that fit the
 /// transport.
+#[hegel::test_helper]
 fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    let request = match tc.draw(gs::integers::<u8>().max_value(7)) {
-        0 => tc.draw(gs::binary().max_size(64)),
-        // A real request cut short, corrupted, or spliced.
-        1 if !seen.requests.is_empty() => mutate(tc, pick(tc, &seen.requests), seen),
-        2 => encode(HubRequest::PutChunk {
-            blob: blob(tc, seen),
-            total: number(tc, seen),
-            offset: number(tc, seen),
-            data: tc.draw(gs::binary().max_size(256)),
-        }),
-        3 => encode(HubRequest::GetChunk {
+    let mut kinds = vec![BadRequest::Garbage];
+    if !seen.requests.is_empty() {
+        kinds.push(BadRequest::Mutated);
+    }
+    kinds.extend([
+        BadRequest::PutChunk,
+        BadRequest::GetChunk,
+        BadRequest::ThroughBlob,
+        BadRequest::Protocol,
+    ]);
+    if !seen.pushes.is_empty() {
+        kinds.push(BadRequest::DamagedPush);
+    }
+    kinds.push(BadRequest::OtherVersion);
+    let request_kind = tc.draw(gs::sampled_from(kinds));
+    let request = match request_kind {
+        BadRequest::Garbage => tc.draw_named("garbage", gs::binary().max_size(64)),
+        BadRequest::Mutated => mutate(tc, pick(tc, &seen.requests), seen),
+        BadRequest::PutChunk => {
+            let data = tc.draw(gs::binary().max_size(256));
+            encode(HubRequest::PutChunk {
+                blob: blob(tc, seen),
+                total: number(tc, seen),
+                offset: number(tc, seen),
+                data,
+            })
+        }
+        BadRequest::GetChunk => encode(HubRequest::GetChunk {
             blob: blob(tc, seen),
             offset: number(tc, seen),
             len: number(tc, seen),
         }),
-        // A request that arrives as a blob, and is itself malformed or indirect.
-        4 => {
-            let inner = if seen.requests.is_empty() || tc.draw(gs::booleans()) {
+        BadRequest::ThroughBlob => {
+            let indirect = seen.requests.is_empty() || tc.draw_named("indirect", gs::booleans());
+            let inner = if indirect {
                 encode(HubRequest::Indirect {
                     blob: blob(tc, seen),
                 })
             } else {
                 mutate(tc, pick(tc, &seen.requests), seen)
             };
+            tc.note(&format!(
+                "the hub is sent, as a blob, {}",
+                describe_request(&inner)
+            ));
             return as_blob(&inner);
         }
-        5 => encode(HubRequest::Protocol(protocol(tc, seen, heads))),
-        6 if !seen.pushes.is_empty() => encode(HubRequest::Protocol(damaged_push(tc, seen))),
-        // From a peer of another version, whose name for it can be too long to quote whole.
-        _ => postcard::to_stdvec(&Envelope {
-            protocol: tc.draw(gs::integers::<u32>()),
-            jj_lib: tc
-                .draw(gs::text().max_size(8))
-                .repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_PAYLOAD))),
-            release: tc.draw(gs::text().max_size(8)),
-            body: HubRequest::Protocol(protocol(tc, seen, heads)),
-        })
-        .unwrap(),
+        BadRequest::Protocol => encode(HubRequest::Protocol(protocol(tc, seen, heads))),
+        BadRequest::DamagedPush => encode(HubRequest::Protocol(damaged_push(tc, seen))),
+        BadRequest::OtherVersion => {
+            let version = tc.draw(gs::integers::<u32>());
+            let jj_lib = tc.draw(gs::text().max_size(8));
+            let repeats = tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_PAYLOAD));
+            let release = tc.draw(gs::text().max_size(8));
+            postcard::to_stdvec(&Envelope {
+                protocol: version,
+                jj_lib: jj_lib.repeat(repeats),
+                release,
+                body: HubRequest::Protocol(protocol(tc, seen, heads)),
+            })
+            .unwrap()
+        }
     };
+    tc.note(&format!("the hub is sent {}", describe_request(&request)));
     if request.len() <= MAX_PAYLOAD {
         vec![request]
     } else {
         as_blob(&request)
     }
+}
+
+/// How `malformed_reply` makes a reply no honest hub sends, when it isn't the real reply with
+/// its numbers wrong.
+#[derive(Clone, Copy, Debug)]
+enum BadReply {
+    Garbage,
+    /// The real reply, cut short, corrupted, or spliced.
+    Mutated,
+    /// The reply to another request, as from a hub that mixed them up.
+    Another,
+    ChunkAck,
+    Indirect,
+    /// A reply of another kind: an error, no hive, or a removed one.
+    Other,
+    /// From a hub of another version.
+    OtherVersion,
+}
+
+/// What a reply of another kind is.
+#[derive(Clone, Copy, Debug)]
+enum OtherReply {
+    Error,
+    NoHive,
+    Removed,
 }
 
 /// A reply no honest hub sends to request `n` of the session, built from what the session
@@ -1627,26 +1709,28 @@ fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
 /// any length, as the code that reads them takes on trust. Otherwise it is the real reply
 /// corrupted, the reply to another request, a reply of another kind, garbage, or a reply
 /// from another version.
+#[hegel::test_helper]
 fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
     let seen = &session.seen;
     let encode = |reply| Envelope::encode(reply).unwrap();
     let real = session.replies.get(&n);
-    if let Some(real) = real
-        && tc.draw(gs::booleans())
-    {
-        return encode(match Envelope::decode(real).unwrap() {
-            HubReply::ChunkAck { .. } => HubReply::ChunkAck {
-                received: number(tc, seen),
-                complete: tc.draw(gs::booleans()),
-            },
-            HubReply::Chunk { total, data } => HubReply::Chunk {
-                total: if tc.draw(gs::booleans()) {
-                    number(tc, seen)
-                } else {
-                    total
-                },
-                data: mutate(tc, &data, seen),
-            },
+    let numbers_wrong = real.is_some() && tc.draw_named("numbers_wrong", gs::booleans());
+    if numbers_wrong {
+        return encode(match Envelope::decode(real.unwrap()).unwrap() {
+            HubReply::ChunkAck { .. } => {
+                let complete = tc.draw(gs::booleans());
+                HubReply::ChunkAck {
+                    received: number(tc, seen),
+                    complete,
+                }
+            }
+            HubReply::Chunk { total, data } => {
+                let other_total = tc.draw(gs::booleans());
+                HubReply::Chunk {
+                    total: if other_total { number(tc, seen) } else { total },
+                    data: mutate(tc, &data, seen),
+                }
+            }
             HubReply::Indirect { blob, .. } => HubReply::Indirect {
                 blob,
                 len: number(tc, seen),
@@ -1655,59 +1739,111 @@ fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
             other => other,
         });
     }
-    match tc.draw(gs::integers::<u8>().max_value(6)) {
-        0 => tc.draw(gs::binary().max_size(64)),
-        // The real reply, cut short, corrupted, or spliced.
-        1 if real.is_some() => mutate(tc, real.unwrap(), seen),
-        // The reply to another request, as from a hub that mixed them up.
-        2 => (*pick(tc, &session.replies.values().collect::<Vec<_>>())).clone(),
-        3 => encode(HubReply::ChunkAck {
-            received: number(tc, seen),
-            complete: tc.draw(gs::booleans()),
-        }),
-        4 => encode(HubReply::Indirect {
+    let mut kinds = vec![BadReply::Garbage];
+    if real.is_some() {
+        kinds.push(BadReply::Mutated);
+    }
+    kinds.extend([
+        BadReply::Another,
+        BadReply::ChunkAck,
+        BadReply::Indirect,
+        BadReply::Other,
+        BadReply::OtherVersion,
+    ]);
+    let reply_kind = tc.draw(gs::sampled_from(kinds));
+    match reply_kind {
+        BadReply::Garbage => tc.draw_named("garbage", gs::binary().max_size(64)),
+        BadReply::Mutated => mutate(tc, real.unwrap(), seen),
+        BadReply::Another => (*pick(tc, &session.replies.values().collect::<Vec<_>>())).clone(),
+        BadReply::ChunkAck => {
+            let complete = tc.draw(gs::booleans());
+            encode(HubReply::ChunkAck {
+                received: number(tc, seen),
+                complete,
+            })
+        }
+        BadReply::Indirect => encode(HubReply::Indirect {
             blob: blob(tc, seen),
             len: number(tc, seen),
         }),
-        5 => encode(match tc.draw(gs::integers::<u8>().max_value(2)) {
-            0 => HubReply::Error(tc.draw(gs::text().max_size(64))),
-            1 => HubReply::NoHive,
-            _ => HubReply::Removed,
-        }),
-        // From a hub of another version.
-        _ => postcard::to_stdvec(&Envelope {
-            protocol: tc.draw(gs::integers::<u32>()),
-            jj_lib: tc.draw(gs::text().max_size(8)),
-            release: tc.draw(gs::text().max_size(8)),
-            body: HubReply::NoHive,
-        })
-        .unwrap(),
+        BadReply::Other => {
+            let other_reply = tc.draw(gs::sampled_from(vec![
+                OtherReply::Error,
+                OtherReply::NoHive,
+                OtherReply::Removed,
+            ]));
+            encode(match other_reply {
+                OtherReply::Error => {
+                    let message = tc.draw(gs::text().max_size(64));
+                    HubReply::Error(message)
+                }
+                OtherReply::NoHive => HubReply::NoHive,
+                OtherReply::Removed => HubReply::Removed,
+            })
+        }
+        BadReply::OtherVersion => {
+            let version = tc.draw(gs::integers::<u32>());
+            let jj_lib = tc.draw(gs::text().max_size(8));
+            let release = tc.draw(gs::text().max_size(8));
+            postcard::to_stdvec(&Envelope {
+                protocol: version,
+                jj_lib,
+                release,
+                body: HubReply::NoHive,
+            })
+            .unwrap()
+        }
     }
+}
+
+/// What `damaged_reply` does to an attachment.
+#[derive(Clone, Copy, Debug)]
+enum AttachmentDamage {
+    Keep,
+    /// The same blob, of any length.
+    OtherLen,
+    /// Another blob, of any length.
+    OtherBlob,
+    /// A real bundle, cut short or corrupted, inline.
+    Inline,
 }
 
 /// `reply` with each attachment as it was, another blob or the same one of any length, or a
 /// real bundle cut short or corrupted.
+#[hegel::test_helper]
 fn damaged_reply(tc: &TestCase, seen: &Seen, reply: WireReply) -> WireReply {
     map_reply(
         reply,
         |id| id,
         |attachment| {
-            Ok(
-                match (tc.draw(gs::integers::<u8>().max_value(3)), attachment) {
-                    (0, WireAttachment::Blob { blob, .. }) => WireAttachment::Blob {
+            // Kept twice where it is no blob, as a draw that fell through was kept.
+            let mut damages = vec![AttachmentDamage::Keep];
+            if matches!(attachment, WireAttachment::Blob { .. }) {
+                damages.push(AttachmentDamage::OtherLen);
+            } else {
+                damages.push(AttachmentDamage::Keep);
+            }
+            damages.push(AttachmentDamage::OtherBlob);
+            if !seen.payloads.is_empty() {
+                damages.push(AttachmentDamage::Inline);
+            }
+            let damage = tc.draw(gs::sampled_from(damages));
+            Ok(match (damage, attachment) {
+                (AttachmentDamage::OtherLen, WireAttachment::Blob { blob, .. }) => {
+                    WireAttachment::Blob {
                         blob,
                         len: number(tc, seen),
-                    },
-                    (1, _) => WireAttachment::Blob {
-                        blob: blob(tc, seen),
-                        len: number(tc, seen),
-                    },
-                    (2, _) if !seen.payloads.is_empty() => {
-                        WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
                     }
-                    (_, attachment) => attachment,
+                }
+                (AttachmentDamage::OtherBlob, _) => WireAttachment::Blob {
+                    blob: blob(tc, seen),
+                    len: number(tc, seen),
                 },
-            )
+                (AttachmentDamage::Inline, _) => {
+                    WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
+                }
+                (_, attachment) => attachment,
+            })
         },
     )
     .unwrap()
@@ -1715,6 +1851,7 @@ fn damaged_reply(tc: &TestCase, seen: &Seen, reply: WireReply) -> WireReply {
 
 /// A real push with its bundles inline, one of them damaged: cut short, as by a connection
 /// that died partway through its upload, or corrupted.
+#[hegel::test_helper]
 fn damaged_push(tc: &TestCase, seen: &Seen) -> WireRequest {
     let damaged = tc.draw(gs::integers::<usize>().max_value(1));
     let mut n = 0;
@@ -1741,31 +1878,47 @@ fn damaged_push(tc: &TestCase, seen: &Seen) -> WireRequest {
     .unwrap()
 }
 
+/// Which protocol request `protocol` makes.
+#[derive(Clone, Copy, Debug)]
+enum ProtocolKind {
+    Fetch,
+    GetObjects,
+    Push,
+}
+
 /// A protocol request with ids and attachments drawn from what `seen` carried and the
 /// hub's `heads`, or made up.
+#[hegel::test_helper]
 fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
     let ids = |tc: &TestCase| {
-        (0..tc.draw(gs::integers::<usize>().max_value(3)))
-            .map(|_| id(tc, seen, heads))
-            .collect()
+        let count = tc.draw(gs::integers::<usize>().max_value(3));
+        (0..count).map(|_| id(tc, seen, heads)).collect()
     };
-    let records = |tc: &TestCase| RecordState {
-        count: tc.draw(gs::integers::<u64>().max_value(2)),
-        digest: id(tc, seen, heads),
+    let records = |tc: &TestCase| {
+        let count = tc.draw(gs::integers::<u64>().max_value(2));
+        RecordState {
+            count,
+            digest: id(tc, seen, heads),
+        }
     };
-    match tc.draw(gs::integers::<u8>().max_value(2)) {
-        0 => Request::Fetch {
+    let protocol_kind = tc.draw(gs::sampled_from(vec![
+        ProtocolKind::Fetch,
+        ProtocolKind::GetObjects,
+        ProtocolKind::Push,
+    ]));
+    match protocol_kind {
+        ProtocolKind::Fetch => Request::Fetch {
             machine: "laptop".to_owned(),
             base: id(tc, seen, heads),
             haves: attachment(tc, seen, heads),
             records: records(tc),
         },
-        1 => Request::GetObjects {
+        ProtocolKind::GetObjects => Request::GetObjects {
             for_ops: ids(tc),
             base: id(tc, seen, heads),
             haves: attachment(tc, seen, heads),
         },
-        _ => Request::Push {
+        ProtocolKind::Push => Request::Push {
             machine: "laptop".to_owned(),
             ops: ids(tc),
             ops_attachment: attachment(tc, seen, heads),
@@ -1778,89 +1931,300 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
     }
 }
 
+/// What `attachment` makes.
+#[derive(Clone, Copy, Debug)]
+enum AttachmentKind {
+    None,
+    /// A real bundle cut short or corrupted.
+    Inline,
+    Blob,
+    Haves,
+}
+
+#[hegel::test_helper]
 fn attachment(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireAttachment {
-    match tc.draw(gs::integers::<u8>().max_value(3)) {
-        0 => WireAttachment::None,
-        // A real bundle cut short or corrupted.
-        1 if !seen.payloads.is_empty() => {
+    let mut kinds = vec![AttachmentKind::None];
+    if !seen.payloads.is_empty() {
+        kinds.push(AttachmentKind::Inline);
+    }
+    kinds.extend([AttachmentKind::Blob, AttachmentKind::Haves]);
+    let attachment_kind = tc.draw(gs::sampled_from(kinds));
+    match attachment_kind {
+        AttachmentKind::None => WireAttachment::None,
+        AttachmentKind::Inline => {
             WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
         }
-        2 => WireAttachment::Blob {
+        AttachmentKind::Blob => WireAttachment::Blob {
             blob: blob(tc, seen),
             len: number(tc, seen),
         },
-        _ => WireAttachment::Haves(
-            (0..tc.draw(gs::integers::<usize>().max_value(3)))
-                .map(|_| id(tc, seen, heads))
-                .collect(),
-        ),
+        AttachmentKind::Haves => {
+            let count = tc.draw(gs::integers::<usize>().max_value(3));
+            WireAttachment::Haves((0..count).map(|_| id(tc, seen, heads)).collect())
+        }
     }
 }
 
+/// What `mutate` does wrong to bytes.
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    /// Cut short, as by a connection that died partway.
+    Cut,
+    /// One bit flipped.
+    Flip,
+    /// A length gone wrong: postcard's are varints, a bundle's little-endian u64s.
+    Length,
+    Insert,
+    Drop,
+}
+
 /// `bytes` with up to three things gone wrong.
+#[hegel::test_helper]
 fn mutate(tc: &TestCase, bytes: &[u8], seen: &Seen) -> Vec<u8> {
     let mut bytes = bytes.to_vec();
-    for _ in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(3)) {
-        let at = tc.draw(gs::integers::<usize>().max_value(bytes.len()));
-        match tc.draw(gs::integers::<u8>().max_value(4)) {
-            // Cut short, as by a connection that died partway.
-            0 => bytes.truncate(at),
-            1 if at < bytes.len() => bytes[at] ^= 1 << tc.draw(gs::integers::<u8>().max_value(7)),
-            // A length gone wrong: postcard's are varints, a bundle's little-endian u64s.
-            2 => {
+    let edits = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+    for _ in 0..edits {
+        let edit_at = tc.draw(gs::integers::<usize>().max_value(bytes.len()));
+        let mut kinds = vec![Damage::Cut];
+        if edit_at < bytes.len() {
+            kinds.push(Damage::Flip);
+        }
+        kinds.extend([Damage::Length, Damage::Insert, Damage::Drop]);
+        let damage = tc.draw(gs::sampled_from(kinds));
+        match damage {
+            Damage::Cut => {
+                tc.note(&format!("cut {} bytes at {edit_at}", bytes.len()));
+                bytes.truncate(edit_at);
+            }
+            Damage::Flip => {
+                let bit = tc.draw(gs::integers::<u8>().max_value(7));
+                tc.note(&format!("flip bit {bit} of byte {edit_at}"));
+                bytes[edit_at] ^= 1 << bit;
+            }
+            Damage::Length => {
                 let value = number(tc, seen).to_le_bytes();
-                let end = (at + 8).min(bytes.len());
-                bytes[at..end].copy_from_slice(&value[..end - at]);
+                let end = (edit_at + 8).min(bytes.len());
+                tc.note(&format!("overwrite {edit_at}..{end} with {value:02x?}"));
+                bytes[edit_at..end].copy_from_slice(&value[..end - edit_at]);
             }
-            3 => {
+            Damage::Insert => {
                 let inserted = tc.draw(gs::binary().max_size(16));
-                bytes.splice(at..at, inserted);
+                tc.note(&format!("insert {inserted:02x?} at {edit_at}"));
+                bytes.splice(edit_at..edit_at, inserted);
             }
-            _ => {
-                let end = tc.draw(gs::integers::<usize>().min_value(at).max_value(bytes.len()));
-                bytes.drain(at..end);
+            Damage::Drop => {
+                let end = tc.draw(
+                    gs::integers::<usize>()
+                        .min_value(edit_at)
+                        .max_value(bytes.len()),
+                );
+                tc.note(&format!("drop {edit_at}..{end}"));
+                bytes.drain(edit_at..end);
             }
         }
     }
     bytes
 }
 
+/// What `number` makes.
+#[derive(Clone, Copy, Debug)]
+enum NumberKind {
+    Extreme,
+    /// Next to one `seen` carried.
+    Near,
+    Any,
+}
+
 /// An offset, length, or total: an extreme, one next to a number `seen` carried, or any.
+#[hegel::test_helper]
 fn number(tc: &TestCase, seen: &Seen) -> u64 {
-    match tc.draw(gs::integers::<u8>().max_value(2)) {
-        0 => tc.draw(gs::sampled_from(vec![
-            0,
-            1,
-            u64::from(u32::MAX),
-            u64::MAX / 2,
-            u64::MAX - 1,
-            u64::MAX,
-        ])),
-        1 if !seen.numbers.is_empty() => pick(tc, &seen.numbers)
-            .wrapping_add_signed(tc.draw(gs::integers::<i64>().min_value(-2).max_value(2))),
-        _ => tc.draw(gs::integers::<u64>()),
+    let mut kinds = vec![NumberKind::Extreme];
+    if !seen.numbers.is_empty() {
+        kinds.push(NumberKind::Near);
+    }
+    kinds.push(NumberKind::Any);
+    let number_kind = tc.draw(gs::sampled_from(kinds));
+    match number_kind {
+        NumberKind::Extreme => tc.draw_named(
+            "extreme",
+            gs::sampled_from(vec![
+                0,
+                1,
+                u64::from(u32::MAX),
+                u64::MAX / 2,
+                u64::MAX - 1,
+                u64::MAX,
+            ]),
+        ),
+        NumberKind::Near => {
+            let near = *pick(tc, &seen.numbers);
+            let delta = tc.draw(gs::integers::<i64>().min_value(-2).max_value(2));
+            near.wrapping_add_signed(delta)
+        }
+        NumberKind::Any => tc.draw_named("any", gs::integers::<u64>()),
     }
 }
 
+#[hegel::test_helper]
 fn blob(tc: &TestCase, seen: &Seen) -> BlobId {
-    if !seen.blobs.is_empty() && tc.draw(gs::booleans()) {
+    let seen_one = !seen.blobs.is_empty() && tc.draw_named("seen_blob", gs::booleans());
+    if seen_one {
         *pick(tc, &seen.blobs)
     } else {
-        BlobId::of_bytes(&tc.draw(gs::binary().max_size(8)))
+        let content = tc.draw(gs::binary().max_size(8));
+        BlobId::of_bytes(&content)
     }
 }
 
+/// What `id` makes.
+#[derive(Clone, Copy, Debug)]
+enum IdKind {
+    /// One of the hub's `heads`.
+    Head,
+    /// One `seen` carried.
+    Seen,
+    /// As long as an id of some kind, so that it gets past checks of length: a commit's
+    /// (SHA-1), a SHA-256 hash, which gix also reads as a commit's, or an operation's.
+    Sized,
+    Any,
+}
+
+#[hegel::test_helper]
 fn id(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<u8> {
-    match tc.draw(gs::integers::<u8>().max_value(3)) {
-        0 if !heads.is_empty() => pick(tc, heads).clone(),
-        1 if !seen.ids.is_empty() => pick(tc, &seen.ids).clone(),
-        // As long as an id of some kind, so that it gets past checks of length: a commit's
-        // (SHA-1), a SHA-256 hash, which gix also reads as a commit's, or an operation's.
-        2 => {
+    let mut kinds = vec![];
+    if !heads.is_empty() {
+        kinds.push(IdKind::Head);
+    }
+    if !seen.ids.is_empty() {
+        kinds.push(IdKind::Seen);
+    }
+    kinds.extend([IdKind::Sized, IdKind::Any]);
+    let id_kind = tc.draw(gs::sampled_from(kinds));
+    match id_kind {
+        IdKind::Head => pick(tc, heads).clone(),
+        IdKind::Seen => pick(tc, &seen.ids).clone(),
+        IdKind::Sized => {
             let len = tc.draw(gs::sampled_from(vec![20, 32, 64]));
-            tc.draw(gs::binary().min_size(len).max_size(len))
+            tc.draw_named("sized_id", gs::binary().min_size(len).max_size(len))
         }
-        _ => tc.draw(gs::binary().max_size(70)),
+        IdKind::Any => tc.draw_named("garbage_id", gs::binary().max_size(70)),
+    }
+}
+
+/// `bytes` of a request as a note says it: what kind it is and what is in it, with ids and
+/// blobs by their first bytes and bundles by their length.
+fn describe_request(bytes: &[u8]) -> String {
+    match Envelope::<HubRequest>::decode(bytes) {
+        Ok(HubRequest::Protocol(request)) => {
+            let request = map_request(
+                request,
+                |id| hex(&id),
+                |attachment| Ok(describe_attachment(&attachment)),
+            );
+            brief(&format!("{:?}", request.unwrap()))
+        }
+        Ok(HubRequest::Indirect { blob }) => format!("an indirect request for {}", hex(&blob.0)),
+        Ok(HubRequest::PutChunk {
+            blob,
+            total,
+            offset,
+            data,
+        }) => format!(
+            "a chunk of {} bytes at {offset} of a blob {} of {total} bytes",
+            data.len(),
+            hex(&blob.0)
+        ),
+        Ok(HubRequest::GetChunk { blob, offset, len }) => format!(
+            "a request for {len} bytes at {offset} of a blob {}",
+            hex(&blob.0)
+        ),
+        Err(err) => undecodable(bytes, &err),
+    }
+}
+
+/// `bytes` of a reply, as [`describe_request`] says a request.
+fn describe_reply(bytes: &[u8]) -> String {
+    match Envelope::<HubReply>::decode(bytes) {
+        Ok(HubReply::Protocol(reply)) => {
+            let reply = map_reply(
+                reply,
+                |id| hex(&id),
+                |attachment| Ok(describe_attachment(&attachment)),
+            );
+            brief(&format!("{:?}", reply.unwrap()))
+        }
+        Ok(HubReply::Indirect { blob, len }) => {
+            format!(
+                "an indirect reply naming a blob {} of {len} bytes",
+                hex(&blob.0)
+            )
+        }
+        Ok(HubReply::ChunkAck { received, complete }) => {
+            format!("an acknowledgement of {received} bytes, complete: {complete}")
+        }
+        Ok(HubReply::Chunk { total, data }) => {
+            format!("a chunk of {} bytes of a blob of {total} bytes", data.len())
+        }
+        Ok(other @ (HubReply::Error(_) | HubReply::NoHive | HubReply::Removed)) => {
+            brief(&format!("{other:?}"))
+        }
+        Err(err) => undecodable(bytes, &err),
+    }
+}
+
+fn describe_attachment(attachment: &WireAttachment) -> String {
+    match attachment {
+        WireAttachment::None => "no attachment".to_owned(),
+        WireAttachment::Blob { blob, len } => format!("a blob {} of {len} bytes", hex(&blob.0)),
+        WireAttachment::Inline(bytes) => format!("{} bytes inline", bytes.len()),
+        WireAttachment::Haves(ids) => format!("{} haves", ids.len()),
+    }
+}
+
+fn undecodable(bytes: &[u8], err: &anyhow::Error) -> String {
+    format!(
+        "{} bytes that don't decode, {}: {}",
+        bytes.len(),
+        brief(&format!("{err:#}")),
+        hex(bytes)
+    )
+}
+
+/// The first bytes of `bytes` in hex, and how many there are.
+fn hex(bytes: &[u8]) -> String {
+    const SHOWN: usize = 8;
+    let mut head = String::new();
+    for byte in bytes.iter().take(SHOWN) {
+        write!(head, "{byte:02x}").unwrap();
+    }
+    if bytes.len() > SHOWN {
+        format!("{head}..({} bytes)", bytes.len())
+    } else {
+        head
+    }
+}
+
+/// `text` with each record digest, 32 or 64 numbers, elided, and then cut to a few hundred
+/// characters, for a note.
+fn brief(text: &str) -> String {
+    const LIMIT: usize = 600;
+    const DIGEST: &str = "digest: [";
+    let mut compact = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(DIGEST) {
+        let (head, tail) = rest.split_at(start + DIGEST.len());
+        compact.push_str(head);
+        let Some(end) = tail.find(']') else {
+            rest = tail;
+            break;
+        };
+        compact.push_str("..");
+        rest = &tail[end..];
+    }
+    compact.push_str(rest);
+    match compact.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &compact[..end]),
+        None => compact,
     }
 }
 

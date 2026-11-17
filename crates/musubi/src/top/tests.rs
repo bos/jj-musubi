@@ -6,6 +6,7 @@ use musubi_hub::activity::HubActivity;
 use musubi_hub::activity::MachineActivity;
 use musubi_hub::activity::Report;
 use musubi_hub::activity::Traffic;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -19,7 +20,7 @@ use super::*;
 fn hive(name: &str) -> HiveActivity {
     HiveActivity {
         info: HiveInfo {
-            id: name.to_owned(),
+            id: HiveId::from(name.to_owned()),
             name: name.to_owned(),
             backend: musubi_jj::objects::Backend::GIT,
             clone_config: Default::default(),

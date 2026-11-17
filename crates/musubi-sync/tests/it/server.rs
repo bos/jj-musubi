@@ -12,6 +12,7 @@ use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::Report;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -140,7 +141,7 @@ async fn one_hub_many_hives() {
     assert_eq!(created.hive.name, "project");
     assert_eq!(created.hive.machines, ["alpha"]);
     let hive = created.hive.id.clone();
-    sync(&alpha, client.clone(), &hive).await;
+    sync(&alpha, client.clone(), hive.as_str()).await;
 
     // A copy with history in common and the same remote, by another URL form, joins it.
     let beta = env.init_repo("beta");
@@ -223,7 +224,7 @@ async fn one_hub_many_hives() {
         .unwrap();
     assert!(fork.created);
     assert_eq!(fork.hive.name, "fork/project");
-    sync(&gamma, client.clone(), &fork.hive.id).await;
+    sync(&gamma, client.clone(), fork.hive.id.as_str()).await;
 
     // Asked for by a prefix of its name, the first hive takes gamma too, since they share
     // history; an unrelated repository can't join it.
@@ -240,7 +241,7 @@ async fn one_hub_many_hives() {
     assert!(err.contains("shares no history"), "{err}");
 
     // Per-hive requests reach their own hive, and only hives the hub has.
-    sync(&alpha, client.clone(), &hive).await;
+    sync(&alpha, client.clone(), hive.as_str()).await;
     let reply = client
         .request(
             &format!("musubi.{}.rpc", uuid_like()),
@@ -258,7 +259,7 @@ async fn one_hub_many_hives() {
     // them elsewhere. The original hints remain useful to copies with older URLs.
     let moved = "ssh://git@example.com/team/project";
     alpha.jj(&["git", "remote", "set-url", "origin", moved]);
-    sync(&alpha, client.clone(), &hive).await;
+    sync(&alpha, client.clone(), hive.as_str()).await;
 
     // Listing, resolving, renaming, removing.
     let HubWideReply::Hives(hives) = hub_wide(&*client, HubWideRequest::List).await else {
@@ -323,10 +324,10 @@ async fn one_hub_many_hives() {
     ));
 
     // A restarted hub reads its hives back, rebuilding a lost index.
-    std::fs::remove_file(dir.join(&hive).join("index.json")).unwrap();
+    std::fs::remove_file(dir.join(hive.as_str()).join("index.json")).unwrap();
     let reopened = HubServer::open(&dir).unwrap();
     assert_eq!(reopened.hive_count(), 1);
-    let index = musubi_hub::index::HiveIndex::load(&dir.join(&hive)).unwrap();
+    let index = musubi_hub::index::HiveIndex::load(&dir.join(hive.as_str())).unwrap();
     assert_eq!(index.roots.len(), 1, "{index:?}");
     assert!(index.urls.contains(moved), "{index:?}");
     assert!(
@@ -398,7 +399,7 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         },
         dropped: vec![],
     };
-    match hive_request(&*client, &hive, HubRequest::Protocol(push)).await {
+    match hive_request(&*client, hive.as_str(), HubRequest::Protocol(push)).await {
         HubReply::Error(err) => assert!(err.contains("the hub failed"), "{err}"),
         other => panic!("unexpected reply {other:?}"),
     }
@@ -412,7 +413,7 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         },
     };
     assert!(matches!(
-        hive_request(&*client, &hive, HubRequest::Protocol(fetch)).await,
+        hive_request(&*client, hive.as_str(), HubRequest::Protocol(fetch)).await,
         HubReply::Protocol(Reply::Fetched { .. })
     ));
 }
@@ -438,17 +439,17 @@ async fn the_hub_keeps_account_of_its_hives() {
     let request = creating(join_request(&alpha));
     let machine = request.machine.clone();
     let hive = join(&*client, request).await.unwrap().hive.id;
-    sync(&alpha, client.clone(), &hive).await;
+    sync(&alpha, client.clone(), hive.as_str()).await;
     // A join brings the repository as it is, writing no commits; then a commit.
     alpha.write_file("b", "b");
     alpha.jj(&["commit", "-m", "second"]);
     let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
-    sync_node(node, &alpha, client.clone(), &hive).await;
+    sync_node(node, &alpha, client.clone(), hive.as_str()).await;
     let missing = HubRequest::Indirect {
         blob: musubi_sync::blobs::BlobId::of_bytes(b"never uploaded"),
     };
     assert!(matches!(
-        hive_request(&*client, &hive, missing).await,
+        hive_request(&*client, hive.as_str(), missing).await,
         HubReply::Error(_)
     ));
     let report = Report {
@@ -467,7 +468,7 @@ async fn the_hub_keeps_account_of_its_hives() {
         HubWideReply::Hive(info) if info.id == hive
     ));
     let elsewhere = HubWideRequest::Report {
-        hive: uuid_like().to_owned(),
+        hive: HiveId::from(uuid_like().to_owned()),
         report: report.clone(),
     };
     assert!(matches!(
@@ -532,11 +533,11 @@ async fn a_corrupt_hive_is_made_again() {
         .hive
         .id;
     // Torn before the hive's store was ever opened to serve it.
-    let heads = dir.join(&hive).join("heads");
+    let heads = dir.join(hive.as_str()).join("heads");
     let mut torn = std::fs::read(&heads).unwrap();
     torn.extend_from_slice(b"1 0123456789a");
     std::fs::write(&heads, torn).unwrap();
-    sync(&alpha, client.clone(), &hive).await;
+    sync(&alpha, client.clone(), hive.as_str()).await;
     // The root, and what alpha pushed.
     let heads = std::fs::read_to_string(&heads).unwrap();
     assert_eq!(heads.lines().count(), 2, "{heads}");
@@ -545,7 +546,7 @@ async fn a_corrupt_hive_is_made_again() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     assert!(
-        matches!(aside.as_slice(), [name] if name.starts_with(&hive) && name.ends_with(".corrupt")),
+        matches!(aside.as_slice(), [name] if name.starts_with(hive.as_str()) && name.ends_with(".corrupt")),
         "{aside:?}"
     );
 }

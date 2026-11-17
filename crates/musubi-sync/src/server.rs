@@ -25,6 +25,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use musubi_hub::activity::Activity;
 use musubi_hub::activity::summarize;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
 use musubi_hub::hub_dir::Joins;
@@ -64,10 +65,10 @@ pub struct HubServer {
 
 #[derive(Default)]
 struct Workers {
-    serving: HashMap<String, Worker>,
+    serving: HashMap<HiveId, Worker>,
     /// The hives being removed: their threads are finishing what they have queued, and
     /// requests for them are refused until they are gone.
-    removing: HashSet<String>,
+    removing: HashSet<HiveId>,
 }
 
 struct Worker {
@@ -174,8 +175,9 @@ impl HubServer {
         message: Message,
         transport: &Arc<dyn Transport>,
     ) -> Option<HubReply> {
+        let id = HiveId::from(token.to_owned());
         let mut workers = self.workers();
-        if workers.removing.contains(token) {
+        if workers.removing.contains(&id) {
             // Not `Removed` yet, which tells its machines to leave: the removal may fail.
             return Some(HubReply::Error(
                 "this hive is being removed from the hub".to_owned(),
@@ -183,15 +185,15 @@ impl HubServer {
         }
         let dir = {
             let hubs = self.lock();
-            match hubs.hive_dir(token) {
+            match hubs.hive_dir(&id) {
                 Some(dir) => dir.to_owned(),
-                None if hubs.is_removed(token) => return Some(HubReply::Removed),
+                None if hubs.is_removed(&id) => return Some(HubReply::Removed),
                 None => return Some(HubReply::NoHive),
             }
         };
         let spawn = || {
             spawn_worker(
-                token.to_owned(),
+                id.clone(),
                 dir.clone(),
                 self.hubs.clone(),
                 self.activity.clone(),
@@ -202,10 +204,7 @@ impl HubServer {
                 self.hold.clone(),
             )
         };
-        let worker = workers
-            .serving
-            .entry(token.to_owned())
-            .or_insert_with(spawn);
+        let worker = workers.serving.entry(id.clone()).or_insert_with(spawn);
         if let Err(mpsc::SendError(message)) = worker.requests.send(message) {
             // Its thread has stopped, which a request's failing, or even panicking, can't
             // make it do: a fresh one takes the request.
@@ -214,7 +213,7 @@ impl HubServer {
             if worker.requests.send(message).is_err() {
                 tracing::error!("hive {token}'s new thread has stopped too");
             }
-            workers.serving.insert(token.to_owned(), worker);
+            workers.serving.insert(id, worker);
         }
         None
     }
@@ -254,10 +253,8 @@ impl HubServer {
             HubWideRequest::Resolve { name } => {
                 let hubs = self.lock();
                 hubs.resolve(&name).and_then(|id| {
-                    hubs.check_remote_consistency(id.as_str())?;
-                    Ok(HubWideReply::Hive(
-                        hubs.info(id.as_str()).expect("resolved"),
-                    ))
+                    hubs.check_remote_consistency(&id)?;
+                    Ok(HubWideReply::Hive(hubs.info(&id).expect("resolved")))
                 })
             }
             HubWideRequest::Rename { name, to } => {
@@ -308,7 +305,7 @@ impl HubServer {
     fn remove(&self, name: &str) -> Result<HiveInfo, Refusal> {
         let (id, worker) = {
             let mut workers = self.workers();
-            let id = self.lock().resolve_exact(name)?.into_string();
+            let id = self.lock().resolve_exact(name)?;
             if !workers.removing.insert(id.clone()) {
                 return Err(format!("hive {name} is already being removed"));
             }
@@ -336,7 +333,7 @@ impl HubServer {
 /// A hive being removed, which stops being so when this is dropped.
 struct Removing<'a> {
     server: &'a HubServer,
-    id: &'a str,
+    id: &'a HiveId,
 }
 
 impl Drop for Removing<'_> {
@@ -350,7 +347,7 @@ fn lock_activity(activity: &Mutex<Activity>) -> std::sync::MutexGuard<'_, Activi
 }
 
 fn spawn_worker(
-    id: String,
+    id: HiveId,
     dir: PathBuf,
     hubs: Arc<Mutex<HubDir>>,
     activity: Arc<Mutex<Activity>>,
@@ -360,7 +357,7 @@ fn spawn_worker(
 ) -> Worker {
     let (requests, receiver) = mpsc::channel::<Message>();
     let runtime = tokio::runtime::Handle::current();
-    let head = head_subject(&id);
+    let head = head_subject(id.as_str());
     let thread = std::thread::Builder::new()
         .name(format!("hive {id}"))
         .spawn(move || {
@@ -504,7 +501,7 @@ struct Served {
 
 /// What a hive's thread serves it with.
 struct Hive<'a> {
-    id: &'a str,
+    id: &'a HiveId,
     dir: &'a Path,
     joins: &'a Joins,
     hubs: &'a Mutex<HubDir>,

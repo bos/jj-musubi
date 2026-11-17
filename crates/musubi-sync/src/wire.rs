@@ -25,6 +25,7 @@ use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::HubActivity;
 use musubi_hub::activity::Report;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -200,7 +201,7 @@ pub enum HubWideRequest {
     },
     /// How a machine's sync with the hive `hive`, by id, went: its daemon says after each.
     Report {
-        hive: String,
+        hive: HiveId,
         report: Report,
     },
     /// What the hub has seen of its hives since it started, for `musubi top`.
@@ -208,7 +209,7 @@ pub enum HubWideRequest {
     /// Validate and reserve the destination's inherited names before clone makes its path.
     PrepareClone {
         /// The exact id returned by Resolve, never a hive name or prefix.
-        hive: musubi_hub::hub_dir::HiveId,
+        hive: HiveId,
         backend: musubi_jj::objects::Backend,
         remote_bindings: std::collections::BTreeMap<String, musubi_jj::remote_url::RemoteBinding>,
     },

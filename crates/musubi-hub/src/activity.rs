@@ -16,6 +16,7 @@ use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::hub_dir::HiveId;
 use crate::hub_dir::HiveInfo;
 use crate::store::HubStore;
 use crate::store::StoreError;
@@ -143,7 +144,7 @@ pub struct HubActivity {
 
 pub struct Activity {
     started: Instant,
-    hives: HashMap<String, HiveTrack>,
+    hives: HashMap<HiveId, HiveTrack>,
 }
 
 #[derive(Default)]
@@ -172,15 +173,15 @@ impl Activity {
         }
     }
 
-    fn hive(&mut self, id: &str) -> &mut HiveTrack {
-        self.hives.entry(id.to_owned()).or_default()
+    fn hive(&mut self, id: &HiveId) -> &mut HiveTrack {
+        self.hives.entry(id.clone()).or_default()
     }
 
     /// Counts one request for hive `id` and its reply, and what it did, at `now`; `head` is
     /// the hive's head after it.
     pub fn served(
         &mut self,
-        id: &str,
+        id: &HiveId,
         received: usize,
         sent: usize,
         head: u64,
@@ -208,7 +209,7 @@ impl Activity {
     }
 
     /// Records what a head the hub accepted for hive `id` brought, at `now`.
-    pub fn summarized(&mut self, id: &str, accepted: Accepted, now: Instant) {
+    pub fn summarized(&mut self, id: &HiveId, accepted: Accepted, now: Instant) {
         let hive = self.hive(id);
         hive.traffic.ops_in += accepted.ops;
         hive.traffic.commits_in += accepted.commits;
@@ -217,7 +218,14 @@ impl Activity {
     }
 
     /// Counts a request for hive `id` that failed, at `now`, and its reply.
-    pub fn failed(&mut self, id: &str, received: usize, sent: usize, message: &str, now: Instant) {
+    pub fn failed(
+        &mut self,
+        id: &HiveId,
+        received: usize,
+        sent: usize,
+        message: &str,
+        now: Instant,
+    ) {
         let hive = self.hive(id);
         hive.traffic.received += received as u64;
         hive.traffic.sent += sent as u64;
@@ -226,12 +234,12 @@ impl Activity {
     }
 
     /// Records trouble the hub had with hive `id` at `now`, though no request failed.
-    pub fn troubled(&mut self, id: &str, message: &str, now: Instant) {
+    pub fn troubled(&mut self, id: &HiveId, message: &str, now: Instant) {
         self.hive(id).failure = Some((now, clip(message), false));
     }
 
     /// Records what a machine said of its sync with hive `id`, at `now`.
-    pub fn report(&mut self, id: &str, mut report: Report, now: Instant) {
+    pub fn report(&mut self, id: &HiveId, mut report: Report, now: Instant) {
         report.machine = clip(&report.machine);
         report.version = clip(&report.version);
         report.error = report.error.as_deref().map(clip);
@@ -242,7 +250,7 @@ impl Activity {
     }
 
     /// Forgets hive `id`, as when it is removed.
-    pub fn forget(&mut self, id: &str) {
+    pub fn forget(&mut self, id: &HiveId) {
         self.hives.remove(id);
     }
 
@@ -394,9 +402,14 @@ fn clip(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The hive the tests track.
+    fn h() -> HiveId {
+        HiveId::from("h".to_owned())
+    }
+
     fn info(id: &str) -> HiveInfo {
         HiveInfo {
-            id: id.to_owned(),
+            id: HiveId::from(id.to_owned()),
             name: id.to_owned(),
             backend: musubi_jj::objects::Backend::GIT,
             clone_config: Default::default(),
@@ -418,8 +431,8 @@ mod tests {
 
     /// Accepts head `seq` at `at`, as the hub's server does.
     fn accept(activity: &mut Activity, seq: u64, at: Instant) {
-        activity.served("h", 10, 10, seq, Outcome::Accepted, at);
-        activity.summarized("h", accepted(seq), at);
+        activity.served(&h(), 10, 10, seq, Outcome::Accepted, at);
+        activity.summarized(&h(), accepted(seq), at);
     }
 
     fn report(machine: &str, seq: u64) -> Report {
@@ -439,13 +452,13 @@ mod tests {
         let mut activity = Activity::new();
         let start = activity.started;
         let at = |secs| start + Duration::from_secs(secs);
-        activity.served("h", 100, 10, 0, Outcome::Other, at(0));
+        activity.served(&h(), 100, 10, 0, Outcome::Other, at(0));
         accept(&mut activity, 1, at(10));
         accept(&mut activity, 2, at(20));
-        activity.served("h", 0, 50, 2, Outcome::Sent(3), at(20));
-        activity.served("h", 5, 5, 2, Outcome::Rejected, at(20));
-        activity.report("h", report("alpha#1", 2), at(21));
-        activity.report("h", report("beta#2", 0), at(25));
+        activity.served(&h(), 0, 50, 2, Outcome::Sent(3), at(20));
+        activity.served(&h(), 5, 5, 2, Outcome::Rejected, at(20));
+        activity.report(&h(), report("alpha#1", 2), at(21));
+        activity.report(&h(), report("beta#2", 0), at(25));
         let keys = BTreeSet::from(["alpha#1".to_owned(), "gamma#3".to_owned()]);
         let snapshot = activity.snapshot(vec![(info("h"), keys)], "0.1.0", at(30));
         assert_eq!(snapshot.uptime, 30);
@@ -488,8 +501,8 @@ mod tests {
         let mut activity = Activity::new();
         let start = activity.started;
         let at = |secs| start + Duration::from_secs(secs);
-        activity.served("h", 0, 0, 7, Outcome::Other, at(0));
-        activity.report("h", report("alpha#1", 3), at(1));
+        activity.served(&h(), 0, 0, 7, Outcome::Other, at(0));
+        activity.report(&h(), report("alpha#1", 3), at(1));
         let keys = BTreeSet::new();
         let behind = |activity: &Activity| {
             activity
@@ -503,7 +516,7 @@ mod tests {
             accept(&mut activity, seq, at(seq));
         }
         assert_eq!(behind(&activity), Some(100 - 9));
-        assert_eq!(activity.hives["h"].recent.len(), RECENT);
+        assert_eq!(activity.hives[&h()].recent.len(), RECENT);
     }
 
     /// A head whose summary failed still counts, so its machines aren't taken for behind.
@@ -513,8 +526,8 @@ mod tests {
         let start = activity.started;
         let at = |secs| start + Duration::from_secs(secs);
         accept(&mut activity, 1, at(1));
-        activity.served("h", 0, 0, 2, Outcome::Accepted, at(50));
-        activity.report("h", report("alpha#1", 1), at(51));
+        activity.served(&h(), 0, 0, 2, Outcome::Accepted, at(50));
+        activity.report(&h(), report("alpha#1", 1), at(51));
         let snapshot = activity.snapshot(vec![(info("h"), BTreeSet::new())], "", at(60));
         let hive = &snapshot.hives[0];
         assert_eq!((hive.traffic.accepted, hive.recent.len()), (2, 1));
@@ -526,7 +539,7 @@ mod tests {
     fn reports_are_forgotten_after_a_day() {
         let mut activity = Activity::new();
         let start = activity.started;
-        activity.report("h", report("alpha#1", 0), start);
+        activity.report(&h(), report("alpha#1", 0), start);
         let keys = BTreeSet::new();
         let later = |activity: &Activity, after: Duration| {
             activity
@@ -537,8 +550,8 @@ mod tests {
         };
         assert_eq!(later(&activity, REPORTS_KEPT / 2), 1);
         assert_eq!(later(&activity, REPORTS_KEPT), 0);
-        activity.report("h", report("beta#2", 0), start + REPORTS_KEPT);
-        assert_eq!(activity.hives["h"].reports.len(), 1);
+        activity.report(&h(), report("beta#2", 0), start + REPORTS_KEPT);
+        assert_eq!(activity.hives[&h()].reports.len(), 1);
     }
 
     /// Shrinking leaves out latest heads first, then errors, then says it can't.
@@ -551,7 +564,7 @@ mod tests {
         }
         let mut failing = report("alpha#1", 0);
         failing.error = Some("broken".to_owned());
-        activity.report("h", failing, start);
+        activity.report(&h(), failing, start);
         let mut snapshot = activity.snapshot(vec![(info("h"), BTreeSet::new())], "", start);
         let mut recent = vec![];
         while snapshot.shrink() {

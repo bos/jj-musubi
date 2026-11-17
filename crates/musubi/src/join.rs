@@ -15,6 +15,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -76,7 +77,7 @@ pub fn join(
     // if its hub has lost it.
     let rejoin = |record: &HiveConfig| -> anyhow::Result<(JoinChoice, String)> {
         let remake = JoinChoice::Remake {
-            id: record.hive.to_string(),
+            id: HiveId::from(record.hive),
             name: record.name.clone(),
         };
         let hub = hub.map_or_else(|| Ok(record.hub.clone()), |hub| UserState::hub(Some(hub)))?;
@@ -134,7 +135,7 @@ pub fn join(
     let summary = node.join_summary()?;
     let mut remotes = summary.remote_snapshot();
     if let JoinChoice::Remake { id, .. } = &choice {
-        node.check_recorded_remote_bindings(id, &mut remotes)?;
+        node.check_recorded_remote_bindings(id.as_str(), &mut remotes)?;
     }
     let request = JoinRequest {
         choice,
@@ -254,6 +255,7 @@ fn become_node(
     let hive_id: uuid::Uuid = joined
         .hive
         .id
+        .as_str()
         .parse()
         .context("the hub sent a malformed hive id")?;
     let mut node = located.open()?;
@@ -261,9 +263,9 @@ fn become_node(
     let key = node.machine().key().to_owned();
     let description = format!("musubi: {machine} joins the hive");
     if full_history {
-        node.mark_joined_with_remotes(&description, &joined.hive.id, remotes)?;
+        node.mark_joined_with_remotes(&description, joined.hive.id.as_str(), remotes)?;
     } else {
-        node.create_join_operation_with_remotes(&description, &joined.hive.id, remotes)?;
+        node.create_join_operation_with_remotes(&description, joined.hive.id.as_str(), remotes)?;
     }
     // A hive doesn't take on the members of another: they aren't its own until they join it.
     if before.is_none_or(|before| before.hive != hive_id) {
@@ -490,7 +492,7 @@ pub fn clone(
     } else {
         musubi_jj::remote_url::JoinRemotes::default()
     };
-    let resolved_id = musubi_hub::hub_dir::HiveId::from(info.id);
+    let resolved_id = info.id;
     let reply = block_on(ask_preparing(
         ui,
         &hub,
@@ -504,7 +506,7 @@ pub fn clone(
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
     anyhow::ensure!(
-        info.id == resolved_id.as_str(),
+        info.id == resolved_id,
         "the hub returned a different hive during clone; run `musubi clone` again"
     );
     clone_config::missing(&jj_lib::config::StackedConfig::empty(), &info.clone_config)?;

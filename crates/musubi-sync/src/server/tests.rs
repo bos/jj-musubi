@@ -81,8 +81,8 @@ impl Hold {
         }
     }
 
-    pub(super) fn wait(&self, hive: &str) {
-        if hive != self.hive {
+    pub(super) fn wait(&self, hive: &HiveId) {
+        if hive.as_str() != self.hive {
             return;
         }
         let mut state = self.state.lock().unwrap();
@@ -123,9 +123,10 @@ impl RunningWorker {
     ) -> Self {
         let transport: Arc<dyn Transport> = Arc::new(network.connect());
         let mut incoming = transport.subscribe(&rpc_subject(hive)).await.unwrap();
-        let dir = server.lock().hive_dir(hive).unwrap().to_owned();
+        let id = HiveId::from(hive.to_owned());
+        let dir = server.lock().hive_dir(&id).unwrap().to_owned();
         let worker = spawn_worker(
-            hive.to_owned(),
+            id,
             dir,
             server.hubs.clone(),
             server.activity.clone(),
@@ -170,7 +171,7 @@ async fn create_hive(server: &HubServer, repo: &TestRepo) -> String {
         choice: JoinChoice::Create(Some(repo.machine().to_owned())),
     });
     match server.handle_hub_wide(&Envelope::encode(request).unwrap(), 1024 * 1024) {
-        HubWideReply::Joined(joined) => joined.hive.id,
+        HubWideReply::Joined(joined) => joined.hive.id.into_string(),
         other => panic!("expected a new hive, got {other:?}"),
     }
 }
@@ -301,7 +302,11 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     let server = HubServer::open(&dir).unwrap();
     let hive = create_hive(&server, &alpha).await;
     let other_hive = create_hive(&server, &gamma).await;
-    let hive_dir = server.lock().hive_dir(&hive).unwrap().to_owned();
+    let hive_dir = server
+        .lock()
+        .hive_dir(&HiveId::from(hive.clone()))
+        .unwrap()
+        .to_owned();
     let network = MemoryNetwork::new(1, 1024 * 1024);
     let recovery = Arc::new(WorkerHooks::default());
     recovery.armed.store(true, Ordering::SeqCst);
@@ -435,7 +440,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     let mut server = HubServer::open(dir.path()).unwrap();
     let busy = server.lock().create("busy", Backend::GIT).unwrap();
     let idle = server.lock().create("idle", Backend::GIT).unwrap();
-    let hold = Arc::new(Hold::new(&busy));
+    let hold = Arc::new(Hold::new(busy.as_str()));
     server.hold = Some(hold.clone());
     let watched = server.clone();
     let network = MemoryNetwork::new(1, 1024 * 1024);
@@ -465,7 +470,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
 
     // The busy hive's thread is in the middle of a request when the hive is removed, which
     // waits for it.
-    let held = tokio::spawn(ask(&busy));
+    let held = tokio::spawn(ask(busy.as_str()));
     hold.held().await;
     let removal = tokio::spawn(hub_wide(HubWideRequest::Remove {
         name: "busy".to_owned(),
@@ -478,7 +483,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
 
     // Meanwhile, the hub answers everything else: the other hive's requests, requests about
     // the hub, and, for now with an error, the busy hive's.
-    let reply = ask(&idle).await;
+    let reply = ask(idle.as_str()).await;
     assert!(
         matches!(&reply, HubReply::Error(m) if !m.contains("being removed")),
         "{reply:?}"
@@ -488,7 +493,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     };
     assert_eq!(hives.len(), 2);
     assert!(
-        matches!(ask(&busy).await, HubReply::Error(m) if m.contains("being removed")),
+        matches!(ask(busy.as_str()).await, HubReply::Error(m) if m.contains("being removed")),
         "the busy hive was served while being removed"
     );
     let again = hub_wide(HubWideRequest::Remove {
@@ -508,7 +513,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
         "{reply:?}"
     );
     assert!(matches!(held.await.unwrap(), HubReply::Error(_)));
-    assert_eq!(ask(&busy).await, HubReply::Removed);
+    assert_eq!(ask(busy.as_str()).await, HubReply::Removed);
     assert!(!watched.workers().removing.contains(&busy));
 }
 
@@ -522,7 +527,7 @@ async fn requests_their_senders_gave_up_on_go_unanswered() {
     let dir = musubi_testutil::tempdir();
     let mut server = HubServer::open(dir.path()).unwrap();
     let busy = server.lock().create("busy", Backend::GIT).unwrap();
-    let hold = Arc::new(Hold::new(&busy));
+    let hold = Arc::new(Hold::new(busy.as_str()));
     server.hold = Some(hold.clone());
     let network = MemoryNetwork::new(1, 1024 * 1024);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -532,7 +537,7 @@ async fn requests_their_senders_gave_up_on_go_unanswered() {
     ready_rx.await.unwrap();
     let client: Arc<dyn Transport> = Arc::new(network.connect());
     let send = |request: Bytes, within: Duration| {
-        let (client, subject) = (client.clone(), rpc_subject(&busy));
+        let (client, subject) = (client.clone(), rpc_subject(busy.as_str()));
         async move { client.request(&subject, request, within).await }
     };
     // Not a request a hive answers, but its thread works it out all the same, and counts it
@@ -611,12 +616,12 @@ fn hub_survives_malformed_clone_preflights() {
     )]
     .into();
     let request = HubWideRequest::PrepareClone {
-        hive: id.clone().into(),
+        hive: id.clone(),
         backend: Backend::GIT,
         remote_bindings: bindings,
     };
     let bytes = Envelope::encode(request).unwrap();
-    let path = dir.path().join(&id).join("hive.toml");
+    let path = dir.path().join(id.as_str()).join("hive.toml");
     let before = std::fs::read(&path).unwrap();
     for end in 0..bytes.len() {
         assert!(matches!(

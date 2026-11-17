@@ -36,8 +36,11 @@ use crate::store::StoreError;
 
 const HIVE_FILE: &str = "hive.toml";
 
-/// A hive's internal identity, distinct from a human-supplied name or prefix.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A hive's internal identity, distinct from a human-supplied name or prefix: a UUID in its
+/// usual form, as the hub makes them, though one a repository asks for may be anything.
+/// Encoded as the bare string, wherever it is serialized, and shown as one in debug output,
+/// as messages that print a reply with `{:?}` showed it when it was a `String`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HiveId(String);
 
@@ -54,6 +57,18 @@ impl HiveId {
 impl From<String> for HiveId {
     fn from(id: String) -> Self {
         Self(id)
+    }
+}
+
+impl From<Uuid> for HiveId {
+    fn from(id: Uuid) -> Self {
+        Self(id.hyphenated().to_string())
+    }
+}
+
+impl std::fmt::Debug for HiveId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -87,7 +102,7 @@ pub enum JoinChoice {
     /// it was removed. Under this name, if no hive has it, as `Create` with the name would
     /// make it; otherwise as `Create` without one would, refused if the repository belongs in
     /// another hive here. A hive with this id that the hub has is joined.
-    Remake { id: String, name: Option<String> },
+    Remake { id: HiveId, name: Option<String> },
 }
 
 /// What a joining repository tells the hub.
@@ -116,7 +131,7 @@ pub struct JoinRequest {
 /// A hive, as `musubi list` shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveInfo {
-    pub id: String,
+    pub id: HiveId,
     pub name: String,
     pub backend: Backend,
     /// One-time defaults from the copy that created the hive, as TOML values.
@@ -196,14 +211,14 @@ struct Pending {
 
 pub struct HubDir {
     dir: PathBuf,
-    hives: BTreeMap<String, Hive>,
+    hives: BTreeMap<HiveId, Hive>,
     pending_lifetime: Duration,
     /// Corrupt stores set aside under `removed/` and not deleted yet (see
     /// [`Self::sweep`]).
     corrupt: Vec<SetAside>,
     /// The ids of hives `musubi hub remove` removed: each has a directory under `removed/`,
     /// kept for good, empty once a day has passed, as a tombstone.
-    removed: BTreeSet<String>,
+    removed: BTreeSet<HiveId>,
     /// The removed hives' stores not emptied yet.
     unemptied: Vec<SetAside>,
 }
@@ -211,7 +226,7 @@ pub struct HubDir {
 /// A store set aside under `removed/`: a hive's corrupt store, set aside when the hive was
 /// made again, or a removed hive's.
 struct SetAside {
-    id: String,
+    id: HiveId,
     path: PathBuf,
     /// When it was set aside, in seconds since the epoch.
     stamp: u64,
@@ -236,7 +251,7 @@ impl HubDir {
                 .file_name()
                 .to_str()
                 .filter(|name| Uuid::parse_str(name).is_ok())
-                .map(str::to_owned)
+                .map(|name| HiveId::from(name.to_owned()))
             else {
                 continue;
             };
@@ -288,7 +303,7 @@ impl HubDir {
 
     /// Opens hive `id`'s store, making the hive again first if a power cut left it corrupt
     /// ([`open_whole`]).
-    pub fn open_store(&mut self, id: &str) -> anyhow::Result<HubStore> {
+    pub fn open_store(&mut self, id: &HiveId) -> anyhow::Result<HubStore> {
         let dir = self.hive(id)?.dir.clone();
         match open_whole(&dir)? {
             Opened::Whole(store) => Ok(*store),
@@ -299,7 +314,7 @@ impl HubDir {
         }
     }
 
-    fn hive(&self, id: &str) -> anyhow::Result<&Hive> {
+    fn hive(&self, id: &HiveId) -> anyhow::Result<&Hive> {
         self.hives
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("no hive {id}"))
@@ -314,7 +329,7 @@ impl HubDir {
     /// and a new one takes its place, made whole beside it first, so that a failure leaves
     /// the hive as it was, to be made again next time, and a crash between the two renames
     /// leaves it for the hub to finish as it next starts.
-    pub fn remake(&mut self, id: &str, why: &StoreError) -> anyhow::Result<()> {
+    pub fn remake(&mut self, id: &HiveId, why: &StoreError) -> anyhow::Result<()> {
         let hive = self.hive(id)?;
         let removed = self.dir.join("removed");
         fs::create_dir_all(&removed)?;
@@ -341,7 +356,7 @@ impl HubDir {
             aside.display()
         );
         self.corrupt.push(SetAside {
-            id: id.to_owned(),
+            id: id.clone(),
             path: aside,
             stamp,
         });
@@ -403,23 +418,23 @@ impl HubDir {
     }
 
     /// The store directory of the hive with this id.
-    pub fn hive_dir(&self, id: &str) -> Option<&Path> {
+    pub fn hive_dir(&self, id: &HiveId) -> Option<&Path> {
         self.hives.get(id).map(|hive| hive.dir.as_path())
     }
 
     /// Creates an empty hive.
-    pub fn create(&mut self, name: &str, backend: Backend) -> anyhow::Result<String> {
+    pub fn create(&mut self, name: &str, backend: Backend) -> anyhow::Result<HiveId> {
         self.check_new_name(name).map_err(anyhow::Error::msg)?;
-        let id = Uuid::new_v4().to_string();
+        let id = HiveId::from(Uuid::new_v4());
         self.create_as(&id, name, backend)?;
         Ok(id)
     }
 
     /// Creates an empty hive with id `id`, a UUID in its usual form, and `name`, which must be
     /// valid.
-    fn create_as(&mut self, id: &str, name: &str, backend: Backend) -> anyhow::Result<()> {
+    fn create_as(&mut self, id: &HiveId, name: &str, backend: Backend) -> anyhow::Result<()> {
         names::check_name(name).map_err(anyhow::Error::msg)?;
-        let dir = self.dir.join(id);
+        let dir = self.dir.join(id.as_str());
         HubStore::init(&dir, backend)?;
         let meta = HiveMeta {
             name: name.to_owned(),
@@ -431,7 +446,7 @@ impl HubDir {
         let index = HiveIndex::default();
         index.save(&dir)?;
         self.hives.insert(
-            id.to_owned(),
+            id.clone(),
             Hive {
                 dir,
                 meta,
@@ -445,7 +460,7 @@ impl HubDir {
     }
 
     /// Whether `musubi hub remove` removed the hive with this id.
-    pub fn is_removed(&self, id: &str) -> bool {
+    pub fn is_removed(&self, id: &HiveId) -> bool {
         self.removed.contains(id)
     }
 
@@ -473,14 +488,14 @@ impl HubDir {
         let by_name = |hive: &Hive, _: &str| hive.meta.name.starts_with(name);
         let by_id = |_: &Hive, id: &str| id.starts_with(name);
         for matches in [&by_name as &dyn Fn(&Hive, &str) -> bool, &by_id] {
-            let found: Vec<(&String, &Hive)> = self
+            let found: Vec<(&HiveId, &Hive)> = self
                 .hives
                 .iter()
-                .filter(|(id, hive)| matches(hive, id))
+                .filter(|(id, hive)| matches(hive, id.as_str()))
                 .collect();
             match found.as_slice() {
                 [] => {}
-                [(id, _)] => return Ok((*id).clone().into()),
+                [(id, _)] => return Ok((*id).clone()),
                 several => {
                     let mut names: Vec<&str> =
                         several.iter().map(|(_, h)| h.meta.name.as_str()).collect();
@@ -503,18 +518,16 @@ impl HubDir {
     /// Exact names take precedence over ids, in both kinds of lookup.
     fn exact_id(&self, name: &str) -> Option<HiveId> {
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
-            return Some(id.clone().into());
+            return Some(id.clone());
         }
-        if self.hives.contains_key(name) {
-            return Some(name.to_owned().into());
-        }
-        None
+        let id = HiveId::from(name.to_owned());
+        self.hives.contains_key(&id).then_some(id)
     }
 
-    pub fn info(&self, id: &str) -> Option<HiveInfo> {
+    pub fn info(&self, id: &HiveId) -> Option<HiveInfo> {
         let hive = self.hives.get(id)?;
         Some(HiveInfo {
-            id: id.to_owned(),
+            id: id.clone(),
             name: hive.meta.name.clone(),
             backend: hive.meta.backend,
             clone_config: hive.meta.clone_config.clone(),
@@ -524,7 +537,7 @@ impl HubDir {
     }
 
     /// The keys of the machines with workspaces in hive `id`'s head.
-    pub fn machine_keys(&self, id: &str) -> Option<&BTreeSet<String>> {
+    pub fn machine_keys(&self, id: &HiveId) -> Option<&BTreeSet<String>> {
         Some(&self.hives.get(id)?.index.machines)
     }
 
@@ -537,7 +550,7 @@ impl HubDir {
     /// Renames the hive `name` names, as [`Self::resolve`] finds it, `to`. Returns the name it
     /// had, and the hive as it is now.
     pub fn rename(&mut self, name: &str, to: &str) -> Result<(String, HiveInfo), Refusal> {
-        let id = self.resolve(name)?.into_string();
+        let id = self.resolve(name)?;
         let from = self.hives[&id].meta.name.clone();
         if from != to {
             self.check_new_name(to)?;
@@ -552,7 +565,7 @@ impl HubDir {
 
     /// Takes a hive out of the hub, keeping its store under `removed/`. The caller has
     /// stopped serving it.
-    pub fn remove(&mut self, id: &str) -> Result<HiveInfo, Refusal> {
+    pub fn remove(&mut self, id: &HiveId) -> Result<HiveInfo, Refusal> {
         let info = self.info(id).ok_or_else(|| format!("no hive {id}"))?;
         let removed = self.dir.join("removed");
         fs::create_dir_all(&removed).map_err(refusal)?;
@@ -561,9 +574,9 @@ impl HubDir {
         let path = removed.join(format!("{id}-{stamp}"));
         fs::rename(&hive.dir, &path).map_err(refusal)?;
         self.hives.remove(id);
-        self.removed.insert(id.to_owned());
+        self.removed.insert(id.clone());
         self.unemptied.push(SetAside {
-            id: id.to_owned(),
+            id: id.clone(),
             path,
             stamp,
         });
@@ -571,13 +584,13 @@ impl HubDir {
     }
 
     /// The machines whose joins chose hive `id`, for its thread to take ([`Joins`]).
-    pub fn joins(&self, id: &str) -> Option<Joins> {
+    pub fn joins(&self, id: &HiveId) -> Option<Joins> {
         self.hives.get(id).map(|hive| hive.joins.clone())
     }
 
     /// Adds what newly accepted operations brought to a hive's index, and forgets the
     /// pending joins of machines that are now in it.
-    pub fn update_index(&mut self, id: &str, index: HiveIndex) -> anyhow::Result<()> {
+    pub fn update_index(&mut self, id: &HiveId, index: HiveIndex) -> anyhow::Result<()> {
         let Some(hive) = self.hives.get_mut(id) else {
             return Ok(());
         };
@@ -732,12 +745,12 @@ impl HubDir {
                 );
             }
             // Only an id in the form the hub makes them names a directory here.
-            if Uuid::parse_str(id).map(|uuid| uuid.hyphenated().to_string()) != Ok(id.clone()) {
+            if Uuid::parse_str(id.as_str()).map(HiveId::from).as_ref() != Ok(id) {
                 return Err(format!("{id:?} is not a hive id"));
             }
         }
         let chosen = match &request.choice {
-            JoinChoice::Hive(name) => Some(self.resolve(name)?.into_string()),
+            JoinChoice::Hive(name) => Some(self.resolve(name)?),
             JoinChoice::Match | JoinChoice::Create(_) | JoinChoice::Remake { .. } => None,
         };
         let new_name = match &request.choice {
@@ -852,7 +865,7 @@ impl HubDir {
     fn joined(
         &mut self,
         request: &JoinRequest,
-        id: &str,
+        id: &HiveId,
         created: bool,
         reason: String,
     ) -> Result<Joined, Refusal> {
@@ -895,22 +908,19 @@ impl HubDir {
         backend: Backend,
         incoming: &BTreeMap<String, RemoteBinding>,
     ) -> Result<HiveInfo, Refusal> {
-        let hive = self
-            .hives
-            .get(id.as_str())
-            .ok_or_else(|| format!("no hive {id}"))?;
+        let hive = self.hives.get(id).ok_or_else(|| format!("no hive {id}"))?;
         if hive.meta.backend != backend {
             return Err(
                 "the hive changed backend during clone; run `musubi clone` again".to_owned(),
             );
         }
-        self.reserve_remote_bindings(id.as_str(), incoming, None)?;
-        Ok(self.info(id.as_str()).expect("checked by id"))
+        self.reserve_remote_bindings(id, incoming, None)?;
+        Ok(self.info(id).expect("checked by id"))
     }
 
     fn reserve_remote_bindings(
         &mut self,
-        id: &str,
+        id: &HiveId,
         incoming: &BTreeMap<String, RemoteBinding>,
         clone_config: Option<&BTreeMap<String, String>>,
     ) -> Result<(), Refusal> {
@@ -930,13 +940,13 @@ impl HubDir {
     }
 
     /// Checks immutable name bindings and the accepted evidence before join or clone.
-    pub fn check_remote_consistency(&self, id: &str) -> Result<(), Refusal> {
+    pub fn check_remote_consistency(&self, id: &HiveId) -> Result<(), Refusal> {
         self.checked_bindings(id, &BTreeMap::new()).map(|_| ())
     }
 
     fn checked_bindings(
         &self,
-        id: &str,
+        id: &HiveId,
         incoming: &BTreeMap<String, RemoteBinding>,
     ) -> Result<BTreeMap<String, RemoteBinding>, Refusal> {
         let hive = &self.hives[id];
@@ -989,12 +999,12 @@ fn display_names(keys: &BTreeSet<String>) -> Vec<String> {
 pub struct Probe {
     backend: Backend,
     targets: Vec<CommitId>,
-    hives: Vec<(String, PathBuf)>,
+    hives: Vec<(HiveId, PathBuf)>,
 }
 
 /// Whether each probed hive's store has any of the commits a joining repository's remotes
 /// point at, or why it couldn't tell.
-pub struct Probed(BTreeMap<String, Result<bool, Refusal>>);
+pub struct Probed(BTreeMap<HiveId, Result<bool, Refusal>>);
 
 impl Probe {
     /// Looks in each store. A store removed meanwhile can't be looked in, but nor can its
@@ -1040,7 +1050,7 @@ pub fn open_whole(dir: &Path) -> anyhow::Result<Opened> {
 
 /// Where [`HubDir::remake`] makes hive `id` of the hub in `hub_dir` again: not a hive's
 /// name, which is its id.
-fn remade(hub_dir: &Path, id: &str) -> PathBuf {
+fn remade(hub_dir: &Path, id: &HiveId) -> PathBuf {
     hub_dir.join(format!(".{id}.remade"))
 }
 
@@ -1076,7 +1086,7 @@ fn now() -> u64 {
 #[derive(Default)]
 struct SetAsides {
     corrupt: Vec<SetAside>,
-    removed: BTreeSet<String>,
+    removed: BTreeSet<HiveId>,
     unemptied: Vec<SetAside>,
 }
 
@@ -1102,7 +1112,7 @@ fn set_aside(dir: &Path) -> SetAsides {
             continue;
         };
         let aside = SetAside {
-            id: id.to_owned(),
+            id: HiveId::from(id.to_owned()),
             path: entry.path(),
             stamp,
         };
@@ -1207,18 +1217,18 @@ mod tests {
         let dir = musubi_testutil::tempdir();
         let mut hubs = HubDir::open(dir.path()).unwrap();
         let alpha = hubs.create("alpha", Backend::GIT).unwrap();
-        let other = hubs.create(&alpha, Backend::GIT).unwrap();
+        let other = hubs.create(alpha.as_str(), Backend::GIT).unwrap();
         assert_ne!(alpha, other);
-        assert_eq!(hubs.resolve(&alpha).unwrap().as_str(), other);
+        assert_eq!(hubs.resolve(alpha.as_str()).unwrap(), other);
         let resolved = hubs.resolve("alpha").unwrap();
         let prepared = hubs
             .prepare_clone(&resolved, Backend::GIT, &BTreeMap::new())
             .unwrap();
         assert_eq!(prepared.id, alpha, "clone switched to a different hive");
-        let missing = Uuid::new_v4().to_string();
-        hubs.create(&missing, Backend::GIT).unwrap();
+        let missing = HiveId::from(Uuid::new_v4());
+        hubs.create(missing.as_str(), Backend::GIT).unwrap();
         assert!(
-            hubs.prepare_clone(&HiveId::from(missing), Backend::GIT, &BTreeMap::new())
+            hubs.prepare_clone(&missing, Backend::GIT, &BTreeMap::new())
                 .is_err()
         );
     }
@@ -1245,12 +1255,8 @@ mod tests {
         let joined = hubs.join(&first).unwrap();
         let id = joined.hive.id;
         assert!(
-            hubs.prepare_clone(
-                &HiveId::from(id.clone()),
-                Backend::GIT,
-                &first.remote_bindings
-            )
-            .is_ok()
+            hubs.prepare_clone(&id, Backend::GIT, &first.remote_bindings)
+                .is_ok()
         );
         let mut conflicting = first.remote_bindings.clone();
         conflicting
@@ -1258,10 +1264,7 @@ mod tests {
             .unwrap()
             .push
             .insert("example.com/fork".to_owned());
-        assert!(
-            hubs.prepare_clone(&HiveId::from(id.clone()), Backend::GIT, &conflicting)
-                .is_err()
-        );
+        assert!(hubs.prepare_clone(&id, Backend::GIT, &conflicting).is_err());
         // The first push records common history independently of the approval's names.
         hubs.update_index(
             &id,
@@ -1274,7 +1277,7 @@ mod tests {
         drop(hubs);
         let mut hubs = HubDir::open(dir.path()).unwrap();
         for choice in [
-            JoinChoice::Hive(id.clone()),
+            JoinChoice::Hive(id.to_string()),
             JoinChoice::Remake {
                 id: id.clone(),
                 name: None,
@@ -1295,7 +1298,7 @@ mod tests {
         }
         // Push destinations are checked too, even when the fetch destination agrees.
         let mut second = request("beta", "https://example.com/one");
-        second.choice = JoinChoice::Hive(id.clone());
+        second.choice = JoinChoice::Hive(id.to_string());
         let mut pushes_elsewhere = binding("example.com/one");
         pushes_elsewhere.push.insert("example.com/fork".to_owned());
         second
@@ -1395,7 +1398,7 @@ mod tests {
             .unwrap();
         assert_eq!(joined.hive.name, "My-Project");
         let remake = JoinChoice::Remake {
-            id: Uuid::new_v4().to_string(),
+            id: HiveId::from(Uuid::new_v4()),
             name: Some("Old Name".to_owned()),
         };
         let mut other = unnamed("Other Project", remake);
@@ -1404,7 +1407,7 @@ mod tests {
         assert!(joined.created);
         assert_eq!(joined.hive.name, "Other-Project");
         let err = hubs
-            .create_as(&Uuid::new_v4().to_string(), "My Project", Backend::GIT)
+            .create_as(&HiveId::from(Uuid::new_v4()), "My Project", Backend::GIT)
             .unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -1428,7 +1431,7 @@ mod tests {
         assert_eq!(hubs.resolve_exact("").unwrap_err(), empty);
         assert_eq!(hubs.rename("", "gamma").unwrap_err(), empty);
         let beta = hubs.resolve("beta").unwrap();
-        assert_eq!(hubs.info(beta.as_str()).unwrap().name, "beta");
+        assert_eq!(hubs.info(&beta).unwrap().name, "beta");
     }
 
     /// A hive created with a name has it, and no second hive can be created with it.
@@ -1474,7 +1477,7 @@ mod tests {
         assert_eq!(store.backend(), sha256);
         let format = std::process::Command::new("git")
             .arg("--git-dir")
-            .arg(dir.path().join(&id).join("git"))
+            .arg(dir.path().join(id.as_str()).join("git"))
             .args(["rev-parse", "--show-object-format"])
             .output()
             .unwrap();
@@ -1503,7 +1506,7 @@ mod tests {
         hubs.update_index(&id, pushed).unwrap();
         assert_eq!(hubs.info(&id).unwrap().machines, ["mac-0000", "mac-1111"]);
         let third = JoinRequest {
-            choice: JoinChoice::Hive(id.clone()),
+            choice: JoinChoice::Hive(id.to_string()),
             machine: "mac#22222222".to_owned(),
             ..request("mac", url)
         };
@@ -1529,13 +1532,13 @@ mod tests {
             urls: BTreeSet::from(["https://example.com/a".to_owned()]),
         };
         // A directory in the file's place makes the save fail, as a full disk would.
-        let file = dir.path().join(&id).join("index.json");
+        let file = dir.path().join(id.as_str()).join("index.json");
         fs::remove_file(&file).unwrap();
         fs::create_dir(&file).unwrap();
         hubs.update_index(&id, pushed.clone()).unwrap_err();
         fs::remove_dir(&file).unwrap();
         hubs.update_index(&id, pushed.clone()).unwrap();
-        assert_eq!(HiveIndex::load(&dir.path().join(&id)), Some(pushed));
+        assert_eq!(HiveIndex::load(&dir.path().join(id.as_str())), Some(pushed));
     }
 
     /// A hive whose store is corrupt is made again, empty, from what the hub knows of it,
@@ -1549,7 +1552,7 @@ mod tests {
             .unwrap()
             .hive
             .id;
-        let hive_dir = dir.path().join(&id);
+        let hive_dir = dir.path().join(id.as_str());
         fs::write(hive_dir.join("backend"), b"").unwrap();
         let Err(err) = HubStore::open(&hive_dir) else {
             panic!("opened a store with no backend");
@@ -1573,7 +1576,7 @@ mod tests {
             .unwrap()
             .hive
             .id;
-        let hive_dir = dir.path().join(&id);
+        let hive_dir = dir.path().join(id.as_str());
         fs::remove_file(hive_dir.join("index.json")).unwrap();
         let mut heads = fs::read(hive_dir.join("heads")).unwrap();
         heads.extend_from_slice(b"1 0123");
@@ -1600,7 +1603,11 @@ mod tests {
             .id
         };
         let (renamed, begun) = (join("alpha"), join("beta"));
-        fs::rename(dir.path().join(&renamed), remade(dir.path(), &renamed)).unwrap();
+        fs::rename(
+            dir.path().join(renamed.as_str()),
+            remade(dir.path(), &renamed),
+        )
+        .unwrap();
         fs::create_dir(remade(dir.path(), &begun)).unwrap();
         let hubs = HubDir::open(dir.path()).unwrap();
         for id in [&renamed, &begun] {
@@ -1639,7 +1646,7 @@ mod tests {
             new.exists() && old.exists(),
             "swept before the hive was filled"
         );
-        let heads = dir.path().join(&id).join("heads");
+        let heads = dir.path().join(id.as_str()).join("heads");
         let filled = format!(
             "{}1 {}\n",
             fs::read_to_string(&heads).unwrap(),
@@ -1669,8 +1676,8 @@ mod tests {
         };
         let id = hubs.join(&named).unwrap().hive.id;
         assert!(hubs.resolve_exact("proj").is_err(), "removed by a prefix");
-        assert_eq!(hubs.resolve_exact("project").unwrap().as_str(), id);
-        assert_eq!(hubs.resolve_exact(&id).unwrap().as_str(), id);
+        assert_eq!(hubs.resolve_exact("project").unwrap(), id);
+        assert_eq!(hubs.resolve_exact(id.as_str()).unwrap(), id);
         hubs.remove(&id).unwrap();
         assert!(hubs.is_removed(&id));
         let removed = dir.path().join("removed");
@@ -1688,7 +1695,7 @@ mod tests {
         fs::create_dir_all(removed.join(format!("{other}-{day_ago}.corrupt"))).unwrap();
         let hubs = HubDir::open(dir.path()).unwrap();
         assert!(hubs.is_removed(&id));
-        assert!(!hubs.is_removed(&other.to_string()));
+        assert!(!hubs.is_removed(&HiveId::from(other)));
         // Emptied in the background.
         let deadline = Instant::now() + Duration::from_secs(10);
         let empty = || fs::read_dir(&old).unwrap().next().is_none();
@@ -1739,21 +1746,21 @@ mod tests {
         let mut hubs = HubDir::open(dir.path()).unwrap();
         let remake_as = |id: &str, name: Option<&str>| JoinRequest {
             choice: JoinChoice::Remake {
-                id: id.to_owned(),
+                id: HiveId::from(id.to_owned()),
                 name: name.map(str::to_owned),
             },
             ..request("alpha", "https://example.com/a")
         };
         let remake = |id: &str, name: &str| remake_as(id, Some(name));
-        let lost = Uuid::new_v4().to_string();
-        let joined = hubs.join(&remake(&lost, "mine")).unwrap();
+        let lost = HiveId::from(Uuid::new_v4());
+        let joined = hubs.join(&remake(lost.as_str(), "mine")).unwrap();
         assert!(joined.created);
         assert_eq!(
             (joined.hive.id.as_str(), joined.hive.name.as_str()),
             (lost.as_str(), "mine")
         );
         // Made again already: joined.
-        let joined = hubs.join(&remake(&lost, "mine")).unwrap();
+        let joined = hubs.join(&remake(lost.as_str(), "mine")).unwrap();
         assert!(!joined.created);
         // Another lost hive of the same repository, under the name of this one, or none,
         // belongs beside it: refused.
@@ -1766,7 +1773,7 @@ mod tests {
             assert!(err.contains("`musubi leave --force`"), "{err}");
         }
         hubs.remove(&lost).unwrap();
-        let err = hubs.join(&remake(&lost, "mine")).unwrap_err();
+        let err = hubs.join(&remake(lost.as_str(), "mine")).unwrap_err();
         assert!(err.contains("removed"), "{err}");
         let err = hubs.join(&remake("../elsewhere", "mine")).unwrap_err();
         assert!(err.contains("not a hive id"), "{err}");

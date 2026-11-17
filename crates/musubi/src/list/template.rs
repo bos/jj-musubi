@@ -58,7 +58,7 @@ impl Line {
             hub: hub.to_owned(),
             reached: true,
             hive: info.name.clone(),
-            id: info.id.clone(),
+            id: info.id.to_string(),
             machines: info.machines.clone(),
             ..Self::default()
         }

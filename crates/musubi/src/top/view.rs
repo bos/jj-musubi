@@ -615,6 +615,7 @@ mod tests {
     use musubi_hub::activity::Failure;
     use musubi_hub::activity::Report;
     use musubi_hub::activity::Traffic;
+    use musubi_hub::hub_dir::HiveId;
     use musubi_hub::hub_dir::HiveInfo;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -650,7 +651,7 @@ mod tests {
             uptime: 3600,
             hives: vec![HiveActivity {
                 info: HiveInfo {
-                    id: "id".to_owned(),
+                    id: HiveId::from("id".to_owned()),
                     name: "app".to_owned(),
                     backend: musubi_jj::objects::Backend::GIT,
                     clone_config: Default::default(),

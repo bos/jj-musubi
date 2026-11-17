@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use bytes::Bytes;
 use musubi_hub::activity::Report;
+use musubi_hub::hub_dir::HiveId;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -594,7 +595,7 @@ fn report(
     error: Option<&String>,
 ) {
     let request = HubWideRequest::Report {
-        hive: hive.hive.to_string(),
+        hive: HiveId::from(hive.hive),
         report: Report {
             machine: machine.to_owned(),
             seq,
@@ -621,7 +622,7 @@ fn report(
                     crate::upgrade::consider(release);
                 }
                 if let Ok(HubWideReply::Hive(info)) = Envelope::decode(&reply)
-                    && info.id == hive.hive.to_string()
+                    && info.id == HiveId::from(hive.hive)
                 {
                     hive.note_name(&repo_path, &info.name);
                 }

@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use jj_cli::formatter::FormatterExt as _;
+use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_jj::workspaces;
 use musubi_sync::wire::HubWideReply;
@@ -126,7 +127,8 @@ pub fn list(
                 // A copy shows its hive's name while the hub is out of reach, so keep up with
                 // renames.
                 for copy in &here {
-                    if let Some(info) = hives.iter().find(|h| h.id == copy.hive.hive.to_string()) {
+                    if let Some(info) = hives.iter().find(|h| h.id == HiveId::from(copy.hive.hive))
+                    {
                         copy.hive.note_name(&copy.located.repo_path, &info.name);
                     }
                 }
@@ -134,14 +136,14 @@ pub fn list(
                 for info in &hives {
                     let hive = Line::hive(hub, info);
                     lister.print(&hive)?;
-                    for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
+                    for copy in here.iter().filter(|c| HiveId::from(c.hive.hive) == info.id) {
                         lister.print(&copy_line(&hive, copy))?;
                     }
                     print_missing(&lister, &hive, &missing, &mut shown)?;
                 }
                 for copy in here
                     .iter()
-                    .filter(|copy| !hives.iter().any(|h| h.id == copy.hive.hive.to_string()))
+                    .filter(|copy| !hives.iter().any(|h| h.id == HiveId::from(copy.hive.hive)))
                 {
                     let hive = hive_here(hub, true, copy);
                     lister.print(&Line {

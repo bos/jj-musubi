@@ -8,10 +8,12 @@
 
 use std::collections::BTreeSet;
 
+use crate::hub_dir::HiveId;
+
 /// A hive, as far as matching cares.
 #[derive(Clone, Debug)]
 pub struct Candidate {
-    pub id: String,
+    pub id: HiveId,
     pub name: String,
     /// Whether it shares history with the joining repository (and has its backend).
     pub related: bool,
@@ -23,7 +25,7 @@ pub struct Candidate {
 pub enum Decision {
     /// Join the hive with this id; the reason is for telling the user.
     Join {
-        id: String,
+        id: HiveId,
         reason: String,
     },
     Create,
@@ -38,7 +40,7 @@ pub struct Joiner {
     /// Whether it has any commit of its own.
     pub has_commits: bool,
     /// The id of the hive it asked to join.
-    pub chosen: Option<String>,
+    pub chosen: Option<HiveId>,
     /// Whether it asked for a new hive (`musubi create`).
     pub create: bool,
     /// Whether it named the new hive itself.
@@ -170,7 +172,7 @@ mod tests {
 
     fn hive(id: &str, related: bool, urls: &[&str]) -> Candidate {
         Candidate {
-            id: id.to_owned(),
+            id: HiveId::from(id.to_owned()),
             name: format!("name-{id}"),
             related,
             url_keys: urls.iter().map(|u| (*u).to_owned()).collect(),
@@ -190,7 +192,7 @@ mod tests {
 
     fn joins(decision: &Decision) -> Option<(&str, &str)> {
         match decision {
-            Decision::Join { id, reason } => Some((id, reason)),
+            Decision::Join { id, reason } => Some((id.as_str(), reason)),
             _ => None,
         }
     }
@@ -302,9 +304,9 @@ mod tests {
     fn asking_for_a_hive() {
         let hives = [hive("a", true, &[]), hive("b", false, &[ORIGIN.1])];
         let mut asking = joiner(&[ORIGIN]);
-        asking.chosen = Some("a".to_owned());
+        asking.chosen = Some(HiveId::from("a".to_owned()));
         assert_eq!(joins(&decide(&asking, &hives)), Some(("a", "as asked")));
-        asking.chosen = Some("b".to_owned());
+        asking.chosen = Some(HiveId::from("b".to_owned()));
         assert!(refuses(&decide(&asking, &hives), "musubi create"));
     }
 

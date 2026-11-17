@@ -17,7 +17,7 @@ the hub's records applied, no record receipts, a known pair from after the cut, 
 announced but the hub's records. The reply is not an `Incomplete` answer, after which the driver
 would reopen the node.
 
-* After a fresh `Fetched` reply this holds through the round after it (`FetchLaws.current`).
+* After a fresh `Fetched` reply this holds through the round after it (`fresh_fetch_current`).
 * A fresh `Head` reply answers a push. The push is refused unless it offers the hub's records,
   and it offers those the node has applied. It is made with the core's record test quiet
   (`choose_push_announced`), and receipts have an announcement in an active round, so it is made
@@ -27,132 +27,127 @@ would reopen the node.
 
 Nothing before the entry is read as NodeSettle's state. -/
 
+/-- What a node's pre-entry raw run reads, sampled from its actual events: its run up to a first
+fresh reply (`HeadData`), and the rest. Data only: its laws are `EntryLaws`. -/
+structure EntryData (ρ α : Type) extends HeadData ρ α where
+  /-- The records applied right after the step. -/
+  ap : Nat → ρ
+  /-- The known sequence right after the step. -/
+  seqAfter : Nat → Nat
+  /-- The records announced, right after the step. -/
+  anncAfter : Nat → Option ρ
+  /-- The records announced, at each step. -/
+  annc : Nat → Option ρ
+  /-- Whether the node holds record receipts at the step. -/
+  receipts : Nat → Bool
+  /-- Whether it holds record receipts right after the step. -/
+  receiptsAfter : Nat → Bool
+  /-- A `Push::answer` bit: the answer is `Incomplete`. -/
+  incomplete : Nat → Bool
+  /-- A `Push::answer` bit: the push's expected head is the hub's head. -/
+  expectedIsHead : Nat → Bool
+  /-- A `Push::answer` bit: the hub holds the push's closure. -/
+  closed : Nat → Bool
+  /-- The data of the round after a fresh `Fetched` reply. -/
+  round : Nat → FetchData α
+
+/-- The native per-call laws of that run, as `raw_entry_reached` takes them: those of its run up
+to a fresh head (`HeadLaws`), and those that carry it from there to entry. Each law is asked of
+the steps before the first fresh reply, except `fresh_seq` and `fresh_announces`, which are asked
+of every fresh reply. The objects laws rest on a valid base: a node advertises as haves
+only objects it holds, so a reply brings what it lacks, or the round fails and another starts.
+`hroundServe` is not among them: `raw_entry_reached` takes it as a separate argument. -/
+structure EntryLaws {ρ α : Type} [DecidableEq ρ] (R : ρ) (w : Nat) (d : EntryData ρ α) : Prop
+    extends HeadLaws R d.toHeadData where
+  /-- A fresh reply comes from a `Fetch` or a push. -/
+  fresh_source : ∀ j, Before d.reply j → d.reply j = .fresh →
+    d.fetchCall j ∨ (d.core j ∧ d.ctl j = .push)
+  /-- The round after a fresh `Fetch` reply obeys `FetchCurrent` of its data, holding receipts if
+  the node did right after the reply (its prelude may add some). -/
+  round_laws : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh →
+    FetchCurrent (d.ap j) R (d.round j) ∧
+      (d.receiptsAfter j = true → (d.round j).receiptsAtStart = true)
+  /-- A fresh `Fetch` reply is not an `Incomplete` answer. -/
+  fetch_complete : ∀ j, Before d.reply j → d.fetchCall j → d.incomplete j = false
+  /-- A push offers the records the node has applied. -/
+  push_offers_applied : ∀ j, Before d.reply j → d.core j → d.ctl j = .push → d.ap j = d.offered
+  /-- The core's first test is `Retry.Records.needsRecords` of the records applied, those
+  announced and the receipts. -/
+  announced_needs : ∀ i, Before d.reply i → d.core i →
+    (d.prims i).announced = Retry.Records.needsRecords (d.ap i) (d.annc i) (d.receipts i)
+  /-- Receipts have an announcement (`Retry.Records.State.Guard`). -/
+  receipts_announced : ∀ i, Before d.reply i → d.core i → d.receipts i = true → d.annc i ≠ none
+  /-- A push leaves the receipts as they were. -/
+  push_keeps_receipts : ∀ j, Before d.reply j → d.core j → d.ctl j = .push →
+    d.receiptsAfter j = d.receipts j
+  /-- `Push::answer` answers `Incomplete` only from its head, to a push whose closure it lacks. -/
+  incomplete_from_head : ∀ j, Before d.reply j → d.core j → d.ctl j = .push →
+    d.incomplete j = true → d.expectedIsHead j = true ∧ d.closed j = false
+  /-- An honest push from the hub's head, with the hub's records, is closed once uploaded. -/
+  head_push_closed : ∀ j, Before d.reply j → d.core j → d.ctl j = .push → d.offered = R →
+    d.expectedIsHead j = true → d.closed j = true
+  /-- A fresh reply names a known sequence from the cut's `w` on. -/
+  fresh_seq : ∀ j, d.reply j = .fresh → w ≤ d.seqAfter j
+  /-- A fresh reply announces only the hub's records. -/
+  fresh_announces : ∀ j, d.reply j = .fresh → d.anncAfter j = none ∨ d.anncAfter j = some R
+
 /-- A node enters, raw: its first fresh reply leaves it with the hub's records `R` applied, no
 record receipts, a known sequence from the cut's `w` on and nothing announced but `R`, and is not
-an `Incomplete` answer. Assumes what `fresh_head_reached` takes, and:
-* A fresh reply comes only from a `Fetch` or a push.
-* The round after a fresh `Fetch` reply obeys `FetchLaws` of its sampled data `round`, holding
-  receipts if the node did right after the reply (its prelude may add some), and is never
-  `Incomplete`.
-* A push offers the records the node has applied (`ap`).
-* The core's first test is `Retry.Records.needsRecords` of the records applied, those announced
-  (`annc`) and the receipts. Receipts have an announcement in an active round
-  (`Retry.Records.State.Guard`), so a push, made with that test quiet, is made with no receipts
-  (`Retry.Records.no_receipts_when_quiet`), and a `Head` reply leaves them so.
-* `Push::answer` answers `Incomplete` only from its head and to a push whose closure it lacks,
-  and an honest push with the hub's records from its head is closed once uploaded (the
-  conditional closure law).
-* A fresh reply names a head from after the cut and announces only the hub's records.
+an `Incomplete` answer. `EntryLaws` gives what `fresh_head_reached` takes (`HeadLaws`), and:
+* `fresh_source`: a fresh reply comes only from a `Fetch` or a push.
+* `round_laws`: the round after a fresh `Fetch` reply obeys `FetchCurrent` of its sampled data
+  `round`, holding receipts if the node did right after the reply (its prelude may add some).
+  `fetch_complete`: such a reply is never `Incomplete`.
+* `push_offers_applied`: a push offers the records the node has applied (`ap`).
+* `announced_needs`, `receipts_announced`, `push_keeps_receipts`: the core's first test is
+  `Retry.Records.needsRecords` of the records applied, those announced (`annc`) and the receipts.
+  Receipts have an announcement in an active round (`Retry.Records.State.Guard`), so a push, made
+  with that test quiet, is made with no receipts (`Retry.Records.no_receipts_when_quiet`), and a
+  `Head` reply leaves them so.
+* `incomplete_from_head`, `head_push_closed`: `Push::answer` answers `Incomplete` only from its
+  head and to a push whose closure it lacks, and an honest push with the hub's records from its
+  head is closed once uploaded (the conditional closure law).
+* `fresh_seq`, `fresh_announces`: a fresh reply names a head from after the cut and announces only
+  the hub's records.
 
 `hroundServe` is a separate premise, not a law of the run: no `GetObjects` fails in the round
 after a fresh `Fetch`. -/
-theorem raw_entry_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm : Naming α)
-    (par : Nat → List Nat) (anc : Nat → Nat → Bool)
-    (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
-    (hlt : ParLt par) (H : Nat) (hraw : ∀ x, Anc par x H → x ∈ raw)
-    (run after : Nat → State) (prims : Nat → Prims) (reply : Nat → Reply)
-    (core starts fetchCall : Nat → Prop) (pushDropped : Nat → Bool)
-    (offered R : ρ) (heard : Nat → Option ρ)
-    (hnaming : nm.Laws par H (Before reply))
-    (hkind : ∀ i, Before reply i → core i ∨ starts i)
-    (hrecord : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt ∧
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance →
-        (prims i).dropHead = false))
-    (hdiffer : ∀ i, Before reply i → core i → (prims i).differ = match heard i with
-      | some h => !decide (h = offered)
-      | none => (prims i).pending)
-    (hheard : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .idle → reply i ≠ .fresh →
-      heard (i + 1) = if reply i = .refused then some R else heard i)
-    (hburst : ∀ i, Before reply i → core i → nm.Still i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance) →
-      ∃ k, callB raw (nm.images i) anc (.burst k) (run i) (after i) = true)
-    (hobjects : ∀ i, Before reply i → core i → nm.Still i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects →
-      (∃ j, i < j ∧ starts j) ∨
-      ((∀ x, walkB par (run i).burst.loc (run i).stg H x = true →
-        (run i).burst.loc x = false → (run i).stg x = true → (run i).obj x = false →
-        (after i).obj x = true ∨ (after i).burst.loc x = true) ∧
-      (after i).burst.heads = (run i).burst.heads ∧
-      (after i).burst.plan = (run i).burst.plan ∧
-      growsB raw (run i) (after i) = true))
-    (hframe : ∀ i, Before reply (i + 1) → core i → nm.Still i → Frame raw (after i) (run (i + 1)))
-    (hpoll : ∀ i, Before reply i → core i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .fetch ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .poll) → fetchCall i)
-    (hstart : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .idle → ∃ j, i < j ∧ starts j)
-    (hstartFetch : ∀ j, Before reply j → starts j → fetchCall j)
-    (hfetchCall : ∀ j, Before reply j → fetchCall j → reply j = .fresh)
-    (hnd : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .push → offered = R →
-      pushDropped i = false)
-    (hpush : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .push →
-      (offered = R → pushDropped i = false → reply i = .fresh) ∧
-      (offered ≠ R → reply i = .refused))
-    (ap : Nat → ρ) (seqAfter : Nat → Nat) (anncAfter : Nat → Option ρ) (w : Nat)
-    (receipts receiptsAfter : Nat → Bool) (incomplete expectedIsHead closed : Nat → Bool)
-    (hsource : ∀ j, Before reply j → reply j = .fresh →
-      fetchCall j ∨ (core j ∧ rawControl raw (nm.images j) par anc H (run j) (prims j) = .push))
-    (round : Nat → FetchData α)
-    (hround : ∀ j, Before reply j → fetchCall j → reply j = .fresh →
-      FetchLaws (ap j) R (round j) ∧ (receiptsAfter j = true → (round j).receipts = true))
-    (hroundServe : ∀ j, Before reply j → fetchCall j → reply j = .fresh → ∀ i,
-      (round j).active i = true → ¬ (round j).failed i)
-    (hfetchInc : ∀ j, Before reply j → fetchCall j → incomplete j = false)
-    (hoffer : ∀ j, Before reply j → core j →
-      rawControl raw (nm.images j) par anc H (run j) (prims j) = .push → ap j = offered)
-    (annc : Nat → Option ρ)
-    (hneeds : ∀ i, Before reply i → core i →
-      (prims i).announced = Retry.Records.needsRecords (ap i) (annc i) (receipts i))
-    (hguard : ∀ i, Before reply i → core i → receipts i = true → annc i ≠ none)
-    (hheadReceipts : ∀ j, Before reply j → core j →
-      rawControl raw (nm.images j) par anc H (run j) (prims j) = .push →
-      receiptsAfter j = receipts j)
-    (hinc : ∀ j, Before reply j → core j →
-      rawControl raw (nm.images j) par anc H (run j) (prims j) = .push → incomplete j = true →
-      expectedIsHead j = true ∧ closed j = false)
-    (hclosure : ∀ j, Before reply j → core j →
-      rawControl raw (nm.images j) par anc H (run j) (prims j) = .push → offered = R →
-      expectedIsHead j = true → closed j = true)
-    (hseq : ∀ j, reply j = .fresh → w ≤ seqAfter j)
-    (hannc : ∀ j, reply j = .fresh → anncAfter j = none ∨ anncAfter j = some R) :
-    ∃ j, reply j = .fresh ∧ ap j = R ∧ receiptsAfter j = false ∧ incomplete j = false ∧
-      w ≤ seqAfter j ∧ (anncAfter j = none ∨ anncAfter j = some R) := by
-  obtain ⟨j, hj, hmin⟩ := exists_first (fresh_head_reached raw nm par anc trans hlt H hraw
-    run after prims reply core starts fetchCall pushDropped offered R heard hnaming hkind hrecord
-    hdiffer hheard hburst hobjects hframe hpoll hstart hstartFetch hfetchCall hnd hpush)
-  have hb : Before reply j := fun m hm h => hmin m hm h
-  rcases hsource j hb hj with hf | ⟨hc, hp⟩
-  · obtain ⟨F, hF⟩ := hround j hb hf hj
-    obtain ⟨hap, hrec⟩ := F.current (hroundServe j hb hf hj)
-    have hra : receiptsAfter j = false := by
-      cases h : receiptsAfter j
+theorem raw_entry_reached {ρ α : Type} [DecidableEq ρ] {R : ρ} {w : Nat} {d : EntryData ρ α}
+    (L : EntryLaws R w d)
+    (hroundServe : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh → ∀ i,
+      (d.round j).active i = true → ¬ (d.round j).failed i) :
+    ∃ j, d.reply j = .fresh ∧ d.ap j = R ∧ d.receiptsAfter j = false ∧
+      d.incomplete j = false ∧ w ≤ d.seqAfter j ∧
+      (d.anncAfter j = none ∨ d.anncAfter j = some R) := by
+  obtain ⟨j, hj, hmin⟩ := exists_first (fresh_head_reached L.toHeadLaws)
+  have hb : Before d.reply j := fun m hm h => hmin m hm h
+  rcases L.fresh_source j hb hj with hf | ⟨hc, hp⟩
+  · obtain ⟨F, hF⟩ := L.round_laws j hb hf hj
+    obtain ⟨hap, hrec⟩ := fresh_fetch_current F (hroundServe j hb hf hj)
+    have hra : d.receiptsAfter j = false := by
+      cases h : d.receiptsAfter j
       · rfl
       · rw [hF h] at hrec; cases hrec
-    exact ⟨j, hj, hap, hra, hfetchInc j hb hf, hseq j hj, hannc j hj⟩
-  · have hl := hpush j hb hc hp
-    have hoR : offered = R := Classical.byContradiction fun hne => by
+    exact ⟨j, hj, hap, hra, L.fetch_complete j hb hf, L.fresh_seq j hj, L.fresh_announces j hj⟩
+  · have hl := L.push_reply j hb hc hp
+    have hoR : d.offered = R := Classical.byContradiction fun hne => by
       have h := hl.2 hne
       rw [hj] at h
       cases h
-    have hrec : receipts j = false := by
-      have hn : (prims j).announced = false := choose_push_announced hp
-      rw [hneeds j hb hc] at hn
-      exact Retry.Records.no_receipts_when_quiet (ap j) (annc j) (receipts j)
-        (hguard j hb hc) hn
-    have hinc' : incomplete j = false := by
-      cases h : incomplete j
+    have hrec : d.receipts j = false := by
+      have hn : (d.prims j).announced = false := choose_push_announced hp
+      rw [L.announced_needs j hb hc] at hn
+      exact Retry.Records.no_receipts_when_quiet (d.ap j) (d.annc j) (d.receipts j)
+        (L.receipts_announced j hb hc) hn
+    have hinc' : d.incomplete j = false := by
+      cases h : d.incomplete j
       · rfl
-      · obtain ⟨he, hcl⟩ := hinc j hb hc hp h
-        rw [hclosure j hb hc hp hoR he] at hcl
+      · obtain ⟨he, hcl⟩ := L.incomplete_from_head j hb hc hp h
+        rw [L.head_push_closed j hb hc hp hoR he] at hcl
         cases hcl
-    refine ⟨j, hj, by rw [hoffer j hb hc hp, hoR], ?_, hinc', hseq j hj, hannc j hj⟩
-    rw [hheadReceipts j hb hc hp, hrec]
+    refine ⟨j, hj, by rw [L.push_offers_applied j hb hc hp, hoR], ?_, hinc', L.fresh_seq j hj,
+      L.fresh_announces j hj⟩
+    rw [L.push_keeps_receipts j hb hc hp, hrec]
 
 /-- What a node's entry reads of it, raw. -/
 structure RawNode (ρ : Type) where
@@ -202,140 +197,5 @@ theorem raw_entry_persists {ρ : Type} (R : ρ) (w : Nat) (state : Nat → RawNo
       rw [hclosure (j + d) (by omega) he hh] at hc
       cases hc
     exact hkeep (j + d) (by omega) he hnr
-
-/-- What a node's pre-entry raw run reads, sampled from its actual events. Data only: its laws are
-`EntryLaws`. -/
-structure EntryData (ρ α : Type) where
-  /-- The round's raw closure. -/
-  raw : List Nat
-  /-- The core's naming. -/
-  naming : Naming α
-  /-- The raw graph: each operation's parents. -/
-  par : Nat → List Nat
-  /-- The raw ancestry test. -/
-  anc : Nat → Nat → Bool
-  /-- The known raw head. -/
-  H : Nat
-  /-- The core state at each sampled step. -/
-  run : Nat → State
-  /-- The state right after the step's calls complete. -/
-  after : Nat → State
-  /-- What the core reads at the step. -/
-  prims : Nat → Prims
-  /-- What the step's calls bring back. -/
-  reply : Nat → Reply
-  /-- The step is a core step. -/
-  core : Nat → Prop
-  /-- The step is a round start. -/
-  starts : Nat → Prop
-  /-- The step's call is a `Fetch`. -/
-  fetchCall : Nat → Prop
-  /-- `is_dropped` of a push's new head. -/
-  pushDropped : Nat → Bool
-  /-- The records the node offers. -/
-  offered : ρ
-  /-- The records last heard, at each step. -/
-  heard : Nat → Option ρ
-  /-- The records applied, at each step. -/
-  ap : Nat → ρ
-  /-- The known sequence right after the step. -/
-  seqAfter : Nat → Nat
-  /-- The records announced, right after the step. -/
-  anncAfter : Nat → Option ρ
-  /-- Whether the node holds record receipts at the step. -/
-  receipts : Nat → Bool
-  /-- Whether it holds record receipts right after the step. -/
-  receiptsAfter : Nat → Bool
-  /-- A `Push::answer` bit: the answer is `Incomplete`. -/
-  incomplete : Nat → Bool
-  /-- A `Push::answer` bit: the push's expected head is the hub's head. -/
-  expectedIsHead : Nat → Bool
-  /-- A `Push::answer` bit: the hub holds the push's closure. -/
-  closed : Nat → Bool
-  /-- The data of the round after a fresh `Fetched` reply. -/
-  round : Nat → FetchData α
-  /-- The records announced, at each step. -/
-  annc : Nat → Option ρ
-
-/-- The native per-call laws of that run, as `raw_entry_reached` takes them, each asked before
-its first fresh reply only. The objects laws rest on a valid base: a node advertises as haves
-only objects it holds, so a reply brings what it lacks, or the round fails and another starts.
-`hroundServe` is not among them: `EntryLaws.enters` takes it as a separate argument. -/
-structure EntryLaws {ρ α : Type} [DecidableEq ρ] (R : ρ) (w : Nat) (d : EntryData ρ α) :
-    Prop where
-  trans : ∀ a b c, d.anc a b = true → d.anc b c = true → d.anc a c = true
-  hlt : ParLt d.par
-  hraw : ∀ x, Anc d.par x d.H → x ∈ d.raw
-  hnaming : d.naming.Laws d.par d.H (Before d.reply)
-  hkind : ∀ i, Before d.reply i → d.core i ∨ d.starts i
-  hrecord : ∀ i, Before d.reply i → d.core i → rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) ≠ .adopt ∧ (rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i)
-    (d.prims i) = .advance → (d.prims i).dropHead = false)
-  hdiffer : ∀ i, Before d.reply i → d.core i → (d.prims i).differ = match d.heard i with
-      | some h => !decide (h = d.offered)
-      | none => (d.prims i).pending
-  hheard : ∀ i, Before d.reply i → d.core i → rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) ≠ .idle → d.reply i ≠ .fresh → d.heard (i + 1) = if d.reply i = .refused
-    then some R else d.heard i
-  hburst : ∀ i, Before d.reply i → d.core i → d.naming.Still i → (rawControl d.raw (d.naming.images
-    i) d.par d.anc d.H (d.run i) (d.prims i) = .merge ∨ rawControl d.raw (d.naming.images i) d.par
-    d.anc d.H (d.run i) (d.prims i) = .realize ∨ rawControl d.raw (d.naming.images i) d.par d.anc
-    d.H (d.run i) (d.prims i) = .advance) → ∃ k, callB d.raw (d.naming.images i) d.anc (.burst k)
-    (d.run i) (d.after i) = true
-  hobjects : ∀ i, Before d.reply i → d.core i → d.naming.Still i → rawControl d.raw (d.naming.images
-    i) d.par d.anc d.H (d.run i) (d.prims i) = .objects → (∃ j, i < j ∧ d.starts j) ∨ ((∀ x, walkB
-    d.par (d.run i).burst.loc (d.run i).stg d.H x = true → (d.run i).burst.loc x = false → (d.run
-    i).stg x = true → (d.run i).obj x = false → (d.after i).obj x = true ∨ (d.after i).burst.loc x =
-    true) ∧ (d.after i).burst.heads = (d.run i).burst.heads ∧ (d.after i).burst.plan = (d.run
-    i).burst.plan ∧ growsB d.raw (d.run i) (d.after i) = true)
-  hframe : ∀ i, Before d.reply (i + 1) → d.core i → d.naming.Still i → Frame d.raw (d.after i)
-    (d.run (i + 1))
-  hpoll : ∀ i, Before d.reply i → d.core i → (rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) = .fetch ∨ rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i)
-    (d.prims i) = .poll) → d.fetchCall i
-  hstart : ∀ i, Before d.reply i → d.core i → rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) = .idle → ∃ j, i < j ∧ d.starts j
-  hstartFetch : ∀ j, Before d.reply j → d.starts j → d.fetchCall j
-  hfetchCall : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh
-  hnd : ∀ i, Before d.reply i → d.core i → rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) = .push → d.offered = R → d.pushDropped i = false
-  hpush : ∀ i, Before d.reply i → d.core i → rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) = .push → (d.offered = R → d.pushDropped i = false → d.reply i = .fresh) ∧
-    (d.offered ≠ R → d.reply i = .refused)
-  hsource : ∀ j, Before d.reply j → d.reply j = .fresh → d.fetchCall j ∨ (d.core j ∧ rawControl
-    d.raw (d.naming.images j) d.par d.anc d.H (d.run j) (d.prims j) = .push)
-  hround : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh → FetchLaws (d.ap j) R
-    (d.round j) ∧ (d.receiptsAfter j = true → (d.round j).receipts = true)
-  hfetchInc : ∀ j, Before d.reply j → d.fetchCall j → d.incomplete j = false
-  hoffer : ∀ j, Before d.reply j → d.core j → rawControl d.raw (d.naming.images j) d.par d.anc d.H
-    (d.run j) (d.prims j) = .push → d.ap j = d.offered
-  hneeds : ∀ i, Before d.reply i → d.core i → (d.prims i).announced = Retry.Records.needsRecords
-    (d.ap i) (d.annc i) (d.receipts i)
-  hguard : ∀ i, Before d.reply i → d.core i → d.receipts i = true → d.annc i ≠ none
-  hheadReceipts : ∀ j, Before d.reply j → d.core j → rawControl d.raw (d.naming.images j) d.par
-    d.anc d.H (d.run j) (d.prims j) = .push → d.receiptsAfter j = d.receipts j
-  hinc : ∀ j, Before d.reply j → d.core j → rawControl d.raw (d.naming.images j) d.par d.anc d.H
-    (d.run j) (d.prims j) = .push → d.incomplete j = true → d.expectedIsHead j = true ∧ d.closed j =
-    false
-  hclosure : ∀ j, Before d.reply j → d.core j → rawControl d.raw (d.naming.images j) d.par d.anc d.H
-    (d.run j) (d.prims j) = .push → d.offered = R → d.expectedIsHead j = true → d.closed j = true
-  hseq : ∀ j, d.reply j = .fresh → w ≤ d.seqAfter j
-  hannc : ∀ j, d.reply j = .fresh → d.anncAfter j = none ∨ d.anncAfter j = some R
-
-/-- Such a run reaches a fresh reply that leaves it entered. -/
-theorem EntryLaws.enters {ρ α : Type} [DecidableEq ρ] {R : ρ} {w : Nat} {d : EntryData ρ α}
-    (L : EntryLaws R w d)
-    (hroundServe : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh → ∀ i,
-      (d.round j).active i = true → ¬ (d.round j).failed i) :
-    ∃ j, d.reply j = .fresh ∧ d.ap j = R ∧ d.receiptsAfter j = false ∧
-      d.incomplete j = false ∧ w ≤ d.seqAfter j ∧
-      (d.anncAfter j = none ∨ d.anncAfter j = some R) :=
-  raw_entry_reached
-    d.raw d.naming d.par d.anc L.trans L.hlt d.H L.hraw d.run d.after d.prims d.reply d.core
-    d.starts d.fetchCall d.pushDropped d.offered R d.heard L.hnaming L.hkind L.hrecord L.hdiffer
-    L.hheard L.hburst L.hobjects L.hframe L.hpoll L.hstart L.hstartFetch L.hfetchCall L.hnd
-    L.hpush d.ap d.seqAfter d.anncAfter w d.receipts d.receiptsAfter d.incomplete
-    d.expectedIsHead d.closed L.hsource d.round L.hround hroundServe L.hfetchInc L.hoffer d.annc
-    L.hneeds L.hguard L.hheadReceipts L.hinc L.hclosure L.hseq L.hannc
 
 end Musubi.EarlyEntry.Control

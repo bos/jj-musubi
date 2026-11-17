@@ -166,8 +166,8 @@ Check these specially:
 * `FineSource.binds` and `Entry.entry` are the largest correspondence obligations: the first is
   one binding for each kind of replayed event, whose node-side fields the source says no checker
   of this exact relation tests (`decide`, `handle`); the second is 28 per-call laws of a node's
-  pre-entry run (`EntryLaws`), including `hobjects` and `hstart`, which require eventual round
-  restarts.
+  pre-entry run (`EntryLaws`), including `objects_step` and `idle_restarts`, which require
+  eventual round restarts.
 * `FineSource.inFlight` is the one part of the honesty invariant that is not derived. Its
   window, head and clock parts follow from `historyWindow` and `clock`; the replay proves honesty
   of traffic sent after the cut. A reply or notice already in flight at the cut has a snapshot
@@ -1194,7 +1194,7 @@ call finishes, while the system keeps the exchange's starting pair until the bat
 so the latch binding relates completed observations, not every intermediate callback; and
 matching applied records does not make whole normalizers equal, since one machine may have extra
 pending drops. The completion and scheduling premises (`doneIn`, `answer`,
-`EntryLaws.hobjects`, `hstart`) are obligations on the sampled execution, not derived.
+`EntryLaws.objects_step`, `idle_restarts`) are obligations on the sampled execution, not derived.
 
 ### Contraction and canonical bodies
 

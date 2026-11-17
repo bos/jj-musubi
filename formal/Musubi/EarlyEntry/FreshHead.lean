@@ -150,6 +150,57 @@ theorem settles {par : Nat → List Nat} {H : Nat} {P : Nat → Prop} (L : N.Law
 
 end Naming
 
+/-! ### One node's round, bundled
+
+Every theorem about a node's entry reads the same run: the raw closure, the naming, the raw graph
+and the core's states, each a function of the step. `RunData` holds them once, `RunLaws` the laws
+of the raw graph, and the bundles for the rounds that follow extend them: `HeadData` and
+`HeadLaws` for the run up to a first fresh head (below), `FetchData` and `FetchLaws` for the round
+after a fresh `Fetch` reply (`FreshFetch`), `EntryData` and `EntryLaws` for a node's whole
+pre-entry run (`RawEntry`). A step's choice is `RunData.ctl`, so no theorem writes out the
+seven arguments of `rawControl`.
+
+The layers are not a chain. `FetchLaws` extends `RunLaws`, not `HeadLaws`, because a fetch round
+has its own frozen known head and none of the `reply`, `core`, `starts` or `fetchCall` data that
+`HeadLaws` speaks of; `FetchCurrent` adds a third layer, the first reading's announcement. -/
+
+/-- What a node's raw run reads at its successive steps, sampled from its actual events: the part
+every round shares. Data only: its laws are `RunLaws`. -/
+structure RunData (α : Type) where
+  /-- The raw closure of the known head. -/
+  raw : List Nat
+  /-- The core's naming; its images of the known head may change. -/
+  naming : Naming α
+  /-- The raw graph: each operation's parents. -/
+  par : Nat → List Nat
+  /-- The raw ancestry test. -/
+  anc : Nat → Nat → Bool
+  /-- The known raw head. -/
+  H : Nat
+  /-- The core state at each sampled step. -/
+  run : Nat → State
+  /-- The core state right after the step's calls complete. -/
+  after : Nat → State
+  /-- What the core reads at the step. -/
+  prims : Nat → Prims
+
+/-- What the core reads at step `i`, computed raw from the images at that step. -/
+abbrev RunData.reads {α : Type} (d : RunData α) (i : Nat) : Reads :=
+  rawReads d.raw (d.naming.images i) d.par d.anc d.H (d.run i) (d.prims i)
+
+/-- The core's choice at step `i`, computed. -/
+abbrev RunData.ctl {α : Type} (d : RunData α) (i : Nat) : Choice :=
+  rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i) (d.prims i)
+
+/-- The laws of a run's raw graph, asked of every round. -/
+structure RunLaws {α : Type} (d : RunData α) : Prop where
+  /-- The raw ancestry test is transitive. -/
+  anc_trans : ∀ a b c, d.anc a b = true → d.anc b c = true → d.anc a c = true
+  /-- Every raw operation's parents have smaller ids. -/
+  par_lt : ParLt d.par
+  /-- The raw closure holds every ancestor of the known head. -/
+  raw_closure : ∀ x, Anc d.par x d.H → x ∈ d.raw
+
 /-! ### A first fresh head
 
 A fresh head is a reply from after the record cut naming the hub's current head: `Head` or
@@ -194,152 +245,174 @@ theorem idle_brings_fresh {reply : Nat → Reply} {starts fetchCall : Nat → Pr
   obtain ⟨j, hj, hs⟩ := hstart
   exact ⟨j, hj, hfetchCall j (hstartFetch j hs)⟩
 
-/-- A node observes a fresh head. Its events are core steps (`core`) and round starts (`starts`).
-Until a fresh head, assumed of every step:
-* `hnaming`: naming's laws hold (metadata only arrives, the images read only that of finitely
-  many raw operations, pending names only leave).
-* `hrecord`: the record-credit cut: no adoption, no prepared taking advance.
-* `hdiffer`, `hheard`: `differ` is as the core computes it against the records last heard. Across
-  a core step that does not idle, those records change only by a refusal. (Between rounds a
-  notification may change them, but an idle is followed by a fresh `Fetch` reply anyway.)
-* `hburst`, `hobjects`: a core step's law follows from its computed choice, asked only of steps
-  across which naming does not change. A burst step is as checked. An objects call brings the
-  objects, or locality, of the walked operations with a body but not their objects, with the op
-  heads and plan as they were and nothing lost; or its reply lacks them and fails the round, so
-  that a round starts after it (the adapter's `stage_objects` checks they are here, and the
+/-- What a node's run reads until its first fresh reply, sampled from its actual events. Data
+only: its laws are `HeadLaws`. -/
+structure HeadData (ρ α : Type) extends RunData α where
+  /-- What the step's calls bring back. -/
+  reply : Nat → Reply
+  /-- The step is a core step. -/
+  core : Nat → Prop
+  /-- The step is a round start. -/
+  starts : Nat → Prop
+  /-- The step's call is a `Fetch`. -/
+  fetchCall : Nat → Prop
+  /-- `is_dropped` of a push's new head. -/
+  pushDropped : Nat → Bool
+  /-- The records the node offers. -/
+  offered : ρ
+  /-- The records last heard, at each step. -/
+  heard : Nat → Option ρ
+
+/-- The laws of that run, as `fresh_head_reached` takes them, `R` being the hub's records: those
+of the raw graph (`RunLaws`), which hold throughout, and the others, each asked of the steps
+before the first fresh reply only. -/
+structure HeadLaws {ρ α : Type} [DecidableEq ρ] (R : ρ) (d : HeadData ρ α) : Prop
+    extends RunLaws d.toRunData where
+  /-- Naming's laws hold. -/
+  naming_laws : d.naming.Laws d.par d.H (Before d.reply)
+  /-- A step is a core step or a round start. -/
+  step_kind : ∀ i, Before d.reply i → d.core i ∨ d.starts i
+  /-- The record-credit cut: a core step does not adopt, nor take by advancing. -/
+  record_cut : ∀ i, Before d.reply i → d.core i →
+    d.ctl i ≠ .adopt ∧ (d.ctl i = .advance → (d.prims i).dropHead = false)
+  /-- A core step's `differ` is as the core computes it against the records last heard. -/
+  differ_heard : ∀ i, Before d.reply i → d.core i → (d.prims i).differ = match d.heard i with
+    | some h => !decide (h = d.offered)
+    | none => (d.prims i).pending
+  /-- Across a core step that does not idle, the records heard change only by a refusal. -/
+  heard_step : ∀ i, Before d.reply i → d.core i → d.ctl i ≠ .idle → d.reply i ≠ .fresh →
+    d.heard (i + 1) = if d.reply i = .refused then some R else d.heard i
+  /-- A merge, realize or advance is a checked burst, across a step naming does not change. -/
+  burst_step : ∀ i, Before d.reply i → d.core i → d.naming.Still i →
+    (d.ctl i = .merge ∨ d.ctl i = .realize ∨ d.ctl i = .advance) →
+    ∃ k, callB d.raw (d.naming.images i) d.anc (.burst k) (d.run i) (d.after i) = true
+  /-- An objects call brings what it was asked for, or the round fails and another starts. -/
+  objects_step : ∀ i, Before d.reply i → d.core i → d.naming.Still i → d.ctl i = .objects →
+    (∃ j, i < j ∧ d.starts j) ∨
+    ((∀ x, walkB d.par (d.run i).burst.loc (d.run i).stg d.H x = true →
+      (d.run i).burst.loc x = false → (d.run i).stg x = true → (d.run i).obj x = false →
+      (d.after i).obj x = true ∨ (d.after i).burst.loc x = true) ∧
+    (d.after i).burst.heads = (d.run i).burst.heads ∧
+    (d.after i).burst.plan = (d.run i).burst.plan ∧
+    growsB d.raw (d.run i) (d.after i) = true)
+  /-- What a step leaves frames the next step's reading: nothing lost, op heads and plan kept. -/
+  frame_step : ∀ i, Before d.reply (i + 1) → d.core i → d.naming.Still i →
+    Frame d.raw (d.after i) (d.run (i + 1))
+  /-- A step that fetches or polls sends a `Fetch`. -/
+  poll_fetches : ∀ i, Before d.reply i → d.core i → (d.ctl i = .fetch ∨ d.ctl i = .poll) →
+    d.fetchCall i
+  /-- A step that idles is followed by a round start. -/
+  idle_restarts : ∀ i, Before d.reply i → d.core i → d.ctl i = .idle → ∃ j, i < j ∧ d.starts j
+  /-- A round starts with a `Fetch`. -/
+  start_fetches : ∀ j, Before d.reply j → d.starts j → d.fetchCall j
+  /-- A `Fetch` completes with a fresh reply. -/
+  fetch_fresh : ∀ j, Before d.reply j → d.fetchCall j → d.reply j = .fresh
+  /-- The hub does not drop the new head of a push that offers its records. -/
+  push_undropped : ∀ i, Before d.reply i → d.core i → d.ctl i = .push → d.offered = R →
+    d.pushDropped i = false
+  /-- A push with the hub's records, not dropped, is answered fresh; any other is refused. -/
+  push_reply : ∀ i, Before d.reply i → d.core i → d.ctl i = .push →
+    (d.offered = R → d.pushDropped i = false → d.reply i = .fresh) ∧
+    (d.offered ≠ R → d.reply i = .refused)
+
+/-- A node observes a fresh head: some step's reply is fresh. Its events are core steps (`core`)
+and round starts (`starts`). `HeadLaws` gives, of every step before a fresh head:
+* `naming_laws`: metadata only arrives, the images read only that of finitely many raw
+  operations, pending names only leave.
+* `record_cut`: the record-credit cut: no adoption, no prepared taking advance.
+* `differ_heard`, `heard_step`: `differ` is as the core computes it against the records last
+  heard. Across a core step that does not idle, those records change only by a refusal. (Between
+  rounds a notification may change them, but an idle is followed by a fresh `Fetch` reply anyway.)
+* `burst_step`, `objects_step`: a core step's law follows from its computed choice, asked only of
+  steps across which naming does not change. A burst step is as checked. An objects call brings
+  the objects, or locality, of the walked operations with a body but not their objects, with the
+  op heads and plan as they were and nothing lost; or its reply lacks them and fails the round,
+  so that a round starts after it (the adapter's `stage_objects` checks they are here, and the
   driver reopens and starts a round with an initial `Fetch`).
-* `hframe`: each step's law relates its reading to its state right after its calls complete
+* `frame_step`: each step's law relates its reading to its state right after its calls complete
   (`after`), and that state to the next step's reading by a frame (`Frame`: nothing lost, the
   canonical op heads and the plan as they were).
-* `hpoll`, `hstart`, `hstartFetch`, `hfetchCall`: a fetch or poll sends a `Fetch`; an idle is
-  followed by a round start; a round starts with a `Fetch`; a `Fetch` completes fresh.
-* `hnd`, `hpush`: a push is refused unless it has the hub's records `R`, and is fresh when it
-  has them and the hub does not drop it (`pushDropped`, its `is_dropped`). That primitive is
-  asked only of a push with the hub's records: one with other records is refused first, even if
-  its head is newly superseded at the hub. -/
-theorem fresh_head_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm : Naming α)
-    (par : Nat → List Nat) (anc : Nat → Nat → Bool)
-    (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
-    (hlt : ParLt par) (H : Nat) (hraw : ∀ x, Anc par x H → x ∈ raw)
-    (run after : Nat → State) (prims : Nat → Prims) (reply : Nat → Reply)
-    (core starts fetchCall : Nat → Prop) (pushDropped : Nat → Bool)
-    (offered R : ρ) (heard : Nat → Option ρ)
-    (hnaming : nm.Laws par H (Before reply))
-    (hkind : ∀ i, Before reply i → core i ∨ starts i)
-    (hrecord : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt ∧
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance →
-        (prims i).dropHead = false))
-    (hdiffer : ∀ i, Before reply i → core i → (prims i).differ = match heard i with
-      | some h => !decide (h = offered)
-      | none => (prims i).pending)
-    (hheard : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .idle → reply i ≠ .fresh →
-      heard (i + 1) = if reply i = .refused then some R else heard i)
-    (hburst : ∀ i, Before reply i → core i → nm.Still i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance) →
-      ∃ k, callB raw (nm.images i) anc (.burst k) (run i) (after i) = true)
-    (hobjects : ∀ i, Before reply i → core i → nm.Still i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects →
-      (∃ j, i < j ∧ starts j) ∨
-      ((∀ x, walkB par (run i).burst.loc (run i).stg H x = true →
-        (run i).burst.loc x = false → (run i).stg x = true → (run i).obj x = false →
-        (after i).obj x = true ∨ (after i).burst.loc x = true) ∧
-      (after i).burst.heads = (run i).burst.heads ∧
-      (after i).burst.plan = (run i).burst.plan ∧
-      growsB raw (run i) (after i) = true))
-    (hframe : ∀ i, Before reply (i + 1) → core i → nm.Still i → Frame raw (after i) (run (i + 1)))
-    (hpoll : ∀ i, Before reply i → core i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .fetch ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .poll) → fetchCall i)
-    (hstart : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .idle → ∃ j, i < j ∧ starts j)
-    (hstartFetch : ∀ j, Before reply j → starts j → fetchCall j)
-    (hfetchCall : ∀ j, Before reply j → fetchCall j → reply j = .fresh)
-    (hnd : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .push → offered = R →
-      pushDropped i = false)
-    (hpush : ∀ i, Before reply i → core i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .push →
-      (offered = R → pushDropped i = false → reply i = .fresh) ∧
-      (offered ≠ R → reply i = .refused)) :
-    ∃ i, reply i = .fresh := by
+* `poll_fetches`, `idle_restarts`, `start_fetches`, `fetch_fresh`: a fetch or poll sends a
+  `Fetch`; an idle is followed by a round start; a round starts with a `Fetch`; a `Fetch`
+  completes fresh.
+* `push_undropped`, `push_reply`: a push is refused unless it has the hub's records `R`, and is
+  fresh when it has them and the hub does not drop it (`pushDropped`, its `is_dropped`). That
+  primitive is asked only of a push with the hub's records: one with other records is refused
+  first, even if its head is newly superseded at the hub. -/
+theorem fresh_head_reached {ρ α : Type} [DecidableEq ρ] {R : ρ} {d : HeadData ρ α}
+    (L : HeadLaws R d) : ∃ i, d.reply i = .fresh := by
   apply Classical.byContradiction
   intro hno
-  have hall : ∀ i, Before reply i := fun _ j _ h => hno ⟨j, h⟩
-  have hcore : ∀ i, core i := by
+  have hall : ∀ i, Before d.reply i := fun _ j _ h => hno ⟨j, h⟩
+  have hcore : ∀ i, d.core i := by
     intro i
-    rcases hkind i (hall i) with h | h
+    rcases L.step_kind i (hall i) with h | h
     · exact h
-    · exact absurd ⟨i, hfetchCall i (hall i) (hstartFetch i (hall i) h)⟩ hno
+    · exact absurd ⟨i, L.fetch_fresh i (hall i) (L.start_fetches i (hall i) h)⟩ hno
   -- the known head stays, so naming settles
-  obtain ⟨T, hT⟩ := nm.settles hnaming hall
-  have hcall : ∀ i, T ≤ i → rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .push →
-      Call raw (nm.images T) anc (run i) (after i) := by
+  obtain ⟨T, hT⟩ := d.naming.settles L.naming_laws hall
+  have hcall : ∀ i, T ≤ i → d.ctl i ≠ .push →
+      Call d.raw (d.naming.images T) d.anc (d.run i) (d.after i) := by
     intro i hi hp
     have hb := hall i
     have hc' := hcore i
     obtain ⟨hs, himg⟩ := hT i hi
-    cases hc : rawControl raw (nm.images i) par anc H (run i) (prims i) with
-    | adopt => exact absurd hc (hrecord i hb hc').1
+    cases hc : d.ctl i with
+    | adopt => exact absurd hc (L.record_cut i hb hc').1
     | merge =>
-      obtain ⟨k, hk⟩ := hburst i hb hc' hs (Or.inl hc)
+      obtain ⟨k, hk⟩ := L.burst_step i hb hc' hs (Or.inl hc)
       rw [himg] at hk
       exact callB_sound hk
     | realize =>
-      obtain ⟨k, hk⟩ := hburst i hb hc' hs (Or.inr (Or.inl hc))
+      obtain ⟨k, hk⟩ := L.burst_step i hb hc' hs (Or.inr (Or.inl hc))
       rw [himg] at hk
       exact callB_sound hk
     | advance =>
-      obtain ⟨k, hk⟩ := hburst i hb hc' hs (Or.inr (Or.inr hc))
+      obtain ⟨k, hk⟩ := L.burst_step i hb hc' hs (Or.inr (Or.inr hc))
       rw [himg] at hk
       exact callB_sound hk
-    | fetch => exact absurd ⟨i, hfetchCall i hb (hpoll i hb hc' (Or.inl hc))⟩ hno
-    | poll => exact absurd ⟨i, hfetchCall i hb (hpoll i hb hc' (Or.inr hc))⟩ hno
+    | fetch => exact absurd ⟨i, L.fetch_fresh i hb (L.poll_fetches i hb hc' (Or.inl hc))⟩ hno
+    | poll => exact absurd ⟨i, L.fetch_fresh i hb (L.poll_fetches i hb hc' (Or.inr hc))⟩ hno
     | idle =>
-      obtain ⟨j, -, hj⟩ := idle_brings_fresh (hstart i hb hc' hc)
-        (fun j h => hstartFetch j (hall j) h) (fun j h => hfetchCall j (hall j) h)
+      obtain ⟨j, -, hj⟩ := idle_brings_fresh (L.idle_restarts i hb hc' hc)
+        (fun j h => L.start_fetches j (hall j) h) (fun j h => L.fetch_fresh j (hall j) h)
       exact absurd ⟨j, hj⟩ hno
     | objects =>
-      rcases hobjects i hb hc' hs hc with hfail | ⟨hbr, hh, hp', hg⟩
+      rcases L.objects_step i hb hc' hs hc with hfail | ⟨hbr, hh, hp', hg⟩
       · -- the reply lacked them: the round fails, and the next one starts with a `Fetch`
         obtain ⟨j, -, hj⟩ := idle_brings_fresh hfail
-          (fun j h => hstartFetch j (hall j) h) (fun j h => hfetchCall j (hall j) h)
+          (fun j h => L.start_fetches j (hall j) h) (fun j h => L.fetch_fresh j (hall j) h)
         exact absurd ⟨j, hj⟩ hno
       · exact objects_call (base := surveyBase)
-          ((missObjsB_iff hlt hraw).1 (choose_objects_missObjs hc))
-          (fun x hw => walk_mem hraw hw) (fun x hw => hbr x ((walkB_iff hlt).2 hw)) hh hp'
-          (growsB_sound hg)
+          ((missObjsB_iff L.par_lt L.raw_closure).1 (choose_objects_missObjs hc))
+          (fun x hw => walk_mem L.raw_closure hw)
+          (fun x hw => hbr x ((walkB_iff L.par_lt).2 hw)) hh hp' (growsB_sound hg)
     | push => exact absurd hc hp
-  have hnoidle : ∀ i, rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .idle := by
+  have hnoidle : ∀ i, d.ctl i ≠ .idle := by
     intro i hc
-    obtain ⟨j, -, hj⟩ := idle_brings_fresh (hstart i (hall i) (hcore i) hc)
-      (fun j h => hstartFetch j (hall j) h) (fun j h => hfetchCall j (hall j) h)
+    obtain ⟨j, -, hj⟩ := idle_brings_fresh (L.idle_restarts i (hall i) (hcore i) hc)
+      (fun j h => L.start_fetches j (hall j) h) (fun j h => L.fetch_fresh j (hall j) h)
     exact hno ⟨j, hj⟩
   -- with no push from `S` on, the calls from there go on forever
-  have tail : ∀ S, T ≤ S →
-      (∀ i, S ≤ i → rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .push) →
-      False := fun S hS hnp =>
-    no_infinite_framed raw (nm.images T) anc trans (fun j => run (S + j)) (fun j => after (S + j))
-      (fun j => hcall (S + j) (by omega) (hnp (S + j) (by omega)))
-      (fun j => hframe (S + j) (hall _) (hcore _) (hT (S + j) (by omega)).1)
-  by_cases hp : ∃ i0, rawControl raw (nm.images i0) par anc H (run i0) (prims i0) = .push
+  have tail : ∀ S, T ≤ S → (∀ i, S ≤ i → d.ctl i ≠ .push) → False := fun S hS hnp =>
+    no_infinite_framed d.raw (d.naming.images T) d.anc L.anc_trans (fun j => d.run (S + j))
+      (fun j => d.after (S + j)) (fun j => hcall (S + j) (by omega) (hnp (S + j) (by omega)))
+      (fun j => L.frame_step (S + j) (hall _) (hcore _) (hT (S + j) (by omega)).1)
+  by_cases hp : ∃ i0, d.ctl i0 = .push
   · obtain ⟨i0, hi0⟩ := hp
-    have hl := hpush i0 (hall i0) (hcore i0) hi0
-    have hoR : offered ≠ R := fun ho =>
-      hno ⟨i0, hl.1 ho (hnd i0 (hall i0) (hcore i0) hi0 ho)⟩
-    have href : reply i0 = .refused := hl.2 hoR
-    have hR : ∀ j, heard (i0 + 1 + j) = some R := by
+    have hl := L.push_reply i0 (hall i0) (hcore i0) hi0
+    have hoR : d.offered ≠ R := fun ho =>
+      hno ⟨i0, hl.1 ho (L.push_undropped i0 (hall i0) (hcore i0) hi0 ho)⟩
+    have href : d.reply i0 = .refused := hl.2 hoR
+    have hR : ∀ j, d.heard (i0 + 1 + j) = some R := by
       intro j
       induction j with
       | zero =>
-        have h := hheard i0 (hall i0) (hcore i0) (hnoidle i0) (fun h => hno ⟨i0, h⟩)
+        have h := L.heard_step i0 (hall i0) (hcore i0) (hnoidle i0) (fun h => hno ⟨i0, h⟩)
         rw [href] at h
         simpa using h
       | succ j ih =>
-        have h := hheard (i0 + 1 + j) (hall _) (hcore _) (hnoidle _) (fun h => hno ⟨_, h⟩)
+        have h := L.heard_step (i0 + 1 + j) (hall _) (hcore _) (hnoidle _) (fun h => hno ⟨_, h⟩)
         rw [show i0 + 1 + (j + 1) = i0 + 1 + j + 1 by omega, h]
         split
         · rfl
@@ -348,13 +421,13 @@ theorem fresh_head_reached {ρ α : Type} [DecidableEq ρ] (raw : List Nat) (nm 
     intro i hi hc
     obtain ⟨j, rfl⟩ : ∃ j, i = i0 + 1 + j := ⟨i - (i0 + 1), by omega⟩
     have hd := choose_push_differ hc
-    have h := hdiffer (i0 + 1 + j) (hall _) (hcore _)
+    have h := L.differ_heard (i0 + 1 + j) (hall _) (hcore _)
     rw [hR j] at h
-    change (prims (i0 + 1 + j)).differ = false at hd
+    change (d.prims (i0 + 1 + j)).differ = false at hd
     rw [hd] at h
     simp only at h
-    have : R = offered := by
-      cases hdec : decide (R = offered)
+    have : R = d.offered := by
+      cases hdec : decide (R = d.offered)
       · rw [hdec] at h; cases h
       · exact of_decide_eq_true hdec
     exact hoR this.symm

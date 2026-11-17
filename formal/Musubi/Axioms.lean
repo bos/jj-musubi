@@ -173,9 +173,7 @@ open Musubi
 #assert_axioms EarlyEntry.Control.fresh_head_reached
 #assert_axioms EarlyEntry.Control.fresh_fetch_takes
 #assert_axioms EarlyEntry.Control.fresh_fetch_current
-#assert_axioms EarlyEntry.Control.FetchLaws.current
 #assert_axioms EarlyEntry.Control.raw_entry_reached
-#assert_axioms EarlyEntry.Control.EntryLaws.enters
 #assert_axioms EarlyEntry.Control.raw_entry_persists
 #assert_axioms RawPublish.pendingPush_accepted
 #assert_axioms RawPublish.stable_no_pendingPush

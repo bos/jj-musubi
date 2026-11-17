@@ -44,96 +44,120 @@ theorem missOpsB_bodies {raw : List Nat} {par : Nat → List Nat} {H : Nat} {s :
   · simp
   · simp [h x (anc_of_walk ((Exec.ancB_iff (parLt_walkParents hlt)).1 hw))]
 
+/-- What the round right after a fresh `Fetched` reply reads, sampled from the node's actual
+events. Data only: its laws are `FetchLaws`. -/
+structure FetchData (α : Type) extends RunData α where
+  /-- Whether the step is the round's own. -/
+  active : Nat → Bool
+  /-- Whether the step's `GetObjects` reply lacked what it was asked for. -/
+  failed : Nat → Prop
+  /-- Whether the node holds receipts at the round's first reading (`prims 0`). That includes
+  at least the receipts held right after the reply; the prelude may add some. -/
+  receiptsAtStart : Bool
+
+/-- The native laws of that round, as `fresh_fetch_takes` takes them. They are asked of the
+round's own steps only, so a round that ends at once has them. `hserve` (no `GetObjects` of the
+round fails) is not among them: `fresh_fetch_takes` takes it as a separate argument. -/
+structure FetchLaws {α : Type} (d : FetchData α) : Prop extends RunLaws d.toRunData where
+  /-- The round's first step is its own. -/
+  active_first : d.active 0 = true
+  /-- Naming's laws hold. -/
+  naming_laws : d.naming.Laws d.par d.H fun i => d.active i = true
+  /-- A step that merges, realizes or asks for objects without failing is followed by another. -/
+  round_continues : ∀ i, d.active i = true →
+    (d.ctl i = .merge ∨ d.ctl i = .realize ∨ (d.ctl i = .objects ∧ ¬ d.failed i)) →
+    d.active (i + 1) = true
+  /-- The record-credit cut: no adoption, no prepared taking advance. -/
+  record_cut : ∀ i, d.active i = true →
+    d.ctl i ≠ .adopt ∧ (d.ctl i = .advance → (d.prims i).dropHead = false)
+  /-- Every operation below the known head has a body at the round's first step. -/
+  bodies_first : RawBodies d.par d.H (d.run 0)
+  /-- Bodies staged in the closure stay staged through the round. -/
+  bodies_kept : ∀ i, d.active i = true → ∀ x ∈ d.raw, (d.run i).stg x = true →
+    (d.run (i + 1)).stg x = true
+  /-- An announcement stands past a step that neither adopts nor takes by advancing. -/
+  announced_stands : ∀ i, d.active i = true → (d.prims i).announced = true →
+    d.ctl i ≠ .adopt → ¬ (d.ctl i = .advance ∧ (d.prims i).dropHead = true) →
+    (d.prims (i + 1)).announced = true
+  /-- A merge or realize is a checked burst, across a step naming does not change. -/
+  burst_step : ∀ i, d.active i = true → d.naming.Still i → (d.ctl i = .merge ∨ d.ctl i = .realize) →
+    ∃ k, callB d.raw (d.naming.images i) d.anc (.burst k) (d.run i) (d.after i) = true
+  /-- An objects call brings what it was asked for, or its reply lacks it and fails. -/
+  objects_step : ∀ i, d.active i = true → d.naming.Still i → d.ctl i = .objects →
+    d.failed i ∨
+    ((∀ x, walkB d.par (d.run i).burst.loc (d.run i).stg d.H x = true →
+      (d.run i).burst.loc x = false → (d.run i).stg x = true → (d.run i).obj x = false →
+      (d.after i).obj x = true ∨ (d.after i).burst.loc x = true) ∧
+    (d.after i).burst.heads = (d.run i).burst.heads ∧
+    (d.after i).burst.plan = (d.run i).burst.plan ∧
+    growsB d.raw (d.run i) (d.after i) = true)
+  /-- What a step leaves frames the next step's reading, across a step naming does not change. -/
+  frame_step : ∀ i, d.active i = true → d.active (i + 1) = true → d.naming.Still i →
+    Frame d.raw (d.after i) (d.run (i + 1))
+
+/-- `FetchLaws`, and that the round's first reading announces the hub's records `R` unless the
+node, which had applied `ap` when it handled the reply, has applied them and holds no
+receipts. -/
+structure FetchCurrent {ρ α : Type} (ap R : ρ) (d : FetchData α) : Prop extends FetchLaws d where
+  /-- The first reading announces exactly when the node lacks the records or holds receipts. -/
+  announced_iff : (d.prims 0).announced = true ↔ (ap ≠ R ∨ d.receiptsAtStart = true)
+
 /-- After a fresh `Fetch` that brought the bodies of the known head's raw closure, an
 announcement does not stand through the node's round: with no adoption and no taking advance,
-the core would merge, realize and ask for objects forever. Premises:
-* `active` marks the round's own core steps from the reply on, the known head frozen. The first
-  step is the round's, and a step of it that merges, realizes or asks for objects, sending no
-  `Fetch`, is followed by another (the `GetObjects` reply comes, and the next core step,
-  fairly). Every law is asked of those steps only; the run past the round's end is arbitrary.
-* Bodies are kept through the round. Objects may not have come with the `Fetch`: a `GetObjects`
-  brings what the survey finds missing, or its reply lacks them (`failed`) and the round fails.
-* `hserve`: no `GetObjects` of the round fails. This is not a law of the round; it is to be
-  derived from the hub keeping what it can serve (the `SerialReply` credit).
-* Naming may change in the round; it settles there (`Naming.settles`), and the checked burst
-  and objects laws are asked only of steps it does not change across. -/
-theorem fresh_fetch_takes {α : Type} (raw : List Nat) (nm : Naming α) (par : Nat → List Nat)
-    (anc : Nat → Nat → Bool)
-    (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
-    (hlt : ParLt par) (H : Nat) (hraw : ∀ x, Anc par x H → x ∈ raw)
-    (run after : Nat → State) (prims : Nat → Prims) (active : Nat → Bool)
-    (failed : Nat → Prop)
-    (h0 : active 0 = true)
-    (hnaming : nm.Laws par H fun i => active i = true)
-    (hnext : ∀ i, active i = true →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-        (rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects ∧ ¬ failed i)) →
-      active (i + 1) = true)
-    (hrecord : ∀ i, active i = true →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt ∧
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance →
-        (prims i).dropHead = false))
-    (hbodies : RawBodies par H (run 0))
-    (hstg : ∀ i, active i = true → ∀ x ∈ raw, (run i).stg x = true → (run (i + 1)).stg x = true)
-    (hann : ∀ i, active i = true → (prims i).announced = true →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt →
-      ¬ (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance ∧
-        (prims i).dropHead = true) → (prims (i + 1)).announced = true)
-    (hburst : ∀ i, active i = true → nm.Still i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize) →
-      ∃ k, callB raw (nm.images i) anc (.burst k) (run i) (after i) = true)
-    (hobjects : ∀ i, active i = true → nm.Still i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects →
-      failed i ∨
-      ((∀ x, walkB par (run i).burst.loc (run i).stg H x = true →
-        (run i).burst.loc x = false → (run i).stg x = true → (run i).obj x = false →
-        (after i).obj x = true ∨ (after i).burst.loc x = true) ∧
-      (after i).burst.heads = (run i).burst.heads ∧
-      (after i).burst.plan = (run i).burst.plan ∧
-      growsB raw (run i) (after i) = true))
-    (hframe : ∀ i, active i = true → active (i + 1) = true → nm.Still i →
-      Frame raw (after i) (run (i + 1)))
-    (hserve : ∀ i, active i = true → ¬ failed i) :
-    (prims 0).announced = false := by
-  cases ha0 : (prims 0).announced with
+the core would merge, realize and ask for objects forever. `FetchLaws` gives:
+* `anc_trans`, `par_lt`, `raw_closure`: the raw graph's laws, from `RunLaws`.
+* `active_first`, `round_continues`: `active` marks the round's own core steps from the reply on,
+  the known head frozen. The first step is the round's, and a step of it that merges, realizes or
+  asks for objects, sending no `Fetch`, is followed by another (the `GetObjects` reply comes, and
+  the next core step, fairly). Every other law is asked of those steps only; the run past the
+  round's end is arbitrary.
+* `record_cut`: no step of the round adopts, nor takes by advancing with a prepared drop, so
+  an announcement is not discharged by the core's choice.
+* `bodies_first`, `bodies_kept`, `announced_stands`: bodies are kept through the round. Objects
+  may not have come with the `Fetch`: a `GetObjects` brings what the survey finds missing, or its
+  reply lacks them (`failed`) and the round fails.
+* `naming_laws`, `burst_step`, `objects_step`, `frame_step`: naming may change in the round; it
+  settles there (`Naming.settles`), and the checked burst and objects laws are asked only of
+  steps it does not change across.
+* `hserve` is separate: no `GetObjects` of the round fails. This is not a law of the round; it is
+  to be derived from the hub keeping what it can serve (the `SerialReply` credit). -/
+theorem fresh_fetch_takes {α : Type} {d : FetchData α} (L : FetchLaws d)
+    (hserve : ∀ i, d.active i = true → ¬ d.failed i) :
+    (d.prims 0).announced = false := by
+  cases ha0 : (d.prims 0).announced with
   | false => rfl
   | true =>
     exfalso
     -- standing, the announcement drops an op head, and the round's step merges, realizes or
     -- asks for objects
-    have step : ∀ i, active i = true → (prims i).announced = true → RawBodies par H (run i) →
-        (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-          rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-          rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects) ∧
-        (prims (i + 1)).announced = true ∧ active (i + 1) = true ∧
-          RawBodies par H (run (i + 1)) := by
+    have step : ∀ i, d.active i = true → (d.prims i).announced = true →
+        RawBodies d.par d.H (d.run i) →
+        (d.ctl i = .merge ∨ d.ctl i = .realize ∨ d.ctl i = .objects) ∧
+        (d.prims (i + 1)).announced = true ∧ d.active (i + 1) = true ∧
+          RawBodies d.par d.H (d.run (i + 1)) := by
       intro i hact ha hb
-      have hmo : missOpsB raw par (run i).burst.loc (run i).stg H = false := missOpsB_bodies hlt hb
-      have hrec := hrecord i hact
-      have hdh : (prims i).dropHead = true := by
-        cases hd : (prims i).dropHead
-        · exact absurd (choose_adopt_of
-            (r := rawReads raw (nm.images i) par anc H (run i) (prims i)) ha hd) hrec.1
+      have hmo : missOpsB d.raw d.par (d.run i).burst.loc (d.run i).stg d.H = false :=
+        missOpsB_bodies L.par_lt hb
+      have hrec := L.record_cut i hact
+      have hdh : (d.prims i).dropHead = true := by
+        cases hd : (d.prims i).dropHead
+        · exact absurd (choose_adopt_of (r := d.reads i) ha hd) hrec.1
         · rfl
-      have hmr : rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-          rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-          rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects := by
-        cases hc' : rawControl raw (nm.images i) par anc H (run i) (prims i) with
+      have hmr : d.ctl i = .merge ∨ d.ctl i = .realize ∨ d.ctl i = .objects := by
+        cases hc' : d.ctl i with
         | adopt => exact absurd hc' hrec.1
         | merge => exact Or.inl rfl
         | realize => exact Or.inr (Or.inl rfl)
         | objects => exact Or.inr (Or.inr rfl)
         | fetch =>
           have h := choose_fetch_missOps hc'
-          change missOpsB raw par (run i).burst.loc (run i).stg H = true at h
+          change missOpsB d.raw d.par (d.run i).burst.loc (d.run i).stg d.H = true at h
           rw [hmo] at h; cases h
         | idle =>
           obtain ⟨hk, hr⟩ := choose_idle_dropHead hdh hc'
           obtain ⟨hmo', hmb'⟩ := choose_idle_survey hc' hk
-          rcases rawReads_survey (images := nm.images i) (anc := anc) (s := run i) (q := prims i)
-              hlt hraw hk hr with h | h
+          rcases rawReads_survey (images := d.naming.images i) (anc := d.anc) (s := d.run i)
+              (q := d.prims i) L.par_lt L.raw_closure hk hr with h | h
           · rw [hmo'] at h; cases h
           · rw [hmb'] at h; cases h
         | advance =>
@@ -141,172 +165,57 @@ theorem fresh_fetch_takes {α : Type} (raw : List Nat) (nm : Naming α) (par : N
           rw [hdh] at h; cases h
         | poll => exact (choose_late_dropHead hdh (Or.inl hc')).elim
         | push => exact (choose_late_dropHead hdh (Or.inr hc')).elim
-      have hgo : rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-          rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-          (rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects ∧
-            ¬ failed i) := by
+      have hgo : d.ctl i = .merge ∨ d.ctl i = .realize ∨ (d.ctl i = .objects ∧ ¬ d.failed i) := by
         rcases hmr with h | h | h
         · exact Or.inl h
         · exact Or.inr (Or.inl h)
         · exact Or.inr (Or.inr ⟨h, hserve i hact⟩)
-      refine ⟨hmr, hann i hact ha hrec.1 ?_, hnext i hact hgo,
-        fun x hx => hstg i hact x (hraw x hx) (hb x hx)⟩
+      refine ⟨hmr, L.announced_stands i hact ha hrec.1 ?_, L.round_continues i hact hgo,
+        fun x hx => L.bodies_kept i hact x (L.raw_closure x hx) (hb x hx)⟩
       rintro ⟨hadv, -⟩
       rcases hmr with h | h | h <;> rw [h] at hadv <;> cases hadv
-    have hall : ∀ i, active i = true ∧ (prims i).announced = true ∧
-        RawBodies par H (run i) := by
+    have hall : ∀ i, d.active i = true ∧ (d.prims i).announced = true ∧
+        RawBodies d.par d.H (d.run i) := by
       intro i
       induction i with
-      | zero => exact ⟨h0, ha0, hbodies⟩
+      | zero => exact ⟨L.active_first, ha0, L.bodies_first⟩
       | succ i ih =>
         obtain ⟨-, ha', hact', hb'⟩ := step i ih.1 ih.2.1 ih.2.2
         exact ⟨hact', ha', hb'⟩
     -- the round goes on forever with its known head, so naming settles
-    obtain ⟨T, hT⟩ := nm.settles hnaming fun i => (hall i).1
-    apply no_infinite_framed raw (nm.images T) anc trans (fun j => run (T + j))
-      (fun j => after (T + j)) _
-      (fun j => hframe (T + j) (hall _).1 (hall _).1 (hT (T + j) (by omega)).1)
+    obtain ⟨T, hT⟩ := d.naming.settles L.naming_laws fun i => (hall i).1
+    apply no_infinite_framed d.raw (d.naming.images T) d.anc L.anc_trans (fun j => d.run (T + j))
+      (fun j => d.after (T + j)) _
+      (fun j => L.frame_step (T + j) (hall _).1 (hall _).1 (hT (T + j) (by omega)).1)
     intro j
     have hact := (hall (T + j)).1
     obtain ⟨hs, himg⟩ := hT (T + j) (by omega)
     rcases (step (T + j) hact (hall _).2.1 (hall _).2.2).1 with h | h | h
-    · obtain ⟨k, hk⟩ := hburst _ hact hs (Or.inl h)
+    · obtain ⟨k, hk⟩ := L.burst_step _ hact hs (Or.inl h)
       rw [himg] at hk
       exact callB_sound hk
-    · obtain ⟨k, hk⟩ := hburst _ hact hs (Or.inr h)
+    · obtain ⟨k, hk⟩ := L.burst_step _ hact hs (Or.inr h)
       rw [himg] at hk
       exact callB_sound hk
-    · rcases hobjects _ hact hs h with hf | ⟨hbr, hh, hp', hg⟩
+    · rcases L.objects_step _ hact hs h with hf | ⟨hbr, hh, hp', hg⟩
       · exact absurd hf (hserve _ hact)
       · exact objects_call (base := surveyBase)
-          ((missObjsB_iff hlt hraw).1 (choose_objects_missObjs h))
-          (fun x hw => walk_mem hraw hw) (fun x hw => hbr x ((walkB_iff hlt).2 hw)) hh hp'
-          (growsB_sound hg)
+          ((missObjsB_iff L.par_lt L.raw_closure).1 (choose_objects_missObjs h))
+          (fun x hw => walk_mem L.raw_closure hw)
+          (fun x hw => hbr x ((walkB_iff L.par_lt).2 hw)) hh hp' (growsB_sound hg)
 
 /-- So, past the cut after which the node takes no more records, the node has the hub's records
 `R` applied and holds no receipts when it has handled a fresh `Fetch`: the core announces them
-otherwise (`note_announced`). -/
-theorem fresh_fetch_current {ρ α : Type} (raw : List Nat) (nm : Naming α) (par : Nat → List Nat)
-    (anc : Nat → Nat → Bool)
-    (trans : ∀ a b c, anc a b = true → anc b c = true → anc a c = true)
-    (hlt : ParLt par) (H : Nat) (hraw : ∀ x, Anc par x H → x ∈ raw)
-    (run after : Nat → State) (prims : Nat → Prims) (active : Nat → Bool)
-    (failed : Nat → Prop) (ap R : ρ)
-    (receipts : Bool)
-    (hnote : (prims 0).announced = true ↔ (ap ≠ R ∨ receipts = true))
-    (h0 : active 0 = true)
-    (hnaming : nm.Laws par H fun i => active i = true)
-    (hnext : ∀ i, active i = true →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize ∨
-        (rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects ∧ ¬ failed i)) →
-      active (i + 1) = true)
-    (hrecord : ∀ i, active i = true →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt ∧
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance →
-        (prims i).dropHead = false))
-    (hbodies : RawBodies par H (run 0))
-    (hstg : ∀ i, active i = true → ∀ x ∈ raw, (run i).stg x = true → (run (i + 1)).stg x = true)
-    (hann : ∀ i, active i = true → (prims i).announced = true →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) ≠ .adopt →
-      ¬ (rawControl raw (nm.images i) par anc H (run i) (prims i) = .advance ∧
-        (prims i).dropHead = true) → (prims (i + 1)).announced = true)
-    (hburst : ∀ i, active i = true → nm.Still i →
-      (rawControl raw (nm.images i) par anc H (run i) (prims i) = .merge ∨
-        rawControl raw (nm.images i) par anc H (run i) (prims i) = .realize) →
-      ∃ k, callB raw (nm.images i) anc (.burst k) (run i) (after i) = true)
-    (hobjects : ∀ i, active i = true → nm.Still i →
-      rawControl raw (nm.images i) par anc H (run i) (prims i) = .objects →
-      failed i ∨
-      ((∀ x, walkB par (run i).burst.loc (run i).stg H x = true →
-        (run i).burst.loc x = false → (run i).stg x = true → (run i).obj x = false →
-        (after i).obj x = true ∨ (after i).burst.loc x = true) ∧
-      (after i).burst.heads = (run i).burst.heads ∧
-      (after i).burst.plan = (run i).burst.plan ∧
-      growsB raw (run i) (after i) = true))
-    (hframe : ∀ i, active i = true → active (i + 1) = true → nm.Still i →
-      Frame raw (after i) (run (i + 1)))
-    (hserve : ∀ i, active i = true → ¬ failed i) :
-    ap = R ∧ receipts = false := by
-  have h := fresh_fetch_takes raw nm par anc trans hlt H hraw run after prims active failed h0
-    hnaming hnext hrecord hbodies hstg hann hburst hobjects hframe hserve
-  refine ⟨Classical.byContradiction fun hne => ?_, ?_⟩
-  · rw [hnote.2 (Or.inl hne)] at h; cases h
-  · cases hr : receipts
-    · rfl
-    · rw [hnote.2 (Or.inr hr)] at h; cases h
-
-/-- What the round right after a fresh `Fetched` reply reads, sampled from the node's actual
-events. Data only: its laws are `FetchLaws`. -/
-structure FetchData (α : Type) where
-  /-- The raw closure. -/
-  raw : List Nat
-  /-- The core's naming; its images of the known head may change. -/
-  naming : Naming α
-  /-- The raw graph: each operation's parents. -/
-  par : Nat → List Nat
-  /-- The raw ancestry test. -/
-  anc : Nat → Nat → Bool
-  /-- The known raw head (the fresh one). -/
-  H : Nat
-  /-- The core state at each sampled step. -/
-  run : Nat → State
-  /-- The core state right after the step's calls complete. -/
-  after : Nat → State
-  /-- What the core reads at the step. -/
-  prims : Nat → Prims
-  /-- Whether the step is the round's own. -/
-  active : Nat → Bool
-  /-- Whether the step's `GetObjects` reply lacked what it was asked for. -/
-  failed : Nat → Prop
-  /-- Whether the node holds receipts at the round's first reading (`prims 0`). That includes
-  at least the receipts held right after the reply; the prelude may add some. -/
-  receipts : Bool
-
-/-- The native laws of that round, as `fresh_fetch_current` takes them, `ap` being the records the
-node had applied when it handled the reply. They are asked of the round's own steps only, so a
-round that ends at once has them. `hserve` (no `GetObjects` of the round fails) is not among
-them: `FetchLaws.current` takes it as a separate argument. -/
-structure FetchLaws {ρ α : Type} (ap R : ρ) (d : FetchData α) : Prop where
-  trans : ∀ a b c, d.anc a b = true → d.anc b c = true → d.anc a c = true
-  hlt : ParLt d.par
-  hraw : ∀ x, Anc d.par x d.H → x ∈ d.raw
-  note : (d.prims 0).announced = true ↔ (ap ≠ R ∨ d.receipts = true)
-  active0 : d.active 0 = true
-  naming : d.naming.Laws d.par d.H fun i => d.active i = true
-  next : ∀ i, d.active i = true → (rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i)
-    (d.prims i) = .merge ∨ rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i) (d.prims
-    i) = .realize ∨ (rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i) (d.prims i) =
-    .objects ∧ ¬ d.failed i)) → d.active (i + 1) = true
-  record : ∀ i, d.active i = true → rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i)
-    (d.prims i) ≠ .adopt ∧ (rawControl d.raw (d.naming.images i) d.par d.anc d.H (d.run i) (d.prims
-    i) = .advance → (d.prims i).dropHead = false)
-  bodies : RawBodies d.par d.H (d.run 0)
-  stg : ∀ i, d.active i = true → ∀ x ∈ d.raw, (d.run i).stg x = true → (d.run (i + 1)).stg x = true
-  ann : ∀ i, d.active i = true → (d.prims i).announced = true → rawControl d.raw (d.naming.images i)
-    d.par d.anc d.H (d.run i) (d.prims i) ≠ .adopt → ¬ (rawControl d.raw (d.naming.images i) d.par
-    d.anc d.H (d.run i) (d.prims i) = .advance ∧ (d.prims i).dropHead = true) → (d.prims (i +
-    1)).announced = true
-  burst : ∀ i, d.active i = true → d.naming.Still i → (rawControl d.raw (d.naming.images i) d.par
-    d.anc d.H (d.run i) (d.prims i) = .merge ∨ rawControl d.raw (d.naming.images i) d.par d.anc d.H
-    (d.run i) (d.prims i) = .realize) → ∃ k, callB d.raw (d.naming.images i) d.anc (.burst k) (d.run
-    i) (d.after i) = true
-  objects : ∀ i, d.active i = true → d.naming.Still i → rawControl d.raw (d.naming.images i) d.par
-    d.anc d.H (d.run i) (d.prims i) = .objects → d.failed i ∨ ((∀ x, walkB d.par (d.run i).burst.loc
-    (d.run i).stg d.H x = true → (d.run i).burst.loc x = false → (d.run i).stg x = true → (d.run
-    i).obj x = false → (d.after i).obj x = true ∨ (d.after i).burst.loc x = true) ∧ (d.after
-    i).burst.heads = (d.run i).burst.heads ∧ (d.after i).burst.plan = (d.run i).burst.plan ∧ growsB
-    d.raw (d.run i) (d.after i) = true)
-  frame : ∀ i, d.active i = true → d.active (i + 1) = true → d.naming.Still i → Frame d.raw (d.after
-    i) (d.run (i + 1))
-
-theorem FetchLaws.current {ρ α : Type} {ap R : ρ} {d : FetchData α} (L : FetchLaws ap R d)
+otherwise (`FetchCurrent.announced_iff`). Assumes `FetchCurrent`, and, as `fresh_fetch_takes`
+does, `hserve`. -/
+theorem fresh_fetch_current {ρ α : Type} {ap R : ρ} {d : FetchData α} (L : FetchCurrent ap R d)
     (hserve : ∀ i, d.active i = true → ¬ d.failed i) :
-    ap = R ∧ d.receipts = false :=
-  fresh_fetch_current
-    d.raw d.naming d.par d.anc L.trans L.hlt d.H L.hraw d.run d.after d.prims d.active d.failed
-    ap R d.receipts L.note L.active0 L.naming L.next L.record L.bodies L.stg L.ann L.burst
-    L.objects L.frame hserve
-
+    ap = R ∧ d.receiptsAtStart = false := by
+  have h := fresh_fetch_takes L.toFetchLaws hserve
+  refine ⟨Classical.byContradiction fun hne => ?_, ?_⟩
+  · rw [L.announced_iff.2 (Or.inl hne)] at h; cases h
+  · cases hr : d.receiptsAtStart
+    · rfl
+    · rw [L.announced_iff.2 (Or.inr hr)] at h; cases h
 
 end Musubi.EarlyEntry.Control

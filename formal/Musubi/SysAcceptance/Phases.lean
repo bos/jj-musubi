@@ -103,7 +103,7 @@ theorem known_after
   obtain ⟨T, hkT, hT⟩ := old_effects_stop C horizon n hn
   obtain ⟨p, hp⟩ : ∃ p, p = max T (max k entryCut) := ⟨_, rfl⟩
   have L := C.entry _ hcut hq n hn p (by have := hschedBound n p; omega)
-  obtain ⟨j, hfresh, -⟩ := L.enters fun j _ _ _ i _ =>
+  obtain ⟨j, hfresh, -⟩ := raw_entry_reached L fun j _ _ _ i _ =>
     hq.noObjectFailure n hn (O.sched n (p + j + 1 + i))
       (by have := hschedBound n (p + j + 1 + i); omega)
   have htj : p ≤ O.sched n (p + j) := by have := hschedBound n (p + j); omega
@@ -292,7 +292,7 @@ theorem entered_phase
     intro n hn
     have laws := C.entry recordCut phase.cut phase.quiet n hn recordCut
       (sampleBound n recordCut)
-    obtain ⟨j, -, applied, records, -, sequence, announcement⟩ := laws.enters
+    obtain ⟨j, -, applied, records, -, sequence, announcement⟩ := raw_entry_reached laws
       (fun j _ _ _ i _ => phase.quiet.noObjectFailure n hn
         (O.sched n (recordCut + j + 1 + i)) (by have := sampleBound n (recordCut + j + 1 + i); omega))
     have entry : RawEntry (Rof recordCut) (wOf recordCut)

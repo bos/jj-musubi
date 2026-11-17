@@ -249,7 +249,7 @@ def fetchData (n p : Nat) : FetchData α where
   prims := fun m => O.prims n (O.sched n (p + m))
   active := fun m => O.roundActive n p m
   failed := fun m => O.objFail n (O.sched n (p + m))
-  receipts := O.receipts n (O.sched n p)
+  receiptsAtStart := O.receipts n (O.sched n p)
 
 /-- Node `n`'s pre-entry run from its `p`th scheduled event: each sampled step is that event,
 what it leaves is the node's reading right after its calls' batch completes, and the round after

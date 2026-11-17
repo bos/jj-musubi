@@ -448,14 +448,16 @@ mod tests {
             let (local, canonical) = (LocalOp(id(3 * i)), CanonicalOp(id(3 * i + 1)));
             let fingerprint = id(3 * i + 2).hex();
             let line = format!("{} {} {fingerprint}", local.0.hex(), canonical.0.hex());
-            if tc.draw(gs::booleans()) {
+            let is_torn = tc.draw(gs::booleans());
+            if is_torn {
                 let cut = tc.draw(gs::integers::<usize>().max_value(line.len() - 1));
                 text.push_str(&line[..cut]);
             } else {
                 text.push_str(&line);
                 whole.push((local, canonical, fingerprint));
             }
-            if i + 1 < lines || tc.draw(gs::booleans()) {
+            let ended = i + 1 < lines || tc.draw(gs::booleans());
+            if ended {
                 text.push('\n');
             }
         }

@@ -799,9 +799,8 @@ mod tests {
         let heads: Vec<OperationId> = (0..count).map(|i| OperationId::new(vec![i; 64])).collect();
         // Sometimes the log of a hub that pruned its records, which starts with their count
         // and digest: a cut that keeps only that line keeps no head.
-        let pruned = tc
-            .draw(gs::booleans())
-            .then(|| (3, RecordDigest::root().then(&Record::new([]))));
+        let pruned_log = tc.draw(gs::booleans());
+        let pruned = pruned_log.then(|| (3, RecordDigest::root().then(&Record::new([]))));
         let mut text = String::new();
         if let Some((count, digest)) = &pruned {
             writeln!(
@@ -816,10 +815,15 @@ mod tests {
             writeln!(text, "{seq} {}", head.hex()).unwrap();
             ends.push(text.len());
         }
-        let cut = if tc.draw(gs::booleans()) {
-            ends[tc.draw(gs::integers::<usize>().max_value(ends.len() - 1))]
+        let at_a_line_end = tc.draw(gs::booleans());
+        // The `let` names the draw in a failure's printout.
+        #[allow(clippy::let_and_return)]
+        let cut = if at_a_line_end {
+            let line_end = tc.draw(gs::integers::<usize>().max_value(ends.len() - 1));
+            ends[line_end]
         } else {
-            tc.draw(gs::integers::<usize>().max_value(text.len()))
+            let offset = tc.draw(gs::integers::<usize>().max_value(text.len()));
+            offset
         };
         fs::write(dir.path().join("heads"), &text[..cut]).unwrap();
         match ends.iter().position(|&end| end == cut) {

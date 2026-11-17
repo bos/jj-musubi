@@ -10,6 +10,9 @@
 [profiles.development]
 test_cases = 50
 
+# Per-commit CI repeats the same cases on every run (derandomized, no example database), so a
+# failure on a pull request reproduces. Exploring with fresh seeds is for local runs and the
+# nightly search, whose own seeds take precedence over derandomizing.
 [profiles.ci]
 test_cases = 150
 

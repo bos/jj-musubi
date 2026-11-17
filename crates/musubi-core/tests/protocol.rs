@@ -481,19 +481,15 @@ fn run_from(
     assert_eq!(world.hub_pruned(), world.hub_records().len());
     world.quiesce();
     check_safety(&tc, &world);
-    if let Some(path) = std::env::var_os("MUSUBI_TRACE_STATS") {
-        // Appends one line of action kinds per case, for checking what the search reaches.
-        let kinds: Vec<&str> = world
-            .trace
-            .iter()
-            .filter_map(|a| a["kind"].as_str().or_else(|| a["marker"].as_str()))
-            .collect();
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        std::io::Write::write_all(&mut file, format!("{}\n", kinds.join(" ")).as_bytes()).unwrap();
+    // What the search reaches: with `HEGEL_STATISTICS=1`, Hegel reports the share of cases that
+    // took each kind of action.
+    for kind in world
+        .trace
+        .iter()
+        .filter_map(|a| a["kind"].as_str().or_else(|| a["marker"].as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        tc.event(kind);
     }
     world.take_oracle()
 }

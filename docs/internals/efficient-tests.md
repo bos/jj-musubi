@@ -20,8 +20,9 @@ the checks [AGENTS.md](../../AGENTS.md#checks) requires.
   Tracing exposed thousands of `fdatasync` waits and two `tput` processes per jj command.
 - Compare two versions by running them alternately, several times each, on the same machine,
   and compare averages. For generated tests, set the same `HEGEL_SEED` and keep the case
-  count and checks unchanged. `MUSUBI_TRACE_STATS` records the protocol harness's actions,
-  so compare those too: a shorter run must still do the same work.
+  count and checks unchanged. `HEGEL_STATISTICS=1` makes the protocol harness report the
+  share of cases that took each kind of action, so compare those too: a shorter run must
+  still do the same work.
 - Measure compilation separately from execution, including a warm build and a small source
   edit. An optimization that saves test time can cost more to compile; prefer a package
   profile override to optimizing every test binary.

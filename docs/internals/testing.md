@@ -69,9 +69,11 @@ which cargo and nextest make its crate's; to run a test binary from elsewhere, s
 of their own. `HEGEL_TEST_CASES` sets the number of cases of those tests, which take it from
 `hegel.toml`, and leaves the others alone; `just mutants` sets it to 150. On a CI server Hegel
 starts from its `ci` profile: each test starts from the same seed on every run, keeps no
-example database, and runs without the `too_slow` health check. The `slow-cases` profile
-drops that check everywhere, for tests whose every case asks the Lean oracle or works on real
-repositories.
+example database, and runs without the `too_slow` health check. That is deliberate: per-commit
+CI repeats the same cases, so a failure on a pull request reproduces, and exploring with fresh
+seeds is left to local runs and the nightly search, whose own seeds take precedence over the
+derandomizing. The `slow-cases` profile drops that check everywhere, for tests whose every case
+asks the Lean oracle or works on real repositories.
 
 `clone_preflight_keeps_the_resolved_hive` creates a hive whose name equals another hive's
 id, then keeps the id returned for the requested name through preflight. Reinterpreting that

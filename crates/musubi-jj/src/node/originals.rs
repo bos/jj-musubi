@@ -95,7 +95,8 @@ mod tests {
         let id = |byte| OperationId::new(vec![byte; 64]);
         let mut text = String::new();
         let mut expected: HashMap<OperationId, HashSet<String>> = HashMap::new();
-        for n in 0..tc.draw(gs::integers::<u8>().max_value(8)) {
+        let rows = tc.draw(gs::integers::<u8>().max_value(8));
+        for n in 0..rows {
             let original = id(n / 2);
             let fingerprint = id(n % 3).hex();
             let row = format!("{} {fingerprint}\n", original.hex());

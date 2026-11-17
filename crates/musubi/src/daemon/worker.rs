@@ -3,6 +3,7 @@
 //! The server owns only a `Worker` handle. This module owns stopping and joining the thread,
 //! locating its copy, retrying failed sessions, and reacting to repository and hub changes.
 
+#[cfg(unix)]
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;

@@ -903,6 +903,13 @@ goes by the physical history and merge bases.
 HEAD and ref records, altered bodies, missing or marked-only sources, invalid original
 transitions and invalid erased ancestors.
 
+A machine's own `jj op abandon` can reparent a realization too: one on the root, as of a copy
+that joined since, lands on the abandoned operation's parent, keeping its view and so none of
+this machine's records. The search records each realization the command rewrote, the same but
+for its parents, and the record checker judges jj's rewrite on the realization's own parents.
+`imports::a_realization_jj_reparents_keeps_its_records` checks HEAD and ref records through
+such a move, and that without it the move is blamed for dropping HEAD's record.
+
 Concurrent HEAD records can contain conflicts and even resolve by cancellation to a value
 no command wrote. The import checker traces possible physical values to native imports or
 commands that actually changed a scalar record, through original source parents. Merges and

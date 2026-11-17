@@ -54,6 +54,9 @@ pub const SEARCH_MACHINES: usize = 3;
 pub const BOOKMARKS: [&str; 3] = ["main", "feature", "topic"];
 pub const TAGS: [&str; 2] = ["v1", "v2"];
 pub const WORKSPACES: [&str; 4] = ["default", "work", "second", "third"];
+/// What the trace says when jj fails with its known duplicate-commit bug (races.md, "Known
+/// jj limitations") and the world runs the command again.
+pub const JJ_DUPLICATE_COMMIT_BUG: &str = "jj hit its known duplicate-commit bug";
 /// Shared files, so that rebases and merges produce content conflicts.
 pub const FILES: [&str; 3] = ["a.txt", "b.txt", "dir/c.txt"];
 
@@ -236,6 +239,9 @@ pub struct Workspace {
     pub name: String,
     /// `None` for the repository's own directory.
     pub path: Option<PathBuf>,
+    /// Files were written in it since a recorded `jj` command last ran there, so the next
+    /// one there snapshots them.
+    pub edited: bool,
 }
 
 /// An operation a rule may act on, printed by what it did and how far back it is, which are
@@ -499,6 +505,7 @@ impl World {
                 let mut workspaces = vec![Workspace {
                     name: primary(machine),
                     path: None,
+                    edited: false,
                 }];
                 if setup.secondary {
                     let path = env.root().join(format!("{machine}-second"));
@@ -512,6 +519,7 @@ impl World {
                     workspaces.push(Workspace {
                         name: "second".to_owned(),
                         path: Some(path),
+                        edited: false,
                     });
                 }
                 workspaces
@@ -685,24 +693,29 @@ impl World {
     pub fn check_loads(&mut self) {
         let touched = std::mem::take(&mut self.touched);
         for m in touched {
-            for head in self.op_heads(m) {
-                let output = self.fx.repo(m).jj_output(&[
-                    "--at-op",
-                    &head,
-                    "log",
-                    "--no-graph",
-                    "-r",
-                    "visible_heads()",
-                    "-T",
-                    "commit_id ++ \"\\n\"",
-                ]);
-                if !output.status.success() {
-                    self.fail(&format!(
-                        "{} does not load at op head {head}:\n{}",
-                        self.machine(m),
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-                }
+            self.check_loads_of(m);
+        }
+    }
+
+    /// Every op head of machine `m` loads, read-only.
+    fn check_loads_of(&self, m: usize) {
+        for head in self.op_heads(m) {
+            let output = self.fx.repo(m).jj_output(&[
+                "--at-op",
+                &head,
+                "log",
+                "--no-graph",
+                "-r",
+                "visible_heads()",
+                "-T",
+                "commit_id ++ \"\\n\"",
+            ]);
+            if !output.status.success() {
+                self.fail(&format!(
+                    "{} does not load at op head {head}:\n{}",
+                    self.machine(m),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
     }

@@ -281,6 +281,7 @@ impl World {
         let primary = vec![Workspace {
             name: "default".to_owned(),
             path: None,
+            edited: false,
         }];
         if m < self.dirty.len() {
             self.fx.repos.swap_remove(m);

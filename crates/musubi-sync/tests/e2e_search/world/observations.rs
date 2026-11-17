@@ -192,6 +192,49 @@ impl World {
         }
     }
 
+    /// Whether workspace `ws` of machine `m` records its working copy at an operation no op
+    /// head descends from, as `jj op abandon` leaves one it rewrote but didn't remap: the next
+    /// command there snapshots at that operation and merges it with the head. Read through
+    /// jj-lib with the observer's settings, so it takes no command seeds.
+    pub(super) fn working_copy_left_behind(&self, m: usize, ws: usize) -> bool {
+        let path = self.workspaces[m][ws]
+            .path
+            .as_deref()
+            .unwrap_or_else(|| self.fx.repo(m).path());
+        let Ok(loader) = jj_lib::workspace::DefaultWorkspaceLoaderFactory.create(path) else {
+            return false;
+        };
+        let Ok(workspace) = loader.load(
+            &self.observer_settings(m),
+            &jj_lib::default_backend_factories::default_backend_factories(),
+            &jj_lib::default_backend_factories::default_working_copy_factories(),
+        ) else {
+            return false;
+        };
+        let recorded = workspace.working_copy().operation_id().clone();
+        let store = workspace.repo_loader().op_store();
+        let mut pending: Vec<OpId> = self
+            .op_heads(m)
+            .iter()
+            .map(|head| OpId::try_from_hex(head).unwrap())
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if id == recorded {
+                return false;
+            }
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            match futures::executor::block_on(store.read_operation(&id)) {
+                Ok(op) => pending.extend(op.parents),
+                // An unreadable operation proves nothing: don't excuse a failure on it.
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
     /// Independent native oracle for validating the in-process observer across the search.
     pub(super) fn native_stale_observation(&self, m: usize, ws: usize) -> StaleObservation {
         let heads = self.op_heads(m);

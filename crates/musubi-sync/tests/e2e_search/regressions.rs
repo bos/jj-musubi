@@ -232,3 +232,80 @@ fn e2e_records_snapshots_from_commands_and_looking() {
             .is_empty()
     );
 }
+
+/// jj's known duplicate-commit bug (docs/internals/races.md, "Known jj limitations"): `musubi
+/// forget` writes an operation the working copy isn't recorded at, `jj op abandon` of an
+/// earlier one leaves the working copy at its operation's old version, and a commit in the
+/// dirty working copy snapshots there and fails merging that with the head. The world runs the
+/// command again, as a user would, and the replay judges what both runs wrote as jj's work.
+/// Without the rerun, the commit fails with jj's "Newly-created commit ... already exists";
+/// once jj is fixed (https://github.com/jj-vcs/jj/pull/10712), the first run succeeds and this
+/// fails, so that the rerun is removed.
+#[test]
+fn e2e_command_rerun_past_jj_duplicate_commit_bug() {
+    let mut world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::Own,
+        prejoin: true,
+        secondary: false,
+    });
+    world.jj(1, &["bookmark", "create", "x", "-r", "@-"]);
+    let op = world.raw_jj(
+        1,
+        &[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n1",
+            "-T",
+            "id",
+        ],
+    );
+    world.jj(1, &["new", "--no-edit", "@", "-m", "child"]);
+    world.forget_copy(1, 2);
+    world.op_abandon(1, &op);
+    world.sync(0);
+    world.sync(1);
+    world.commit(1, 0, 0);
+    assert!(
+        world
+            .trace
+            .iter()
+            .any(|line| line.contains(world::JJ_DUPLICATE_COMMIT_BUG)),
+        "jj no longer hits its duplicate-commit bug here (jj-vcs/jj#10712): remove the rerun"
+    );
+    // The failed run left jj's snapshot beside musubi's forget, and the rerun merged them
+    // before committing: the capture takes the snapshot and the commit as native commands.
+    let store = world.fx.hive.members[1]
+        .adapter
+        .repo()
+        .loader()
+        .op_store()
+        .clone();
+    let read = |id: &jj_lib::op_store::OperationId| {
+        futures::executor::block_on(store.read_operation(id)).unwrap()
+    };
+    let command =
+        read(&jj_lib::op_store::OperationId::try_from_hex(world.latest_op_head(1)).unwrap());
+    let [merge] = command.parents.as_slice() else {
+        panic!("the commit has one parent");
+    };
+    let merge = read(merge);
+    assert_eq!(merge.metadata.description, "reconcile divergent operations");
+    let snapshot = merge
+        .parents
+        .iter()
+        .map(read)
+        .find(|op| op.metadata.description == "snapshot working copy")
+        .expect("the failed run's snapshot");
+    for op in [&snapshot, &command] {
+        assert!(
+            !op.metadata
+                .attributes
+                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+        );
+        assert!(world.evidence.commands.contains_key(&world::merge_key(op)));
+    }
+    world.converge();
+}

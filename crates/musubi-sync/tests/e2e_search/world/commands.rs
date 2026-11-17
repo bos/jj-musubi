@@ -210,12 +210,22 @@ impl World {
             Command::Observe => {
                 let history_before = self.command_history(m);
                 let before = self.seen(m);
+                let exposed = self.exposed_to_duplicate_commit_bug(m, 0);
                 self.dirty[m] = false;
                 let present = self.abandoned_present(m);
                 // A failed native observation or parse fails before source recording.
-                let view = View::parse(
-                    &self.raw_jj(m, &["log", "--no-graph", "-r", "all()", "-T", TEMPLATE]),
-                );
+                let args = ["log", "--no-graph", "-r", "all()", "-T", TEMPLATE];
+                let what = format!("{}: (looking)", self.machine(m));
+                let output = self.jj_past_known_bug(m, &args, &what, exposed);
+                if !output.status.success() {
+                    self.fail(&format!(
+                        "`jj {}` failed on {}:\n{}",
+                        args.join(" "),
+                        self.machine(m),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let view = View::parse(&String::from_utf8(output.stdout).unwrap());
                 CommandExecution {
                     history_before,
                     before,
@@ -228,6 +238,7 @@ impl World {
                 let before = self.seen(m);
                 let present = self.abandoned_present(m);
                 let stale = self.is_stale(m, ws);
+                let exposed = self.exposed_to_duplicate_commit_bug(m, ws);
                 let path = self.workspaces[m][ws]
                     .path
                     .as_ref()
@@ -242,8 +253,9 @@ impl World {
                     Some(_) => format!("{} ({})", self.machine(m), self.workspaces[m][ws].name),
                     None => self.machine(m).to_owned(),
                 };
-                self.record(format!("{place}: jj {}", args.join(" ")));
-                let output = self.fx.repo(m).jj_output(&full);
+                let what = format!("{place}: jj {}", args.join(" "));
+                self.record(what.clone());
+                let output = self.jj_past_known_bug(m, &full, &what, exposed);
                 CommandExecution {
                     history_before,
                     before,
@@ -366,7 +378,53 @@ impl World {
         }
     }
 
+    /// How far a recorded command in workspace `ws` of machine `m` is in the situation jj's
+    /// duplicate-commit bug needs, which alone may excuse its failure: files written that the
+    /// command will snapshot, and a working copy recorded at an operation left behind, as by
+    /// `jj op abandon`. Read before the command, which takes the edits.
+    fn exposed_to_duplicate_commit_bug(&mut self, m: usize, ws: usize) -> Exposure {
+        let edited = std::mem::take(&mut self.workspaces[m][ws].edited);
+        Exposure {
+            edited,
+            left_behind: edited && self.working_copy_left_behind(m, ws),
+        }
+    }
+
+    /// Runs a recorded `jj` command, `what` in the trace: a command in a workspace or a look,
+    /// the only ones this covers. Any other `jj` the test runs (`raw_jj`, the checks', the
+    /// setup's) fails as before. When the command fails with jj's known duplicate-commit bug
+    /// in the situation it needs (races.md, "Known jj limitations"), which a rerun a second
+    /// later recovers from, this runs it again as a user would, at the next seed's later time,
+    /// and the trace records it again. The failed attempt leaves jj's own snapshot at the
+    /// working copy's operation beside the head, and no merge. A user can sync from that
+    /// state, so first it is judged as after any command: its imports, and that every op head
+    /// loads. The rerun merges it as any command would, and the caller's capture, from before
+    /// the first attempt, takes both runs' operations as the command's, as it takes those of
+    /// one run that snapshots and merges.
+    fn jj_past_known_bug(
+        &mut self,
+        m: usize,
+        args: &[&str],
+        what: &str,
+        exposed: Exposure,
+    ) -> Output {
+        let output = self.fx.repo(m).jj_output(args);
+        if !is_jj_duplicate_commit_bug(exposed, output.status.code(), &output.stderr) {
+            return output;
+        }
+        self.record(format!(
+            "{}: {}; running it again",
+            self.machine(m),
+            super::JJ_DUPLICATE_COMMIT_BUG
+        ));
+        self.check_imports(m);
+        self.check_loads_of(m);
+        self.record(what.to_owned());
+        self.fx.repo(m).jj_output(args)
+    }
+
     pub fn write(&mut self, m: usize, ws: usize, file: &str, contents: &str) {
+        self.workspaces[m][ws].edited = true;
         let dir = self.workspaces[m][ws]
             .path
             .clone()
@@ -441,6 +499,7 @@ impl World {
         self.workspaces[m].push(Workspace {
             name: name.to_owned(),
             path: Some(path),
+            edited: false,
         });
     }
 
@@ -458,5 +517,104 @@ impl World {
         self.jj(m, &["workspace", "forget", &name]);
         self.logical_extras[m].remove(&name);
         self.workspaces[m].remove(ws);
+    }
+}
+
+/// What a command was exposed to, read before it ran.
+#[derive(Clone, Copy)]
+struct Exposure {
+    /// Files were written in its workspace that it snapshots.
+    edited: bool,
+    /// Its workspace's working copy was recorded at an operation no op head descends from.
+    left_behind: bool,
+}
+
+/// Whether a `jj` command failed with jj 0.47.1's duplicate-commit bug: snapshotting edits at
+/// an operation left behind, then merging that with the op head, recreated in the same
+/// second a commit the snapshot wrote, so the command failed as it loaded the repository,
+/// before doing its work. Both the situation and the message are required, so that no other
+/// failure is excused, such as a musubi defect that made jj rebase twice in one command: an
+/// internal error, and these as the last lines.
+fn is_jj_duplicate_commit_bug(exposed: Exposure, code: Option<i32>, stderr: &[u8]) -> bool {
+    if !(exposed.edited && exposed.left_behind) || code != Some(255) {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    let [
+        ..,
+        "Concurrent modification detected, resolving automatically.",
+        "Internal error: Failed to load the repo",
+        cause,
+    ] = lines.as_slice()
+    else {
+        return false;
+    };
+    cause
+        .strip_prefix("Caused by: Newly-created commit ")
+        .and_then(|rest| rest.strip_suffix(" already exists"))
+        .is_some_and(|id| id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+#[test]
+fn only_the_duplicate_commit_bug_is_excused() {
+    let exposed = Exposure {
+        edited: true,
+        left_behind: true,
+    };
+    let id = "920e8bef9a7837a6d06b34a9b409148ea932cec3";
+    let bug = format!(
+        "Rebased 1 descendant commits onto updated working copy.\n\
+         Concurrent modification detected, resolving automatically.\n\
+         Internal error: Failed to load the repo\n\
+         Caused by: Newly-created commit {id} already exists\n"
+    );
+    assert!(is_jj_duplicate_commit_bug(
+        exposed,
+        Some(255),
+        bug.as_bytes()
+    ));
+    // The same failure without the situation the bug needs: no edits to snapshot, or a
+    // working copy at an operation the head descends from.
+    for other in [
+        Exposure {
+            edited: false,
+            ..exposed
+        },
+        Exposure {
+            left_behind: false,
+            ..exposed
+        },
+    ] {
+        assert!(!is_jj_duplicate_commit_bug(
+            other,
+            Some(255),
+            bug.as_bytes()
+        ));
+    }
+    // Another exit status, no merge before the failure, another failure or cause, a short
+    // commit id, or more after it.
+    assert!(!is_jj_duplicate_commit_bug(
+        exposed,
+        Some(1),
+        bug.as_bytes()
+    ));
+    for other in [
+        bug.replace(
+            "Concurrent modification detected, resolving automatically.\n",
+            "",
+        ),
+        bug.replace(
+            "Failed to load the repo",
+            "Failed to snapshot the working copy",
+        ),
+        bug.replace(" already exists", " is missing"),
+        bug.replace(id, &id[..12]),
+        format!("{bug}Hint: something else\n"),
+    ] {
+        assert!(
+            !is_jj_duplicate_commit_bug(exposed, Some(255), other.as_bytes()),
+            "{other}"
+        );
     }
 }

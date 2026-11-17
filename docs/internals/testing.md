@@ -890,6 +890,17 @@ makes a new copy with `musubi clone`, bringing nothing across, and runs `musubi 
 the old one, which tells the hive nothing: the new copy takes the old one's place in the rest of
 the sequence, and the old one, out of the hive, is out of the checks.
 
+Every `jj` command must succeed too, with one exception. A recorded command, one in a
+workspace or a look, that fails with jj's duplicate-commit bug ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)) runs again, as a user would, and the trace says
+so. Only that message excuses it, and only where the bug can happen: the command snapshots
+files written since the last command there, and the working copy is recorded at an
+operation no op head descends from. Before the rerun, the state the failed run left, jj's
+snapshot beside the head, is judged as after any command: its imports, and that every op
+head loads. The source capture takes what both runs wrote as the command's, jj's own
+operations. Any other `jj` the test runs, through `raw_jj`, the checks or the setup, gets no
+rerun.
+
 After each rule, every repository must still load, and no import of git refs or of git's HEAD
 may revert anything (`e2e_search/imports.rs`; for refs, `noSpuriousRevert` in
 `formal/Musubi/Refs.lean`). Every `jj` command imports any difference between its record of

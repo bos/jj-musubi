@@ -33,7 +33,6 @@ So `read_heads` can require every image to be below a head: no state these steps
 that, and a history that kept only some of the images, which only lost history could be, does.
 -/
 import Musubi.ContractOrder
-import Musubi.SurvivorAdvance
 
 namespace Musubi.Contract
 
@@ -51,8 +50,13 @@ theorem covered_of_below (hh : h ∈ heads) (hb : Below par D base h) :
 
 /-- Or it sets the base after advancing the op heads to its surviving images. -/
 theorem covered_advance (hlt : ParLt par) (hb : ∀ h ∈ heads, h < B) (hk : known < B) :
-    Covered par D (advanceImages par D heads known) known :=
-  fun _ hp => advanceImages_covers hlt hb hk (Or.inr hp)
+    Covered par D (frontier par D (heads ++ [known])) known := by
+  have hb' : ∀ g ∈ heads ++ [known], g < B := by
+    intro g hg
+    rcases List.mem_append.1 hg with hg | hg
+    · exact hb g hg
+    · exact (List.mem_singleton.1 hg) ▸ hk
+  exact fun _ hp => frontier_covers_image hlt hb' (by simp) hp
 
 /-- More drops, noticed or taken, keep every image below a head: each new image is below an
 old one. -/

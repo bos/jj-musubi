@@ -5,8 +5,7 @@ heads*, including work published since preparation, before realization is merged
 published. Expected values are snapshots, taken before contraction rather than recomputed from
 contracted parents.
 -/
-import Musubi.Contract
-import Musubi.ExecSound
+import Musubi.ContractOrder
 import Musubi.Refs
 
 namespace Musubi.AbandonRefs
@@ -14,13 +13,11 @@ namespace Musubi.AbandonRefs
 open Contract Refs
 
 /-- Original-operation names are ghost identities. Actual names are `Contract.cid` under
-the party's dropped set. Expanding a dropped head retains every surviving branch below it. -/
-def candidates (par : Nat → List Nat) (D : Nat → Bool) (heads : List Nat)
-    (incoming : Nat) : List Nat := incoming :: heads.flatMap (exp par D)
-
-/-- `taken_beside` and `switch_to_taken`: normalize before deciding what is concurrent. -/
+the party's dropped set. `taken_beside` and `switch_to_taken` normalize before deciding what is
+concurrent: the merge's parents are the frontier of the incoming head and the current heads,
+every surviving branch below a dropped head included. -/
 def takeHeads (par : Nat → List Nat) (D : Nat → Bool) (heads : List Nat)
-    (incoming : Nat) : List Nat := Exec.maxL (cpar par D) (candidates par D heads incoming)
+    (incoming : Nat) : List Nat := frontier par D (incoming :: heads)
 
 /-- The original-operation abstraction is unambiguous, even across different dropped sets.
 This is the immutable-content premise that validating original identities enforces. -/
@@ -37,36 +34,15 @@ theorem adoption_composes {par : Nat → List Nat} (hlt : ParLt par)
     cid content (cpar par D) E x = cid content par (union D E) x :=
   cid_union hlt D E x
 
-/-- Every element of a finite candidate list is below a maximal candidate. -/
-theorem max_covers {par : Nat → List Nat} (hlt : ParLt par) (xs : List Nat)
-    {a : Nat} (ha : a ∈ xs) : ∃ h ∈ Exec.maxL par xs, Anc par a h := by
-  let ys := xs.filter (fun b => Exec.ancB par a b)
-  have hay : a ∈ ys := by simp [ys, ha, Exec.ancB_iff hlt, Anc.refl]
-  let h := ys.max (List.ne_nil_of_mem hay)
-  have hh := List.mem_filter.1 (List.max_mem (List.ne_nil_of_mem hay))
-  have hah := (Exec.ancB_iff hlt).1 hh.2
-  refine ⟨h, ?_, hah⟩
-  have he := congrFun (Exec.setP_maxL hlt xs) h
-  apply (Iff.of_eq he).mpr
-  refine ⟨hh.1, fun y hy hhy => ?_⟩
-  exact Nat.le_antisymm (hhy.le hlt)
-    (List.le_max_of_mem (l := ys)
-      (List.mem_filter.2 ⟨hy, (Exec.ancB_iff hlt).2 (hah.trans hhy)⟩))
-
-/-- Record adoption, incoming realization and merge publication preserve *every* surviving
-ancestor of the old published heads, including a head arriving after record preparation.
-Only the merge is fresh; realization and renaming allocate no original-operation identity. -/
 theorem publish_retains {par : Nat → List Nat} {D : Nat → Bool} (hlt : ParLt par)
     {heads : List Nat} {incoming fresh : Nat}
-    (hf : ∀ p ∈ takeHeads par D heads incoming, p < fresh)
+    (hb : ∀ g ∈ incoming :: heads, g < fresh)
     {a h : Nat} (hh : h ∈ heads) (ha : Anc par a h) (hD : D a = false) :
     Anc (upd (cpar par D) fresh (takeHeads par D heads incoming)) a fresh := by
-  obtain ⟨p, hp, hap⟩ := exp_covers hlt ha hD
-  have hp' : p ∈ candidates par D heads incoming :=
-    List.mem_cons_of_mem _ (List.mem_flatMap.2 ⟨h, hh, hp⟩)
-  obtain ⟨q, hq, hpq⟩ := max_covers (parLt_cpar hlt) _ hp'
-  exact (anc_upd_new (parLt_cpar hlt) hf).2
-    (Or.inr ⟨q, hq, ((anc_cpar_iff hlt hD).2 hap).trans hpq⟩)
+  have hf := fun p hp => frontier_lt (D := D) hlt hb (h := p) hp
+  obtain ⟨q, hq, haq⟩ := frontier_covers hlt hb (List.mem_cons_of_mem _ hh) ha hD
+  refine (anc_upd_new (parLt_cpar hlt) hf).2 (Or.inr ⟨q, hq, ?_⟩)
+  exact (anc_cpar_iff hlt hD).2 haq
 
 variable {T : Type} [DecidableEq T] [RefAlg T] [Sides T]
 
@@ -152,7 +128,7 @@ Every surviving branch remains, the ref action is a CStep, and the new published
 carries exactly the resulting slot and expectation. Expected values are derived in
 `Expected.lean`. -/
 theorem publish_refines (h : History T) (first : Bool) (e : T)
-    (hlt : ParLt h.par) (hf : ∀ p ∈ h.parents, p < h.next)
+    (hlt : ParLt h.par) (hlive : ∀ g ∈ h.incoming :: h.heads, g < h.next)
     {base : Nat} (hb : h.bases = [base]) (hs : CInv h.current)
     (hre : RefAlg.resolved (h.merged first).v.R = true → e = (h.merged first).v.R)
     (he : e = (h.merged first).G ∨ RefAlg.writable e = true) :
@@ -165,7 +141,7 @@ theorem publish_refines (h : History T) (first : Bool) (e : T)
     exact CStep.beside h.current first (h.refs h.incoming).slot.L
       (h.refs h.incoming).slot.R (h.refs h.incoming).expected e
       (h.refs (h.bases.headD 0)).slot hre he
-  exact ⟨fun _ _ hh ha hd => publish_retains hlt hf hh ha hd,
+  exact ⟨fun _ _ hh ha hd => publish_retains hlt hlive hh ha hd,
     href.inv hs, href, rfl, by simp, by simp,
     by simp [hb], publish_current h first e hs⟩
 

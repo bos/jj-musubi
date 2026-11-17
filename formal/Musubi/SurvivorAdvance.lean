@@ -21,18 +21,6 @@ theorem advanceImages_set (hlt : ParLt par) :
   funext x
   exact propext (mem_dd.trans List.mem_append)
 
-theorem ddAux_nodup (seen l : List Nat) : (ddAux seen l).Nodup := by
-  induction l generalizing seen with
-  | nil => simp [ddAux]
-  | cons a l ih =>
-    simp only [ddAux]
-    split
-    · exact ih _
-    · apply List.nodup_cons.2
-      refine ⟨?_, ih _⟩
-      intro ha
-      exact (mem_ddAux.1 ha).2 (by simp)
-
 theorem advanceImages_nodup : (advanceImages par D heads known).Nodup := by
   unfold advanceImages Exec.maxL
   exact (ddAux_nodup [] _).filter _
@@ -61,7 +49,7 @@ theorem advanceImages_covers (hlt : ParLt par)
   have hbound : ∀ y, y ∈ heads ∨ y ∈ exp par D known → y < B := by
     intro y hy
     exact hy.elim (hb y) (fun hy => Nat.lt_of_le_of_lt ((mem_exp hlt hy).2.le hlt) hk)
-  obtain ⟨h, hh, hxh⟩ := below_max hlt hbound hx
+  obtain ⟨h, hh, hxh⟩ := maxSet_covers hlt hbound hx
   refine ⟨h, ?_, hxh⟩
   change Exec.setP (advanceImages par D heads known) h
   rwa [advanceImages_set hlt]
@@ -75,19 +63,6 @@ theorem advanceImages_singleton_ready (hlt : ParLt par)
   rw [he] at hq
   have hqh : q = h := by simpa using hq
   exact hqh ▸ hpq
-
-/-- Fresh operations do not change the images of an older head. -/
-theorem exp_upd (hlt : ParLt par) (hL : ∀ p ∈ L, p < o) (hx : x < o) :
-    exp (upd par o L) D x = exp par D x := by
-  have hlt' := parLt_upd hlt hL
-  induction x using Nat.strongRecOn with
-  | ind x ih =>
-    rw [exp_eq hlt', exp_eq hlt, upd_ne _ _ (Nat.ne_of_lt hx)]
-    split
-    · apply flatMap_congr_mem
-      intro p hp
-      exact ih p (hlt x p hp) (by have := hlt x p hp; omega)
-    · rfl
 
 /-- Merging the resulting frontier gives one head past every surviving image. Its
 expected head may be dropped; the conclusion is the contracted comparison, not original

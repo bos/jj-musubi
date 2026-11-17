@@ -49,11 +49,6 @@ import Musubi.Dag
 
 namespace Musubi.Presence
 
-/-- `Musubi.exists_max_le`, kept for `Supersede.lean` until that file moves to the root name. -/
-theorem exists_max_le {Q : Nat → Prop} {x a : Nat} (ha : Q a) (hle : ∀ m, Q m → m ≤ x) :
-    ∃ m, Q m ∧ ∀ m', Q m' → m' ≤ m :=
-  Musubi.exists_max_le ha hle
-
 /-- A hive's operation history: each operation's parents, and which operations are work by,
 or forgets of, which copies. Copies are numbered too. -/
 structure Hist where

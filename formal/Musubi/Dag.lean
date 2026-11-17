@@ -132,4 +132,14 @@ theorem anc_upd_new {par : Nat → List Nat} (hlt : ParLt par) {o : Nat} {L : Li
     · exact Anc.refl
     · exact Anc.step (by simp; exact hp) ((anc_upd_iff hlt hL (hL _ hp)).2 hA)
 
+/-- Every element of a bounded set is below one of its maximal elements. -/
+theorem maxSet_covers {par : Nat → List Nat} (hlt : ParLt par) {S : OSet} {B : Nat}
+    (hB : ∀ y, S y → y < B) {x : Nat} (hx : S x) : ∃ y, maxSet par S y ∧ Anc par x y := by
+  obtain ⟨m, ⟨hSm, hAm⟩, hmax⟩ :=
+    exists_max_le (Q := fun m => S m ∧ Anc par x m) (x := B)
+      ⟨hx, Anc.refl⟩ (fun m hm => Nat.le_of_lt (hB m hm.1))
+  refine ⟨m, ⟨hSm, fun y hy hmy => ?_⟩, hAm⟩
+  have := hmax y ⟨hy, hAm.trans hmy⟩
+  exact Nat.le_antisymm (hmy.le hlt) this
+
 end Musubi

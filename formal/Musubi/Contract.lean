@@ -347,6 +347,29 @@ theorem anc_cpar_iff (hlt : ParLt par) {a x : Nat} (ha : D a = false) :
         have hlt' := (parLt_cpar hlt) x q hq
         exact Anc.step hq (ih q hlt' hAq)
 
+/-! ## The frontier -/
+
+/-- The frontier of heads `H` once `D` is dropped: the maximal surviving images of the heads. A
+head that survives is its own image, so with nothing dropped this is `max(H)`. A node advances
+to it, adopts records that drop a head through it, and publishes a merge of it. -/
+def frontierSet (par : Nat → List Nat) (D : Nat → Bool) (H : OSet) : OSet :=
+  maxSet par (fun x => ∃ h, H h ∧ x ∈ exp par D h)
+
+theorem frontierSet_survives (hlt : ParLt par) {H : OSet} {x : Nat}
+    (hx : frontierSet par D H x) : D x = false :=
+  let ⟨_, _, hm⟩ := hx.1
+  (mem_exp hlt hm).1
+
+/-- **Every surviving operation below a head is below the frontier.** -/
+theorem frontierSet_covers (hlt : ParLt par) {H : OSet} {B : Nat} (hB : ∀ h, H h → h < B)
+    {a h : Nat} (hh : H h) (ha : Anc par a h) (hD : D a = false) :
+    ∃ y, frontierSet par D H y ∧ Anc par a y := by
+  obtain ⟨q, hq, haq⟩ := exp_covers hlt ha hD
+  have hbound : ∀ y, (∃ g, H g ∧ y ∈ exp par D g) → y < B := fun y ⟨g, hg, hy⟩ =>
+    Nat.lt_of_le_of_lt ((mem_exp hlt hy).2.le hlt) (hB g hg)
+  obtain ⟨y, hy, hqy⟩ := maxSet_covers hlt hbound ⟨h, hh, hq⟩
+  exact ⟨y, hy, haq.trans hqy⟩
+
 /-! ## Dropping in two steps -/
 
 /-- Dropping both sets at once. -/

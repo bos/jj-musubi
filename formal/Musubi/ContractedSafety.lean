@@ -219,7 +219,7 @@ theorem safe_advanceImages (h : Safe v) (hk : known < v.base.U.next)
         intro y hy
         exact hy.elim (fun hy => h.localLt n y (h.headsLocal n y hy))
           (fun hy => Nat.lt_of_le_of_lt ((mem_exp h.parLt hy).2.le h.parLt) hk)
-      obtain ⟨y, hy, _⟩ := below_max h.parLt hb (Or.inl hx)
+      obtain ⟨y, hy, _⟩ := maxSet_covers h.parLt hb (Or.inl hx)
       exact ⟨y, (hm y).2 hy⟩
     · obtain ⟨x, hx⟩ := h.headsNonempty m
       exact ⟨x, by rwa [hn m he]⟩
@@ -371,7 +371,7 @@ theorem advanceImages_retains (h : Safe v) (hk : known < v.base.U.next) :
       intro y hy
       exact hy.elim (fun hy => h.localLt n y (h.headsLocal n y hy))
         (fun hy => Nat.lt_of_le_of_lt ((mem_exp h.parLt hy).2.le h.parLt) hk)
-    obtain ⟨y, hy, hxy⟩ := below_max h.parLt hb (Or.inl hx)
+    obtain ⟨y, hy, hxy⟩ := maxSet_covers h.parLt hb (Or.inl hx)
     refine ⟨y, ?_, hax.trans hxy⟩
     simpa [View.advanceImages, State.setNode] using hy
   · refine ⟨x, ?_, hax⟩

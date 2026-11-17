@@ -268,16 +268,6 @@ theorem step_par {s t : State} (hs : Step N s t) :
   · have := noFeedback hs
     rw [this]; exact ⟨Nat.le_refl _, fun _ _ => rfl⟩
 
-/-- Every element of a bounded set is below one of its maximal elements. -/
-theorem below_max {par : Nat → List Nat} (hlt : ParLt par) {S : OSet} {B : Nat}
-    (hB : ∀ y, S y → y < B) {x : Nat} (hx : S x) : ∃ y, maxSet par S y ∧ Anc par x y := by
-  obtain ⟨m, ⟨hSm, hAm⟩, hmax⟩ :=
-    Musubi.Presence.exists_max_le (Q := fun m => S m ∧ Anc par x m) (x := B)
-      ⟨hx, Anc.refl⟩ (fun m hm => Nat.le_of_lt (hB m hm.1))
-  refine ⟨m, ⟨hSm, fun y hy hmy => ?_⟩, hAm⟩
-  have := hmax y ⟨hy, hAm.trans hmy⟩
-  exact Nat.le_antisymm (hmy.le hlt) this
-
 -- Each sync step's node update unfolds through a different few of these definitions.
 set_option linter.unusedSimpArgs false in
 /-- What a node's heads reach only grows: every protocol step keeps each operation below some
@@ -303,10 +293,10 @@ theorem step_heads_cover {s t : State} (hI : InvR N s) (hs : Step N s t) {m x : 
           · exact Nat.lt_succ_self _
         by_cases hhp : h = p
         · subst hhp
-          obtain ⟨y, hy, hAy⟩ := below_max hlt' hB (x := s.U.next) (Or.inr rfl)
+          obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := s.U.next) (Or.inr rfl)
           refine ⟨y, by simpa [State.userOp, State.createOp] using hy, ?_⟩
           exact hA'.trans ((Anc.parent (by simp)).trans hAy)
-        · obtain ⟨y, hy, hAy⟩ := below_max hlt' hB (x := h) (Or.inl ⟨hh, hhp⟩)
+        · obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := h) (Or.inl ⟨hh, hhp⟩)
           exact ⟨y, by simpa [State.userOp, State.createOp] using hy, hA'.trans hAy⟩
       · refine ⟨h, ?_, hA'⟩
         simpa [State.userOp, State.createOp, hmn] using hh
@@ -328,7 +318,7 @@ theorem step_heads_cover {s t : State} (hI : InvR N s) (hs : Step N s t) {m x : 
           rintro y (hy | rfl)
           · exact hI.headsLt hy
           · exact hI.knownLt m
-        obtain ⟨y, hy, hAy⟩ := below_max hI.parLt hB (Or.inl hh)
+        obtain ⟨y, hy, hAy⟩ := maxSet_covers hI.parLt hB (Or.inl hh)
         exact ⟨y, by simpa [State.advance, State.setNode] using hy, hA.trans hAy⟩
       · exact ⟨h, by simpa [State.advance, State.setNode, upd, hmn] using hh, hA⟩
     | _ =>
@@ -1443,7 +1433,7 @@ theorem progressS {S : SState} (h : SRReachable N S) (hc : ¬ SConverged N S) :
       obtain ⟨g, hg, hA⟩ := hIb.ownInHeads c x0 hIb.headLt hcr
       exact ⟨g, c, hc, hg, hA⟩
   obtain ⟨a, ha⟩ := hQ
-  obtain ⟨gs, ⟨M, hM, hgs, hxg⟩, hmax⟩ := Musubi.Presence.exists_max_le (Q := Q)
+  obtain ⟨gs, ⟨M, hM, hgs, hxg⟩, hmax⟩ := exists_max_le (Q := Q)
     (x := S.s.U.next) ha (fun g ⟨m, _, hg, _⟩ => Nat.le_of_lt (hIb.headsLt hg))
   -- an operation some node dropped above the hub's head is below a newer head
   have kept : ∀ y, Kept N S y → Anc S.s.U.par x0 y → ∃ g, Q g ∧ y < g := by

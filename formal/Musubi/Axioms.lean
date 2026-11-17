@@ -556,6 +556,8 @@ open Musubi
 #assert_axioms Contract.image_original_survives
 #assert_axioms Contract.image_ne_dropped_original
 #assert_axioms Contract.cid_comm
+#assert_axioms Contract.idTerm_cpar_eq
+#assert_axioms Contract.idTerm_superseded_ne
 #assert_axioms Contract.cid_eq
 #assert_axioms Contract.superseded_ne
 #assert_axioms Contract.anc_cpar_iff

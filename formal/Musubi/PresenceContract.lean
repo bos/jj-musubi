@@ -26,9 +26,11 @@ it again, so the theorems are about any history and what is dropped from it next
   (`sid_comm`). Whether an operation is stamped, and with what, depends only on the history
   that is left and on what is gone, never on the order in which it went.
 - `stamp_none`: a history nothing was dropped from has no stamps.
-- `sid_eq`, `sid_superseded_ne`: as for `cid` (`Contract.cid_eq`, `Contract.superseded_ne`),
-  two ids are equal only for the same operation with the same proper ancestors gone, so no id an
-  operation had before something below it was dropped is any id after.
+- `sid_eq`, `sid_superseded_ne`: two ids are equal only for the same operation with the same
+  proper ancestors gone, so no id an operation had before something below it was dropped is any
+  id after. They are instances of the generic `Contract.idTerm_cpar_eq` and
+  `Contract.idTerm_superseded_ne`, for ids that hash an operation's immutable content and its
+  stamp.
 -/
 import Musubi.Contract
 
@@ -103,47 +105,6 @@ theorem stamp_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
 
 /-! ## Ids -/
 
-/-- An operation id: a hash of the operation's content, which `α` stands for, and its parents'
-ids, as `Contract.CId`, but with content of any type: here the immutable content and the
-stamp. -/
-inductive SId (α : Type)
-  | mk (content : α) (parents : List (SId α))
-
-/-- The content an id hashes. -/
-def SId.content {α : Type} : SId α → α
-  | .mk c _ => c
-
-/-- Ids with fuel. -/
-def sidF {α : Type} (content : Nat → α) (P : Nat → List Nat) : Nat → Nat → SId α
-  | 0, x => .mk (content x) []
-  | f + 1, x => .mk (content x) ((P x).map (sidF content P f))
-
-/-- The id of `x` in a history with parents `P`, its content `content x`. -/
-def sid {α : Type} (content : Nat → α) (P : Nat → List Nat) (x : Nat) : SId α :=
-  sidF content P (x + 1) x
-
-theorem sidF_fuel {α : Type} {content : Nat → α} {P : Nat → List Nat} (hlt : ParLt P)
-    {f g x : Nat} (hf : x < f) (hg : x < g) : sidF content P f x = sidF content P g x := by
-  induction f generalizing g x with
-  | zero => omega
-  | succ f ih =>
-    cases g with
-    | zero => omega
-    | succ g =>
-      simp only [sidF, SId.mk.injEq, true_and]
-      apply List.map_congr_left
-      intro q hq
-      have := hlt x q hq
-      exact ih (by omega) (by omega)
-
-theorem sid_eq_mk {α : Type} {content : Nat → α} {P : Nat → List Nat} (hlt : ParLt P)
-    (x : Nat) : sid content P x = .mk (content x) ((P x).map (sid content P)) := by
-  simp only [sid, sidF, SId.mk.injEq, true_and]
-  apply List.map_congr_left
-  intro q hq
-  have := hlt x q hq
-  exact sidF_fuel hlt (by omega) (by omega)
-
 variable (content : Nat → Nat)
 
 /-- What an id hashes once `gone` is dropped from `par`: an operation's immutable content and
@@ -151,13 +112,17 @@ its stamp. -/
 noncomputable def scontent (P : Nat → List Nat) (gone : Nat → Bool) (x : Nat) : Nat × Option V :=
   (content x, stamp val step P gone x)
 
+/-- The id of `x` in a history with parents `P` from which `gone` was dropped: a
+`Contract.IdTerm` of its immutable content and its stamp. -/
+noncomputable def sid (P : Nat → List Nat) (gone : Nat → Bool) (x : Nat) :
+    IdTerm (Nat × Option V) :=
+  idTerm (scontent (val := val) (step := step) content P gone) P x
+
 /-- Dropping `D₁` and then `D₂` gives the ids, stamps and all, that dropping both at once
 gives. -/
 theorem sid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
-    sid (scontent (val := val) (step := step) content (cpar (cpar par D₁) D₂) (union D₁ D₂))
-        (cpar (cpar par D₁) D₂) x =
-      sid (scontent (val := val) (step := step) content (cpar par (union D₁ D₂))
-        (union D₁ D₂)) (cpar par (union D₁ D₂)) x := by
+    sid (val := val) (step := step) content (cpar (cpar par D₁) D₂) (union D₁ D₂) x =
+      sid (val := val) (step := step) content (cpar par (union D₁ D₂)) (union D₁ D₂) x := by
   have : cpar (cpar par D₁) D₂ = cpar par (union D₁ D₂) := funext (cpar_union hlt D₁ D₂)
   rw [this]
 
@@ -165,18 +130,15 @@ theorem sid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
 presence stamp. The cumulative dropped set is the same on both sides. -/
 theorem sid_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
     (hsub : ∀ y, smaller y = true → larger y = true) (x : Nat) :
-    sid (scontent (val := val) (step := step) content (cpar (cpar par larger) smaller)
-        (union larger smaller)) (cpar (cpar par larger) smaller) x =
-      sid (scontent (val := val) (step := step) content (cpar par larger) larger)
-        (cpar par larger) x := by
+    sid (val := val) (step := step) content (cpar (cpar par larger) smaller)
+        (union larger smaller) x =
+      sid (val := val) (step := step) content (cpar par larger) larger x := by
   rw [sid_union content hlt, union_absorbs_subset hsub]
 
 /-- Hence the order of two drops doesn't matter. -/
 theorem sid_comm (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
-    sid (scontent (val := val) (step := step) content (cpar (cpar par D₁) D₂) (union D₁ D₂))
-        (cpar (cpar par D₁) D₂) x =
-      sid (scontent (val := val) (step := step) content (cpar (cpar par D₂) D₁) (union D₂ D₁))
-        (cpar (cpar par D₂) D₁) x := by
+    sid (val := val) (step := step) content (cpar (cpar par D₁) D₂) (union D₁ D₂) x =
+      sid (val := val) (step := step) content (cpar (cpar par D₂) D₁) (union D₂ D₁) x := by
   rw [sid_union content hlt, sid_union content hlt]
   have : union D₁ D₂ = union D₂ D₁ := by funext y; simp [union, Bool.or_comm]
   rw [this]
@@ -221,72 +183,15 @@ theorem stamp_none (hlt : ParLt par) (hnd : ∀ x, (par x).Nodup)
 
 /-! ## When ids agree -/
 
-/-- Lists whose images are equal are equal, where equal images have equal sources. -/
-theorem map_eq_of_first {α β : Type} {f g : α → β} (hfg : ∀ a b, f a = g b → a = b) :
-    ∀ {l l' : List α}, l.map f = l'.map g → l = l'
-  | [], [], _ => rfl
-  | [], _ :: _, h => by simp at h
-  | _ :: _, [], h => by simp at h
-  | a :: l, b :: l', h => by
-    simp only [List.map_cons, List.cons.injEq] at h
-    rw [hfg a b h.1, map_eq_of_first hfg h.2]
-
 /-- Requires injective immutable content. Two survivors' ids, each in a history `par` from
 which some operations are gone, are equal only for the same operation, whose proper ancestors
 the two dropped. -/
 theorem sid_eq (hlt : ParLt par) (hinj : Function.Injective content) {D D' : Nat → Bool}
     {x y : Nat}
-    (h : sid (scontent (val := val) (step := step) content (cpar par D) D) (cpar par D) x =
-      sid (scontent (val := val) (step := step) content (cpar par D') D') (cpar par D') y) :
-    x = y ∧ ∀ a, Anc par a x → a ≠ x → D a = D' a := by
-  have hlt₁ := parLt_cpar (D := D) hlt
-  have hlt₂ := parLt_cpar (D := D') hlt
-  have hxy : x = y := by
-    have := congrArg (fun i => (SId.content i).1) h
-    rw [sid_eq_mk hlt₁, sid_eq_mk hlt₂] at this
-    exact hinj this
-  subst hxy
-  refine ⟨rfl, ?_⟩
-  induction x using Nat.strongRecOn with
-  | ind x ih =>
-    rw [sid_eq_mk hlt₁, sid_eq_mk hlt₂] at h
-    simp only [SId.mk.injEq] at h
-    obtain ⟨-, h⟩ := h
-    let s := sid (scontent (val := val) (step := step) content (cpar par D) D) (cpar par D)
-    let s' := sid (scontent (val := val) (step := step) content (cpar par D') D') (cpar par D')
-    have hfirst : ∀ q r, s q = s' r → q = r := by
-      intro q r hqr
-      have := congrArg (fun i => (SId.content i).1) hqr
-      simp only [s, s'] at this
-      rw [sid_eq_mk hlt₁, sid_eq_mk hlt₂] at this
-      exact hinj this
-    have hl : cpar par D x = cpar par D' x := map_eq_of_first hfirst h
-    rw [← hl] at h
-    have hq : ∀ q ∈ cpar par D x, s q = s' q := List.map_inj_left.1 h
-    have key : ∀ (E E' : Nat → Bool), cpar par E x = cpar par E' x →
-        (∀ q ∈ cpar par E x, ∀ a, Anc par a q → a ≠ q → E a = E' a) →
-        ∀ a, Anc par a x → a ≠ x → E a = true → E' a = false → False := by
-      intro E E' hl' ih' a hA hne hE hE'
-      obtain ⟨q, hqm, hAq⟩ := cpar_covers (D := E') hlt hA hne hE'
-      rw [← hl'] at hqm
-      have hqE := (mem_cpar hlt hqm).1
-      by_cases haq : a = q
-      · subst haq; rw [hqE] at hE; exact Bool.false_ne_true hE
-      · have := ih' q hqm a hAq haq
-        rw [hE, hE'] at this
-        exact Bool.noConfusion this
-    have ihD : ∀ q ∈ cpar par D x, ∀ a, Anc par a q → a ≠ q → D a = D' a :=
-      fun q hqm => ih q ((parLt_cpar hlt) x q hqm) (hq q hqm)
-    have ihD' : ∀ q ∈ cpar par D' x, ∀ a, Anc par a q → a ≠ q → D' a = D a := by
-      intro q hqm a hAq hne
-      rw [← hl] at hqm
-      exact (ihD q hqm a hAq hne).symm
-    intro a hA hne
-    cases hDa : D a <;> cases hD'a : D' a
-    · rfl
-    · exact (key D' D hl.symm ihD' a hA hne hD'a hDa).elim
-    · exact (key D D' hl ihD a hA hne hDa hD'a).elim
-    · rfl
+    (h : sid (val := val) (step := step) content (cpar par D) D x =
+      sid (val := val) (step := step) content (cpar par D') D' y) :
+    x = y ∧ ∀ a, Anc par a x → a ≠ x → D a = D' a :=
+  idTerm_cpar_eq hlt (fun _ _ e => hinj (congrArg Prod.fst e)) h
 
 /-- Once what is gone has grown from `D'` to include `x` or one of its proper ancestors, the id
 `x` had is no id of any operation that survives. -/
@@ -294,14 +199,8 @@ theorem sid_superseded_ne (hlt : ParLt par) (hinj : Function.Injective content)
     {D D' : Nat → Bool} {x : Nat}
     (hsup : D x = true ∨ ∃ a, Anc par a x ∧ a ≠ x ∧ D a = true ∧ D' a = false)
     {y : Nat} (hy : D y = false) :
-    sid (scontent (val := val) (step := step) content (cpar par D') D') (cpar par D') x ≠
-      sid (scontent (val := val) (step := step) content (cpar par D) D) (cpar par D) y := by
-  intro h
-  obtain ⟨rfl, hagree⟩ := sid_eq content hlt hinj h
-  rcases hsup with hx | ⟨a, hA, hne, hDa, hD'a⟩
-  · rw [hx] at hy; exact Bool.noConfusion hy
-  · have := hagree a hA hne
-    rw [hDa, hD'a] at this
-    exact Bool.noConfusion this
+    sid (val := val) (step := step) content (cpar par D') D' x ≠
+      sid (val := val) (step := step) content (cpar par D) D y :=
+  idTerm_superseded_ne hlt (fun _ _ e => hinj (congrArg Prod.fst e)) hsup hy
 
 end Musubi.PresenceContract

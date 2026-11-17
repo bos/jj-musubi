@@ -6,16 +6,18 @@ A history is a parent function `par` whose parents have smaller ids (`ParLt`), a
 of operations to drop. Each surviving operation's parents become the expansion of its parent
 list: a dropped parent is replaced, in place, by the expansion of its own parents, and then
 duplicates are removed, keeping each one's first occurrence (`cpar`). An operation's id hashes
-its immutable content and its parents' ids, so a survivor whose parents change gets a new id, and so does
-every operation after it. Ids are modeled as terms (`CId`), which makes the hash injective:
-`cid content par D x` is the id `x` has once `D` is dropped.
+its immutable content and its parents' ids, so a survivor whose parents change gets a new id,
+and so does every operation after it. Ids are modeled as terms (`IdTerm`, with content of any
+type), which makes the hash injective: `cid content par D x` is the id `x` has once `D` is
+dropped.
 
 - `cpar_union`, `cid_union`: dropping `D₁` and then, from what is left, `D₂`, gives the same
   parents and ids as dropping `D₁ ∪ D₂` at once. So abandons compose in any order and grouping
   (`cid_comm`): two machines that drop sets concurrently, or a machine that drops a set again
   on a hub that lost it, reach the same ids.
 - `cid_eq`, with injective immutable content: a survivor's id under one dropped set equals one
-  under another only if they are the same operation and the two sets agree on its proper ancestors.
+  under another only if they are the same operation and the two sets agree on its proper
+  ancestors. `idTerm_cpar_eq` proves it for content of any type, which may depend on the set.
 - `superseded_ne`: hence, once a machine's dropped set has grown to include an operation or
   one of its ancestors, no id the operation had before equals any id the machine holds.
 - `anc_cpar_iff`: among survivors, contraction keeps ancestry exactly.
@@ -386,25 +388,149 @@ theorem cpar_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
 
 /-! ## Ids -/
 
-/-- An operation id: a hash of the operation's content, which `Nat` stands for, and its parents'
+/-- An operation id: a hash of the operation's content, which `α` stands for, and its parents'
 ids. As a term it is injective, as a hash is taken to be. -/
-inductive CId
-  | mk (content : Nat) (parents : List CId)
+inductive IdTerm (α : Type)
+  | mk (content : α) (parents : List (IdTerm α))
 
 /-- The content an id hashes. -/
-def CId.content : CId → Nat
+def IdTerm.content {α : Type} : IdTerm α → α
   | .mk c _ => c
+
+/-- Lists whose images are equal are equal, where equal images have equal sources. -/
+theorem map_eq_of_first {α β : Type} {f g : α → β} (hfg : ∀ a b, f a = g b → a = b) :
+    ∀ {l l' : List α}, l.map f = l'.map g → l = l'
+  | [], [], _ => rfl
+  | [], _ :: _, h => by simp at h
+  | _ :: _, [], h => by simp at h
+  | a :: l, b :: l', h => by
+    simp only [List.map_cons, List.cons.injEq] at h
+    rw [hfg a b h.1, map_eq_of_first hfg h.2]
+
+section Ids
+
+variable {α : Type} {P : Nat → List Nat}
+
+/-- Ids with fuel, in a history with parents `P`, for arbitrary content. -/
+def idTermF (content : Nat → α) (P : Nat → List Nat) : Nat → Nat → IdTerm α
+  | 0, x => .mk (content x) []
+  | f + 1, x => .mk (content x) ((P x).map (idTermF content P f))
+
+/-- The id of `x` in a history with parents `P`, its content `content x`. -/
+def idTerm (content : Nat → α) (P : Nat → List Nat) (x : Nat) : IdTerm α :=
+  idTermF content P (x + 1) x
+
+theorem idTermF_fuel {content : Nat → α} (hlt : ParLt P) {f g x : Nat} (hf : x < f)
+    (hg : x < g) : idTermF content P f x = idTermF content P g x := by
+  induction f generalizing g x with
+  | zero => omega
+  | succ f ih =>
+    cases g with
+    | zero => omega
+    | succ g =>
+      simp only [idTermF, IdTerm.mk.injEq, true_and]
+      apply List.map_congr_left
+      intro q hq
+      have := hlt x q hq
+      exact ih (by omega) (by omega)
+
+theorem idTerm_eq_mk {content : Nat → α} (hlt : ParLt P) (x : Nat) :
+    idTerm content P x = .mk (content x) ((P x).map (idTerm content P)) := by
+  simp only [idTerm, idTermF, IdTerm.mk.injEq, true_and]
+  apply List.map_congr_left
+  intro q hq
+  have := hlt x q hq
+  exact idTermF_fuel hlt (by omega) (by omega)
+
+@[simp] theorem content_idTerm {content : Nat → α} (x : Nat) :
+    (idTerm content P x).content = content x := by
+  simp [idTerm]
+  cases x <;> simp [idTermF, IdTerm.content]
+
+/-- Equal ids are of the same operation, `x = y`, given that the contents name the operations
+(`hfirst`) and each history's parents have smaller ids (`ParLt`). -/
+theorem idTerm_first {P' : Nat → List Nat} {c c' : Nat → α} (hlt : ParLt P) (hlt' : ParLt P')
+    (hfirst : ∀ x y, c x = c' y → x = y) {x y : Nat} (h : idTerm c P x = idTerm c' P' y) :
+    x = y := by
+  rw [idTerm_eq_mk hlt, idTerm_eq_mk hlt'] at h
+  simp only [IdTerm.mk.injEq] at h
+  exact hfirst x y h.1
+
+variable {par : Nat → List Nat}
+
+/-- Two survivors' ids, each in a history contracted from `par` by its own dropped set, are
+equal only for the same operation, where the sets agree on its proper ancestors. The contents
+may depend on the sets, as long as they name the operation (`hfirst`). -/
+theorem idTerm_cpar_eq (hlt : ParLt par) {c c' : Nat → α} (hfirst : ∀ x y, c x = c' y → x = y)
+    {D D' : Nat → Bool} {x y : Nat}
+    (h : idTerm c (cpar par D) x = idTerm c' (cpar par D') y) :
+    x = y ∧ ∀ a, Anc par a x → a ≠ x → D a = D' a := by
+  have hlt₁ := parLt_cpar (D := D) hlt
+  have hlt₂ := parLt_cpar (D := D') hlt
+  have hxy : x = y := idTerm_first hlt₁ hlt₂ hfirst h
+  subst hxy
+  refine ⟨rfl, ?_⟩
+  induction x using Nat.strongRecOn with
+  | ind x ih =>
+    rw [idTerm_eq_mk hlt₁, idTerm_eq_mk hlt₂] at h
+    simp only [IdTerm.mk.injEq] at h
+    obtain ⟨-, h⟩ := h
+    have hl : cpar par D x = cpar par D' x :=
+      map_eq_of_first (fun q r hqr => idTerm_first hlt₁ hlt₂ hfirst hqr) h
+    rw [← hl] at h
+    have hq : ∀ q ∈ cpar par D x, idTerm c (cpar par D) q = idTerm c' (cpar par D') q :=
+      List.map_inj_left.1 h
+    -- One side drops `a` and the other doesn't: the other reaches it from a parent both
+    -- share, whose ids then differ.
+    have key : ∀ (E E' : Nat → Bool), cpar par E x = cpar par E' x →
+        (∀ q ∈ cpar par E x, ∀ a, Anc par a q → a ≠ q → E a = E' a) →
+        ∀ a, Anc par a x → a ≠ x → E a = true → E' a = false → False := by
+      intro E E' hl' ih' a hA hne hE hE'
+      obtain ⟨q, hqm, hAq⟩ := cpar_covers (D := E') hlt hA hne hE'
+      rw [← hl'] at hqm
+      have hqE := (mem_cpar hlt hqm).1
+      by_cases haq : a = q
+      · subst haq; rw [hqE] at hE; exact Bool.false_ne_true hE
+      · have := ih' q hqm a hAq haq
+        rw [hE, hE'] at this
+        exact Bool.noConfusion this
+    have ihD : ∀ q ∈ cpar par D x, ∀ a, Anc par a q → a ≠ q → D a = D' a :=
+      fun q hqm => ih q ((parLt_cpar hlt) x q hqm) (hq q hqm)
+    have ihD' : ∀ q ∈ cpar par D' x, ∀ a, Anc par a q → a ≠ q → D' a = D a := by
+      intro q hqm a hAq hne
+      rw [← hl] at hqm
+      exact (ihD q hqm a hAq hne).symm
+    intro a hA hne
+    cases hDa : D a <;> cases hD'a : D' a
+    · rfl
+    · exact (key D' D hl.symm ihD' a hA hne hD'a hDa).elim
+    · exact (key D D' hl ihD a hA hne hDa hD'a).elim
+    · rfl
+
+/-- Once what is dropped has grown from `D'` to include `x` or one of its proper ancestors, the
+id `x` had under `D'` is no id of any operation that survives, as in `idTerm_cpar_eq`. -/
+theorem idTerm_superseded_ne (hlt : ParLt par) {c c' : Nat → α}
+    (hfirst : ∀ x y, c' x = c y → x = y) {D D' : Nat → Bool} {x : Nat}
+    (hsup : D x = true ∨ ∃ a, Anc par a x ∧ a ≠ x ∧ D a = true ∧ D' a = false)
+    {y : Nat} (hy : D y = false) : idTerm c' (cpar par D') x ≠ idTerm c (cpar par D) y := by
+  intro h
+  obtain ⟨rfl, hagree⟩ := idTerm_cpar_eq hlt hfirst h
+  rcases hsup with hx | ⟨a, hA, hne, hDa, hD'a⟩
+  · rw [hx] at hy; exact Bool.noConfusion hy
+  · have := hagree a hA hne
+    rw [hDa, hD'a] at this
+    exact Bool.noConfusion this
+
+end Ids
+
+/-- An operation id with natural-number content. -/
+abbrev CId := IdTerm Nat
 
 variable {content : Nat → Nat}
 
-/-- Ids with fuel, for arbitrary immutable nonparent content. -/
-def cidF (content : Nat → Nat) (par : Nat → List Nat) (D : Nat → Bool) : Nat → Nat → CId
-  | 0, x => .mk (content x) []
-  | f + 1, x => .mk (content x) ((cpar par D x).map (cidF content par D f))
-
 /-- The id of `x` once `D` is dropped. -/
 def cid (content : Nat → Nat) (par : Nat → List Nat) (D : Nat → Bool) (x : Nat) : CId :=
-  cidF content par D (x + 1) x
+  idTerm content (cpar par D) x
 
 /-- Without an immutable discriminator, removing 1 in a chain can recreate its old id at 2.
 This is identical content, not a hash collision. -/
@@ -413,31 +539,12 @@ theorem equal_content_recreates_id :
     cid (fun _ => 0) par (fun n => n == 1) 2 =
       cid (fun _ => 0) par (fun _ => false) 1 := by rfl
 
-theorem cidF_fuel (hlt : ParLt par) {f g x : Nat} (hf : x < f) (hg : x < g) :
-    cidF content par D f x = cidF content par D g x := by
-  induction f generalizing g x with
-  | zero => omega
-  | succ f ih =>
-    cases g with
-    | zero => omega
-    | succ g =>
-      simp only [cidF, CId.mk.injEq, true_and]
-      apply List.map_congr_left
-      intro q hq
-      have := (parLt_cpar hlt) x q hq
-      exact ih (by omega) (by omega)
-
 theorem cid_eq_mk (hlt : ParLt par) (x : Nat) :
-    cid content par D x = .mk (content x) ((cpar par D x).map (cid content par D)) := by
-  simp only [cid, cidF, CId.mk.injEq, true_and]
-  apply List.map_congr_left
-  intro q hq
-  have := (parLt_cpar hlt) x q hq
-  exact cidF_fuel hlt (by omega) (by omega)
+    cid content par D x = .mk (content x) ((cpar par D x).map (cid content par D)) :=
+  idTerm_eq_mk (parLt_cpar hlt) x
 
-@[simp] theorem content_cid (x : Nat) : (cid content par D x).content = content x := by
-  simp [cid]
-  cases x <;> simp [cidF, CId.content]
+@[simp] theorem content_cid (x : Nat) : (cid content par D x).content = content x :=
+  content_idTerm x
 
 /-- Dropping `D₁` and then `D₂` gives the ids that dropping both at once gives. -/
 theorem cid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
@@ -446,7 +553,7 @@ theorem cid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
   induction x using Nat.strongRecOn with
   | ind x ih =>
     rw [cid_eq_mk hlt₁, cid_eq_mk hlt, cpar_union hlt]
-    simp only [CId.mk.injEq, true_and]
+    simp only [IdTerm.mk.injEq, true_and]
     apply List.map_congr_left
     intro q hq
     exact ih q ((parLt_cpar hlt) x q hq)
@@ -509,69 +616,18 @@ theorem cid_comm (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
 /-- Requires injective immutable content; collision-free hashing alone is insufficient.
 Two survivors' ids under two dropped sets are equal only for the same operation, where the
 sets agree on its proper ancestors. -/
-theorem cid_eq (hlt : ParLt par) (hinj : Function.Injective content) {D' : Nat → Bool} {x y : Nat}
-    (h : cid content par D x = cid content par D' y) :
-    x = y ∧ ∀ a, Anc par a x → a ≠ x → D a = D' a := by
-  have hxy : x = y := by
-    have := congrArg CId.content h
-    exact hinj (by simpa using this)
-  subst hxy
-  refine ⟨rfl, ?_⟩
-  induction x using Nat.strongRecOn with
-  | ind x ih =>
-    rw [cid_eq_mk hlt, cid_eq_mk hlt] at h
-    simp only [CId.mk.injEq, true_and] at h
-    have hl : cpar par D x = cpar par D' x := by
-      have := congrArg (List.map CId.content) h
-      apply (List.map_inj_right (fun _ _ h => hinj h)).1
-      simpa [List.map_map, Function.comp_def] using this
-    rw [← hl] at h
-    have hq : ∀ q ∈ cpar par D x, cid content par D q = cid content par D' q := List.map_inj_left.1 h
-    -- One side drops `a` and the other doesn't: the other reaches it from a parent both
-    -- share, whose ids then differ.
-    have key : ∀ (E E' : Nat → Bool), cpar par E x = cpar par E' x →
-        (∀ q ∈ cpar par E x, cid content par E q = cid content par E' q →
-          ∀ a, Anc par a q → a ≠ q → E a = E' a) →
-        (∀ q ∈ cpar par E x, cid content par E q = cid content par E' q) →
-        ∀ a, Anc par a x → a ≠ x → E a = true → E' a = false → False := by
-      intro E E' hl' ih' hq' a hA hne hE hE'
-      obtain ⟨q, hqm, hAq⟩ := cpar_covers (D := E') hlt hA hne hE'
-      rw [← hl'] at hqm
-      have hqE := (mem_cpar hlt hqm).1
-      by_cases haq : a = q
-      · subst haq; rw [hqE] at hE; exact Bool.false_ne_true hE
-      · have := ih' q hqm (hq' q hqm) a hAq haq
-        rw [hE, hE'] at this
-        exact Bool.noConfusion this
-    intro a hA hne
-    have ihD : ∀ q ∈ cpar par D x, cid content par D q = cid content par D' q →
-        ∀ a, Anc par a q → a ≠ q → D a = D' a :=
-      fun q hqm hc => ih q ((parLt_cpar hlt) x q hqm) hc
-    have ihD' : ∀ q ∈ cpar par D' x, cid content par D' q = cid content par D q →
-        ∀ a, Anc par a q → a ≠ q → D' a = D a := by
-      intro q hqm hc a hAq hne
-      rw [← hl] at hqm
-      exact (ih q ((parLt_cpar hlt) x q hqm) hc.symm a hAq hne).symm
-    have hq' : ∀ q ∈ cpar par D' x, cid content par D' q = cid content par D q := by
-      intro q hqm; rw [← hl] at hqm; exact (hq q hqm).symm
-    cases hDa : D a <;> cases hD'a : D' a
-    · rfl
-    · exact (key D' D hl.symm ihD' hq' a hA hne hD'a hDa).elim
-    · exact (key D D' hl ihD hq a hA hne hDa hD'a).elim
-    · rfl
+theorem cid_eq (hlt : ParLt par) (hinj : Function.Injective content) {D' : Nat → Bool}
+    {x y : Nat} (h : cid content par D x = cid content par D' y) :
+    x = y ∧ ∀ a, Anc par a x → a ≠ x → D a = D' a :=
+  idTerm_cpar_eq hlt (fun _ _ e => hinj e) h
 
 /-- Once a machine's dropped set `D` has grown from `D'` to include `x` or one of its proper
 ancestors, the id `x` had under `D'` is no id of any operation that survives `D`. -/
-theorem superseded_ne (hlt : ParLt par) (hinj : Function.Injective content) {D' : Nat → Bool} {x : Nat}
+theorem superseded_ne (hlt : ParLt par) (hinj : Function.Injective content)
+    {D' : Nat → Bool} {x : Nat}
     (hsup : D x = true ∨ ∃ a, Anc par a x ∧ a ≠ x ∧ D a = true ∧ D' a = false)
-    {y : Nat} (hy : D y = false) : cid content par D' x ≠ cid content par D y := by
-  intro h
-  obtain ⟨rfl, hagree⟩ := cid_eq hlt hinj h
-  rcases hsup with hx | ⟨a, hA, hne, hDa, hD'a⟩
-  · rw [hx] at hy; exact Bool.noConfusion hy
-  · have := hagree a hA hne
-    rw [hDa, hD'a] at this
-    exact Bool.noConfusion this
+    {y : Nat} (hy : D y = false) : cid content par D' x ≠ cid content par D y :=
+  idTerm_superseded_ne hlt (fun _ _ e => hinj e) hsup hy
 
 /-! ## Ids depend only on what is below -/
 
@@ -631,7 +687,7 @@ theorem cid_congr {par par' : Nat → List Nat} (hlt : ParLt par) (hlt' : ParLt 
     | ind z ih =>
       intro hz
       rw [cid_eq_mk hlt, cid_eq_mk hlt', hcpar z hz]
-      simp only [CId.mk.injEq, true_and]
+      simp only [IdTerm.mk.injEq, true_and]
       apply List.map_congr_left
       intro q hq
       have := (parLt_cpar hlt') z q hq

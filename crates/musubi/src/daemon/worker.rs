@@ -76,11 +76,7 @@ impl Worker {
     pub(super) fn start(key: String, hubs: Arc<Hubs>) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (stop, stopped) = watch::channel(false);
-        let initial = UserState::load()
-            .ok()
-            .and_then(|state| state.entry(&key).cloned())
-            .filter(|entry| copy::holds(entry, &entry.path))
-            .and_then(|entry| Located::find(&entry.path).ok())
+        let initial = held_copy(&key)
             .and_then(|located| Status::load(&located.repo_path))
             .unwrap_or_default();
         let status = SharedStatus::new(initial);
@@ -193,15 +189,9 @@ async fn serve_retrying(
                 }
                 // Into the copy, if it is where its entry says; never into what is there
                 // instead.
-                let copy = UserState::load()
-                    .ok()
-                    .and_then(|state| state.entry(key).cloned())
-                    .filter(|entry| copy::holds(entry, &entry.path))
-                    .and_then(|entry| Located::find(&entry.path).ok());
+                let copy = held_copy(key);
                 status.record(copy.as_ref(), |status| status.failed(&err));
-                for waiter in waiting.drain(..) {
-                    waiter.send(Err(message.clone())).ok();
-                }
+                answer_all(&mut waiting, &Err(message.clone()));
             }
         }
         let succeeded = status.succeeded_since(started);
@@ -233,6 +223,27 @@ pub(super) async fn pause(
             }
         },
     }
+}
+
+/// Answers every command waiting for a sync with `reply`, and forgets them. A command that has
+/// stopped waiting is no one to tell.
+fn answer_all(
+    waiting: &mut Vec<oneshot::Sender<Result<Synced, String>>>,
+    reply: &Result<Synced, String>,
+) {
+    for waiter in waiting.drain(..) {
+        waiter.send(reply.clone()).ok();
+    }
+}
+
+/// The copy `key`'s entry names, if it is where the entry says, and its repository is there
+/// to find; any failure to tell is that there is none.
+fn held_copy(key: &str) -> Option<Located> {
+    UserState::load()
+        .ok()
+        .and_then(|state| state.entry(key).cloned())
+        .filter(|entry| copy::holds(entry, &entry.path))
+        .and_then(|entry| Located::find(&entry.path).ok())
 }
 
 /// Finds the copy `key`'s entry names: at its path, or where jj last saw it, which moves the
@@ -381,9 +392,7 @@ async fn serve_async(
                 "the repository at {} isn't the copy: {why}",
                 workspace.display()
             );
-            for waiter in waiting.drain(..) {
-                waiter.send(Err(format!("suspended: {why}"))).ok();
-            }
+            answer_all(waiting, &Err(format!("suspended: {why}")));
             return Err(Suspended(why).into());
         }
         // While the hub is out of reach, a sync could only wait for its requests to time
@@ -400,9 +409,7 @@ async fn serve_async(
             status.record(Some(&located), |status| {
                 status.failed(&anyhow::anyhow!("{why}"));
             });
-            for waiter in waiting.drain(..) {
-                waiter.send(Err(why.clone())).ok();
-            }
+            answer_all(waiting, &Err(why.clone()));
             unreachable = Some(why);
             retry = true;
             // Nothing failed here, so nothing need start over; and the connection coming
@@ -457,9 +464,7 @@ async fn serve_async(
                 "this repository's hive or hub changed while it synced"
             );
             tracing::warn!("{message}");
-            for waiter in waiting.drain(..) {
-                waiter.send(Err(message.clone())).ok();
-            }
+            answer_all(waiting, &Err(message.clone()));
             return Ok(());
         }
         let reply = match &result {
@@ -477,9 +482,7 @@ async fn serve_async(
             synced.seq,
             reply.as_ref().err(),
         );
-        for waiter in waiting.drain(..) {
-            waiter.send(reply.clone()).ok();
-        }
+        answer_all(waiting, &reply);
         match result {
             Ok(_) => {
                 backoff.reset();

@@ -246,90 +246,6 @@ theorem noDuplicateMergeS {S : SState} (h : SReachable N S) {m1 m2 : Nat}
 
 /-! ## Facts about protocol steps -/
 
-/-- A step of the protocol keeps the hub's sequence number, or adds one; history up to the old
-number stays. -/
-theorem step_hub {s t : State} (hs : Step N s t) :
-    (t.hub.seq = s.hub.seq ∧ t.hub.head = s.hub.head ∧ t.hub.hist = s.hub.hist) ∨
-      (t.hub.seq = s.hub.seq + 1 ∧ ∀ i, i ≤ s.hub.seq → t.hub.hist i = s.hub.hist i) := by
-  rcases hs with hs | hs
-  · cases hs <;> exact Or.inl ⟨rfl, rfl, rfl⟩
-  · cases hs with
-    | casAccept => exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (by omega)⟩
-    | hubPushAccept => exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (show i ≠ s.hub.seq + 1 by omega)⟩
-    | _ => exact Or.inl ⟨rfl, rfl, rfl⟩
-
-/-- A step of the protocol keeps the operations created so far as they were. -/
-theorem step_par {s t : State} (hs : Step N s t) :
-    s.U.next ≤ t.U.next ∧ ∀ y, y < s.U.next → t.U.par y = s.U.par y := by
-  rcases hs with hs | hs
-  · cases hs with
-    | userOp n p O => exact ⟨Nat.le_succ _, fun y hy => upd_ne _ _ (Nat.ne_of_lt hy)⟩
-    | merge n L O => exact ⟨Nat.le_succ _, fun y hy => upd_ne _ _ (Nat.ne_of_lt hy)⟩
-  · have := noFeedback hs
-    rw [this]; exact ⟨Nat.le_refl _, fun _ _ => rfl⟩
-
--- Each sync step's node update unfolds through a different few of these definitions.
-set_option linter.unusedSimpArgs false in
-/-- What a node's heads reach only grows: every protocol step keeps each operation below some
-head of each node. -/
-theorem step_heads_cover {s t : State} (hI : InvR N s) (hs : Step N s t) {m x : Nat}
-    (hx : ∃ h, (s.node m).heads h ∧ Anc s.U.par x h) :
-    ∃ h, (t.node m).heads h ∧ Anc t.U.par x h := by
-  obtain ⟨h, hh, hA⟩ := hx
-  rcases hs with hs | hs
-  · cases hs with
-    | userOp n p O hn hp =>
-      have hLlt : ∀ q ∈ [p], q < s.U.next := by
-        intro q hq; simp at hq; rw [hq]; exact hI.lLt n p hp
-      have hlt' := parLt_upd hI.parLt hLlt
-      have hA' : Anc (upd s.U.par s.U.next [p]) x h :=
-        (anc_upd_iff hI.parLt hLlt (hI.headsLt hh)).2 hA
-      by_cases hmn : m = n
-      · subst hmn
-        let S' : OSet := fun y => ((s.node m).heads y ∧ y ≠ p) ∨ y = s.U.next
-        have hB : ∀ y, S' y → y < s.U.next + 1 := by
-          rintro y (⟨hy, -⟩ | rfl)
-          · exact Nat.lt_succ_of_lt (hI.headsLt hy)
-          · exact Nat.lt_succ_self _
-        by_cases hhp : h = p
-        · subst hhp
-          obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := s.U.next) (Or.inr rfl)
-          refine ⟨y, by simpa [State.userOp, State.createOp] using hy, ?_⟩
-          exact hA'.trans ((Anc.parent (by simp)).trans hAy)
-        · obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := h) (Or.inl ⟨hh, hhp⟩)
-          exact ⟨y, by simpa [State.userOp, State.createOp] using hy, hA'.trans hAy⟩
-      · refine ⟨h, ?_, hA'⟩
-        simpa [State.userOp, State.createOp, hmn] using hh
-    | merge n L O hn hL h2 =>
-      have hLlt : ∀ q ∈ L, q < s.U.next := fun q hq => hI.headsLt ((hL q).1 hq)
-      have hA' : Anc (upd s.U.par s.U.next L) x h :=
-        (anc_upd_iff hI.parLt hLlt (hI.headsLt hh)).2 hA
-      by_cases hmn : m = n
-      · subst hmn
-        refine ⟨s.U.next, by simp [State.mergeOp, State.createOp], ?_⟩
-        exact hA'.trans (Anc.parent (by simp; exact (hL h).2 hh))
-      · exact ⟨h, by simpa [State.mergeOp, State.createOp, hmn] using hh, hA'⟩
-  · have hU := noFeedback hs
-    cases hs with
-    | advance n hn hk hna =>
-      by_cases hmn : m = n
-      · subst hmn
-        have hB : ∀ y, ((s.node m).heads y ∨ y = (s.node m).known.head) → y < s.U.next := by
-          rintro y (hy | rfl)
-          · exact hI.headsLt hy
-          · exact hI.knownLt m
-        obtain ⟨y, hy, hAy⟩ := maxSet_covers hI.parLt hB (Or.inl hh)
-        exact ⟨y, by simpa [State.advance, State.setNode] using hy, hA.trans hAy⟩
-      · exact ⟨h, by simpa [State.advance, State.setNode, upd, hmn] using hh, hA⟩
-    | _ =>
-      refine ⟨h, ?_, hA⟩
-      first
-        | exact hh
-        | (simp only [State.learn, State.recvOps, State.recvObjs, State.realize,
-            State.setNode, State.send, State.hubStoreOps, State.hubStoreObjs, State.hubStore,
-            State.hubAccept, State.notifyAll]
-           unfold upd; split <;> (try subst_vars) <;> exact hh)
-
 /-! ## The invariant -/
 
 /-- `x` is dropped by some node, below one of its heads: so some node can always publish a
@@ -435,7 +351,7 @@ theorem sinv_base {S : SState} (hI : SInv N S) {t : State} (hs : Step N S.s t)
   obtain ⟨hnext, -⟩ := step_par hs
   have mono : ∀ {Δ}, DOK N S Δ →
       DOK N { S with s := t, hubD := D', hubDHist := H', hubPHist := FH' } Δ :=
-    fun h => h.mono hnext (fun _ _ h => h) (fun _ _ hc => step_heads_cover hI.base hs hc)
+    fun h => h.mono hnext (fun _ _ h => h) (fun _ _ hc => step_heads_cover hI.base.toInvC hs hc)
   exact
     { base := hIt
       hub := mono hD'
@@ -460,7 +376,7 @@ theorem hist_upd_ok {S : SState} (hI : SInv N S) {t : State} (hs : Step N S.s t)
       ¬ upd S.hubDHist t.hub.seq D' i (t.hub.hist i) := by
   have hIt : InvR N t := invR_rstep hI.base (Or.inl hs)
   have hhist : ∀ i, i ≤ S.s.hub.seq → t.hub.hist i = S.s.hub.hist i := by
-    rcases step_hub hs with ⟨e, -⟩ | ⟨-, h⟩
+    rcases step_hub hs with ⟨e, -⟩ | ⟨-, h, -⟩
     · omega
     · exact h
   intro i hi

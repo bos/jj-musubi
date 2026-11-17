@@ -20,6 +20,7 @@ rule (`PStepR`), once the hub stops going back every policy run ends with every 
 hub's head, and every operation any node made in it.
 -/
 import Musubi.Liveness
+import Musubi.Contract
 
 namespace Musubi
 
@@ -72,14 +73,19 @@ def MsgR (s : State) : Msg → Prop
   | .head _ _ _ h => h < s.U.next
   | _ => True
 
-/-- The invariant of the extended system: `Core`, with the stored, known, staged and in-flight
-operations bounded by the universe, and without what relates nodes to the hub's history. -/
-structure InvR (N : Nat) (s : State) : Prop extends Core N s where
+/-- What every state satisfies once the hub can go back, a push can contract its expected
+head, and records a node takes can drop its own work (`Supersede.lean`): `Base`, with the
+stored, known, staged and in-flight operations bounded by the universe. -/
+structure InvC (N : Nat) (s : State) : Prop extends Base N s where
   objsRoot : s.U.objs root = []
   hubOpsLt : ∀ x, s.hub.ops x → x < s.U.next
   knownLt : ∀ n, (s.node n).known.head < s.U.next
   stagedLt : ∀ n x, (s.node n).sops x → x < s.U.next
   msgs : ∀ m, s.net m → MsgR s m
+
+/-- The invariant of the extended system: `Core` and `InvC`, without what relates nodes to the
+hub's history. -/
+structure InvR (N : Nat) (s : State) : Prop extends Core N s, InvC N s
 
 theorem MsgR.grow {s s' : State} (hn : s.U.next ≤ s'.U.next) {m : Msg} (h : MsgR s m) :
     MsgR s' m := by
@@ -104,10 +110,15 @@ theorem invR_init (N : Nat) : InvR N init := by
       msgs := ?_ }
   all_goals simp [init, initNode]
 
-/-! ## Preservation -/
+/-! ## Preservation
 
-theorem InvR.send {s : State} {m : Msg} (hI : InvR N s) (hm : MsgR s m) :
-    InvR N (s.send m) :=
+Every step keeps `InvC` (`invC_step`), the hub going back included when the head it goes back to
+is still closed (`invC_regress`). `InvR` adds the history chain, which only an accept extends,
+and `ownInHeads`, which a step keeps since each node's heads keep what they reached
+(`step_heads_cover`). -/
+
+theorem InvC.send {s : State} {m : Msg} (hI : InvC N s) (hm : MsgR s m) :
+    InvC N (s.send m) :=
   { hI with
     msgs := by
       intro m' hm'
@@ -115,37 +126,35 @@ theorem InvR.send {s : State} {m : Msg} (hI : InvR N s) (hm : MsgR s m) :
       · exact hI.msgs m' h
       · subst h; exact hm }
 
-/-- The per-node part of `InvR`, for a candidate new state `nd` of node `n`. -/
-structure NodeR (s : State) (n : Nat) (nd : Node) : Prop extends CoreNode s n nd where
+/-- The per-node part of `InvC`, for a candidate new state `nd` of node `n`. -/
+structure NodeInv (s : State) (n : Nat) (nd : Node) : Prop extends BaseNode s n nd where
   knownLt : nd.known.head < s.U.next
   stagedLt : ∀ x, nd.sops x → x < s.U.next
 
-theorem InvR.nodeR {s : State} (hI : InvR N s) (n : Nat) : NodeR s n (s.node n) where
-  toCoreNode := hI.coreNode n
+theorem InvC.nodeInv {s : State} (hI : InvC N s) (n : Nat) : NodeInv s n (s.node n) where
+  toBaseNode := hI.baseNode n
   knownLt := hI.knownLt n
   stagedLt := hI.stagedLt n
 
-theorem invR_setNode {s : State} {n : Nat} {nd : Node} (hI : InvR N s) (h : NodeR s n nd) :
-    InvR N (s.setNode n nd) :=
+theorem invC_setNode {s : State} {n : Nat} {nd : Node} (hI : InvC N s) (h : NodeInv s n nd) :
+    InvC N (s.setNode n nd) :=
   { hI with
-    toCore := hI.toCore.setNode h.toCoreNode
+    toBase := hI.toBase.setNode h.toBaseNode
     knownLt := forall_setNode (P := fun _ nd => nd.known.head < s.U.next) hI.knownLt h.knownLt
     stagedLt := forall_setNode (P := fun _ nd => ∀ x, nd.sops x → x < s.U.next)
       hI.stagedLt h.stagedLt }
 
 /-- The general preservation lemma for creating an operation on node `n`. -/
-theorem invR_createOp {s : State} {n : Nat} {L O : List Nat} {mg : Bool} {H' : OSet}
-    (hI : InvR N s) (hn : n < N)
+theorem invC_createOp {s : State} {n : Nat} {L O : List Nat} {mg : Bool} {H' : OSet}
+    (hI : InvC N s) (hn : n < N)
     (hL : ∀ p ∈ L, (s.node n).lops p) (hLne : L ≠ [])
     (hHo : H' s.U.next)
     (hHsub : ∀ y, H' y → (s.node n).heads y ∨ y = s.U.next)
-    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y)
-    (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
-      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h') :
-    InvR N (s.createOp n L O mg H') := by
+    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y) :
+    InvC N (s.createOp n L O mg H') := by
   have hne0 : s.U.next ≠ root := Nat.ne_of_gt hI.nextPos
   refine
-    { toCore := Core.createOp hI.toCore hn hL hLne hHo hHsub hHanti hHmono, objsRoot := ?_,
+    { toBase := Base.createOp hI.toBase hn hL hLne hHo hHsub hHanti, objsRoot := ?_,
       hubOpsLt := ?_, knownLt := ?_, stagedLt := ?_, msgs := ?_ }
   · simp only [createOp_U, create_objs]
     rw [upd_ne _ _ (Ne.symm hne0)]; exact hI.objsRoot
@@ -165,19 +174,11 @@ theorem invR_createOp {s : State} {n : Nat} {L O : List Nat} {mg : Bool} {H' : O
   · intro m hm
     exact (hI.msgs m hm).grow (by simp)
 
-theorem invR_userOp {s : State} (hI : InvR N s) {n p : Nat} {O : List Nat} (hn : n < N)
-    (hp : (s.node n).lops p) : InvR N (s.userOp n p O) := by
-  have hLlt : ∀ q ∈ [p], q < s.U.next := by
-    intro q hq; simp at hq; subst hq; exact hI.lLt n q hp
-  have T : ∀ {a x : Nat}, x < s.U.next →
-      (Anc (upd s.U.par s.U.next [p]) a x ↔ Anc s.U.par a x) :=
-    fun hx => anc_upd_iff hI.parLt hLlt hx
-  have Tnew : ∀ {a : Nat}, Anc (upd s.U.par s.U.next [p]) a s.U.next ↔
-      a = s.U.next ∨ Anc s.U.par a p := by
-    intro a; rw [anc_upd_new hI.parLt hLlt]; simp
+theorem invC_userOp {s : State} (hI : InvC N s) {n p : Nat} {O : List Nat} (hn : n < N)
+    (hp : (s.node n).lops p) : InvC N (s.userOp n p O) := by
   have H := fun y => userOp_heads_iff_of (y := y) hI.parLt (hI.lLt n p hp)
     (fun _ h => hI.headsLt h) (hI.headsAnti n)
-  apply invR_createOp hI hn
+  apply invC_createOp hI hn
   · intro q hq; simp at hq; subst hq; exact hp
   · simp
   · exact (H _).2 (Or.inl rfl)
@@ -187,36 +188,23 @@ theorem invR_userOp {s : State} (hI : InvR N s) {n p : Nat} {O : List Nat} (hn :
     · exact Or.inl h
   · intro x y hx hy hA
     exact hx.2 y hy.1 hA
-  · intro x h hh hA
-    by_cases hc : h = p ∨ Anc s.U.par h p
-    · refine ⟨s.U.next, (H _).2 (Or.inl rfl), Tnew.2 (Or.inr ?_)⟩
-      rcases hc with hc | hc
-      · subst hc; exact hA
-      · exact hA.trans hc
-    · have hc' : h ≠ p ∧ ¬ Anc s.U.par h p := ⟨fun e => hc (Or.inl e), fun e => hc (Or.inr e)⟩
-      exact ⟨h, (H h).2 (Or.inr ⟨hh, hc'.1, hc'.2⟩), (T (hI.headsLt hh)).2 hA⟩
 
-theorem invR_merge {s : State} (hI : InvR N s) {n : Nat} {L O : List Nat} (hn : n < N)
+theorem invC_merge {s : State} (hI : InvC N s) {n : Nat} {L O : List Nat} (hn : n < N)
     (hL : ∀ x, x ∈ L ↔ (s.node n).heads x) (h2 : ∃ a b, a ∈ L ∧ b ∈ L ∧ a ≠ b) :
-    InvR N (s.mergeOp n L O) := by
-  have hLlt : ∀ q ∈ L, q < s.U.next := fun q hq => hI.headsLt ((hL q).1 hq)
+    InvC N (s.mergeOp n L O) := by
   obtain ⟨a, b, ha, hb, hab⟩ := h2
-  apply invR_createOp hI hn
+  apply invC_createOp hI hn
   · intro q hq; exact hI.headsLocal n q ((hL q).1 hq)
   · intro h; rw [h] at ha; simp at ha
   · rfl
   · intro y hy; exact Or.inr hy
   · intro x y hx hy _; rw [hx, hy]
-  · intro x h hh hA
-    refine ⟨s.U.next, rfl, ?_⟩
-    rw [anc_upd_new hI.parLt hLlt]
-    exact Or.inr ⟨h, (hL h).2 hh, hA⟩
 
-theorem invR_realize {s : State} (hI : InvR N s) {n x : Nat} (hx : (s.node n).sops x)
+theorem invC_realize {s : State} (hI : InvC N s) {n x : Nat} (hx : (s.node n).sops x)
     (hp : ∀ p ∈ s.U.par x, (s.node n).lops p) :
-    InvR N (s.realize n x) := by
-  refine invR_setNode hI
-    { hI.nodeR n with
+    InvC N (s.realize n x) := by
+  refine invC_setNode hI
+    { hI.nodeInv n with
       lroot := Or.inl (hI.lroot n), lLt := ?_, lParents := ?_, lObjs := ?_,
       headsLocal := fun y hy => Or.inl (hI.headsLocal n y hy) }
   · rintro y (hy | rfl)
@@ -229,14 +217,13 @@ theorem invR_realize {s : State} (hI : InvR N s) {n x : Nat} (hx : (s.node n).so
     · exact Or.inl (hI.lObjs n y o hy ho)
     · exact Or.inr ho
 
-theorem invR_advance {s : State} (hI : InvR N s) {n : Nat}
+theorem invC_advance {s : State} (hI : InvC N s) {n : Nat}
     (hk : (s.node n).lops (s.node n).known.head)
     (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
-    InvR N (s.advance n) := by
+    InvC N (s.advance n) := by
   have H := fun y => advance_heads_iff_of (y := y) (hI.headsAnti n) hna
-  refine invR_setNode hI
-    { hI.nodeR n with
-      headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_, ownInHeads := ?_ }
+  refine invC_setNode hI
+    { hI.nodeInv n with headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_ }
   · intro y hy
     rcases (H y).1 hy with rfl | ⟨hy, -⟩
     · exact hk
@@ -244,14 +231,9 @@ theorem invR_advance {s : State} (hI : InvR N s) {n : Nat}
   · intro x y hx hy hA
     exact hx.2 y hy.1 hA
   · exact ⟨_, (H _).2 (Or.inl rfl)⟩
-  · intro x hx hc
-    obtain ⟨h, hh, hA⟩ := hI.ownInHeads n x hx hc
-    by_cases hhk : Anc s.U.par h (s.node n).known.head
-    · exact ⟨_, (H _).2 (Or.inl rfl), hA.trans hhk⟩
-    · exact ⟨h, (H h).2 (Or.inr ⟨hh, hhk⟩), hA⟩
 
-theorem invR_hubStore {s : State} (hI : InvR N s) {S O : OSet}
-    (hS : ∀ x, S x → x < s.U.next) : InvR N (s.hubStore S O) :=
+theorem invC_hubStore {s : State} (hI : InvC N s) {S O : OSet}
+    (hS : ∀ x, S x → x < s.U.next) : InvC N (s.hubStore S O) :=
   { hI with
     hubClosed := fun y hy => by
       obtain ⟨h1, h2⟩ := hI.hubClosed y hy
@@ -261,8 +243,8 @@ theorem invR_hubStore {s : State} (hI : InvR N s) {S O : OSet}
       · exact hI.hubOpsLt x hx
       · exact hS x hx }
 
-theorem invR_hubStoreOps {s : State} (hI : InvR N s) {S : OSet}
-    (hS : ∀ x, S x → x < s.U.next) : InvR N (s.hubStoreOps S) :=
+theorem invC_hubStoreOps {s : State} (hI : InvC N s) {S : OSet}
+    (hS : ∀ x, S x → x < s.U.next) : InvC N (s.hubStoreOps S) :=
   { hI with
     hubClosed := fun y hy => by
       obtain ⟨h1, h2⟩ := hI.hubClosed y hy
@@ -272,71 +254,54 @@ theorem invR_hubStoreOps {s : State} (hI : InvR N s) {S : OSet}
       · exact hI.hubOpsLt x hx
       · exact hS x hx }
 
-theorem invR_hubStoreObjs {s : State} (hI : InvR N s) {S : OSet} :
-    InvR N (s.hubStoreObjs S) :=
+theorem invC_hubStoreObjs {s : State} (hI : InvC N s) {S : OSet} :
+    InvC N (s.hubStoreObjs S) :=
   { hI with
     hubClosed := fun y hy => by
       obtain ⟨h1, h2⟩ := hI.hubClosed y hy
       exact ⟨h1, fun o ho => Or.inl (h2 o ho)⟩ }
 
-theorem invR_casAccept {s : State} (hI : InvR N s) {n0 e d : Nat}
-    (hd : d < s.U.next) (hne : s.hub.head ≠ d) (he : s.hub.head = e)
-    (ha : Anc s.U.par e d) (hc : ClosedAt s d) :
-    InvR N (((s.hubAccept d).send (.head n0 .accepted (s.hub.seq + 1) d)).notifyAll
+/-- The hub accepts a closed head `d`, replying to `n0` and notifying every node, whether or not
+`d` descends from the head it had. -/
+theorem invC_accept {s : State} (hI : InvC N s) {n0 d : Nat} (hd : d < s.U.next)
+    (hc : ClosedAt s d) :
+    InvC N (((s.hubAccept d).send (.head n0 .accepted (s.hub.seq + 1) d)).notifyAll
       (s.hub.seq + 1) d) := by
-  have hed : Anc s.U.par s.hub.head d := he ▸ ha
-  have histOld : ∀ {i}, i ≤ s.hub.seq → upd s.hub.hist (s.hub.seq + 1) d i = s.hub.hist i :=
-    fun hi => upd_ne _ _ (by omega)
-  refine
-    { hI with
-      headLt := hd, histHead := ?_, hist0 := ?_, histStep := ?_, hubClosed := hc,
-      msgs := ?_ }
+  refine { hI with headLt := hd, histHead := ?_, hist0 := ?_, hubClosed := hc, msgs := ?_ }
   · show upd s.hub.hist (s.hub.seq + 1) d (s.hub.seq + 1) = d
     simp
   · show upd s.hub.hist (s.hub.seq + 1) d 0 = root
     rw [upd_ne _ _ (by omega)]; exact hI.hist0
-  · intro i hi
-    show Anc s.U.par (upd s.hub.hist (s.hub.seq + 1) d i)
-        (upd s.hub.hist (s.hub.seq + 1) d (i + 1)) ∧
-      upd s.hub.hist (s.hub.seq + 1) d i ≠ upd s.hub.hist (s.hub.seq + 1) d (i + 1)
-    have hi' : i < s.hub.seq + 1 := hi
-    rw [histOld (by omega)]
-    by_cases his : i = s.hub.seq
-    · subst his
-      rw [upd_same, hI.histHead]
-      exact ⟨hed, hne⟩
-    · rw [histOld (by omega)]
-      exact hI.histStep i (by omega)
   · rintro m ((hm | rfl) | ⟨i, rfl⟩)
     · exact hI.msgs m hm
     · exact hd
     · exact hd
 
-theorem invR_regress {s : State} (hI : InvR N s) {i : Nat} (hi : i ≤ s.hub.seq) :
-    InvR N (s.regress i) :=
+/-- The hub goes back to the head it accepted at `i`, which it still holds the closure of. -/
+theorem invC_regress {s : State} (hI : InvC N s) {i : Nat} (hc : ClosedAt s (s.hub.hist i)) :
+    InvC N (s.regress i) :=
   { hI with
-    headLt := hI.histLt hi
+    headLt := hI.hubOpsLt _ (hc _ Anc.refl).1
     histHead := rfl
-    histStep := fun j hj => hI.histStep j (Nat.lt_of_lt_of_le hj hi)
-    hubClosed := fun y hy => hI.hubClosed y (hy.trans (hI.histAnc hi)) }
+    hubClosed := hc }
 
-theorem invR_syncStep {s s' : State} (hI : InvR N s) (h : SyncStep N s s') : InvR N s' := by
+theorem invC_syncStep {s s' : State} (hI : InvC N s) (h : SyncStep N s s') : InvC N s' := by
   cases h with
   | getHead n hn => exact hI.send trivial
   | learn n k sq h hn hm hs =>
-    exact invR_setNode hI { hI.nodeR n with knownLt := hI.msgs _ hm }
+    exact invC_setNode hI { hI.nodeInv n with knownLt := hI.msgs _ hm }
   | learnUnfiltered n k sq h hn hm =>
-    exact invR_setNode hI { hI.nodeR n with knownLt := hI.msgs _ hm }
+    exact invC_setNode hI { hI.nodeInv n with knownLt := hI.msgs _ hm }
   | fetchOps n S hn hS => exact hI.send trivial
   | fetchObjs n S hn => exact hI.send trivial
   | recvOps n S hn hm =>
-    refine invR_setNode hI { hI.nodeR n with stagedLt := ?_ }
+    refine invC_setNode hI { hI.nodeInv n with stagedLt := ?_ }
     rintro x (hx | hx)
     · exact hI.stagedLt n x hx
     · exact (hI.msgs _ hm : MsgR s (.ops n S)) x hx
-  | recvObjs n S hn hm => exact invR_setNode hI { hI.nodeR n with }
-  | realize n x hn hx hp ho => exact invR_realize hI hx hp
-  | advance n hn hk hna => exact invR_advance hI hk hna
+  | recvObjs n S hn hm => exact invC_setNode hI { hI.nodeInv n with }
+  | realize n x hn hx hp ho => exact invC_realize hI hx hp
+  | advance n hn hk hna => exact invC_advance hI hk hna
   | uploadOps n S hn hS => exact hI.send (fun x hx => hI.lLt n x (hS x hx))
   | uploadObjs n S hn hS => exact hI.send trivial
   | push n e d hn hd => exact hI.send (hI.lLt n d hd)
@@ -344,31 +309,31 @@ theorem invR_syncStep {s s' : State} (hI : InvR N s) (h : SyncStep N s s') : Inv
     exact hI.send ⟨fun x hx => hI.lLt n x (hS x hx), hI.lLt n d hd⟩
   | fetchAll n b H hn => exact hI.send trivial
   | crashNode n hn => exact hI
-  | loseKnown n hn => exact invR_setNode hI { hI.nodeR n with knownLt := hI.nextPos }
+  | loseKnown n hn => exact invC_setNode hI { hI.nodeInv n with knownLt := hI.nextPos }
   | loseVolatile n hn =>
-    refine invR_setNode hI { hI.nodeR n with knownLt := hI.nextPos, stagedLt := ?_ }
+    refine invC_setNode hI { hI.nodeInv n with knownLt := hI.nextPos, stagedLt := ?_ }
     intro x hx; exact hx.elim
   | hubGetHead n hm => exact hI.send hI.headLt
   | hubPutOps n S hm =>
-    exact (invR_hubStoreOps hI (hI.msgs _ hm : MsgR s (.putOps n S))).send trivial
-  | hubPutObjs n S hm => exact (invR_hubStoreObjs hI).send trivial
+    exact (invC_hubStoreOps hI (hI.msgs _ hm : MsgR s (.putOps n S))).send trivial
+  | hubPutObjs n S hm => exact (invC_hubStoreObjs hI).send trivial
   | hubGetOps n S hm => exact hI.send (fun x hx => hI.hubOpsLt x hx.2)
   | hubGetObjs n S hm => exact hI.send trivial
   | casIdem n e d hm hh => exact hI.send hI.headLt
   | casAccept n e d hm hne he ha hc =>
-    exact invR_casAccept hI (hI.msgs _ hm : MsgR s (.cas n e d)) hne he ha hc
+    exact invC_accept hI (hI.msgs _ hm : MsgR s (.cas n e d)) hc
   | casReject n e d hm hne hrej => exact hI.send hI.headLt
   | hubPushIdem n S O e d hm hh =>
-    have hI' := invR_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
+    have hI' := invC_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
     exact hI'.send hI'.headLt
   | hubPushAccept n S O e d hm hne he ha hc =>
     have hmsg : MsgR s (.push n S O e d) := hI.msgs _ hm
-    exact invR_casAccept (invR_hubStore (O := O) hI hmsg.1) hmsg.2 hne he ha hc
+    exact invC_accept (invC_hubStore (O := O) hI hmsg.1) hmsg.2 hc
   | hubPushReject n S O e d hm hne hrej =>
-    have hI' := invR_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
+    have hI' := invC_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
     exact hI'.send hI'.headLt
   | hubPushIncomplete n S O e d hm hne he hc =>
-    have hI' := invR_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
+    have hI' := invC_hubStore (O := O) hI (hI.msgs _ hm : MsgR s (.push n S O e d)).1
     exact hI'.send hI'.headLt
   | hubFetch n b H hm =>
     have h1 := hI.send (m := .head n .head s.hub.seq s.hub.head) hI.headLt
@@ -378,15 +343,176 @@ theorem invR_syncStep {s s' : State} (hI : InvR N s) (h : SyncStep N s s') : Inv
   | hubForget O J hO hJ hc =>
     exact { hI with hubClosed := hc, hubOpsLt := fun x hx => hI.hubOpsLt x (hO x hx) }
 
-theorem invR_envStep {s s' : State} (hI : InvR N s) (h : EnvStep N s s') : InvR N s' := by
+theorem invC_envStep {s s' : State} (hI : InvC N s) (h : EnvStep N s s') : InvC N s' := by
   cases h with
-  | userOp n p O hn hp => exact invR_userOp hI hn hp
-  | merge n L O hn hL h2 => exact invR_merge hI hn hL h2
+  | userOp n p O hn hp => exact invC_userOp hI hn hp
+  | merge n L O hn hL h2 => exact invC_merge hI hn hL h2
+
+theorem invC_step {s s' : State} (hI : InvC N s) (h : Step N s s') : InvC N s' :=
+  h.elim (invC_envStep hI) (invC_syncStep hI)
+
+/-- A step of the protocol keeps the hub's sequence number, or adds one; history up to the old
+number stays. -/
+theorem step_hub {s t : State} (hs : Step N s t) :
+    (t.hub.seq = s.hub.seq ∧ t.hub.head = s.hub.head ∧ t.hub.hist = s.hub.hist) ∨
+      (t.hub.seq = s.hub.seq + 1 ∧ (∀ i, i ≤ s.hub.seq → t.hub.hist i = s.hub.hist i) ∧
+        t.hub.hist (s.hub.seq + 1) = t.hub.head ∧ t.U = s.U ∧
+        Anc s.U.par s.hub.head t.hub.head ∧ s.hub.head ≠ t.hub.head) := by
+  rcases hs with hs | hs
+  · cases hs <;> exact Or.inl ⟨rfl, rfl, rfl⟩
+  · cases hs with
+    | casAccept n e d hm hne he ha =>
+      exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (by omega), upd_same _ _ _, rfl, he ▸ ha, hne⟩
+    | hubPushAccept n S O e d hm hne he ha =>
+      exact Or.inr ⟨rfl, fun i hi => upd_ne _ _ (show i ≠ s.hub.seq + 1 by omega),
+        upd_same _ _ _, rfl, he ▸ ha, hne⟩
+    | _ => exact Or.inl ⟨rfl, rfl, rfl⟩
+
+/-- A step of the protocol keeps the operations created so far as they were. -/
+theorem step_par {s t : State} (hs : Step N s t) :
+    s.U.next ≤ t.U.next ∧ ∀ y, y < s.U.next → t.U.par y = s.U.par y := by
+  rcases hs with hs | hs
+  · cases hs with
+    | userOp n p O => exact ⟨Nat.le_succ _, fun y hy => upd_ne _ _ (Nat.ne_of_lt hy)⟩
+    | merge n L O => exact ⟨Nat.le_succ _, fun y hy => upd_ne _ _ (Nat.ne_of_lt hy)⟩
+  · have := noFeedback hs
+    rw [this]; exact ⟨Nat.le_refl _, fun _ _ => rfl⟩
+
+-- Each sync step's node update unfolds through a different few of these definitions.
+set_option linter.unusedSimpArgs false in
+/-- What a node's heads reach only grows: every protocol step keeps each operation below some
+head of each node. -/
+theorem step_heads_cover {s t : State} (hI : InvC N s) (hs : Step N s t) {m x : Nat}
+    (hx : ∃ h, (s.node m).heads h ∧ Anc s.U.par x h) :
+    ∃ h, (t.node m).heads h ∧ Anc t.U.par x h := by
+  obtain ⟨h, hh, hA⟩ := hx
+  rcases hs with hs | hs
+  · cases hs with
+    | userOp n p O hn hp =>
+      have hLlt : ∀ q ∈ [p], q < s.U.next := by
+        intro q hq; simp at hq; rw [hq]; exact hI.lLt n p hp
+      have hlt' := parLt_upd hI.parLt hLlt
+      have hA' : Anc (upd s.U.par s.U.next [p]) x h :=
+        (anc_upd_iff hI.parLt hLlt (hI.headsLt hh)).2 hA
+      by_cases hmn : m = n
+      · subst hmn
+        let S' : OSet := fun y => ((s.node m).heads y ∧ y ≠ p) ∨ y = s.U.next
+        have hB : ∀ y, S' y → y < s.U.next + 1 := by
+          rintro y (⟨hy, -⟩ | rfl)
+          · exact Nat.lt_succ_of_lt (hI.headsLt hy)
+          · exact Nat.lt_succ_self _
+        by_cases hhp : h = p
+        · subst hhp
+          obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := s.U.next) (Or.inr rfl)
+          refine ⟨y, by simpa [State.userOp, State.createOp] using hy, ?_⟩
+          exact hA'.trans ((Anc.parent (by simp)).trans hAy)
+        · obtain ⟨y, hy, hAy⟩ := maxSet_covers hlt' hB (x := h) (Or.inl ⟨hh, hhp⟩)
+          exact ⟨y, by simpa [State.userOp, State.createOp] using hy, hA'.trans hAy⟩
+      · refine ⟨h, ?_, hA'⟩
+        simpa [State.userOp, State.createOp, hmn] using hh
+    | merge n L O hn hL h2 =>
+      have hLlt : ∀ q ∈ L, q < s.U.next := fun q hq => hI.headsLt ((hL q).1 hq)
+      have hA' : Anc (upd s.U.par s.U.next L) x h :=
+        (anc_upd_iff hI.parLt hLlt (hI.headsLt hh)).2 hA
+      by_cases hmn : m = n
+      · subst hmn
+        refine ⟨s.U.next, by simp [State.mergeOp, State.createOp], ?_⟩
+        exact hA'.trans (Anc.parent (by simp; exact (hL h).2 hh))
+      · exact ⟨h, by simpa [State.mergeOp, State.createOp, hmn] using hh, hA'⟩
+  · have hU := noFeedback hs
+    cases hs with
+    | advance n hn hk hna =>
+      by_cases hmn : m = n
+      · subst hmn
+        have hB : ∀ y, ((s.node m).heads y ∨ y = (s.node m).known.head) → y < s.U.next := by
+          rintro y (hy | rfl)
+          · exact hI.headsLt hy
+          · exact hI.knownLt m
+        obtain ⟨y, hy, hAy⟩ := maxSet_covers hI.parLt hB (Or.inl hh)
+        exact ⟨y, by simpa [State.advance, State.setNode] using hy, hA.trans hAy⟩
+      · exact ⟨h, by simpa [State.advance, State.setNode, upd, hmn] using hh, hA⟩
+    | _ =>
+      refine ⟨h, ?_, hA⟩
+      first
+        | exact hh
+        | (simp only [State.learn, State.recvOps, State.recvObjs, State.realize,
+            State.setNode, State.send, State.hubStoreOps, State.hubStoreObjs, State.hubStore,
+            State.hubAccept, State.notifyAll]
+           unfold upd; split <;> (try subst_vars) <;> exact hh)
+
+/-- A step keeps the hub's history a chain: only an accept extends it, to a head that descends
+from the one before. -/
+theorem histStep_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
+    ∀ i, i < t.hub.seq →
+      Anc t.U.par (t.hub.hist i) (t.hub.hist (i + 1)) ∧ t.hub.hist i ≠ t.hub.hist (i + 1) := by
+  obtain ⟨-, hpar⟩ := step_par hs
+  have keep : ∀ {a x}, x < s.U.next → Anc s.U.par a x → Anc t.U.par a x := fun hx ha =>
+    (Contract.anc_congr hI.parLt (fun y hy => (hpar y (Nat.lt_of_le_of_lt hy hx)).symm)).1 ha
+  rcases step_hub hs with ⟨hq, -, hh⟩ | ⟨hq, hold, hnew, hU, ha, hne⟩
+  · intro i hi
+    rw [hh]; rw [hq] at hi
+    obtain ⟨h1, h2⟩ := hI.histStep i hi
+    exact ⟨keep (hI.histLt (by omega)) h1, h2⟩
+  · intro i hi
+    rw [hU]
+    by_cases his : i = s.hub.seq
+    · subst his
+      rw [hold _ (Nat.le_refl _), hnew, hI.histHead]
+      exact ⟨ha, hne⟩
+    · rw [hold i (by omega), hold (i + 1) (by omega)]
+      exact hI.histStep i (by omega)
+
+/-- A step keeps every operation a node made below one of its heads. -/
+theorem ownInHeads_step {s t : State} (hI : InvR N s) (hs : Step N s t) :
+    ∀ n x, x < t.U.next → t.U.creator x = some n →
+      ∃ h, (t.node n).heads h ∧ Anc t.U.par x h := by
+  intro n x hx hc
+  rcases hs with hs | hs
+  · cases hs with
+    | userOp m p O hm hp =>
+      have H := fun y => userOp_heads_iff_of (y := y) hI.parLt (hI.lLt m p hp)
+        (fun _ h => hI.headsLt h) (hI.headsAnti m)
+      have hC : Core N (s.userOp m p O) := Core.createOp hI.toCore hm
+        (by intro q hq; simp at hq; subst hq; exact hp) (by simp) ((H _).2 (Or.inl rfl))
+        (fun y hy => by
+          rcases (H y).1 hy with h | ⟨h, -⟩
+          · exact Or.inr h
+          · exact Or.inl h)
+        (fun x y hx hy hA => hx.2 y hy.1 hA)
+        (fun x h hh hA => by
+          simpa [State.userOp, State.createOp] using
+            step_heads_cover hI.toInvC (Or.inl (EnvStep.userOp s m p O hm hp)) ⟨h, hh, hA⟩)
+      exact hC.ownInHeads n x hx hc
+    | merge m L O hm hL h2 =>
+      have hLlt : ∀ q ∈ L, q < s.U.next := fun q hq => hI.headsLt ((hL q).1 hq)
+      obtain ⟨a, b, ha, hb, hab⟩ := h2
+      have hC : Core N (s.mergeOp m L O) := Core.createOp hI.toCore hm
+        (fun q hq => hI.headsLocal m q ((hL q).1 hq))
+        (by intro h; rw [h] at ha; simp at ha) rfl (fun y hy => Or.inr hy)
+        (fun x y hx hy _ => by rw [hx, hy])
+        (fun x h hh hA => ⟨s.U.next, rfl, (anc_upd_new hI.parLt hLlt).2
+          (Or.inr ⟨h, (hL h).2 hh, hA⟩)⟩)
+      exact hC.ownInHeads n x hx hc
+  · have hU := noFeedback hs
+    rw [hU] at hx hc ⊢
+    obtain ⟨h, hh, hA⟩ := hI.ownInHeads n x hx hc
+    have := step_heads_cover hI.toInvC (Or.inr hs) ⟨h, hh, hA⟩
+    rwa [hU] at this
+
+theorem invR_step {s s' : State} (hI : InvR N s) (h : Step N s s') : InvR N s' :=
+  { invC_step hI.toInvC h with
+    histStep := histStep_step hI h
+    ownInHeads := ownInHeads_step hI h }
+
+theorem invR_regress {s : State} (hI : InvR N s) {i : Nat} (hi : i ≤ s.hub.seq) :
+    InvR N (s.regress i) :=
+  { invC_regress hI.toInvC (fun y hy => hI.hubClosed y (hy.trans (hI.histAnc hi))) with
+    histStep := fun j hj => hI.histStep j (Nat.lt_of_lt_of_le hj hi)
+    ownInHeads := hI.ownInHeads }
 
 theorem invR_rstep {s s' : State} (hI : InvR N s) (h : RStep N s s') : InvR N s' := by
-  rcases h with (h | h) | ⟨i, hi, rfl⟩
-  · exact invR_envStep hI h
-  · exact invR_syncStep hI h
+  rcases h with h | ⟨i, hi, rfl⟩
+  · exact invR_step hI h
   · exact invR_regress hI hi
 
 theorem invR_reachable {s : State} (h : RReachable N s) : InvR N s := by

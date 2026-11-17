@@ -23,12 +23,12 @@ def MsgOK (s : State) : Msg → Prop
 def Consistent (s : State) (n : Nat) : Prop :=
   (s.node n).known.seq ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.seq = (s.node n).known.head
 
-/-- What every state of the model satisfies, whether or not the hub can go back to an earlier
-head: the universe is a DAG rooted at `root`; the hub's history is a chain of heads ending in
-its head (`hubClosed`: every ancestor of that head, with its objects, is stored at the hub);
-and every node's repository is closed under parents, with an antichain of heads that covers the
-operations the node made. -/
-structure Core (N : Nat) (s : State) : Prop where
+/-- What every state satisfies, whether or not the hub can go back to an earlier head and whether
+or not a push may contract its expected head: the universe is a DAG rooted at `root`; the hub's
+history ends in its head, and the hub holds that head's closure (`hubClosed`: every ancestor
+of it, with its objects); and every node's repository is closed under parents, with a nonempty
+antichain of heads. -/
+structure Base (N : Nat) (s : State) : Prop where
   -- universe
   parLt : ParLt s.U.par
   nextPos : 0 < s.U.next
@@ -39,8 +39,6 @@ structure Core (N : Nat) (s : State) : Prop where
   headLt : s.hub.head < s.U.next
   histHead : s.hub.hist s.hub.seq = s.hub.head
   hist0 : s.hub.hist 0 = root
-  histStep : ∀ i, i < s.hub.seq →
-    Anc s.U.par (s.hub.hist i) (s.hub.hist (i + 1)) ∧ s.hub.hist i ≠ s.hub.hist (i + 1)
   hubClosed : ClosedAt s s.hub.head
   -- nodes
   lroot : ∀ n, (s.node n).lops root
@@ -50,8 +48,32 @@ structure Core (N : Nat) (s : State) : Prop where
   headsLocal : ∀ n x, (s.node n).heads x → (s.node n).lops x
   headsAnti : ∀ n x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y
   headsNonempty : ∀ n, ∃ h, (s.node n).heads h
+
+/-- `Base`, with the hub's history a chain of heads in original ancestry, and every operation
+a node made below one of its heads. Neither holds once a node can drop operations: a push can
+contract its expected head away, and records a node takes can drop work it made
+(`Supersede.lean`). -/
+structure Core (N : Nat) (s : State) : Prop extends Base N s where
+  histStep : ∀ i, i < s.hub.seq →
+    Anc s.U.par (s.hub.hist i) (s.hub.hist (i + 1)) ∧ s.hub.hist i ≠ s.hub.hist (i + 1)
   ownInHeads : ∀ n x, x < s.U.next → s.U.creator x = some n →
     ∃ h, (s.node n).heads h ∧ Anc s.U.par x h
+
+namespace Base
+
+variable {N : Nat} {s : State}
+
+theorem accLt (hI : Base N s) {x : Nat} (h : Anc s.U.par x s.hub.head) : x < s.U.next :=
+  Nat.lt_of_le_of_lt (h.le hI.parLt) hI.headLt
+
+theorem headsLt (hI : Base N s) {n x : Nat} (h : (s.node n).heads x) : x < s.U.next :=
+  hI.lLt n x (hI.headsLocal n x h)
+
+theorem lopsAnc (hI : Base N s) {n x a : Nat} (hx : (s.node n).lops x)
+    (ha : Anc s.U.par a x) : (s.node n).lops a :=
+  Anc.closed (S := (s.node n).lops) (fun y p hy hp => hI.lParents n y p hy hp) ha hx
+
+end Base
 
 namespace Core
 
@@ -72,9 +94,6 @@ theorem histAnc (hI : Core N s) {i : Nat} (hi : i ≤ s.hub.seq) :
     Anc s.U.par (s.hub.hist i) s.hub.head := by
   have := hI.chain hi (Nat.le_refl _)
   rwa [hI.histHead] at this
-
-theorem accLt (hI : Core N s) {x : Nat} (h : Anc s.U.par x s.hub.head) : x < s.U.next :=
-  Nat.lt_of_le_of_lt (h.le hI.parLt) hI.headLt
 
 theorem histLt (hI : Core N s) {i : Nat} (hi : i ≤ s.hub.seq) : s.hub.hist i < s.U.next :=
   hI.accLt (hI.histAnc hi)
@@ -97,13 +116,6 @@ theorem histInj (hI : Core N s) {i j : Nat} (hi : i ≤ s.hub.seq) (hj : j ≤ s
   · have := hI.histLtStrict hlt hj; omega
   · exact heq
   · have := hI.histLtStrict hgt hi; omega
-
-theorem headsLt (hI : Core N s) {n x : Nat} (h : (s.node n).heads x) : x < s.U.next :=
-  hI.lLt n x (hI.headsLocal n x h)
-
-theorem lopsAnc (hI : Core N s) {n x a : Nat} (hx : (s.node n).lops x)
-    (ha : Anc s.U.par a x) : (s.node n).lops a :=
-  Anc.closed (S := (s.node n).lops) (fun y p hy hp => hI.lParents n y p hy hp) ha hx
 
 end Core
 

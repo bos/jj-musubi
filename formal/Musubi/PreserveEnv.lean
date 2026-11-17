@@ -55,16 +55,14 @@ theorem createOp_node_ne {i : Nat} (h : i ≠ n) : (s.createOp n L O mg H').node
 @[simp] theorem createOp_sops : ((s.createOp n L O mg H').node n).sops = (s.node n).sops := by
   simp [State.createOp]
 
-/-- Creating an operation on node `n` preserves `Core`, given what the new operation's parents
+/-- Creating an operation on node `n` preserves `Base`, given what the new operation's parents
 `L` and the node's new heads `H'` must satisfy. -/
-theorem Core.createOp (hI : Core N s) (hn : n < N)
+theorem Base.createOp (hI : Base N s) (hn : n < N)
     (hL : ∀ p ∈ L, (s.node n).lops p) (hLne : L ≠ [])
     (hHo : H' s.U.next)
     (hHsub : ∀ y, H' y → (s.node n).heads y ∨ y = s.U.next)
-    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y)
-    (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
-      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h') :
-    Core N (s.createOp n L O mg H') := by
+    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y) :
+    Base N (s.createOp n L O mg H') := by
   have hLlt : ∀ p ∈ L, p < s.U.next := fun p hp => hI.lLt n p (hL p hp)
   have T : ∀ {a x : Nat}, x < s.U.next →
       (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
@@ -72,8 +70,8 @@ theorem Core.createOp (hI : Core N s) (hn : n < N)
   refine
     { parLt := parLt_upd hI.parLt hLlt, nextPos := ?_, rootAnc := ?_, creatorSome := ?_,
       creatorRoot := ?_, headLt := ?_, histHead := hI.histHead, hist0 := hI.hist0,
-      histStep := ?_, hubClosed := ?_, lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_,
-      headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_, ownInHeads := ?_ }
+      hubClosed := ?_, lroot := ?_, lLt := ?_, lParents := ?_, lObjs := ?_,
+      headsLocal := ?_, headsAnti := ?_, headsNonempty := ?_ }
   · simp
   · -- rootAnc
     intro x hx
@@ -95,11 +93,6 @@ theorem Core.createOp (hI : Core N s) (hn : n < N)
     simp only [createOp_U, create_creator]
     rw [upd_lt _ _ hI.nextPos]; exact hI.creatorRoot
   · simp; have := hI.headLt; omega
-  · -- histStep
-    intro i hi
-    have hi' : i < s.hub.seq := hi
-    obtain ⟨h1, h2⟩ := hI.histStep i hi'
-    exact ⟨(T (hI.histLt (by omega))).2 h1, h2⟩
   · -- hubClosed
     intro y hy
     simp only [HubHas, createOp_U, createOp_hub, create_par, create_objs] at hy ⊢
@@ -172,6 +165,28 @@ theorem Core.createOp (hI : Core N s) (hn : n < N)
     by_cases hi : i = n
     · subst hi; exact ⟨s.U.next, by simpa using hHo⟩
     · rw [createOp_node_ne hi]; exact hI.headsNonempty i
+/-- Creating an operation on node `n` preserves `Core`: `Base`, and the new operation is a head
+of the node that made it, where the heads keep what they reached (`hHmono`). -/
+theorem Core.createOp (hI : Core N s) (hn : n < N)
+    (hL : ∀ p ∈ L, (s.node n).lops p) (hLne : L ≠ [])
+    (hHo : H' s.U.next)
+    (hHsub : ∀ y, H' y → (s.node n).heads y ∨ y = s.U.next)
+    (hHanti : ∀ x y, H' x → H' y → Anc (upd s.U.par s.U.next L) x y → x = y)
+    (hHmono : ∀ x h, (s.node n).heads h → Anc s.U.par x h →
+      ∃ h', H' h' ∧ Anc (upd s.U.par s.U.next L) x h') :
+    Core N (s.createOp n L O mg H') := by
+  have hLlt : ∀ p ∈ L, p < s.U.next := fun p hp => hI.lLt n p (hL p hp)
+  have T : ∀ {a x : Nat}, x < s.U.next →
+      (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
+    fun hx => anc_upd_iff hI.parLt hLlt hx
+  refine
+    { toBase := Base.createOp hI.toBase hn hL hLne hHo hHsub hHanti, histStep := ?_,
+      ownInHeads := ?_ }
+  · -- histStep
+    intro i hi
+    have hi' : i < s.hub.seq := hi
+    obtain ⟨h1, h2⟩ := hI.histStep i hi'
+    exact ⟨(T (hI.histLt (by omega))).2 h1, h2⟩
   · -- ownInHeads
     intro i x hx hc
     simp only [createOp_U, create_next, create_creator, create_par] at hx hc ⊢

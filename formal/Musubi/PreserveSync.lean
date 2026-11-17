@@ -43,8 +43,8 @@ variable {s : State} {m : Msg} {S : OSet} {sq h : Nat}
 
 end simpLemmas
 
-/-- The per-node part of `Core`, for a candidate new state `nd` of node `n`. -/
-structure CoreNode (s : State) (n : Nat) (nd : Node) : Prop where
+/-- The per-node part of `Base`, for a candidate new state `nd` of node `n`. -/
+structure BaseNode (s : State) (n : Nat) (nd : Node) : Prop where
   lroot : nd.lops root
   lLt : ∀ x, nd.lops x → x < s.U.next
   lParents : ∀ x p, nd.lops x → p ∈ s.U.par x → nd.lops p
@@ -52,6 +52,9 @@ structure CoreNode (s : State) (n : Nat) (nd : Node) : Prop where
   headsLocal : ∀ x, nd.heads x → nd.lops x
   headsAnti : ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x y → x = y
   headsNonempty : ∃ h, nd.heads h
+
+/-- The per-node part of `Core`. -/
+structure CoreNode (s : State) (n : Nat) (nd : Node) : Prop extends BaseNode s n nd where
   ownInHeads : ∀ x, x < s.U.next → s.U.creator x = some n →
     ∃ h, nd.heads h ∧ Anc s.U.par x h
 
@@ -78,8 +81,8 @@ theorem forall_setNode {s : State} {n : Nat} {nd : Node} {P : Nat → Node → P
   · subst hi; rw [setNode_self]; exact h
   · rw [setNode_ne hi]; exact hs i
 
-/-- Every node of a state satisfying `Core` satisfies `CoreNode` there. -/
-theorem Core.coreNode {s : State} (hI : Core N s) (n : Nat) : CoreNode s n (s.node n) where
+/-- Every node of a state satisfying `Base` satisfies `BaseNode` there. -/
+theorem Base.baseNode {s : State} (hI : Base N s) (n : Nat) : BaseNode s n (s.node n) where
   lroot := hI.lroot n
   lLt := hI.lLt n
   lParents := hI.lParents n
@@ -87,6 +90,9 @@ theorem Core.coreNode {s : State} (hI : Core N s) (n : Nat) : CoreNode s n (s.no
   headsLocal := hI.headsLocal n
   headsAnti := hI.headsAnti n
   headsNonempty := hI.headsNonempty n
+
+theorem Core.coreNode {s : State} (hI : Core N s) (n : Nat) : CoreNode s n (s.node n) where
+  toBaseNode := hI.baseNode n
   ownInHeads := hI.ownInHeads n
 
 theorem Inv.nodeOK {s : State} (hI : Inv N s) (n : Nat) : NodeOK N s n (s.node n) where
@@ -98,9 +104,9 @@ theorem Inv.nodeOK {s : State} (hI : Inv N s) (n : Nat) : NodeOK N s n (s.node n
   comparable := hI.comparable n
   headsMono := fun _ h hh hA => ⟨h, hh, hA⟩
 
-/-- Replacing node `n` by `nd` preserves `Core`. -/
-theorem Core.setNode {s : State} {n : Nat} {nd : Node} (hI : Core N s) (h : CoreNode s n nd) :
-    Core N (s.setNode n nd) :=
+/-- Replacing node `n` by `nd` preserves `Base`. -/
+theorem Base.setNode {s : State} {n : Nat} {nd : Node} (hI : Base N s) (h : BaseNode s n nd) :
+    Base N (s.setNode n nd) :=
   { hI with
     lroot := forall_setNode (P := fun _ nd => nd.lops root) hI.lroot h.lroot
     lLt := forall_setNode (P := fun _ nd => ∀ x, nd.lops x → x < s.U.next) hI.lLt h.lLt
@@ -114,7 +120,13 @@ theorem Core.setNode {s : State} {n : Nat} {nd : Node} (hI : Core N s) (h : Core
       (P := fun _ nd => ∀ x y, nd.heads x → nd.heads y → Anc s.U.par x y → x = y)
       hI.headsAnti h.headsAnti
     headsNonempty := forall_setNode (P := fun _ nd => ∃ h, nd.heads h)
-      hI.headsNonempty h.headsNonempty
+      hI.headsNonempty h.headsNonempty }
+
+/-- Replacing node `n` by `nd` preserves `Core`. -/
+theorem Core.setNode {s : State} {n : Nat} {nd : Node} (hI : Core N s) (h : CoreNode s n nd) :
+    Core N (s.setNode n nd) :=
+  { toBase := hI.toBase.setNode h.toBaseNode
+    histStep := hI.histStep
     ownInHeads := forall_setNode
       (P := fun i nd => ∀ x, x < s.U.next → s.U.creator x = some i → ∃ h, nd.heads h ∧
         Anc s.U.par x h)

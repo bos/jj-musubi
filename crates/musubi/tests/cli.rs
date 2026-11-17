@@ -640,6 +640,189 @@ fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
     terminate(&mut short, &logs);
 }
 
+/// A stale clone and a hive have independently observed rewritten upstream history. An
+/// unavailable origin leaves an actionable warning; rejoining with access fetches a fresh
+/// value, even one neither copy knew, and preserves local work and unsnapshotted files.
+#[test]
+fn joining_fetches_ambiguous_remote_bookmarks() {
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let _filters = snapshot_filters(&env);
+    let hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let source = env.init_repo("source");
+    let origin = env.root().join("origin.git");
+    source.git(&["init", "--quiet", "--bare", origin.to_str().unwrap()]);
+    source.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+    source.write_file("base", "shared history");
+    source.jj(&["commit", "-m", "base"]);
+    source.jj(&["bookmark", "create", "base", "-r", "@-"]);
+    source.write_file("upstream", "first");
+    source.jj(&["commit", "-m", "first"]);
+    source.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    source.jj(&["git", "push", "--bookmark", "main"]);
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_non_colocated_repo("beta");
+    for repo in [&alpha, &beta] {
+        repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+        repo.jj(&["git", "fetch"]);
+        repo.jj(&["bookmark", "track", "main", "--remote", "origin"]);
+        logs.daemon_of(&env, repo);
+        daemons.of(repo);
+    }
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    let old = beta.jj(&["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
+    let change = beta.jj(&["log", "--no-graph", "-r", "main", "-T", "change_id"]);
+    // The incident's exact distinction: rebasing the parent changes main's commit id,
+    // while preserving both its change id and its tree. Beta keeps the obsolete version.
+    alpha.jj(&[
+        "--ignore-immutable",
+        "describe",
+        "-r",
+        "main-",
+        "-m",
+        "rewritten base",
+    ]);
+    let rewritten = alpha.jj(&["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
+    assert_ne!(old, rewritten);
+    assert_eq!(
+        alpha.jj(&["log", "--no-graph", "-r", "main", "-T", "change_id"]),
+        change
+    );
+    assert_eq!(
+        alpha.jj(&["diff", "--from", &old, "--to", &rewritten, "--stat"]),
+        "0 files changed, 0 insertions(+), 0 deletions(-)\n"
+    );
+    alpha.jj(&["new", "main"]);
+    alpha.write_file("later", "later work");
+    alpha.jj(&["commit", "-m", "later work"]);
+    alpha.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    alpha.jj(&["git", "push", "--bookmark", "main"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    beta.jj(&["new", "main"]);
+    beta.write_file("local", "local work");
+    beta.jj(&["describe", "-m", "local work"]);
+    beta.jj(&["bookmark", "create", "work"]);
+    let work = beta.jj(&["log", "--no-graph", "-r", "work", "-T", "change_id"]);
+    let side = env.root().join("beta-side");
+    beta.jj(&[
+        "workspace",
+        "add",
+        "--colocate",
+        "--name",
+        "side",
+        "-r",
+        "work",
+        side.to_str().unwrap(),
+    ]);
+    beta.write_file("unsnapshotted", "still here");
+    // A fresh observation must also handle upstream advancing beyond either snapshot.
+    source.jj(&["git", "fetch"]);
+    source.jj(&["new", "main"]);
+    source.write_file("fresh", "fresh upstream work");
+    source.jj(&["commit", "-m", "fresh upstream work"]);
+    source.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    source.jj(&["git", "push", "--bookmark", "main"]);
+    let expected = source.jj(&["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
+    // The configured URL stays unchanged, so admission succeeds while the fetch cannot.
+    let offline = env.root().join("offline.git");
+    fs::rename(&origin, &offline).unwrap();
+    let mut join = beta.program(musubi());
+    join.args(["join", "--hub", &hub.url]);
+    let (ok, stdout, stderr) = try_run(&logs, &env, join);
+    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
+    insta::assert_snapshot!(stdout, @"Joined hive origin (matched remote origin), 2 machines");
+    insta::assert_snapshot!(stderr, @"
+    Warning: Remote bookmarks for origin remain conflicted after joining.
+    Hint: Run `musubi join` again on a machine with access to that remote.
+    ");
+    let remote = |name: &str| {
+        let template = format!(
+            "if(remote == {name:?}, if(conflict, \"conflict\", normal_target.commit_id()))"
+        );
+        beta.jj(&[
+            "--ignore-working-copy",
+            "bookmark",
+            "list",
+            "--all-remotes",
+            "main",
+            "-T",
+            &template,
+        ])
+    };
+    assert_eq!(remote("origin"), "conflict");
+    fs::rename(&offline, &origin).unwrap();
+    // Literal names must not be parsed as a union, and configured filters must not omit
+    // the bookmark being repaired. Only the secondary workspace is colocated here.
+    beta.jj(&[
+        "--ignore-working-copy",
+        "git",
+        "remote",
+        "rename",
+        "origin",
+        "foo|bar",
+    ]);
+    beta.jj(&[
+        "--ignore-working-copy",
+        "config",
+        "set",
+        "--repo",
+        r#"remotes."foo|bar".fetch-bookmarks"#,
+        "topic-*",
+    ]);
+    let mut retry = beta.program(musubi());
+    retry.arg("join").current_dir(&side);
+    let (ok, stdout, stderr) = try_run(&logs, &env, retry);
+    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(remote("foo|bar"), expected);
+    assert_eq!(
+        beta.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "main",
+            "-T",
+            "commit_id"
+        ]),
+        expected
+    );
+    assert_eq!(
+        beta.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "work",
+            "-T",
+            "change_id"
+        ]),
+        work
+    );
+    assert_eq!(
+        fs::read_to_string(beta.path().join("local")).unwrap(),
+        "local work"
+    );
+    assert_eq!(
+        fs::read_to_string(beta.path().join("unsnapshotted")).unwrap(),
+        "still here"
+    );
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert_eq!(
+        alpha.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            r#"main@"foo|bar""#,
+            "-T",
+            "commit_id"
+        ]),
+        expected
+    );
+}
+
 #[test]
 #[cfg_attr(
     windows,
@@ -1254,7 +1437,10 @@ fn hub_join_sync_clone_and_list() {
     refuses a repository that matches no hive or several, and a fork, which shares history but not a
     remote: choose a hive yourself with `--hive`, or start a new one with `musubi create`. It starts the
     daemon if it isn't running, and returns once the repository has synced. Git remotes and jj config
-    stay local.
+    stay local. A newer descendant of `main` can come from either copy. If remote bookmarks remain
+    conflicted, it tries fetching their remotes once and syncs the result. An unavailable remote leaves
+    a warning; local bookmark differences still merge as jj merges them. Automatic fetches select only
+    conflicted bookmarks, with a 30-second limit per remote.
 
     Remote URLs recorded by explicit joins help match later copies; run `musubi join` again after
     changing them to register equivalent URLs. A name is bound to its fetch and push destinations for

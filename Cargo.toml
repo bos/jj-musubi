@@ -27,6 +27,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Only 4.6: its dynamic completion is unstable, outside semver, so a minor release may break it.
 clap_complete = { version = "~4.6.5", features = ["unstable-dynamic"] }
 clap_complete_nushell = "4.6"
+ctrlc = { version = "3.5.2", features = ["termination"] }
 etcetera = "0.11"
 futures = "0.3.32"
 insta = { version = "1.48", features = ["filters"] }
@@ -38,6 +39,7 @@ jj-lib = { version = "=0.47.1", default-features = false, features = ["git"] }
 notify = "8"
 pollster = "1.0.1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 tempfile = "3"
 termlens = { version = "0.11.10", default-features = false }
 # jj-lib's, so that musubi builds no second copy.

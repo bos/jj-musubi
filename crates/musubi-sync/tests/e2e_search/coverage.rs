@@ -105,6 +105,8 @@ pub const EVENTS: &[&str] = &[
     "prune:stopped",
     "prune:after_restart",
     "join:after_prune",
+    "join:with_history",
+    "join:fetch_conflict",
     "restart_hub:after_prune",
     "hub_goes_back:after_prune",
     "remake_hub:after_prune",
@@ -298,6 +300,18 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "joining_repositories_with_conflicting_bookmarks",
         Some(&["setup:prejoin"]),
     ),
+    (
+        "joining_takes_the_newer_main_from_either_copy",
+        Some(&["join:with_history", "origin_advance", "fetch"]),
+    ),
+    (
+        "joining_fetches_ambiguous_remote_bookmarks",
+        Some(&["join:fetch_conflict"]),
+    ),
+    (
+        "e2e_join_after_upstream_rewrite",
+        Some(&["join:fetch_conflict"]),
+    ),
     ("same_change_rewritten_on_two_machines", Some(&["describe"])),
     (
         "commit_abandoned_while_another_machine_builds_on_it",
@@ -327,8 +341,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["remake_hub", "lose_reply"]),
     ),
     ("joining_with_full_history", Some(&["setup:prejoin"])),
-    // The search's machines with history of their own join before any rule runs; later
-    // ones join empty, as `musubi clone` makes them.
+    // Later joins can bring Git history, but commands on their private operation history
+    // from before admission are not generated.
     (
         "an_operation_from_before_the_join_doesnt_bring_its_history",
         None,

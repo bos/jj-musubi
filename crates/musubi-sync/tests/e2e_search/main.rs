@@ -269,6 +269,42 @@ fn e2e_smoke() {
 }
 
 #[test]
+fn e2e_join_after_upstream_rewrite() {
+    let _report = coverage::Report::new("join-rewrite");
+    join_after_upstream_rewrite(Config::smoke());
+}
+
+/// Reach the ambiguous admission boundary before continuing the ordinary generated walk.
+/// The independent jj replay and import checks must accept the fetch and its replication.
+#[hegel::standalone_function(config.settings())]
+fn join_after_upstream_rewrite(tc: TestCase, config: Config) {
+    let case = coverage::start_case();
+    walk(
+        tc,
+        config,
+        Setup {
+            nodes: 2,
+            naming: Naming::Own,
+            prejoin: false,
+            secondary: false,
+        },
+        |_, world| {
+            world.origin.advance();
+            world.jj(0, &["git", "fetch", "--remote", "origin"]);
+            world.sync(0);
+            world.origin.rewrite();
+            world.join_existing_copy(2);
+            // An ambiguous name would make this native revision lookup fail.
+            world.raw_jj(
+                2,
+                &["log", "--no-graph", "-r", "main@origin", "-T", "commit_id"],
+            );
+        },
+    );
+    case.passed();
+}
+
+#[test]
 fn e2e_search_shard_0() {
     let _report = coverage::Report::new("shard-0");
     search(Config::shard(0));

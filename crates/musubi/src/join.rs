@@ -1,5 +1,7 @@
 //! Creating, joining, and cloning hives, and starting their first sync.
 
+mod fetch;
+
 use std::io::Write as _;
 use std::path::Component;
 use std::path::Path;
@@ -12,6 +14,7 @@ use jj_cli::formatter::FormatterExt as _;
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
@@ -203,7 +206,73 @@ pub fn join(
         writeln!(out, " ({}), {machines}", joined.reason)?;
     }
     drop(out);
-    start_serving(ui, &located, socket)
+    start_serving(ui, &located, socket)?;
+    fetch_join_conflicts(ui, &located, socket)
+}
+
+/// Independent snapshots may describe different observations of rewritten Git history.
+/// Native jj merging already takes forward moves from either copy. For the remaining
+/// ambiguity, obtain a fresh observation rather than ranking machines or commit times.
+fn fetch_join_conflicts(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
+    let mut node = located.open()?;
+    let remotes = node.conflicted_git_bookmarks()?;
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    let workspace = node
+        .colocated_workspace()
+        .map_or_else(|| located.workspace_root.clone(), Path::to_owned);
+    drop(node);
+    for (remote, bookmarks) in &remotes {
+        let mut jj = Process::new("jj");
+        musubi_jj::git_command::without_repository_env(&mut jj);
+        // Use a verified colocated workspace, if one exists, so native jj takes musubi's
+        // Git import/export lock. The primary workspace need not be colocated.
+        jj.current_dir(&workspace).args([
+            // Joining can leave the checkout stale. Fetch only recorded repository state,
+            // preserving the caller's files, including edits not yet snapshotted by jj.
+            "--ignore-working-copy",
+            "git",
+            "fetch",
+            "--remote",
+            &exact_pattern(remote),
+        ]);
+        // Override fetch filters only for the conflicted bookmarks. Both flags accept jj
+        // string expressions, so stored names must be encoded as exact literal patterns.
+        for bookmark in bookmarks {
+            jj.args(["--branch", &exact_pattern(bookmark)]);
+        }
+        // The expected trunk warning disappears when the fetch resolves the bookmark.
+        // If it cannot, the warning below gives a retry that selects the affected refs.
+        let result = ui.while_blocked(&format!("Fetching from {remote}"), || {
+            block_on(async { Ok(fetch::run(jj, Duration::from_secs(30)).await?) })
+        });
+        if let Err(err) = result
+            && err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|err| err.kind() == std::io::ErrorKind::Interrupted)
+        {
+            return Err(err).context("fetch interrupted; the copy remains joined");
+        }
+    }
+    // A failed native call can retain completed effects. Unless interrupted, sync after
+    // failed attempts too, and inspect the resulting state rather than promising resolution.
+    crate::sync::sync(ui, &located.workspace_root, socket)?;
+    for remote in located.open()?.conflicted_git_bookmarks()?.into_keys() {
+        writeln!(
+            ui.warning(),
+            "Remote bookmarks for {remote} remain conflicted after joining."
+        )?;
+        writeln!(
+            ui.hint(),
+            "Run `musubi join` again on a machine with access to that remote."
+        )?;
+    }
+    Ok(())
+}
+
+fn exact_pattern(name: &str) -> String {
+    format!("exact:{}", RefName::new(name).as_symbol())
 }
 /// Asks `hub`, over ssh first making sure this machine's key works there.
 async fn ask_preparing(

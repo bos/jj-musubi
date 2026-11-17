@@ -52,6 +52,8 @@ pub(super) struct NodeGit {
 /// there imports and exports its refs, under jj's lock. musubi exports them too, before an
 /// operation it publishes becomes an op head.
 pub(super) struct Colocation {
+    /// A workspace verified as colocated with this Git repository.
+    workspace_root: PathBuf,
     /// jj's lock on importing and exporting refs.
     lock_path: PathBuf,
     /// The git repository's directory.
@@ -73,9 +75,8 @@ pub(super) const EXPECTED_ATTRIBUTE: &str = "musubi.expected";
 /// A conflicted remote bookmark's git ref, and its expected value.
 type Expectation = (GitRefNameBuf, Option<RefTarget>);
 
-/// Whether the jj repository whose `.jj/repo` directory is `repo_path` is colocated with
-/// `git`, its backend's git repository: whether any of git's working trees, the main one or
-/// one `git worktree add` made, holds one of its workspaces.
+/// A workspace of `repo_path` colocated with `git`, its backend's Git repository: one of
+/// git's working trees, the main one or one `git worktree add` made.
 ///
 /// jj takes a workspace as colocated when git opens a repository at the workspace's root
 /// whose common directory is the backend's, and imports and exports refs there in every
@@ -85,10 +86,10 @@ type Expectation = (GitRefNameBuf, Option<RefTarget>);
 /// but jj still opens it from the directory it is in, so that directory counts too. This differs
 /// from jj's answer only for a working tree moved without `git worktree repair`, where git's
 /// record of it is stale.
-fn is_colocated(git: &gix::Repository, repo_path: &Path) -> bool {
+fn colocated_workspace(git: &gix::Repository, repo_path: &Path) -> Option<PathBuf> {
     use jj_lib::workspace::WorkspaceLoaderFactory as _;
     let Ok(repo_path) = repo_path.canonicalize() else {
-        return false;
+        return None;
     };
     let linked = git.worktrees().unwrap_or_else(|err| {
         tracing::warn!("listing git worktrees of {}: {err}", git.path().display());
@@ -103,9 +104,9 @@ fn is_colocated(git: &gix::Repository, repo_path: &Path) -> bool {
         .chain(beside)
         .map(Path::to_owned)
         .chain(linked.iter().filter_map(|worktree| worktree.base().ok()));
-    roots.any(|root| {
+    roots.find(|root| {
         jj_lib::workspace::DefaultWorkspaceLoaderFactory
-            .create(&root)
+            .create(root)
             .is_ok_and(|loader| {
                 loader
                     .repo_path()
@@ -121,10 +122,11 @@ impl NodeGit {
     pub fn open(executable: &Path, repo_path: &Path, store: &Store) -> Option<Self> {
         let backend = jj_lib::git::get_git_backend(store).ok()?;
         let git_path = backend.git_repo_path();
-        let colocated = is_colocated(&backend.git_repo(), repo_path);
+        let colocated = colocated_workspace(&backend.git_repo(), repo_path);
         Some(Self {
             repo: GitRepo::new(executable, git_path),
-            colocation: colocated.then(|| Colocation {
+            colocation: colocated.map(|workspace_root| Colocation {
+                workspace_root,
                 lock_path: repo_path.join("git_import_export.lock"),
                 git_dir: git_path.to_owned(),
                 expected: Mutex::default(),
@@ -140,6 +142,10 @@ impl NodeGit {
 
     pub fn colocation(&self) -> Option<&Colocation> {
         self.colocation.as_ref()
+    }
+
+    pub fn colocated_workspace(&self) -> Option<&Path> {
+        Some(&self.colocation.as_ref()?.workspace_root)
     }
 
     /// What this repository lacks of its history, if anything: a shallow clone has a
@@ -834,6 +840,14 @@ mod tests {
             assert_eq!(by_jj, expected, "jj, {case}");
             let node = super::super::NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
             assert_eq!(node.colocation().is_some(), expected, "musubi, {case}");
+            assert_eq!(
+                node.colocated_workspace().is_some(),
+                expected,
+                "path, {case}"
+            );
+            if let Some(path) = node.colocated_workspace() {
+                assert!(colocated_by_jj(&repo.another_copy(path)), "selected {case}");
+            }
         }
     }
 }

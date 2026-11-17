@@ -129,6 +129,16 @@ The hub figures out which hive from your repo's history and remotes; you don't n
 Joined hive app (matched remote origin), 2 machines
 ```
 
+A newer descendant of `main` can come from either copy. If the copies have observed different
+rewrites of upstream history, `join` tries fetching the conflicted bookmarks once, with a
+30-second limit per remote, and syncs the result. `create` does the same if its starting repo
+has conflicted remote bookmarks. Neither
+command changes your checkout files. If a remote is unavailable, joining still succeeds and
+prints how to [resolve the remaining conflict][join-conflict].
+Local bookmark differences merge as they do in jj; a fetch can leave those conflicted.
+
+[join-conflict]: ../troubleshooting.md#remote-bookmarks-remain-conflicted-after-joining
+
 If the repo you're trying to join from doesn't match a hive, or matches more than one, `join`
 stops and says why. (See [Joining is refused](../troubleshooting.md#joining-is-refused).)
 

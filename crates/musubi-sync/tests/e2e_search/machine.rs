@@ -729,13 +729,18 @@ impl Search<'_> {
         self.note(&tc);
     }
 
-    /// Another machine joins, with a new copy made by `musubi clone`.
+    /// Another machine joins with an independent Git snapshot, or an empty copy as
+    /// `musubi clone` makes. The existing copy can bring a different upstream observation.
     #[rule]
     fn join(&mut self, tc: TestCase) {
         let m = self.world.nodes();
         tc.assume(m < SEARCH_MACHINES);
         fired("join");
-        self.world.clone_copy(m);
+        if tc.draw(gs::booleans()) {
+            self.world.join_existing_copy(m);
+        } else {
+            self.world.clone_copy(m);
+        }
         self.note(&tc);
     }
 

@@ -75,6 +75,9 @@ pub enum Command {
     /// Without a name, it is refused if the repository belongs in a hive the hub already
     /// has: `musubi join` joins that one. It starts the daemon if it isn't running, and
     /// returns once the repository has synced.
+    /// If remote bookmarks are conflicted, it tries fetching their remotes once and syncs
+    /// the result. An unavailable remote leaves a warning and the conflict intact.
+    /// Automatic fetches select only conflicted bookmarks, with a 30-second limit per remote.
     Create {
         /// The hive's name [default: the repository's name on its forge, from its `origin`
         /// remote, else its first remote, else the name of the directory of the workspace it
@@ -91,6 +94,10 @@ pub enum Command {
     /// which shares history but not a remote: choose a hive yourself with `--hive`, or start
     /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
     /// once the repository has synced. Git remotes and jj config stay local.
+    /// A newer descendant of `main` can come from either copy. If remote bookmarks remain
+    /// conflicted, it tries fetching their remotes once and syncs the result. An unavailable
+    /// remote leaves a warning; local bookmark differences still merge as jj merges them.
+    /// Automatic fetches select only conflicted bookmarks, with a 30-second limit per remote.
     ///
     /// Remote URLs recorded by explicit joins help match later copies; run `musubi join`
     /// again after changing them to register equivalent URLs. A name is bound to its fetch

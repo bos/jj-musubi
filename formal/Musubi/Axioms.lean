@@ -445,6 +445,9 @@ open Musubi
 #assert_axioms Refs.fork_noSpuriousRevert
 #assert_axioms Refs.concurrent_records_revert
 #assert_axioms Refs.TSlot.import_toSlot
+#assert_axioms Refs.TSlot.import_remote
+#assert_axioms Refs.TSlot.import_record
+#assert_axioms Refs.TSlot.import_following
 #assert_axioms Refs.TSlot.import_self
 #assert_axioms Refs.TSlot.track_toSlot
 #assert_axioms Refs.TSlot.exportLocal_toSlot

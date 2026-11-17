@@ -405,6 +405,12 @@ impl NodeRepo {
         self.git.as_ref()?.colocation()
     }
 
+    /// A workspace where native jj takes the same Git import/export lock as musubi.
+    /// This can be a secondary workspace of a non-colocated primary workspace.
+    pub fn colocated_workspace(&self) -> Option<&Path> {
+        self.git.as_ref()?.colocated_workspace()
+    }
+
     /// The commits the stored canonical operations `ops` require, excluding the root commit.
     pub fn required_commits(
         &self,

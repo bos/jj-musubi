@@ -1455,6 +1455,25 @@ suite makes its own recording per build. Neither option changes shipping behavio
 
 ## Per-machine refs
 
+Join repair uses the same native fetch and selected-ref import as ordinary explicit fetches.
+`Refs.TSlot.import_remote` and `import_record` establish that a selected upstream observation
+sets the remote target and its Git record, independently of the previous target or physical
+ref. `import_following` establishes that a tracked local bookmark equal to its remote follows
+that observation; `import_L` keeps local differences subject to jj's merge. The existing
+`RefsModel::import` oracle path checks this computation in `bookmarks_conform_to_refs_model`.
+`joining_fetches_ambiguous_remote_bookmarks` checks the actual command, unavailable upstream,
+retry, a fresh target outside both snapshots, and preservation of local work and files.
+The stale copy holds an obsolete revision with the same change id and tree as its successor.
+It also exercises restricted fetch filters, a remote name containing expression syntax, and
+a non-colocated primary workspace whose secondary workspace is colocated. The native
+`a_stalled_fetch_stops_its_git_descendant` test accepts a real HTTP Git request, advances the
+deadline, and checks socket EOF to establish that the network child stopped too.
+`interrupts_stop_the_fetch_and_still_work_afterwards` sends actual interrupts to a subprocess,
+checking fetch cleanup and termination after the fetch runtime has ended.
+`e2e_join_after_upstream_rewrite` reaches an ambiguous join before continuing the generated
+walk and independent native replay. The model does not order independently cached observations
+by commit or observation timestamps, or assume an entire failed fetch had no effects.
+
 In a colocated repository, each view records what jj last saw in this machine's `.git` (`git_refs`
 and the `git` remote, such as `x@git`). With jj 0.47, an ordinary command imports a ref
 only when its physical Git value differs from `git_refs`; an unchanged ref is an identity step,

@@ -878,16 +878,8 @@ impl<'a> Lanes<'a> {
 
 /// The blobs a reply's attachments refer to, with their lengths.
 fn reply_blobs(reply: &Reply<Vec<u8>, WireAttachment>) -> Vec<(BlobId, u64)> {
-    let attachments: Vec<&WireAttachment> = match reply {
-        Reply::Fetched {
-            ops_attachment,
-            objects,
-            ..
-        } => vec![ops_attachment, objects],
-        Reply::Objects { attachment, .. } => vec![attachment],
-        Reply::Head { .. } | Reply::Refused { .. } => vec![],
-    };
-    attachments
+    reply
+        .attachments()
         .into_iter()
         .filter_map(|attachment| match attachment {
             WireAttachment::Blob { blob, len } => Some((*blob, *len)),

@@ -199,7 +199,6 @@ impl NodeDriver {
 fn log_handled(handled: &Handled<OpId>) {
     match handled {
         Handled::Learned { kind, seq, head } => {
-            let kind = format!("{kind:?}").to_lowercase();
             tracing::debug!("learned the hive's head ({kind}): {seq} ({})", short(head));
         }
         Handled::Fetched { learned, staged } => match learned {

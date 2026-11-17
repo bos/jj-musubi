@@ -497,16 +497,8 @@ fn reaches_end(offset: u64, got: usize, total: u64) -> bool {
 
 /// The uploaded blobs a protocol request names.
 fn request_blobs(request: &WireRequest) -> Vec<BlobId> {
-    let attachments = match request {
-        Request::Fetch { haves, .. } => vec![haves],
-        Request::GetObjects { haves, .. } => vec![haves],
-        Request::Push {
-            ops_attachment,
-            objects,
-            ..
-        } => vec![ops_attachment, objects],
-    };
-    attachments
+    request
+        .attachments()
         .into_iter()
         .filter_map(|attachment| match attachment {
             WireAttachment::Blob { blob, .. } => Some(*blob),
@@ -545,7 +537,6 @@ fn log_reply(reply: &Reply<OpId, Attachment>) {
         Reply::Head {
             kind, seq, head, ..
         } => {
-            let kind = format!("{kind:?}").to_lowercase();
             tracing::debug!("answered {kind}: {seq} ({})", short(head));
         }
         Reply::Fetched { seq, head, ops, .. } => tracing::debug!(

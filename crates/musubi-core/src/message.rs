@@ -22,6 +22,19 @@ pub enum HeadKind {
     Notify,
 }
 
+/// The lowercase name logs use.
+impl std::fmt::Display for HeadKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Head => "head",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Incomplete => "incomplete",
+            Self::Notify => "notify",
+        })
+    }
+}
+
 /// A `(seq, head)` pair: the hub's `seq`th head, `head`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Head<O> {
@@ -89,6 +102,21 @@ pub enum Request<O, A> {
     },
 }
 
+impl<O, A> Request<O, A> {
+    /// Every attachment the request carries, in field order. Code that only needs to see the
+    /// attachments uses this, so that a new variant is listed here and nowhere else.
+    pub fn attachments(&self) -> Vec<&A> {
+        match self {
+            Self::Fetch { haves, .. } | Self::GetObjects { haves, .. } => vec![haves],
+            Self::Push {
+                ops_attachment,
+                objects,
+                ..
+            } => vec![ops_attachment, objects],
+        }
+    }
+}
+
 /// An operation in a [`Reply::Fetched`] reply, with its parents, so the node can check it
 /// is an ancestor of the head before staging it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,4 +161,19 @@ pub enum Reply<O, A> {
         for_ops: Vec<O>,
         attachment: A,
     },
+}
+
+impl<O, A> Reply<O, A> {
+    /// Every attachment the reply carries, in field order; see [`Request::attachments`].
+    pub fn attachments(&self) -> Vec<&A> {
+        match self {
+            Self::Fetched {
+                ops_attachment,
+                objects,
+                ..
+            } => vec![ops_attachment, objects],
+            Self::Objects { attachment, .. } => vec![attachment],
+            Self::Head { .. } | Self::Refused { .. } => vec![],
+        }
+    }
 }

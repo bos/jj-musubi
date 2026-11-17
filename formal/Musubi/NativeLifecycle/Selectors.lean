@@ -269,10 +269,32 @@ def rootBase (e : Evidence) (fuel : Nat) (saved : Persistent) (receipt : Option 
     if r.switched then return false
     return (← preparedBase e fuel saved r) == some e.root
 
+/-- Whether the records being taken drop one of `heads`, the current op heads, by immutable
+original: the readable records after the common prefix, and records in custody that they lack.
+What moving the heads leaves in a dropped head's place is below it, without its changes to this
+copy's Git record, such as the HEAD its commit recorded. A head with no canonical identity, as
+a native command's not yet translated, is never dropped. Rust's `taking_drops_a_head` tests the
+head's canonical id against a dropped set holding every local version of each dropped original,
+which is this test by original. -/
+def dropsHead (e : Evidence) (saved : Persistent) (heads : List Physical)
+    (receipt : Option Receipt) : Bool :=
+  match receipt with
+  | none => false
+  | some r =>
+    let common := if saved.recordPrefix = r.recordPrefix ∧ saved.prunedCount = r.prunedCount then
+      ((saved.applied.zip r.records).takeWhile (fun pair => decide (pair.1 = pair.2))).length
+      else 0
+    let held := r.recordPrefix :: r.records.map (·.identity)
+    let dropped := (r.records.drop common).flatMap (·.drops) ++
+      (saved.custody.filter (fun record => !held.contains record.identity)).flatMap (·.drops)
+    !r.switched && heads.any fun head =>
+      e.identities.any fun row => decide (row.physical = head) && dropped.contains row.original
+
 structure GitChoice where
   currentOwned : Bindings
   targetOwned : Bindings
   rootBase : Bool
+  dropsHead : Bool
   known : Bool
   present : Bool
   overlap : Bool
@@ -287,12 +309,13 @@ def gitChoice (e : Evidence) (fuel : Nat) (me : Copy) (heads : List Physical)
   let canonical ← e.identity target
   let p ← presence e fuel canonical
   let root ← rootBase e fuel saved receipt
+  let drops := dropsHead e saved heads receipt
   let overlap := currentOwned.any (fun row => (lookup targetOwned row.1).isSome)
   let known := p.known.contains me
   let isPresent := present p me
   return {
-    currentOwned, targetOwned, rootBase := root, known, present := isPresent, overlap,
-    useCurrent := root || (known && !isPresent && overlap) }
+    currentOwned, targetOwned, rootBase := root, dropsHead := drops, known,
+    present := isPresent, overlap, useCurrent := root || drops || (known && !isPresent && overlap) }
 
 inductive Role where
   | rendered

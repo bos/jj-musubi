@@ -2594,6 +2594,20 @@ fn newest_of(repo: &musubi_testutil::TestRepo, machine: &str) -> String {
         .unwrap()
 }
 
+/// Each workspace's Git HEAD as `node`'s single op head records it: what its next `jj`
+/// command compares with `.git`.
+fn head_git_heads(
+    node: &musubi_jj::node::NodeRepo,
+) -> BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::op_store::RefTarget> {
+    let heads = node.local_heads().unwrap();
+    assert_eq!(heads.len(), 1, "one op head: {heads:?}");
+    let store = node.loader().op_store();
+    let op = futures::executor::block_on(store.read_operation(&heads[0].0)).unwrap();
+    futures::executor::block_on(store.read_view(&op.view_id))
+        .unwrap()
+        .git_heads
+}
+
 /// Whether `repo`'s op log has an operation described as `description`.
 fn has_operation(repo: &musubi_testutil::TestRepo, description: &str) -> bool {
     op_log(repo).iter().any(|(_, d)| d == description)
@@ -4751,19 +4765,9 @@ fn a_trim_below_an_accepted_push_keeps_the_other_copy_present() {
 #[test]
 fn a_second_trim_keeps_git_state_with_a_cached_root_realization() {
     use musubi_core::node::Step;
-    use musubi_jj::node::NodeRepo;
     use musubi_jj::op_id::LocalOp;
     use musubi_jj::records::HubOp;
 
-    let fields = |node: &NodeRepo| {
-        let heads = node.local_heads().unwrap();
-        assert_eq!(heads.len(), 1);
-        let store = node.loader().op_store();
-        let op = futures::executor::block_on(store.read_operation(&heads[0].0)).unwrap();
-        futures::executor::block_on(store.read_view(&op.view_id))
-            .unwrap()
-            .git_heads
-    };
     let mut hive = Fixture::new(&["alpha", "beta"]);
     let joined = op_log(hive.repo(0))[0].0.clone();
     hive.commit(0, "a", "alpha's surviving branch");
@@ -4803,14 +4807,47 @@ fn a_second_trim_keeps_git_state_with_a_cached_root_realization() {
     }
     assert!(hive.node(1).local_of(&snapshot).is_some());
     hive.node(1).settle().unwrap();
-    let before = fields(hive.node(1));
+    let before = head_git_heads(hive.node(1));
     assert!(!before.is_empty(), "beta has recorded its Git HEAD");
 
     let beta = op_described(hive.repo(0), &beta_description);
     hive.repo(0).jj(&["op", "abandon", &format!("..{beta}")]);
     hive.hive.sync(0).unwrap();
     hive.hive.sync(1).unwrap();
-    assert_eq!(fields(hive.node(1)), before);
+    assert_eq!(head_git_heads(hive.node(1)), before);
+}
+
+/// Another machine's `jj op abandon` of this machine's latest operation, the one that
+/// recorded its Git HEAD, keeps that record here, as jj's own abandon keeps the views after
+/// what it drops: this machine's next `jj` command imports nothing. Fails if the operation
+/// taking the abandon inherits its Git record from the surviving parent, which lacks the HEAD:
+/// `jj status` then imports HEAD as moved by git and replaces the working-copy commit.
+#[test]
+fn abandoning_another_machines_latest_operation_keeps_its_git_head() {
+    let working_copy = |hive: &Fixture| {
+        hive.repo(1)
+            .jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+    };
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "beta's commit");
+    let commit = op_log(hive.repo(1))[0].1.clone();
+    assert!(commit.starts_with("commit "), "{commit}");
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync(0).unwrap();
+    // So that beta's operation is no longer alpha's latest.
+    hive.commit(0, "a", "alpha's commit");
+    let before = head_git_heads(hive.node(1));
+    assert!(!before.is_empty(), "beta has recorded its Git HEAD");
+    let at = working_copy(&hive);
+
+    let abandoned = op_described(hive.repo(0), &commit);
+    hive.repo(0).jj(&["op", "abandon", &abandoned]);
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    assert_eq!(head_git_heads(hive.node(1)), before);
+    assert_eq!(working_copy(&hive), at);
+    assert!(!has_operation(hive.repo(1), "import git head"));
+    assert!(!has_operation(hive.repo(1), &commit));
 }
 
 /// The hub doesn't wait for a copy the hive has forgotten, though its daemon goes on saying

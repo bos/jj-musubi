@@ -182,23 +182,16 @@ fn restore_a_conflicted_remote_bookmark(settled: &str, abandon: Abandon) {
         );
     }
 
-    // The remote ref still matches git_refs, so ordinary commands leave its conflict alone.
+    // The refs still match git_refs, so ordinary commands leave the conflicts alone. So too
+    // on the other machine where the abandon drops its op head, its realization of the fetch:
+    // taking the abandon keeps the record of `.git` that head held.
     for index in [HERE, THERE] {
         let before = y(&f, index);
         f.repo(index).jj(&["status"]);
         let (local, remote, git_local, git_remote) = y(&f, index);
         assert_eq!(remote, before.1, "remote conflict unchanged on {index}");
         assert_eq!((git_local, git_remote), (before.2, before.3));
-        // These fix-ups merge a different local branch record on the other machine.
-        // Its import can settle y while leaving the unchanged remote ref conflicted.
-        let expected_local = if index == THERE
-            && matches!(abandon, Abandon::Fetch | Abandon::FetchThenAnEarlierOne)
-        {
-            normal(&settled)
-        } else {
-            before.0
-        };
-        assert_eq!(local, expected_local, "local bookmark on {index}");
+        assert_eq!(local, before.0, "local bookmark on {index}");
     }
     f.assert_converged();
     // A fetch imports its result even though the physical ref is unchanged.

@@ -118,6 +118,25 @@ private def taking : Receipt := { receipt with identity := 1, records := [drop] 
   (some { taking with capturedHeads := [p 3] })).map
     (fun choice => (choice.overlap, choice.rootBase, choice.useCurrent)) = .ok (false, true, true)
 
+private def dropHead : Record := { before := 0, identity := 2, drops := [o 3] }
+private def takingHead : Receipt :=
+  { receipt with identity := 2, records := [dropHead], capturedHeads := [p 3] }
+
+-- Records that drop a current op head, by its original, decide it too, even where the base
+-- survives: what replaces the head lacks the Git record it made. A switched receipt, or a
+-- head the records keep, leaves the choice to the other rules.
+#guard dropsHead evidence saved [p 3] (some takingHead) = true
+#guard dropsHead evidence saved [p 1] (some takingHead) = false
+#guard dropsHead evidence saved [p 3] (some { takingHead with switched := true }) = false
+#guard dropsHead evidence saved [p 3] none = false
+-- A record this copy took already drops nothing new; one in custody the receipt lacks does.
+#guard dropsHead evidence { saved with applied := [dropHead] } [p 3] (some takingHead) = false
+#guard dropsHead evidence { saved with custody := [dropHead] } [p 3]
+  (some { takingHead with records := [] }) = true
+#guard (gitChoice evidence 30 me [p 3] (p 2) saved (some takingHead)).map
+    (fun choice => (choice.overlap, choice.rootBase, choice.dropsHead, choice.useCurrent)) =
+  .ok (false, false, true, true)
+
 private def state : State :=
   { me, evidence, heads := [p 1], saved }
 private def namedWrite : BodyWrite :=
@@ -766,7 +785,7 @@ private def refreshState : State :=
       selections := { choices := [(c 1, .selected .published (p 1))] },
       own := { source := .canonicalSlots, bindings := [] }, reserved := [], inputs := refreshInputs },
     git := some {
-      currentOwned := [], targetOwned := [], rootBase := false, known := true,
+      currentOwned := [], targetOwned := [], rootBase := false, dropsHead := false, known := true,
       present := false, overlap := true, useCurrent := true },
     publication := some { incoming := p 70, beside := [p 4], mergeBeforeExport := true } }
 

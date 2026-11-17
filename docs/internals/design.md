@@ -1097,21 +1097,24 @@ machine may have taken the push first, and would push it again. That costs a rec
 
 ### Taking the hub's
 
-If the prepared base is the root, because a trim removed the old base or the hub lost records
-this copy held, publication carries the current physical heads' per-machine Git fields into
-the incoming local tips, merged as jj merges those heads. The root has none of this copy's
-Git state. This happens after realization, under the colocated lock: a realization may be
-cached from before the records arrived, or a jj command may have changed Git state since it
-was made. Shared views and parents stay as the contraction names them. If other heads remain,
-their shared payloads are merged before the first export. Exporting the incoming tip first could
-move Git backward, then merge its record forward without writing Git again. A failed merge
-publishes nothing. The next jj command therefore does not import unchanged Git refs or HEAD
-as moves. An incoming tip where this copy is known but forgotten has the same missing authority
-for its private Git record, even with a non-root accepted base. If that tip retains a currently
-owned private workspace, publication refreshes its complete Git record from the current physical
-heads too. Ownership comes from the tip's qualified local bindings, not matching names alone;
-other incoming tips keep their normal inheritance. Ordinary realization still inherits its
-parents' per-machine fields.
+If the prepared base is the root, because a trim removed the old base or the hub lost records this
+copy held, publication carries the current physical heads' per-machine Git fields into the
+incoming local tips, merged as jj merges those heads. The root has none of this copy's Git state.
+So too where the records drop one of this copy's op heads, as another machine's `jj op abandon` of
+this machine's latest operation does: what takes its place is below it, without the Git record
+that operation made, such as its commit's HEAD, which jj's own abandon keeps in the views after
+it. Either way, this happens after realization, under the colocated lock: a realization may be
+cached from before the records arrived, or a jj command may have changed Git state since it was
+made. Shared views and parents stay as the contraction names them. If other heads remain, their
+shared payloads are merged before the first export. Exporting the incoming tip first could move
+Git backward, then merge its record forward without writing Git again. A failed merge publishes
+nothing. The next jj command therefore does not import unchanged Git refs or HEAD as moves. An
+incoming tip where this copy is known but forgotten has the same missing authority for its private
+Git record, even with a non-root accepted base. If that tip retains a currently owned private
+workspace, publication refreshes its complete Git record from the current physical heads too.
+Ownership comes from the tip's qualified local bindings, not matching names alone; other incoming
+tips keep their normal inheritance. Ordinary realization still inherits its parents' per-machine
+fields.
 
 The hub keeps the dropped sets it took, in order, each a *record* naming operations by the ids
 they had before it. A machine that lacks some of the hub's records applies them in order. It

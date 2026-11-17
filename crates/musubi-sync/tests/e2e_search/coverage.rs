@@ -340,6 +340,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
     (
+        "abandoning_another_machines_latest_operation_keeps_its_git_head",
+        Some(&["commit", "op_abandon"]),
+    ),
+    (
         "a_trim_above_a_dropped_base_keeps_materialized_work",
         Some(&["op_abandon", "crash", "trim_below_accepted_push"]),
     ),

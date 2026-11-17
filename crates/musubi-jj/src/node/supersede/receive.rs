@@ -520,6 +520,25 @@ impl NodeRepo {
         }))
     }
 
+    /// Whether the records being taken drop one of `heads`, this machine's op heads. What
+    /// moving the op heads leaves in its place is below it, so lacks any change it made to
+    /// this copy's record of Git, as its own commit's HEAD: publication must retain the
+    /// record the op heads hold, as jj's own `jj op abandon` keeps the views after what it
+    /// drops.
+    pub(in super::super) fn taking_drops_a_head(
+        &mut self,
+        heads: &[LocalOp],
+    ) -> Result<bool, NodeError> {
+        self.prepare_again_if_moved()?;
+        Ok(self.records.taking.as_ref().is_some_and(|taking| {
+            !taking.switched
+                && heads.iter().any(|head| {
+                    self.canonical_of(head)
+                        .is_some_and(|canonical| taking.dropped.contains(&canonical))
+                })
+        }))
+    }
+
     /// The op heads that moving them where the records being taken name them leaves beside
     /// `head`, as they name them: `max(images(heads) ∪ {head}) \ {head}`. Empty if no records
     /// are being taken, or the op heads are there already.

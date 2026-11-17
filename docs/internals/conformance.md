@@ -1187,7 +1187,14 @@ HEAD through the independent import checker; `e2e_git_change_while_taking_a_trim
 bookmark after realization, and
 `history::a_second_trim_keeps_git_state_with_a_cached_root_realization`
 checks a detached cached root child across two trims. An earlier realization-time fallback
-failed the latter two cases.
+failed the latter two cases. Records that drop a current op head need the same, with any
+base: `history::abandoning_another_machines_latest_operation_keeps_its_git_head` has another
+machine abandon this one's latest operation (a commit), and checks its recorded HEAD and
+working-copy commit before and after its next `jj` command. Inheriting from the surviving
+parent fails it. `AbandonRefs.lean` already took the machine's slot from its own head, dropped
+or not (`History.current`); the code had departed from it. `NativeLifecycle`'s `gitChoice` adds
+the same `dropsHead` condition to `useCurrent`, with `#guard` examples; no oracle fixture yet
+observes a dropped head.
 `history::a_forward_bookmark_survives_a_command_inside_a_trim_advance` places a real command
 between policy preparation and native advance, without a second policy step that would
 adopt the records first. Before any import or convergence it checks the published bookmark,

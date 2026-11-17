@@ -406,14 +406,18 @@ impl NodeRepo {
         // root-based cached realization may have no Git fields, or ones from before a
         // concurrent command. Taking a trim must change neither this copy's record of Git
         // nor its physical Git state merely because that record's old ancestry disappeared.
-        // A known forgotten copy with retained private workspaces has the same missing
-        // shared authority even when its saved accepted base is non-root. Use its actual current
-        // Git bookkeeping, and merge shared payloads before the export below.
+        // So too for records that drop an op head, as another machine's `jj op abandon` of
+        // this machine's latest operation does: the realization is on what was below it,
+        // without the HEAD its commit recorded. A known forgotten copy with retained private
+        // workspaces has the same missing shared authority even when its saved accepted base
+        // is non-root. Use its actual current Git bookkeeping, and merge shared payloads
+        // before the export below.
         let sources = self.local_heads()?;
         #[cfg(test)]
         native_contract::emit(native_contract::Event::Sources(sources.clone()));
+        let carried = root_base || self.taking_drops_a_head(&sources)?;
         let mut private = vec![false; left.len()];
-        if !root_base {
+        if !carried {
             let absent = left
                 .iter()
                 .map(|id| {
@@ -436,11 +440,11 @@ impl NodeRepo {
                 }
             }
         }
-        let current_git = root_base || private.iter().any(|kept| *kept);
+        let current_git = carried || private.iter().any(|kept| *kept);
         if current_git {
             let fields = self.inherited_per_machine(&sources)?;
             for (i, (canonical, local)) in left.iter().zip(&mut realized).enumerate() {
-                if root_base || private[i] {
+                if carried || private[i] {
                     #[cfg(test)]
                     let source_before = native_contract::observer()
                         .map(|_| (local.clone(), self.native_identity_snapshot()));
@@ -489,10 +493,10 @@ impl NodeRepo {
         }
         let colocation = self.colocation();
         let pending = self.pending_expected();
-        // A root-based transition carries the current heads' Git records, rather than a
-        // shared ancestor's. Merge its shared payload before exporting: exporting the
-        // incoming tip first could move Git backward, then merge its record forward without
-        // writing Git again. Other realizations export beside the heads as usual.
+        // A transition that carries the current heads' Git records, rather than a shared
+        // ancestor's, merges its shared payload before exporting: exporting the incoming tip
+        // first could move Git backward, then merge its record forward without writing Git
+        // again. Other realizations export beside the heads as usual.
         let merge_before_export = current_git && !merging.is_empty();
         let head = match colocation {
             Some(colocation) if !merge_before_export => colocation.export_refs(

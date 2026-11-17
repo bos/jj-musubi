@@ -775,11 +775,12 @@ For unpublished surviving work, selecting its pre-trim state is another native o
 `history::a_trim_below_an_accepted_forget_keeps_the_copy_forgotten` checks a maximal accepted
 frontier in both orders of saved base and own push. `pres_eq` does not select that frontier.
 
-Root-based native publication also selects current local Git state independently of the
+Root-based native publication, and publication while taking records that drop a current op
+head (`NativeLifecycle` `dropsHead`), also select current local Git state independently of the
 contracted shared ancestry. `Refs.lean` preserves supplied local slots, and
 `AbandonRefs.publish_refines` uses its normalized common-base slot; neither proves this
 native source selection, cache refresh, or Git HEAD handling. The trim, concurrent bookmark
-change and cached-root regressions described in
+change, cached-root and dropped-head regressions described in
 [conformance](../docs/internals/conformance.md#presence)
 check those boundaries against real repositories and the independent import checker.
 The within-step forward-bookmark regression also compares immediate native publication with

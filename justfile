@@ -246,6 +246,7 @@ mutants-adapter *args: oracle
     # What the defaulted LocalRepo methods do, which the core's model leaves out.
     filter+=' | test(=history::lost_records_follow_an_older_name_the_receiver_never_held)'
     filter+=' | test(=history::record_bodies_keep_pending_drops_named_after_hub_rollback)'
+    filter+=' | test(=history::records_fetched_without_operations_keep_their_bodies)'
     filter+=' | test(=history::received_records_survive_departure_and_drop_local_aliases)'
     filter+=' | test(=history::lost_received_records_preserve_work_before_the_fixup_arrives)'
     filter+=' | test(=history::abandoning_a_push_the_hub_just_accepted_drops_it)'

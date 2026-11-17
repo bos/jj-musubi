@@ -5442,10 +5442,15 @@ fn a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup() {
     ));
 }
 
-#[test]
-fn record_bodies_keep_pending_drops_named_after_hub_rollback() {
-    use jj_lib::object_id::ObjectId as _;
-    use musubi_core::hub::HubStorage as _;
+/// Alpha publishes `a` and then `p0`, which gamma takes, then drops `p0` while keeping later
+/// work. Beta has not synced at all, so its next fetch brings a record naming `p0`, an
+/// operation it never held. Returns the hub's seq before `a`, `p0`, and gamma's `a`.
+fn beta_next_fetches_a_record_of_an_operation_it_never_held() -> (
+    Fixture,
+    u64,
+    jj_lib::op_store::OperationId,
+    musubi_jj::op_id::LocalOp,
+) {
     use musubi_core::node::LocalRepo as _;
     use musubi_jj::op_id::CanonicalOp;
 
@@ -5473,6 +5478,18 @@ fn record_bodies_keep_pending_drops_named_after_hub_rollback() {
             .iter()
             .any(|r| r.ops().iter().any(|op| op.0.0 == p0))
     );
+    (hive, before_a, p0, a_gamma)
+}
+
+#[test]
+fn record_bodies_keep_pending_drops_named_after_hub_rollback() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let (mut hive, before_a, p0, a_gamma) =
+        beta_next_fetches_a_record_of_an_operation_it_never_held();
     hive.hive.sync(1).unwrap();
     assert_eq!(
         hive.hive.members[1].adapter.records().unwrap(),
@@ -5535,6 +5552,61 @@ fn record_bodies_keep_pending_drops_named_after_hub_rollback() {
         hive.hive.hub.records()
     );
     assert!(!hive.hive.hub.store().is_accepted(&p1));
+    assert!(
+        hive.node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p0))
+    );
+}
+
+/// A fetch that brings new records but stages no operations, as for a node that holds the
+/// hub's head already, still keeps the bodies the records name: nothing else imports its
+/// bundle, and without them the node can never take the records.
+#[test]
+fn records_fetched_without_operations_keep_their_bodies() {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let (mut hive, _, p0, _) = beta_next_fetches_a_record_of_an_operation_it_never_held();
+    let mut emptied = false;
+    let taken = hive
+        .hive
+        .sync_steps(1, 24, &mut |_, reply| match reply {
+            Reply::Fetched {
+                seq,
+                head,
+                ops,
+                ops_attachment,
+                objects,
+                records,
+                records_from,
+                new_records,
+                pruned,
+            } if !emptied && !new_records.is_empty() => {
+                assert!(!ops.is_empty());
+                emptied = true;
+                Reply::Fetched {
+                    seq,
+                    head,
+                    ops: vec![],
+                    ops_attachment,
+                    objects,
+                    records,
+                    records_from,
+                    new_records,
+                    pruned,
+                }
+            }
+            reply => reply,
+        })
+        .unwrap();
+    assert!(emptied);
+    assert!(taken < 24, "beta did not finish taking the records");
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
     assert!(
         hive.node(1)
             .canonical_store()

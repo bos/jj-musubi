@@ -375,6 +375,7 @@ names of one original. The following real-repository tests cover those boundarie
 | `taking_an_abandon_resumes_where_it_stopped` | Resume before the hold save, after it, after adding new heads, and after moving heads but before workspaces. Recover the saved exact move through cache loss while preserving newer commands or abandons and all images of a dropped merge. A multi-image working-copy rewrite has no unique single target. |
 | `a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup` | Advance to take prepared records even when the receiver already descends from the hub head. An accepted head can be an ancestor of a dropped operation. A finite core regression pins the same choice. |
 | `record_bodies_keep_pending_drops_named_after_hub_rollback` | Retain metadata for a drop never realized locally, rename it and publish the actual new raw target. `record_metadata_arrives_without_current_operations_or_parent_views` separately checks record-only bundle custody, ordering, deduplication and refusal of missing names. |
+| `records_fetched_without_operations_keep_their_bodies` | Keep the bodies a fetch's records name when it stages no operations, as for a receiver at the hub's head, so that the receiver can take the records. |
 | `lost_records_follow_an_older_name_the_receiver_never_held` | Normalize pending names after local abandon discovery and again when lost records become pending, even without another fetch. Publish the older target and supply its metadata to a remade hub. |
 | `received_records_survive_departure_and_drop_local_aliases` | Save custody before preparation writes local operations; recover received drops after the producer leaves and the hub rolls back. Retain off-frontier aliases across reopening and consume receipts even when applied records are unchanged. |
 
@@ -742,6 +743,7 @@ production boundary, rather than by changing a protocol fake:
 | Repair replays old time over surviving work | [Offline trim regression][native-ancestry] |
 | The hub finds a record count's digest by an unchecked subtraction of its pruned count | `history::a_forgotten_copy_behind_pruned_records_stops`: a fetch from behind the pruned records underflows in `records_since` |
 | The hub answers a fetch from any count it has, ignoring the digest | `history::record_bodies_keep_pending_drops_named_after_hub_rollback` and six other race tests |
+| The node takes a fetch's records without importing the bodies they name (`store_record_ops` returns `Ok(())`) | `history::records_fetched_without_operations_keep_their_bodies`: with no operations to stage, nothing imports the bundle, and preparing the records fails |
 | An import, on either backend, skips its check that the objects wanted are all present | `translation::an_import_missing_wanted_commits_fails` |
 
 [stream-failures]: ../../crates/musubi-transport/src/stream.rs

@@ -122,6 +122,31 @@ fn kind_name(kind: HeadKind) -> &'static str {
     }
 }
 
+/// One line for a recorded model action or harness marker: its kind, then its other fields as
+/// `name=value`. A case records hundreds of actions, which `{:#?}` spread over thousands of
+/// lines.
+fn compact_action(action: &Value) -> String {
+    let Some(fields) = action.as_object() else {
+        return action.to_string();
+    };
+    let plain = |value: &Value| {
+        value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_string)
+    };
+    let mut line: Vec<String> = ["kind", "marker"]
+        .iter()
+        .filter_map(|name| fields.get(*name).map(plain))
+        .collect();
+    line.extend(
+        fields
+            .iter()
+            .filter(|(name, _)| *name != "kind" && *name != "marker")
+            .map(|(name, value)| format!("{name}={}", plain(value))),
+    );
+    line.join(" ")
+}
+
 fn sorted(items: impl IntoIterator<Item = u64>) -> Vec<u64> {
     items
         .into_iter()
@@ -166,6 +191,12 @@ impl World {
 
     pub fn nodes(&self) -> usize {
         self.repos.len()
+    }
+
+    /// The trace so far, one line per model action or harness marker, for a failure.
+    pub fn compact_trace(&self) -> String {
+        let lines: Vec<String> = self.trace.iter().map(compact_action).collect();
+        lines.join("\n")
     }
 
     pub fn local_ops(&self, node: usize) -> Vec<Op> {
@@ -222,8 +253,8 @@ impl World {
         for action in &actions {
             state = oracle.step(action).unwrap_or_else(|error| {
                 panic!(
-                    "the Lean model rejects {action}: {error}\ntrace: {:#?}",
-                    self.trace
+                    "the Lean model rejects {action}: {error}\ntrace:\n{}",
+                    self.compact_trace()
                 )
             });
         }
@@ -472,8 +503,8 @@ impl World {
         assert_eq!(
             (sorted(ops.iter().copied()), sorted(objects.iter().copied())),
             (up_ops, up_objs),
-            "node {node}'s push of {new} does not upload upOps and upObjs\ntrace: {:#?}",
-            self.trace
+            "node {node}'s push of {new} does not upload upOps and upObjs\ntrace:\n{}",
+            self.compact_trace()
         );
     }
 
@@ -1165,8 +1196,8 @@ impl World {
                 if let Some(measure) = self.measure() {
                     assert!(
                         measure.converged,
-                        "converged, but not in the Lean model\ntrace: {:#?}",
-                        self.trace
+                        "converged, but not in the Lean model\ntrace:\n{}",
+                        self.compact_trace()
                     );
                 }
                 let univ = self.univ.borrow();
@@ -1185,7 +1216,10 @@ impl World {
                 return;
             }
         }
-        panic!("did not converge after quiescing\ntrace: {:#?}", self.trace);
+        panic!(
+            "did not converge after quiescing\ntrace:\n{}",
+            self.compact_trace()
+        );
     }
 
     /// The oracle's measures of the current state, with an oracle.
@@ -1253,17 +1287,17 @@ impl World {
         let what = if changed { "fall" } else { "stay or fall" };
         assert!(
             self.went_back || self.dropped_any || fell(&old.measure, &new.measure),
-            "node {node}'s exchange did not make the measure {what}: {:?} to {:?}\ntrace: {:#?}",
+            "node {node}'s exchange did not make the measure {what}: {:?} to {:?}\ntrace:\n{}",
             old.measure,
             new.measure,
-            self.trace
+            self.compact_trace()
         );
         assert!(
             self.dropped_any || fell(&old.rmeasure, &new.rmeasure),
-            "node {node}'s exchange did not make rmeasure {what}: {:?} to {:?}\ntrace: {:#?}",
+            "node {node}'s exchange did not make rmeasure {what}: {:?} to {:?}\ntrace:\n{}",
             old.rmeasure,
             new.rmeasure,
-            self.trace
+            self.compact_trace()
         );
         let what = if changed || records_changed {
             "fall"
@@ -1276,10 +1310,10 @@ impl World {
             } else {
                 new.smeasure <= old.smeasure
             },
-            "node {node}'s exchange did not make the record measure {what}: {:?} to {:?}\ntrace: {:#?}",
+            "node {node}'s exchange did not make the record measure {what}: {:?} to {:?}\ntrace:\n{}",
             old.smeasure,
             new.smeasure,
-            self.trace
+            self.compact_trace()
         );
     }
 

@@ -12,6 +12,8 @@ mod support;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::convert::Infallible;
+use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
 use hegel::TestCase;
@@ -47,8 +49,104 @@ struct Machine {
     environment: Environment,
 }
 
-fn pick(tc: &TestCase, len: usize) -> usize {
-    tc.draw(gs::integers::<usize>().max_value(len - 1))
+/// How many crashes a case may have, the prefix's among them.
+const CRASHES: usize = 3;
+
+/// A crash, or a hub that loses what a crash can make it lose. The first is the one a
+/// failure shrinks to.
+#[derive(Clone, Copy, Debug)]
+enum Crash {
+    /// A node, keeping only its persistent state.
+    Node,
+    /// A node partway through taking in a fetch.
+    NodeMidFetch,
+    /// The hub, keeping only its persistent state.
+    Hub,
+    /// The hub goes back to an earlier head, as a power cut that loses the last heads it
+    /// accepted would.
+    HubGoesBack,
+    /// The hub drops what lies outside `closure(head)`.
+    HubForgets,
+    /// The hive is made again, empty, as the hub does one whose store is corrupt.
+    Remake,
+}
+
+/// Which head a lying hub's reply is about.
+#[derive(Clone, Copy, Debug)]
+enum LieAbout {
+    /// The head the node knows, so only the reachability check stands between the node and
+    /// the lie.
+    KnownHead,
+    /// Another head.
+    AnotherHead,
+    /// The operation itself, so that it reaches itself and only the check that the reply is
+    /// about the known head stands.
+    Itself,
+}
+
+/// Which kind of reply a buggy hub sends.
+#[derive(Clone, Copy, Debug)]
+enum FalseReply {
+    Head,
+    Fetched,
+    Objects,
+}
+
+/// The sequence number a false reply carries: near the node's or the hub's, or the largest.
+#[derive(Clone, Copy, Debug)]
+enum Seq {
+    At(SeqOf),
+    Below(SeqOf),
+    Above(SeqOf),
+    Largest,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SeqOf {
+    Node,
+    Hub,
+}
+
+impl Seq {
+    /// `Largest` is listed twice so that a quarter of false replies carry `u64::MAX`, which no
+    /// node's or hub's sequence number comes near.
+    const ALL: [Self; 8] = [
+        Self::At(SeqOf::Node),
+        Self::At(SeqOf::Hub),
+        Self::Below(SeqOf::Node),
+        Self::Below(SeqOf::Hub),
+        Self::Above(SeqOf::Node),
+        Self::Above(SeqOf::Hub),
+        Self::Largest,
+        Self::Largest,
+    ];
+
+    fn value(self, world: &World, node: usize) -> u64 {
+        let of = |of: SeqOf| match of {
+            SeqOf::Node => world.known(node).0,
+            SeqOf::Hub => world.hub_seq(),
+        };
+        match self {
+            Self::At(near) => of(near),
+            Self::Below(near) => of(near).saturating_sub(1),
+            Self::Above(near) => of(near).saturating_add(1),
+            Self::Largest => u64::MAX,
+        }
+    }
+}
+
+/// What a storage error interrupts.
+#[derive(Clone, Copy, Debug)]
+enum Interrupted {
+    Poll,
+    Exchange,
+    Prune,
+    Delivery,
+}
+
+/// A node of the hive.
+fn node_ids(world: &World) -> impl gs::PrintableGenerator<usize> {
+    gs::integers::<usize>().max_value(world.nodes() - 1)
 }
 
 #[hegel::state_machine]
@@ -56,10 +154,17 @@ impl Machine {
     #[rule(weight = 3)]
     fn user_op(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
-        let local = world.local_ops(node);
-        // Usually a head, sometimes an older operation (a long-running jj command).
-        let parent = local[pick(&tc, local.len())];
+        let node = tc.draw(node_ids(&world));
+        // Usually a head, sometimes an older operation (a long-running jj command). Heads come
+        // first, newest first, then the older operations, so that a failure shrinks to the
+        // ordinary case: an operation on a head.
+        let heads = world.heads(node);
+        let older = world
+            .local_ops(node)
+            .into_iter()
+            .filter(|op| !heads.contains(op));
+        let candidates: Vec<_> = heads.iter().rev().copied().chain(older.rev()).collect();
+        let parent = tc.draw(gs::sampled_from(candidates));
         let objs = tc.draw(gs::integers::<usize>().max_value(2));
         world.user_op(node, parent, objs);
     }
@@ -68,21 +173,17 @@ impl Machine {
     #[rule(weight = 2)]
     fn op_abandon(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
+        let node = tc.draw(node_ids(&world));
         let candidates = world.abandonable(node);
         tc.assume(!candidates.is_empty());
-        let ops: Vec<u64> = candidates
-            .into_iter()
-            .filter(|_| tc.draw(gs::booleans()))
-            .collect();
-        tc.assume(!ops.is_empty());
+        let ops = tc.draw(gs::subsequences(candidates).min_size(1));
         world.op_abandon(node, ops);
     }
 
     #[rule(weight = 4)]
     fn node_step(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
+        let node = tc.draw(node_ids(&world));
         let merge_objs = tc.draw(gs::integers::<usize>().max_value(1));
         world.node_step(node, merge_objs);
     }
@@ -90,41 +191,42 @@ impl Machine {
     #[rule]
     fn poll(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
+        let node = tc.draw(node_ids(&world));
         world.poll(node);
     }
 
     #[rule(weight = 4)]
     fn exchange(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
+        let node = tc.draw(node_ids(&world));
         let merge_objs = tc.draw(gs::integers::<usize>().max_value(1));
         world.exchange(node, merge_objs);
     }
 
+    /// Delivers a message, by its place among every message ever sent: usually one not yet
+    /// delivered, in any order; sometimes any, so deliveries also repeat.
     #[rule(weight = 6)]
     fn deliver(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let undelivered = world.undelivered();
         tc.assume(world.net_len() > 0);
-        // Usually something not yet delivered, in any order; sometimes any message ever
-        // sent, so deliveries also repeat.
-        let index = if !undelivered.is_empty() && tc.draw(gs::integers::<u8>().max_value(4)) > 0 {
-            undelivered[pick(&tc, undelivered.len())]
+        let undelivered = world.undelivered();
+        let p_again = if undelivered.is_empty() { 1.0 } else { 0.2 };
+        let again = tc.draw(gs::weighted_booleans(p_again));
+        let candidates = if again {
+            (0..world.net_len()).collect()
         } else {
-            pick(&tc, world.net_len())
+            undelivered
         };
-        world.deliver(index);
+        let message = tc.draw(gs::sampled_from(candidates));
+        world.deliver(message);
     }
 
     #[rule]
     fn rogue_push(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
-        let accepted = world.accepted_heads();
-        let expected = accepted[pick(&tc, accepted.len())];
-        let nameable = world.nameable_ops(node);
-        let new = nameable[pick(&tc, nameable.len())];
+        let node = tc.draw(node_ids(&world));
+        let expected = tc.draw(gs::sampled_from(world.accepted_heads()));
+        let new = tc.draw(gs::sampled_from(world.nameable_ops(node)));
         world.rogue_push(node, expected, new);
     }
 
@@ -133,88 +235,30 @@ impl Machine {
         let mut world = self.world.borrow_mut();
         let candidates = world.unaccepted_ops();
         tc.assume(!candidates.is_empty());
-        let node = pick(&tc, world.nodes());
-        let op = candidates[pick(&tc, candidates.len())];
-        // About the head the node knows, so only the reachability check stands between the
-        // node and the lie; about another head; or about the operation itself, so that it
-        // reaches itself and only the check that the reply is about the known head stands.
-        let head = match tc.draw(gs::integers::<u8>().max_value(2)) {
-            0 => world.known_head(node),
-            1 => op + 1,
-            _ => op,
+        let node = tc.draw(node_ids(&world));
+        let op = tc.draw(gs::sampled_from(candidates));
+        let about = tc.draw(gs::sampled_from(vec![
+            LieAbout::KnownHead,
+            LieAbout::AnotherHead,
+            LieAbout::Itself,
+        ]));
+        let head = match about {
+            LieAbout::KnownHead => world.known_head(node),
+            LieAbout::AnotherHead => op + 1,
+            LieAbout::Itself => op,
         };
         world.rogue_ops_reply(node, head, op);
     }
 
-    /// A buggy hub: any reply made of what it stores, about any head, with any sequence
-    /// number near the node's or the hub's, or the largest, to a request of the node's or
-    /// out of the blue. Only in `nodes_recover_from_false_replies`, since the safety
-    /// properties, and the Lean model, rest on the hub's honesty.
+    /// A buggy hub's reply ([`false_reply_to`]), to a request of the node's or out of the
+    /// blue. Only in `nodes_recover_from_false_replies`, since the safety properties, and
+    /// the Lean model, rest on the hub's honesty.
     #[rule]
     fn false_reply(&mut self, tc: TestCase) {
         tc.assume(self.environment == Environment::FalseReplies);
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
-        let (ops, objs) = world.hub_stored();
-        // The node's own records, so that the reply is judged on its operations alone.
-        let (records, records_from, pruned) = world.node_records(node);
-        let some = |items: &[u64]| -> Vec<u64> {
-            if items.is_empty() {
-                return vec![];
-            }
-            (0..tc.draw(gs::integers::<usize>().max_value(3)))
-                .map(|_| items[pick(&tc, items.len())])
-                .collect()
-        };
-        let head = ops[pick(&tc, ops.len())];
-        let near = tc.draw(gs::sampled_from(vec![world.known(node).0, world.hub_seq()]));
-        let seq = match tc.draw(gs::integers::<u8>().max_value(3)) {
-            0 => near.saturating_sub(1),
-            1 => near,
-            2 => near.saturating_add(1),
-            _ => u64::MAX,
-        };
-        let reply = match tc.draw(gs::integers::<u8>().max_value(2)) {
-            0 => Reply::Head {
-                kind: tc.draw(gs::sampled_from(vec![
-                    HeadKind::Head,
-                    HeadKind::Accepted,
-                    HeadKind::Rejected,
-                    HeadKind::Incomplete,
-                    HeadKind::Notify,
-                ])),
-                seq,
-                head,
-                records,
-            },
-            1 => Reply::Fetched {
-                seq,
-                head,
-                // Usually a chain down from the head, as a node stages only operations that
-                // all reach the head; sometimes any.
-                ops: if tc.draw(gs::booleans()) {
-                    chain(&tc, &world, head, &ops)
-                } else {
-                    some(&ops)
-                }
-                .into_iter()
-                .map(|id| OpEntry {
-                    id,
-                    parents: world.parents(id),
-                })
-                .collect(),
-                ops_attachment: vec![],
-                objects: some(&objs),
-                records,
-                records_from,
-                new_records: vec![],
-                pruned,
-            },
-            _ => Reply::Objects {
-                for_ops: some(&ops),
-                attachment: some(&objs),
-            },
-        };
+        let node = tc.draw(node_ids(&world));
+        let reply = false_reply_to(&tc, &world, node);
         let own = tc.draw(gs::booleans());
         world.false_reply(node, reply, own);
     }
@@ -225,60 +269,44 @@ impl Machine {
     #[rule]
     fn prune(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
-        if tc.draw(gs::booleans()) {
+        let converge = tc.draw(gs::booleans());
+        if converge {
             world.quiesce();
         }
         world.prune();
     }
 
-    #[rule]
-    fn hub_forgets(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
-        self.crashes += 1;
-        self.world.borrow_mut().hub_forget();
-    }
-
-    #[rule]
-    fn remake(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
-        self.crashes += 1;
-        self.world.borrow_mut().remake();
-    }
-
-    #[rule]
-    fn hub_goes_back(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
+    /// Every crash, weighted as the six were when each was a rule of its own, so that the
+    /// budget is checked in one place and a failure names the crash it took.
+    #[rule(weight = 6)]
+    fn crash(&mut self, tc: TestCase) {
+        tc.assume(self.crashes < CRASHES);
         let mut world = self.world.borrow_mut();
-        let seq = world.hub_seq();
-        tc.assume(seq > 0);
+        let mut crashes = vec![Crash::Node, Crash::NodeMidFetch, Crash::Hub];
+        // Only a hub that has accepted something has an earlier head to go back to.
+        if world.hub_seq() > 0 {
+            crashes.push(Crash::HubGoesBack);
+        }
+        crashes.extend([Crash::HubForgets, Crash::Remake]);
+        let crash = tc.draw(gs::sampled_from(crashes));
         self.crashes += 1;
-        let back = tc.draw(gs::integers::<u64>().max_value(seq - 1));
-        world.hub_goes_back(back);
-    }
-
-    #[rule]
-    fn crash_node(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
-        self.crashes += 1;
-        let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
-        world.crash_node(node);
-    }
-
-    #[rule]
-    fn crash_mid_fetch(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
-        self.crashes += 1;
-        let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
-        world.crash_before_objects(node);
-    }
-
-    #[rule]
-    fn crash_hub(&mut self, tc: TestCase) {
-        tc.assume(self.crashes < 3);
-        self.crashes += 1;
-        self.world.borrow_mut().crash_hub();
+        match crash {
+            Crash::Node => {
+                let node = tc.draw(node_ids(&world));
+                world.crash_node(node);
+            }
+            Crash::NodeMidFetch => {
+                let node = tc.draw(node_ids(&world));
+                world.crash_before_objects(node);
+            }
+            Crash::Hub => world.crash_hub(),
+            Crash::HubGoesBack => {
+                let back = tc.draw(gs::integers::<u64>().max_value(world.hub_seq() - 1));
+                world.hub_goes_back(back);
+            }
+            Crash::HubForgets => world.hub_forget(),
+            Crash::Remake => world.remake(),
+        }
     }
 
     /// An error in a policy step, poll, request or reply, counted from actual storage
@@ -288,47 +316,137 @@ impl Machine {
     fn storage_failure(&mut self, tc: TestCase) {
         tc.assume(self.environment == Environment::StorageFailures);
         let mut world = self.world.borrow_mut();
-        let node = pick(&tc, world.nodes());
+        let node = tc.draw(node_ids(&world));
         let timing = tc.draw(gs::sampled_from(vec![
             Timing::Before,
             Timing::After,
             Timing::Prefix,
         ]));
         let at = tc.draw(gs::integers::<usize>().min_value(1).max_value(24));
+        let pending = world.undelivered();
+        let mut actions = vec![Interrupted::Poll, Interrupted::Exchange, Interrupted::Prune];
+        if !pending.is_empty() {
+            actions.push(Interrupted::Delivery);
+        }
+        let interrupted = tc.draw(gs::sampled_from(actions));
         world.arm_storage(at, timing);
-        match tc.draw(gs::integers::<u8>().max_value(3)) {
-            0 => world.poll_now(node),
-            1 => world.exchange(node, 1),
-            2 => world.prune(),
-            _ => {
-                let pending = world.undelivered();
-                if !pending.is_empty() {
-                    world.deliver(pending[pick(&tc, pending.len())]);
-                }
+        match interrupted {
+            Interrupted::Poll => world.poll_now(node),
+            Interrupted::Exchange => world.exchange(node, 1),
+            Interrupted::Prune => world.prune(),
+            Interrupted::Delivery => {
+                let message = tc.draw(gs::sampled_from(pending));
+                world.deliver(message);
             }
         }
         world.stop_storage();
     }
 
     #[invariant(always_run)]
-    fn safety(&mut self, _: TestCase) {
-        self.world.borrow().check_invariants();
+    fn safety(&mut self, tc: TestCase) {
+        check_safety(&tc, &self.world.borrow());
     }
+}
+
+/// Checks the safety laws. A law that fails prints the world's trace, one model action per
+/// line, before the failure, as the oracle's and `quiesce`'s failures carry it.
+fn check_safety(tc: &TestCase, world: &World) {
+    let checked = panic::catch_unwind(AssertUnwindSafe(|| world.check_invariants()));
+    if let Err(failure) = checked {
+        tc.note(&format!("trace:\n{}", world.compact_trace()));
+        panic::resume_unwind(failure);
+    }
+}
+
+/// A reply a buggy hub might send `node`: made of what it stores, about any head, with a
+/// sequence number near the node's or the hub's, or the largest.
+#[hegel::test_helper]
+fn false_reply_to(tc: &TestCase, world: &World, node: usize) -> Reply<u64, Vec<u64>> {
+    let (ops, objs) = world.hub_stored();
+    // The node's own records, so that the reply is judged on its operations alone.
+    let (records, records_from, pruned) = world.node_records(node);
+    let head = tc.draw(gs::sampled_from(ops.as_slice()));
+    let sequence = tc.draw(gs::sampled_from(Seq::ALL.as_slice()));
+    let seq = sequence.value(world, node);
+    let reply = tc.draw(gs::sampled_from(vec![
+        FalseReply::Head,
+        FalseReply::Fetched,
+        FalseReply::Objects,
+    ]));
+    match reply {
+        FalseReply::Head => {
+            let head_kind = tc.draw(gs::sampled_from(vec![
+                HeadKind::Head,
+                HeadKind::Accepted,
+                HeadKind::Rejected,
+                HeadKind::Incomplete,
+                HeadKind::Notify,
+            ]));
+            Reply::Head {
+                kind: head_kind,
+                seq,
+                head,
+                records,
+            }
+        }
+        FalseReply::Fetched => {
+            // Half the time a chain down from the head, as a node stages only operations
+            // that all reach the head; otherwise any.
+            let any_ops = tc.draw(gs::booleans());
+            let fetched = if any_ops {
+                some_of(tc, "ops", &ops)
+            } else {
+                chain(tc, world, head, &ops)
+            };
+            Reply::Fetched {
+                seq,
+                head,
+                ops: fetched
+                    .into_iter()
+                    .map(|id| OpEntry {
+                        id,
+                        parents: world.parents(id),
+                    })
+                    .collect(),
+                ops_attachment: vec![],
+                objects: some_of(tc, "objects", &objs),
+                records,
+                records_from,
+                new_records: vec![],
+                pruned,
+            }
+        }
+        FalseReply::Objects => Reply::Objects {
+            for_ops: some_of(tc, "for_ops", &ops),
+            attachment: some_of(tc, "attachment", &objs),
+        },
+    }
+}
+
+/// Up to three of `items`, perhaps repeated, drawn as `name`.
+fn some_of(tc: &TestCase, name: &str, items: &[u64]) -> Vec<u64> {
+    if items.is_empty() {
+        return vec![];
+    }
+    tc.draw_named(name, gs::vecs(gs::sampled_from(items)).max_size(3))
 }
 
 /// `head` and a few of its stored ancestors, each a parent of one before it: operations that
 /// all reach `head`.
+#[hegel::test_helper]
 fn chain(tc: &TestCase, world: &World, head: u64, stored: &[u64]) -> Vec<u64> {
     let mut chain = vec![head];
-    for _ in 0..tc.draw(gs::integers::<usize>().max_value(3)) {
-        let below = chain[pick(tc, chain.len())];
+    let steps = tc.draw(gs::integers::<usize>().max_value(3));
+    for _ in 0..steps {
+        let below = tc.draw(gs::sampled_from(chain.clone()));
         let parents: Vec<u64> = world
             .parents(below)
             .into_iter()
             .filter(|parent| stored.contains(parent) && !chain.contains(parent))
             .collect();
         if !parents.is_empty() {
-            chain.push(parents[pick(tc, parents.len())]);
+            let parent = tc.draw(gs::sampled_from(parents));
+            chain.push(parent);
         }
     }
     chain
@@ -346,7 +464,7 @@ fn run_from(
     environment: Environment,
     prefix: impl FnOnce(&TestCase, &mut World) -> usize,
 ) -> Option<Oracle> {
-    let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
+    let nodes = tc.draw_named("nodes", gs::integers::<usize>().min_value(2).max_value(3));
     let world = Rc::new(RefCell::new(World::new(nodes, oracle)));
     let crashes = prefix(&tc, &mut world.borrow_mut());
     hegel::stateful::machine(Machine {
@@ -354,16 +472,16 @@ fn run_from(
         crashes,
         environment,
     })
-    .run(tc);
+    .run(tc.clone());
     let mut world = world.borrow_mut();
     world.quiesce();
-    world.check_invariants();
+    check_safety(&tc, &world);
     // Every node has said, fetching last, that it took every record: the hub prunes them, and
     // the hive still converges.
     world.prune();
     assert_eq!(world.hub_pruned(), world.hub_records().len());
     world.quiesce();
-    world.check_invariants();
+    check_safety(&tc, &world);
     if let Some(path) = std::env::var_os("MUSUBI_TRACE_STATS") {
         // Appends one line of action kinds per case, for checking what the search reaches.
         let kinds: Vec<&str> = world
@@ -465,6 +583,7 @@ fn survivor_advance_conformance(tc: TestCase) {
 /// node 1 takes the records without that history, perhaps with work of its own; the hub goes
 /// back to one of the dropped operations; and node 1 hears of it and takes a few steps first.
 /// One crash.
+#[hegel::test_helper]
 fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
     let length = tc.draw(gs::integers::<u64>().min_value(3).max_value(5));
     for parent in 0..length {
@@ -472,24 +591,25 @@ fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
         world.user_op(0, parent, objs);
         world.exchange(0, 0);
     }
-    let dropped: Vec<u64> = (1..length).filter(|_| tc.draw(gs::booleans())).collect();
-    tc.assume(!dropped.is_empty());
+    let dropped = tc.draw(gs::subsequences((1..length).collect::<Vec<u64>>()).min_size(1));
     world.op_abandon(0, dropped.clone());
     while world.hub_records().is_empty() {
         world.exchange(0, 0);
     }
     fetch(world, 1);
     world.exchange(1, 0);
-    for _ in 0..tc.draw(gs::integers::<usize>().max_value(2)) {
-        let local = world.local_ops(1);
-        let parent = local[pick(tc, local.len())];
+    let own_ops = tc.draw(gs::integers::<usize>().max_value(2));
+    for _ in 0..own_ops {
+        let parent = tc.draw(gs::sampled_from(world.local_ops(1)));
         world.user_op(1, parent, 0);
     }
-    world.hub_goes_back(dropped[pick(tc, dropped.len())]);
+    let back_to = tc.draw(gs::sampled_from(dropped));
+    world.hub_goes_back(back_to);
     // Node 1 hears of it first, and takes some steps, before anything else happens: each, as
     // `quiesce`'s, makes the measures fall.
     world.poll_now_checked(1);
-    for _ in 0..tc.draw(gs::integers::<usize>().max_value(12)) {
+    let exchanges = tc.draw(gs::integers::<usize>().max_value(12));
+    for _ in 0..exchanges {
         world.exchange_checked(1, 0);
     }
     1

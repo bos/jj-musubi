@@ -4,6 +4,7 @@
 //! `commands`, including `observe`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 
 use jj_lib::object_id::ObjectId as _;
@@ -406,42 +407,55 @@ impl World {
             .collect()
     }
 
-    /// Workspace names from the pool that machine `m` does not use.
+    /// The workspace names machine `m` lists at each of its op heads, read at that operation,
+    /// as `view_at` reads: without `--at-op`, jj would merge divergent op heads first, a change
+    /// no command records, before a rule that reads this can still reject.
+    fn workspace_names_at_heads(&self, m: usize) -> Vec<BTreeSet<String>> {
+        self.op_heads(m)
+            .iter()
+            .map(|head| {
+                let listed = self.raw_jj(
+                    m,
+                    &[
+                        "--at-op",
+                        head,
+                        "workspace",
+                        "list",
+                        "-T",
+                        "name ++ \"\\n\"",
+                    ],
+                );
+                listed.lines().map(str::to_owned).collect()
+            })
+            .collect()
+    }
+
+    /// Workspace names from the pool that machine `m` does not use at any op head, so that
+    /// none is in use once a command merges them.
     pub fn free_workspace_names(&self, m: usize) -> Vec<String> {
         let mut pool: Vec<String> = WORKSPACES.iter().map(|w| (*w).to_owned()).collect();
         pool.push(self.machine(m).to_owned());
         // Operation preconditions use jj's actual occupied names. Certification of those
         // names remains a separate invariant, so this never authorizes a spurious name.
-        let occupied = self.raw_jj(
-            m,
-            &[
-                "workspace",
-                "list",
-                "--ignore-working-copy",
-                "-T",
-                "name ++ \"\\n\"",
-            ],
-        );
+        let occupied: BTreeSet<String> = self
+            .workspace_names_at_heads(m)
+            .into_iter()
+            .flatten()
+            .collect();
         pool.into_iter()
-            .filter(|name| !occupied.lines().any(|used| used == name))
+            .filter(|name| !occupied.contains(name))
             .collect()
     }
 
-    /// Other machines' workspaces as machine `m` shows them, `machine/workspace`.
+    /// Other machines' workspaces as machine `m` shows them, `machine/workspace`: those it
+    /// shows at every op head, so that it still does once a command merges them.
     pub fn foreign_workspace_names(&self, m: usize) -> Vec<String> {
-        self.raw_jj(
-            m,
-            &[
-                "workspace",
-                "list",
-                "--ignore-working-copy",
-                "-T",
-                "name ++ \"\\n\"",
-            ],
-        )
-        .lines()
-        .filter(|name| name.contains('/'))
-        .map(str::to_owned)
-        .collect()
+        let mut heads = self.workspace_names_at_heads(m).into_iter();
+        let first = heads.next().expect("a repository has an op head");
+        let shown = heads.fold(first, |shown, names| &shown & &names);
+        shown
+            .into_iter()
+            .filter(|name| name.contains('/'))
+            .collect()
     }
 }

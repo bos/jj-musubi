@@ -3,11 +3,18 @@
 //! explored: a machine can work on a stale view, git can move a branch jj has not imported,
 //! a node can stop halfway through a sync, and so on.
 //!
-//! Each rule is eligible only when it has work to do: it draws a machine, computes its
-//! candidates from what that machine can see (with a helper of `View`), and rejects the
-//! step if there are none.
+//! Each rule is eligible only when it has work to do, and rejects a step only before it acts:
+//! Hegel restores nothing on a rejection. Where it is cheap to know first which machines can
+//! do the work, a rule draws among those. Where a rule must look first, through a recorded
+//! `jj` command that can snapshot, import and merge, it draws its candidates from what it saw
+//! (with a helper of `View`), and if there are none the step stands as that look.
+//!
+//! Draws print as what they mean, so that a failure's printout reads as a reproduction: a
+//! machine, file or workspace by name, a commit or operation by id, a choice by its variant.
+//! Each step notes the trace entries it added.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 use hegel::TestCase;
@@ -16,6 +23,7 @@ use hegel::generators as gs;
 use crate::coverage::fired;
 use crate::world::BOOKMARKS;
 use crate::world::FILES;
+use crate::world::MACHINES;
 use crate::world::SEARCH_MACHINES;
 use crate::world::TAGS;
 use crate::world::World;
@@ -38,52 +46,169 @@ const PUSH_REFUSALS: &[&str] = &[
 ];
 
 pub struct Search {
-    pub world: Rc<RefCell<World>>,
-    pub faults: usize,
-    pub undos: usize,
-    pub converges: usize,
+    world: Rc<RefCell<World>>,
+    faults: usize,
+    undos: usize,
+    converges: usize,
+    /// How much of the world's trace earlier steps (or the setup) have accounted for.
+    noted: usize,
 }
 
-fn pick(tc: &TestCase, len: usize) -> usize {
-    tc.draw(gs::integers::<usize>().max_value(len - 1))
+/// An item of a pool the world indexes, printed as its name.
+#[derive(Clone)]
+struct Named {
+    index: usize,
+    name: String,
 }
 
-/// One of `candidates`, rejecting the step if there are none.
-fn choose(tc: &TestCase, candidates: &[String]) -> String {
+impl fmt::Debug for Named {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.name, f)
+    }
+}
+
+/// The index of one of `items` (index and name), printed under `what` as its name.
+fn draw_named_index(
+    tc: &TestCase,
+    what: &str,
+    items: impl IntoIterator<Item = (usize, String)>,
+) -> usize {
+    let items: Vec<Named> = items
+        .into_iter()
+        .map(|(index, name)| Named { index, name })
+        .collect();
+    tc.draw_named(what, gs::sampled_from(items)).index
+}
+
+/// One of `eligible` machines, printed under `what`, rejecting the step if there are none.
+fn draw_machine(tc: &TestCase, what: &str, eligible: Vec<usize>) -> usize {
+    tc.assume(!eligible.is_empty());
+    draw_named_index(
+        tc,
+        what,
+        eligible.into_iter().map(|m| (m, MACHINES[m].to_owned())),
+    )
+}
+
+/// One of the shared files, by index.
+fn draw_file(tc: &TestCase) -> usize {
+    draw_named_index(
+        tc,
+        "file",
+        FILES.iter().enumerate().map(|(i, f)| (i, (*f).to_owned())),
+    )
+}
+
+/// One of `candidates`, which mustn't be empty, printed under `what`.
+fn draw_from(tc: &TestCase, what: &str, candidates: Vec<String>) -> String {
+    tc.draw_named(what, gs::sampled_from(candidates))
+}
+
+/// One of `candidates`, or `None` if there are none: for a rule that has already acted,
+/// and so mustn't reject.
+fn choose(tc: &TestCase, what: &str, candidates: Vec<String>) -> Option<String> {
+    (!candidates.is_empty()).then(|| draw_from(tc, what, candidates))
+}
+
+/// One of `candidates`, rejecting the step if there are none: only before the rule acts.
+fn require(tc: &TestCase, what: &str, candidates: Vec<String>) -> String {
     tc.assume(!candidates.is_empty());
-    candidates[pick(tc, candidates.len())].clone()
+    draw_from(tc, what, candidates)
 }
 
 fn strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
-impl Search {
-    fn machine(&self, tc: &TestCase) -> usize {
-        let nodes = self.world.borrow().nodes();
-        pick(tc, nodes)
-    }
+/// How `rewrite_under_other_wc` rewrites a commit.
+#[derive(Clone, Copy, Debug)]
+enum Rewrite {
+    Describe,
+    Rebase,
+}
 
-    fn note(&self, tc: &TestCase) {
-        if let Some(last) = self.world.borrow().trace.last() {
-            tc.note(last);
+/// The command `at_op` runs at an older operation.
+#[derive(Clone, Copy, Debug)]
+enum AtOpCommand {
+    Describe,
+    Abandon,
+    New,
+    BookmarkSet,
+}
+
+impl Search {
+    /// The search over `world`, whose trace so far is the setup's.
+    pub fn new(world: Rc<RefCell<World>>) -> Self {
+        let noted = world.borrow().trace.len();
+        Self {
+            world,
+            faults: 0,
+            undos: 0,
+            converges: 0,
+            noted,
         }
     }
 
-    fn fault(&mut self, tc: &TestCase, rule: &'static str) -> usize {
-        tc.assume(self.faults < MAX_FAULTS);
-        let m = self.machine(tc);
-        self.faults += 1;
-        fired(rule);
-        m
+    /// Any machine.
+    fn machine(&self, tc: &TestCase) -> usize {
+        self.machine_where(tc, |_, _| true)
+    }
+
+    /// A machine for which `eligible` holds, rejecting the step if there is none.
+    fn machine_where(&self, tc: &TestCase, eligible: impl Fn(&World, usize) -> bool) -> usize {
+        let world = self.world.borrow();
+        let machines = (0..world.nodes())
+            .filter(|&m| eligible(&world, m))
+            .collect();
+        drop(world);
+        draw_machine(tc, "machine", machines)
+    }
+
+    /// A machine other than `m`.
+    fn other_than(&self, tc: &TestCase, m: usize) -> usize {
+        let nodes = self.world.borrow().nodes();
+        draw_machine(tc, "other", (0..nodes).filter(|&o| o != m).collect())
     }
 
     /// A machine with a secondary workspace, and that workspace.
     fn secondary(&self, tc: &TestCase) -> (usize, usize) {
-        let m = self.machine(tc);
-        let count = self.world.borrow().workspaces[m].len();
-        tc.assume(count > 1);
-        (m, 1 + pick(tc, count - 1))
+        let m = self.machine_where(tc, |world, m| world.workspaces[m].len() > 1);
+        let world = self.world.borrow();
+        let workspaces = &world.workspaces[m];
+        let ws = draw_named_index(
+            tc,
+            "workspace",
+            (1..workspaces.len()).map(|ws| (ws, workspaces[ws].name.clone())),
+        );
+        (m, ws)
+    }
+
+    /// Rejects the step if the sequence has had its faults. Fault rules call it first.
+    fn may_fault(&self, tc: &TestCase) {
+        tc.assume(self.faults < MAX_FAULTS);
+    }
+
+    /// Counts a fault, once the rule's preconditions hold.
+    fn fault(&mut self, rule: &'static str) {
+        self.faults += 1;
+        fired(rule);
+    }
+
+    /// Notes each trace entry the step added.
+    fn note(&mut self, tc: &TestCase) {
+        let world = self.world.borrow();
+        for entry in &world.trace[self.noted..] {
+            tc.note(entry);
+        }
+        self.noted = world.trace.len();
+    }
+
+    /// Ends a step that looked, through a recorded `jj` command, and found nothing to do.
+    /// The look can have snapshotted, imported and merged, so the step stands as that
+    /// rather than being rejected.
+    fn found_nothing(&mut self, tc: &TestCase, m: usize, what: &str) {
+        self.note(tc);
+        tc.note(&format!("{}: looked, and found {what}", MACHINES[m]));
     }
 }
 
@@ -94,7 +219,7 @@ impl Search {
     #[rule(weight = 4)]
     fn commit(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let file = pick(&tc, FILES.len());
+        let file = draw_file(&tc);
         fired("commit");
         self.world.borrow_mut().commit(m, 0, file);
         self.note(&tc);
@@ -103,7 +228,7 @@ impl Search {
     #[rule]
     fn edit_unsnapshotted(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let file = pick(&tc, FILES.len());
+        let file = draw_file(&tc);
         fired("edit_unsnapshotted");
         self.world.borrow_mut().edit(m, file);
         self.note(&tc);
@@ -113,7 +238,10 @@ impl Search {
     fn describe(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let commit = choose(&tc, &world.observe(m).mutable());
+        let Some(commit) = choose(&tc, "commit", world.observe(m).mutable()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to describe");
+        };
         fired("describe");
         let message = world.message(m);
         world.jj(m, &["describe", &commit, "-m", &message]);
@@ -125,7 +253,10 @@ impl Search {
     fn new_commit(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let parent = choose(&tc, &world.observe(m).bases());
+        let Some(parent) = choose(&tc, "parent", world.observe(m).bases()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to make a commit on");
+        };
         fired("new_commit");
         world.jj(m, &["new", &parent]);
         drop(world);
@@ -137,8 +268,16 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let first = choose(&tc, &view.bases());
-        let second = choose(&tc, &view.unrelated(&first));
+        let firsts = view
+            .bases()
+            .into_iter()
+            .filter(|first| !view.unrelated(first).is_empty())
+            .collect();
+        let Some(first) = choose(&tc, "first", firsts) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no two unrelated commits to merge");
+        };
+        let second = draw_from(&tc, "second", view.unrelated(&first));
         fired("new_merge");
         world.jj(m, &["new", &first, &second]);
         drop(world);
@@ -150,8 +289,16 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let revision = choose(&tc, &view.mutable());
-        let onto = choose(&tc, &view.rebase_revision_destinations(&revision));
+        let revisions = view
+            .mutable()
+            .into_iter()
+            .filter(|revision| !view.rebase_revision_destinations(revision).is_empty())
+            .collect();
+        let Some(revision) = choose(&tc, "revision", revisions) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to rebase");
+        };
+        let onto = draw_from(&tc, "onto", view.rebase_revision_destinations(&revision));
         fired("rebase_revision");
         world.jj(m, &["rebase", "-r", &revision, "-o", &onto]);
         drop(world);
@@ -163,8 +310,16 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let source = choose(&tc, &view.mutable());
-        let onto = choose(&tc, &view.rebase_source_destinations(&source));
+        let sources = view
+            .mutable()
+            .into_iter()
+            .filter(|source| !view.rebase_source_destinations(source).is_empty())
+            .collect();
+        let Some(source) = choose(&tc, "source", sources) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to rebase");
+        };
+        let onto = draw_from(&tc, "onto", view.rebase_source_destinations(&source));
         fired("rebase_source");
         world.jj(m, &["rebase", "-s", &source, "-o", &onto]);
         drop(world);
@@ -175,7 +330,10 @@ impl Search {
     fn squash(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let commit = choose(&tc, &world.observe(m).squashable());
+        let Some(commit) = choose(&tc, "commit", world.observe(m).squashable()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to squash");
+        };
         fired("squash");
         world.jj(m, &["squash", "-r", &commit, "--use-destination-message"]);
         drop(world);
@@ -188,11 +346,17 @@ impl Search {
     fn squash_into(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let view = world.observe(m);
-        let mutable = view.mutable();
-        let into = choose(&tc, &mutable);
-        let from: Vec<String> = mutable.into_iter().filter(|c| *c != into).collect();
-        let from = choose(&tc, &from);
+        let mutable = world.observe(m).mutable();
+        if mutable.len() < 2 {
+            drop(world);
+            return self.found_nothing(&tc, m, "no two commits to squash one into the other");
+        }
+        let into = draw_from(&tc, "into", mutable.clone());
+        let from = draw_from(
+            &tc,
+            "from",
+            mutable.into_iter().filter(|c| *c != into).collect(),
+        );
         fired("squash_into");
         world.jj(
             m,
@@ -213,7 +377,10 @@ impl Search {
     fn abandon(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let commit = choose(&tc, &world.observe(m).mutable());
+        let Some(commit) = choose(&tc, "commit", world.observe(m).mutable()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to abandon");
+        };
         fired("abandon");
         world.jj(m, &["abandon", &commit]);
         drop(world);
@@ -225,8 +392,11 @@ impl Search {
     fn resolve(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let commit = choose(&tc, &world.observe(m).conflicted());
-        let tool = [":ours", ":theirs"][pick(&tc, 2)];
+        let Some(commit) = choose(&tc, "commit", world.observe(m).conflicted()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no conflict to resolve");
+        };
+        let tool = tc.draw(gs::sampled_from(vec![":ours", ":theirs"]));
         // jj's built-in tools resolve only conflicts of two sides, and jj refuses others, as
         // a merge of three machines' work can make.
         let resolved = world.try_jj_in(
@@ -247,7 +417,10 @@ impl Search {
     fn abandon_other_wc(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let commit = choose(&tc, &world.observe(m).other_working_copies());
+        let Some(commit) = choose(&tc, "commit", world.observe(m).other_working_copies()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no other machine's working copy to abandon");
+        };
         fired("abandon_other_wc");
         world.jj(m, &["abandon", &commit]);
         drop(world);
@@ -261,15 +434,30 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let commit = choose(&tc, &view.under_other_working_copies());
-        if tc.draw(gs::booleans()) {
-            let onto = choose(&tc, &view.rebase_source_destinations(&commit));
-            fired("rewrite_under_other_wc");
-            world.jj(m, &["rebase", "-s", &commit, "-o", &onto]);
-        } else {
-            fired("rewrite_under_other_wc");
-            let message = world.message(m);
-            world.jj(m, &["describe", &commit, "-m", &message]);
+        let Some(commit) = choose(&tc, "commit", view.under_other_working_copies()) else {
+            drop(world);
+            return self.found_nothing(
+                &tc,
+                m,
+                "nothing under another machine's working copy to rewrite",
+            );
+        };
+        let destinations = view.rebase_source_destinations(&commit);
+        let mut rewrites = vec![Rewrite::Describe];
+        if !destinations.is_empty() {
+            rewrites.push(Rewrite::Rebase);
+        }
+        let rewrite = tc.draw(gs::sampled_from(rewrites));
+        fired("rewrite_under_other_wc");
+        match rewrite {
+            Rewrite::Describe => {
+                let message = world.message(m);
+                world.jj(m, &["describe", &commit, "-m", &message]);
+            }
+            Rewrite::Rebase => {
+                let onto = draw_from(&tc, "onto", destinations);
+                world.jj(m, &["rebase", "-s", &commit, "-o", &onto]);
+            }
         }
         drop(world);
         self.note(&tc);
@@ -303,8 +491,13 @@ impl Search {
             .map(|b| (*b).to_owned())
             .filter(|b| !existing.contains(&b.as_str()) && !remote.contains(b))
             .collect();
-        let name = choose(&tc, &free);
-        let target = choose(&tc, &view.targets());
+        let targets = view.targets();
+        if free.is_empty() || targets.is_empty() {
+            drop(world);
+            return self.found_nothing(&tc, m, "no free bookmark name, or nothing to create it on");
+        }
+        let name = draw_from(&tc, "name", free);
+        let target = draw_from(&tc, "target", targets);
         fired("bookmark_create");
         // A tracked remote bookmark on a hidden commit is not in the view.
         let _refused = world.try_jj_in(
@@ -322,15 +515,21 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let name = choose(&tc, &view.bookmarks());
-        let target = choose(&tc, &view.targets());
+        let bookmarks = view.bookmarks();
+        let targets = view.targets();
+        if bookmarks.is_empty() || targets.is_empty() {
+            drop(world);
+            return self.found_nothing(&tc, m, "no bookmark to move, or nothing to move it to");
+        }
+        let bookmark = draw_from(&tc, "bookmark", bookmarks);
+        let target = draw_from(&tc, "target", targets);
         fired("bookmark_move");
         world.jj(
             m,
             &[
                 "bookmark",
                 "move",
-                &name,
+                &bookmark,
                 "--to",
                 &target,
                 "--allow-backwards",
@@ -344,9 +543,12 @@ impl Search {
     fn bookmark_delete(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let name = choose(&tc, &world.observe(m).bookmarks());
+        let Some(bookmark) = choose(&tc, "bookmark", world.observe(m).bookmarks()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no bookmark to delete");
+        };
         fired("bookmark_delete");
-        world.jj(m, &["bookmark", "delete", &name]);
+        world.jj(m, &["bookmark", "delete", &bookmark]);
         drop(world);
         self.note(&tc);
     }
@@ -354,9 +556,12 @@ impl Search {
     #[rule]
     fn bookmark_set(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let name = BOOKMARKS[pick(&tc, BOOKMARKS.len())];
+        let name = tc.draw(gs::sampled_from(&BOOKMARKS[..]));
         let mut world = self.world.borrow_mut();
-        let target = choose(&tc, &world.observe(m).targets());
+        let Some(target) = choose(&tc, "target", world.observe(m).targets()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to set the bookmark to");
+        };
         fired("bookmark_set");
         world.jj(
             m,
@@ -369,9 +574,12 @@ impl Search {
     #[rule]
     fn tag_set(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let name = TAGS[pick(&tc, TAGS.len())];
+        let name = tc.draw(gs::sampled_from(&TAGS[..]));
         let mut world = self.world.borrow_mut();
-        let target = choose(&tc, &world.observe(m).targets());
+        let Some(target) = choose(&tc, "target", world.observe(m).targets()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to tag");
+        };
         fired("tag_set");
         world.jj(m, &["tag", "set", name, "-r", &target, "--allow-move"]);
         drop(world);
@@ -382,9 +590,12 @@ impl Search {
     fn tag_delete(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let name = choose(&tc, &world.observe(m).tags());
+        let Some(tag) = choose(&tc, "tag", world.observe(m).tags()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no tag to delete");
+        };
         fired("tag_delete");
-        world.jj(m, &["tag", "delete", &name]);
+        world.jj(m, &["tag", "delete", &tag]);
         drop(world);
         self.note(&tc);
     }
@@ -392,9 +603,8 @@ impl Search {
     #[rule]
     fn undo(&mut self, tc: TestCase) {
         tc.assume(self.undos < MAX_UNDOS);
-        let m = self.machine(&tc);
+        let m = self.machine_where(&tc, |world, m| world.can_undo(m));
         let mut world = self.world.borrow_mut();
-        tc.assume(world.can_undo(m));
         self.undos += 1;
         fired("undo");
         // jj refuses to undo another workspace's operation unless told to, and another
@@ -434,19 +644,39 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let ops = world.older_ops(m);
-        let op = choose(&tc, &ops);
+        let Some(op) = choose(&tc, "op", ops) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no older operation to run a command at");
+        };
         let view = world.view_at(m, &op);
-        let args: Vec<String> = match pick(&tc, 4) {
-            0 => {
-                let commit = choose(&tc, &view.mutable());
+        let mutable = view.mutable();
+        let bases = view.bases();
+        let targets = view.targets();
+        let commands: Vec<AtOpCommand> = [
+            (AtOpCommand::Describe, !mutable.is_empty()),
+            (AtOpCommand::Abandon, !mutable.is_empty()),
+            (AtOpCommand::New, !bases.is_empty()),
+            (AtOpCommand::BookmarkSet, !targets.is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(command, possible)| possible.then_some(command))
+        .collect();
+        if commands.is_empty() {
+            drop(world);
+            return self.found_nothing(&tc, m, "nothing to do at that operation");
+        }
+        let command = tc.draw(gs::sampled_from(commands));
+        let args: Vec<String> = match command {
+            AtOpCommand::Describe => {
+                let commit = draw_from(&tc, "commit", mutable);
                 let message = world.message(m);
                 vec!["describe".into(), commit, "-m".into(), message]
             }
-            1 => vec!["abandon".into(), choose(&tc, &view.mutable())],
-            2 => vec!["new".into(), choose(&tc, &view.bases())],
-            _ => {
-                let name = BOOKMARKS[pick(&tc, BOOKMARKS.len())];
-                let target = choose(&tc, &view.targets());
+            AtOpCommand::Abandon => vec!["abandon".into(), draw_from(&tc, "commit", mutable)],
+            AtOpCommand::New => vec!["new".into(), draw_from(&tc, "parent", bases)],
+            AtOpCommand::BookmarkSet => {
+                let name = tc.draw(gs::sampled_from(&BOOKMARKS[..]));
+                let target = draw_from(&tc, "target", targets);
                 vec![
                     "bookmark".into(),
                     "set".into(),
@@ -471,7 +701,10 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let ops = world.abandonable_ops(m);
-        let op = choose(&tc, &ops);
+        let Some(op) = choose(&tc, "op", ops) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no operation it can abandon");
+        };
         fired("op_abandon");
         world.op_abandon(m, &op);
         drop(world);
@@ -492,12 +725,9 @@ impl Search {
     #[rule]
     fn trim_below_accepted_forget(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let mut world = self.world.borrow_mut();
-        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
-        let other = others[pick(&tc, others.len())];
+        let other = self.other_than(&tc, m);
         fired("trim_below_accepted_forget");
-        world.trim_below_accepted_forget(m, other);
-        drop(world);
+        self.world.borrow_mut().trim_below_accepted_forget(m, other);
         self.note(&tc);
     }
 
@@ -515,10 +745,9 @@ impl Search {
 
     #[rule]
     fn workspace_add(&mut self, tc: TestCase) {
-        let m = self.machine(&tc);
+        let m = self.machine_where(&tc, |world, m| world.workspaces[m].len() < 3);
         let mut world = self.world.borrow_mut();
-        tc.assume(world.workspaces[m].len() < 3);
-        let name = choose(&tc, &world.free_workspace_names(m));
+        let name = require(&tc, "name", world.free_workspace_names(m));
         fired("workspace_add");
         world.add_workspace(m, &name);
         drop(world);
@@ -528,7 +757,7 @@ impl Search {
     #[rule(weight = 2)]
     fn workspace_commit(&mut self, tc: TestCase) {
         let (m, ws) = self.secondary(&tc);
-        let file = pick(&tc, FILES.len());
+        let file = draw_file(&tc);
         fired("workspace_commit");
         self.world.borrow_mut().commit(m, ws, file);
         self.note(&tc);
@@ -538,8 +767,16 @@ impl Search {
     fn workspace_rename(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let ws = pick(&tc, world.workspaces[m].len());
-        let name = choose(&tc, &world.free_workspace_names(m));
+        let workspaces = &world.workspaces[m];
+        let ws = draw_named_index(
+            &tc,
+            "workspace",
+            workspaces
+                .iter()
+                .enumerate()
+                .map(|(ws, workspace)| (ws, workspace.name.clone())),
+        );
+        let name = require(&tc, "name", world.free_workspace_names(m));
         fired("workspace_rename");
         world.rename_workspace(m, ws, &name);
         drop(world);
@@ -560,7 +797,7 @@ impl Search {
     fn forget_other_workspace(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let name = choose(&tc, &world.foreign_workspace_names(m));
+        let name = require(&tc, "workspace", world.foreign_workspace_names(m));
         fired("forget_other_workspace");
         world.jj(m, &["workspace", "forget", &name]);
         drop(world);
@@ -572,12 +809,9 @@ impl Search {
     #[rule]
     fn forget_copy(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let mut world = self.world.borrow_mut();
-        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
-        let o = others[pick(&tc, others.len())];
+        let other = self.other_than(&tc, m);
         fired("forget_copy");
-        world.forget_copy(m, o);
-        drop(world);
+        self.world.borrow_mut().forget_copy(m, other);
         self.note(&tc);
     }
 
@@ -587,16 +821,18 @@ impl Search {
     #[rule]
     fn abandon_while_forgotten(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
+        let other = self.other_than(&tc, m);
         let mut world = self.world.borrow_mut();
-        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
-        let o = others[pick(&tc, others.len())];
         let ops = world.abandonable_ops(m);
-        let op = choose(&tc, &ops);
+        let Some(op) = choose(&tc, "op", ops) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no operation it can abandon");
+        };
         fired("abandon_while_forgotten");
-        world.forget_copy(m, o);
+        world.forget_copy(m, other);
         world.op_abandon(m, &op);
         for _ in 0..2 {
-            for x in (0..world.nodes()).filter(|&x| x != o) {
+            for x in (0..world.nodes()).filter(|&x| x != other) {
                 world.sync(x);
             }
         }
@@ -621,7 +857,7 @@ impl Search {
     #[rule]
     fn set_forget_after(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let value = ["1h", "never"][pick(&tc, 2)];
+        let value = tc.draw(gs::sampled_from(vec!["1h", "never"]));
         fired("set_forget_after");
         self.world.borrow_mut().set_forget_after(m, value);
         self.note(&tc);
@@ -652,8 +888,7 @@ impl Search {
 
     #[rule(weight = 2)]
     fn fetch(&mut self, tc: TestCase) {
-        let m = self.machine(&tc);
-        tc.assume(self.world.borrow().has_origin(m));
+        let m = self.machine_where(&tc, |world, m| world.has_origin(m));
         fired("fetch");
         self.world.borrow_mut().jj(m, &["git", "fetch"]);
         self.note(&tc);
@@ -661,12 +896,19 @@ impl Search {
 
     #[rule]
     fn push(&mut self, tc: TestCase) {
-        let m = self.machine(&tc);
+        let m = self.machine_where(&tc, |world, m| world.has_origin(m));
         let mut world = self.world.borrow_mut();
-        tc.assume(world.has_origin(m));
-        let name = choose(&tc, &world.observe(m).pushable_bookmarks());
+        let Some(bookmark) = choose(&tc, "bookmark", world.observe(m).pushable_bookmarks()) else {
+            drop(world);
+            return self.found_nothing(&tc, m, "no bookmark it can push");
+        };
         fired("push");
-        let pushed = world.try_jj_in(m, 0, &["git", "push", "--bookmark", &name], PUSH_REFUSALS);
+        let pushed = world.try_jj_in(
+            m,
+            0,
+            &["git", "push", "--bookmark", &bookmark],
+            PUSH_REFUSALS,
+        );
         if pushed.is_ok() {
             fired("push:accepted");
         }
@@ -679,10 +921,13 @@ impl Search {
     #[rule(weight = 2)]
     fn git_set_branch(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let name = BOOKMARKS[pick(&tc, BOOKMARKS.len())];
         let mut world = self.world.borrow_mut();
+        // Read-only: it neither snapshots, imports nor merges.
         let view = world.view_at_head(m);
-        let target = choose(&tc, &view.targets());
+        let targets = view.targets();
+        tc.assume(!targets.is_empty());
+        let name = tc.draw(gs::sampled_from(&BOOKMARKS[..]));
+        let target = draw_from(&tc, "target", targets);
         let target = view
             .commits
             .iter()
@@ -696,9 +941,9 @@ impl Search {
 
     #[rule]
     fn git_delete_branch(&mut self, tc: TestCase) {
-        let m = self.machine(&tc);
+        let m = self.machine_where(&tc, |world, m| !world.git_branches(m).is_empty());
         let mut world = self.world.borrow_mut();
-        let branch = choose(&tc, &world.git_branches(m));
+        let branch = draw_from(&tc, "branch", world.git_branches(m));
         fired("git_delete_branch");
         world.delete_git_branch(m, &branch);
         drop(world);
@@ -739,14 +984,18 @@ impl Search {
 
     #[rule]
     fn restart(&mut self, tc: TestCase) {
-        let m = self.fault(&tc, "restart");
+        self.may_fault(&tc);
+        let m = self.machine(&tc);
+        self.fault("restart");
         self.world.borrow_mut().restart(m);
         self.note(&tc);
     }
 
     #[rule]
     fn crash(&mut self, tc: TestCase) {
-        let m = self.fault(&tc, "crash");
+        self.may_fault(&tc);
+        let m = self.machine(&tc);
+        self.fault("crash");
         let stopped = tc.draw(gs::integers::<u64>());
         if self.world.borrow_mut().crash(m, false, stopped) > 0 {
             fired("crash:writes_in_flight");
@@ -758,12 +1007,10 @@ impl Search {
     /// written.
     #[rule]
     fn crash_while_syncing(&mut self, tc: TestCase) {
-        tc.assume(self.faults < MAX_FAULTS);
-        let m = self.machine(&tc);
+        self.may_fault(&tc);
         // Only a machine with something to realize can crash while writing it.
-        tc.assume(self.world.borrow().behind_hub(m));
-        self.faults += 1;
-        fired("crash_while_syncing");
+        let m = self.machine_where(&tc, |world, m| world.behind_hub(m));
+        self.fault("crash_while_syncing");
         let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
         let stopped = tc.draw(gs::integers::<u64>());
         self.world.borrow_mut().sync_realizing(m, count);
@@ -775,7 +1022,9 @@ impl Search {
 
     #[rule]
     fn lose_cache(&mut self, tc: TestCase) {
-        let m = self.fault(&tc, "lose_cache");
+        self.may_fault(&tc);
+        let m = self.machine(&tc);
+        self.fault("lose_cache");
         let stopped = tc.draw(gs::integers::<u64>());
         if self.world.borrow_mut().crash(m, true, stopped) > 0 {
             fired("crash:writes_in_flight");
@@ -785,9 +1034,8 @@ impl Search {
 
     #[rule]
     fn restart_hub(&mut self, tc: TestCase) {
-        tc.assume(self.faults < MAX_FAULTS);
-        self.faults += 1;
-        fired("restart_hub");
+        self.may_fault(&tc);
+        self.fault("restart_hub");
         self.world.borrow_mut().restart_hub();
         self.note(&tc);
     }
@@ -796,11 +1044,10 @@ impl Search {
     /// at an older one.
     #[rule]
     fn hub_goes_back(&mut self, tc: TestCase) {
-        tc.assume(self.faults < MAX_FAULTS);
-        let lost = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+        self.may_fault(&tc);
         tc.assume(self.world.borrow().hub_can_go_back());
-        self.faults += 1;
-        fired("hub_goes_back");
+        self.fault("hub_goes_back");
+        let lost = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
         self.world.borrow_mut().hub_goes_back(lost);
         self.note(&tc);
     }
@@ -809,10 +1056,9 @@ impl Search {
     /// `heads` log it wrote pruning, and everything after, and comes back with the one before.
     #[rule]
     fn hub_loses_prune(&mut self, tc: TestCase) {
-        tc.assume(self.faults < MAX_FAULTS);
+        self.may_fault(&tc);
         tc.assume(self.world.borrow().hub_pruned_since_restart());
-        self.faults += 1;
-        fired("hub_loses_prune");
+        self.fault("hub_loses_prune");
         self.world.borrow_mut().hub_loses_prune();
         self.note(&tc);
     }
@@ -821,9 +1067,8 @@ impl Search {
     /// again, empty.
     #[rule]
     fn remake_hub(&mut self, tc: TestCase) {
-        tc.assume(self.faults < MAX_FAULTS);
-        self.faults += 1;
-        fired("remake_hub");
+        self.may_fault(&tc);
+        self.fault("remake_hub");
         self.world.borrow_mut().remake_hub();
         self.note(&tc);
     }
@@ -840,7 +1085,9 @@ impl Search {
     /// A sync in which the reply to one request is lost after the hub handled it.
     #[rule]
     fn lose_reply(&mut self, tc: TestCase) {
-        let m = self.fault(&tc, "lose_reply");
+        self.may_fault(&tc);
+        let m = self.machine(&tc);
+        self.fault("lose_reply");
         let steps = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
         let lost = tc.draw(gs::integers::<usize>().max_value(4));
         self.world.borrow_mut().sync_partial(m, steps, Some(lost));

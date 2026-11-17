@@ -1225,7 +1225,11 @@ owned literal that collides with a foreign alias.
 To keep the search effective:
 
 - a rule is eligible only when it has work to do, and its candidates come from a helper that
-  its precondition shares;
+  its precondition shares. It rejects a step only before it acts, since Hegel restores nothing
+  on a rejection: a rule that must look first, through a recorded `jj` command that can
+  snapshot, import and merge, ends the step as that look if it finds nothing to do;
+- a failure prints each step's draws as what they mean (a machine by name, a commit or
+  operation by id) and the trace entries the step added;
 - each search shard has its own Hegel example database;
 - a case replays exactly, so that Hegel can shrink a failure and a stored example finds it again
   ([efficient-tests.md, "Make generated cases replay

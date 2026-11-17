@@ -30,8 +30,8 @@
 //!   several shards run at once);
 //! - `MUSUBI_SEARCH_STEPS`: rules per sequence (default 30);
 //! - `MUSUBI_SEARCH_SEED`: base seed, shard `n` using `seed + n` (default: random);
-//! - `MUSUBI_SEARCH_SHRINK`: `0` reports a shard's first failure unshrunk, `1` shrinks the
-//!   smoke test's;
+//! - `MUSUBI_SEARCH_SHRINK`: `1` shrinks a failure, `0` reports it unshrunk (default: the
+//!   shards shrink, and the smoke tests, `e2e_smoke` and `e2e_dropped_merge`, don't);
 //! - `MUSUBI_SEARCH_MASK`: known bugs to look past, comma-separated (see `checks::masked`);
 //! - `MUSUBI_SEARCH_TIMING`: print how long each case took;
 //! - `MUSUBI_SEARCH_VERIFY_OBSERVATIONS`: compare read-only staleness observations with
@@ -76,6 +76,9 @@ use crate::world::Naming;
 use crate::world::Setup;
 use crate::world::World;
 
+/// How machines name their workspaces: the ordinary case first, which a failure shrinks to.
+const NAMINGS: [Naming; 3] = [Naming::Own, Naming::Default, Naming::SharedHostname];
+
 #[derive(Clone, Copy)]
 struct Config {
     shard: Option<u64>,
@@ -111,49 +114,51 @@ impl Config {
         // saying where the replay went another way. By default Hegel would replay it in
         // batches, for minutes, pass the run if that didn't confirm it, and could keep it to
         // replay in batches again in later runs.
-        let settings = Settings::new()
+        let mut settings = Settings::new()
             .test_cases(self.cases)
             .suppress_health_check([HealthCheck::TooSlow, HealthCheck::TestCasesTooLarge])
             .nondeterminism_strictness(NondeterminismStrictness::Error);
-        let shrink = std::env::var("MUSUBI_SEARCH_SHRINK").ok();
-        let settings = match self.shard {
-            // The smoke test is the same on every run, and by default reports its first
-            // failure unshrunk: the search is for minimizing.
-            None => {
-                let settings = settings.derandomize(true).database(None);
-                if shrink.as_deref() == Some("1") {
-                    return settings;
-                }
-                settings
-            }
+        // By default the smoke test reports its first failure unshrunk: the search is for
+        // minimizing.
+        let shrink = match std::env::var("MUSUBI_SEARCH_SHRINK").as_deref() {
+            Ok("0") => false,
+            Ok("1") => true,
+            _ => self.shard.is_some(),
+        };
+        if !shrink {
+            settings = settings.phases([Phase::Explicit, Phase::Reuse, Phase::Generate]);
+        }
+        match self.shard {
+            // The smoke test is the same on every run.
+            None => settings.derandomize(true).database(None),
             Some(shard) => {
                 let database = coverage::dir().join(format!("examples-shard-{shard}"));
-                let seed = std::env::var("MUSUBI_SEARCH_SEED")
+                settings = settings.database(Some(database.to_string_lossy().into_owned()));
+                // Without `MUSUBI_SEARCH_SEED`, `HEGEL_SEED` or else a random seed.
+                if let Some(seed) = std::env::var("MUSUBI_SEARCH_SEED")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .map(|seed| seed + shard);
-                let settings = settings
-                    .database(Some(database.to_string_lossy().into_owned()))
-                    .seed(seed);
-                if shrink.as_deref() != Some("0") {
-                    return settings;
+                {
+                    settings = settings.seed(Some(seed + shard));
                 }
                 settings
             }
-        };
-        settings.phases([Phase::Explicit, Phase::Reuse, Phase::Generate])
+        }
     }
 }
 
 #[hegel::standalone_function(config.settings())]
 fn search(tc: TestCase, config: Config) {
     let case = coverage::start_case();
+    let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
+    let naming = tc.draw(gs::sampled_from(&NAMINGS[..]));
+    let prejoin = tc.draw(gs::booleans());
+    let secondary = tc.draw(gs::booleans());
     let setup = Setup {
-        nodes: tc.draw(gs::integers::<usize>().min_value(2).max_value(3)),
-        naming: [Naming::Own, Naming::Default, Naming::SharedHostname]
-            [tc.draw(gs::integers::<usize>().max_value(2))],
-        prejoin: tc.draw(gs::booleans()),
-        secondary: tc.draw(gs::booleans()),
+        nodes,
+        naming,
+        prejoin,
+        secondary,
     };
     for (event, happened) in [
         ("setup:three_machines", setup.nodes == 3),
@@ -248,14 +253,9 @@ fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCas
     let world = Rc::new(RefCell::new(World::new(setup)));
     prefix(&tc, &mut world.borrow_mut());
     let set_up = started.elapsed();
-    hegel::stateful::machine(Search {
-        world: world.clone(),
-        faults: 0,
-        undos: 0,
-        converges: 0,
-    })
-    .steps(config.steps)
-    .run(tc);
+    hegel::stateful::machine(Search::new(world.clone()))
+        .steps(config.steps)
+        .run(tc);
     let walked = started.elapsed();
     world.borrow_mut().converge();
     if let Some(path) = std::env::var_os("MUSUBI_SEARCH_FINGERPRINTS") {
@@ -285,17 +285,26 @@ fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCas
 #[hegel::standalone_function(config.settings())]
 fn dropped_merge_search(tc: TestCase, config: Config) {
     let case = coverage::start_case();
+    let naming = tc.draw(gs::sampled_from(&NAMINGS[..]));
+    let prejoin = tc.draw(gs::booleans());
+    let secondary = tc.draw(gs::booleans());
     let setup = Setup {
         nodes: 4,
-        naming: [Naming::Own, Naming::Default, Naming::SharedHostname]
-            [tc.draw(gs::integers::<usize>().max_value(2))],
-        prejoin: tc.draw(gs::booleans()),
-        secondary: tc.draw(gs::booleans()),
+        naming,
+        prejoin,
+        secondary,
     };
     fired("setup:dropped_merge");
     walk(tc, config, setup, |tc, world| {
-        let work: Vec<usize> = (0..tc.draw(gs::integers::<usize>().min_value(1).max_value(2)))
-            .map(|_| tc.draw(gs::integers::<usize>().max_value(FILES.len() - 1)))
+        // The files beta commits.
+        let work = tc.draw(
+            gs::vecs(gs::sampled_from(&FILES[..]))
+                .min_size(1)
+                .max_size(2),
+        );
+        let work: Vec<usize> = work
+            .iter()
+            .map(|file| FILES.iter().position(|f| f == file).unwrap())
             .collect();
         let kept = world.hold_dropped_merge(&work);
         world.sync(1);

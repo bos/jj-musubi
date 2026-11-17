@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use super::cleanup::CleanupEffect;
 use super::intent::automatic_git_bookkeeping;
 use super::*;
 use crate::op_id::LocalOp;
@@ -493,7 +494,11 @@ fn partial_commit_cleanup_keeps_committed_and_uncommitted_work() {
     assert_eq!(plan.after.files[0].path, "AGENTS.md");
     assert_eq!(plan.after.bytes, "current instructions\n".len() as u64);
     let _lock = publication_lock(&repo.repo_path()).unwrap();
-    let (count, images, checkpoint) = node
+    let CleanupEffect {
+        pruned: count,
+        images,
+        checkpoint,
+    } = node
         .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
         .unwrap();
     assert_eq!(count, selected.len());
@@ -1110,7 +1115,9 @@ fn automatic_operation_reconciliation_does_not_bless_snapshot_contents() {
     let plan = node
         .preview_publication_cleanup(&selected, &mut cache)
         .unwrap();
-    let (_, images, checkpoint) = node
+    let CleanupEffect {
+        images, checkpoint, ..
+    } = node
         .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
         .unwrap();
     model.assert_applied(&mut open(&repo), &images, &checkpoint);
@@ -1187,7 +1194,9 @@ fn removing_a_snapshots_parent_does_not_turn_unrelated_work_into_intent() {
         plan.after.files.iter().any(|f| f.path == "junk"),
         "the unselected bookmark operation still retains the old working copy"
     );
-    let (_, images, checkpoint) = node
+    let CleanupEffect {
+        images, checkpoint, ..
+    } = node
         .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
         .unwrap();
     model.assert_applied(&mut open(&repo), &images, &checkpoint);
@@ -1435,7 +1444,9 @@ fn manual_unpublished_abandon_cannot_approve_snapshot_content() {
             .preview_publication_cleanup(&selected, &mut cache)
             .unwrap();
         assert_eq!(plan.after.bytes, 0);
-        let (_, images, checkpoint) = node
+        let CleanupEffect {
+            images, checkpoint, ..
+        } = node
             .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
             .unwrap();
         model.assert_applied(&mut open(&repo), &images, &checkpoint);
@@ -1515,7 +1526,9 @@ fn diffedit_protects_its_rewrite_without_approving_the_automatic_input_version()
         .preview_publication_cleanup(&selected, &mut cache)
         .unwrap();
     assert!(plan.after.files.is_empty());
-    let (_, images, checkpoint) = node
+    let CleanupEffect {
+        images, checkpoint, ..
+    } = node
         .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
         .unwrap();
     assert_eq!(commit_id(&repo, "@"), current);
@@ -1604,7 +1617,9 @@ fn untracking_accidental_files_keeps_the_partial_commit_and_current_work() {
         .preview_publication_cleanup(&selected, &mut cache)
         .unwrap();
     assert!(plan.after.files.is_empty());
-    let (_, images, checkpoint) = node
+    let CleanupEffect {
+        images, checkpoint, ..
+    } = node
         .apply_publication_cleanup_mapped(&selected, &plan.token, &mut cache)
         .unwrap();
     assert_eq!(commit_id(&repo, "@-"), readme);

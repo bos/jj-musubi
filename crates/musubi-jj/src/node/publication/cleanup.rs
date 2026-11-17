@@ -5,12 +5,17 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::btree_map::Entry;
+use std::hash::Hash;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::Operation;
 use jj_lib::op_store::OperationId;
+use jj_lib::op_store::ViewId;
 use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::working_copy::LockedWorkingCopy;
 use jj_lib::workspace::WorkspaceLoaderFactory as _;
@@ -38,12 +43,118 @@ pub struct PublicationCleanup {
     heads: Vec<String>,
 }
 
-type CleanupEffect = (usize, HashMap<LocalOp, Vec<LocalOp>>, LocalOp);
+impl PublicationCleanup {
+    /// The one local head the preview saw, which cleanup rewrites.
+    fn source(&self) -> Result<LocalOp, PublicationError> {
+        let id = OperationId::try_from_hex(&self.heads[0])
+            .ok_or(PublicationError::InvalidCleanupSource)?;
+        Ok(LocalOp(id))
+    }
+}
+
+/// What an applied cleanup did.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "tests read the images and checkpoint")
+)]
+pub(super) struct CleanupEffect {
+    /// How many operations it removed.
+    pub(super) pruned: usize,
+    /// Where each unpublished native operation went: its rewrite, itself, or, once removed,
+    /// the images of its parents.
+    pub(super) images: HashMap<LocalOp, Vec<LocalOp>>,
+    /// The checkpoint now at the head.
+    pub(super) checkpoint: LocalOp,
+}
 
 struct CleanupWorkspace {
     name: WorkspaceNameBuf,
     root: PathBuf,
     locked: Box<dyn LockedWorkingCopy>,
+}
+
+/// What an unpublished operation recorded before cleanup: frozen into its rewrite, and
+/// compared against what the rewrite records.
+struct SourceFacts {
+    view: ViewId,
+    intentional: BTreeSet<CommitId>,
+    namespace: BTreeMap<String, String>,
+}
+
+/// The head cleanup rewrites, read under the op-head lock, and what the rewrite must leave
+/// as it was.
+struct CleanupSource {
+    head: LocalOp,
+    intentional: BTreeSet<CommitId>,
+    repo: Arc<ReadonlyRepo>,
+    context: Vec<BTreeMap<String, String>>,
+    foreign: String,
+    view: ViewId,
+    facts: HashMap<OperationId, SourceFacts>,
+}
+
+/// The unpublished native ancestry with the selected operations contracted away.
+struct Contraction {
+    /// The images of the old head, which the checkpoint goes on top of.
+    head: Vec<OperationId>,
+    movements: HashMap<LocalOp, Vec<LocalOp>>,
+}
+
+/// Every node reachable from `start` through `next`, `start` included.
+fn reachable<T: Clone + Eq + Hash, E>(
+    start: T,
+    mut next: impl FnMut(&T) -> Result<Vec<T>, E>,
+) -> Result<HashSet<T>, E> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if seen.insert(node.clone()) {
+            stack.extend(next(&node)?);
+        }
+    }
+    Ok(seen)
+}
+
+/// The nearest intentional versions `id` evolved from, looking through automatic ones.
+fn nearest_intentional(
+    previous: &BTreeMap<CommitId, Vec<CommitId>>,
+    intentional: &BTreeSet<CommitId>,
+    id: &CommitId,
+) -> Vec<CommitId> {
+    let mut stack = previous.get(id).cloned().unwrap_or_default();
+    let mut seen = HashSet::new();
+    let mut predecessors = BTreeSet::new();
+    while let Some(old) = stack.pop() {
+        if !seen.insert(old.clone()) {
+            continue;
+        }
+        if intentional.contains(&old) {
+            predecessors.insert(old);
+        } else {
+            stack.extend(previous.get(&old).into_iter().flatten().cloned());
+        }
+    }
+    predecessors.into_iter().collect()
+}
+
+/// `parents` with each replaced by its images, keeping order and dropping duplicates.
+fn contracted_parents(
+    images: &HashMap<OperationId, Vec<OperationId>>,
+    parents: &[OperationId],
+) -> Vec<OperationId> {
+    let mut contracted = vec![];
+    for parent in parents {
+        for image in images
+            .get(parent)
+            .cloned()
+            .unwrap_or_else(|| vec![parent.clone()])
+        {
+            if !contracted.contains(&image) {
+                contracted.push(image);
+            }
+        }
+    }
+    contracted
 }
 
 impl NodeRepo {
@@ -383,7 +494,7 @@ impl NodeRepo {
         cache: &mut PublicationCache,
     ) -> Result<usize, NodeError> {
         self.apply_publication_cleanup_mapped(selectors, token, cache)
-            .map(|applied| applied.0)
+            .map(|applied| applied.pruned)
     }
 
     pub(super) fn apply_publication_cleanup_mapped(
@@ -398,91 +509,114 @@ impl NodeRepo {
         }
         let (base, ops) = self.publication_pending()?;
         let selected = self.publication_selection(selectors, &ops)?;
-        let source = LocalOp(
-            OperationId::try_from_hex(&plan.heads[0])
-                .ok_or(PublicationError::InvalidCleanupSource)?,
-        );
-        let workspaces = self.lock_cleanup_workspaces(&source)?;
+        let workspaces = self.lock_cleanup_workspaces(&plan.source()?)?;
         let op_heads = self.loader.op_heads_store().clone();
         let lock = op_heads.lock().block_on()?;
+        let source = self.locked_cleanup_source(&plan, &ops)?;
+        let kept = self.intentional_predecessors(&ops, &source.intentional)?;
+        let contraction = self.contract_unpublished(&source, &ops, &selected)?;
+        let checkpoint =
+            self.write_cleanup_checkpoint(&source, &plan.token, contraction.head, kept)?;
+        self.check_prepared_cleanup(
+            &source,
+            &base,
+            &plan.after,
+            &selected,
+            &contraction.movements,
+            &checkpoint,
+        )?;
+        op_heads
+            .update_op_heads(std::slice::from_ref(&source.head.0), &checkpoint)
+            .block_on()?;
+        drop(lock);
+        let checkpoint = LocalOp(checkpoint);
+        self.finish_cleanup(workspaces, &checkpoint)?;
+        Ok(CleanupEffect {
+            pruned: plan.selected.len(),
+            images: contraction.movements,
+            checkpoint,
+        })
+    }
+
+    /// Reads the head under the op-head lock, refusing it unless it is the one the preview
+    /// saw, with what each unpublished operation recorded.
+    fn locked_cleanup_source(
+        &self,
+        plan: &PublicationCleanup,
+        ops: &[CanonicalOp],
+    ) -> Result<CleanupSource, NodeError> {
         let heads = self.local_heads()?;
         if heads.iter().map(|id| id.0.hex()).collect::<Vec<_>>() != plan.heads {
             return Err(PublicationError::OutgoingChanged.into());
         }
         let head = heads[0].clone();
-        let selected_ids: HashSet<_> = selected.iter().map(|id| id.0.clone()).collect();
         let canonical_head = self
             .canonical_of(&head)
             .ok_or(PublicationError::AppliedHeadChanged)?;
-        let intentional = self.publication_kept_versions(&ops)?;
+        let intentional = self.publication_kept_versions(ops)?;
         let repo = self.repo_at(&head)?;
-        let attrs = self.publication_state_attributes(&repo, &canonical_head)?;
-        let expected_context = attrs.clone();
-        let expected_foreign = self.publication_foreign_presence(&canonical_head)?;
-        let expected_view = self.canonical.read_operation(&canonical_head)?.view_id;
-        let mut source_facts = HashMap::new();
-        for id in &ops {
+        let context = self.publication_state_attributes(&repo, &canonical_head)?;
+        let foreign = self.publication_foreign_presence(&canonical_head)?;
+        let view = self.canonical.read_operation(&canonical_head)?.view_id;
+        let mut facts = HashMap::new();
+        for id in ops {
             if let Some(local) = self.local_of(id) {
                 let operation = self.canonical.read_operation(id)?;
                 let view = self.canonical.read_view(&operation.view_id)?;
-                source_facts.insert(
+                facts.insert(
                     local.0,
-                    (
-                        operation.view_id.clone(),
-                        self.publication_intentional(id, &operation, &view)?,
-                        self.publication_namespace_facts(id)?,
-                    ),
+                    SourceFacts {
+                        view: operation.view_id.clone(),
+                        intentional: self.publication_intentional(id, &operation, &view)?,
+                        namespace: self.publication_namespace_facts(id)?,
+                    },
                 );
             }
         }
+        Ok(CleanupSource {
+            head,
+            intentional,
+            repo,
+            context,
+            foreign,
+            view,
+            facts,
+        })
+    }
 
-        // Preserve explicit evolution through discarded automatic versions. Content itself
-        // stays immutable; this only reconnects the recorded intentional predecessors.
+    /// Preserve explicit evolution through discarded automatic versions. Content itself
+    /// stays immutable; this only reconnects the recorded intentional predecessors.
+    fn intentional_predecessors(
+        &self,
+        ops: &[CanonicalOp],
+        intentional: &BTreeSet<CommitId>,
+    ) -> Result<BTreeMap<CommitId, Vec<CommitId>>, NodeError> {
         let mut previous: BTreeMap<CommitId, Vec<CommitId>> = BTreeMap::new();
-        for id in &ops {
+        for id in ops {
             let operation = self.canonical.read_operation(id)?;
             for (id, predecessors) in operation.commit_predecessors.into_iter().flatten() {
                 previous.entry(id).or_default().extend(predecessors);
             }
         }
-        let mut kept = BTreeMap::new();
-        for id in &intentional {
-            let mut stack = previous.get(id).cloned().unwrap_or_default();
-            let mut seen = HashSet::new();
-            let mut predecessors = BTreeSet::new();
-            while let Some(old) = stack.pop() {
-                if !seen.insert(old.clone()) {
-                    continue;
-                }
-                if intentional.contains(&old) {
-                    predecessors.insert(old);
-                } else {
-                    stack.extend(previous.get(&old).into_iter().flatten().cloned());
-                }
-            }
-            kept.insert(id.clone(), predecessors.into_iter().collect());
-        }
-
-        // Walk only unpublished native ancestry; shared operations are untouched. jj's
-        // standard contraction rule preserves parent order and removes duplicate images.
-        let local_ops: HashSet<_> = ops
+        Ok(intentional
             .iter()
-            .filter_map(|id| self.local_of(id))
-            .map(|id| id.0)
-            .collect();
-        let store = self.loader.op_store().clone();
-        let mut source_ids = HashSet::new();
-        let mut source_stack = vec![head.0.clone()];
-        while let Some(id) = source_stack.pop() {
-            if source_ids.insert(id.clone()) {
-                source_stack.extend(store.read_operation(&id).block_on()?.parents);
-            }
-        }
+            .map(|id| (id.clone(), nearest_intentional(&previous, intentional, id)))
+            .collect())
+    }
+
+    /// The native operations in `local` under `head`, each after its parents, which it
+    /// visits in order.
+    fn unpublished_postorder(
+        &self,
+        head: &OperationId,
+        local: &HashSet<OperationId>,
+    ) -> Result<Vec<(OperationId, Operation)>, NodeError> {
+        let store = self.loader.op_store();
         let mut order = vec![];
-        let mut stack = vec![(head.0.clone(), false)];
+        let mut stack = vec![(head.clone(), false)];
         let mut seen = HashSet::new();
         while let Some((id, expanded)) = stack.pop() {
-            if !local_ops.contains(&id) {
+            if !local.contains(&id) {
                 continue;
             }
             let operation = store.read_operation(&id).block_on()?;
@@ -500,36 +634,51 @@ impl NodeRepo {
                 );
             }
         }
+        Ok(order)
+    }
+
+    /// Walk only unpublished native ancestry; shared operations are untouched. jj's
+    /// standard contraction rule preserves parent order and removes duplicate images.
+    fn contract_unpublished(
+        &self,
+        source: &CleanupSource,
+        ops: &[CanonicalOp],
+        selected: &BTreeSet<LocalOp>,
+    ) -> Result<Contraction, NodeError> {
+        let selected: HashSet<_> = selected.iter().map(|id| id.0.clone()).collect();
+        let local: HashSet<_> = ops
+            .iter()
+            .filter_map(|id| self.local_of(id))
+            .map(|id| id.0)
+            .collect();
+        let store = self.loader.op_store();
+        let existing = reachable(source.head.0.clone(), |id| {
+            Ok::<_, NodeError>(store.read_operation(id).block_on()?.parents)
+        })?;
+        let order = self.unpublished_postorder(&source.head.0, &local)?;
         let mut images: HashMap<OperationId, Vec<OperationId>> = HashMap::new();
         let mut movements: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
         let mut created = HashSet::new();
         for (id, mut operation) in order {
-            let mut parents = vec![];
-            for parent in &operation.parents {
-                for image in images
-                    .get(parent)
-                    .cloned()
-                    .unwrap_or_else(|| vec![parent.clone()])
-                {
-                    if !parents.contains(&image) {
-                        parents.push(image);
-                    }
-                }
-            }
-            let now = if selected_ids.contains(&id) {
+            let parents = contracted_parents(&images, &operation.parents);
+            let now = if selected.contains(&id) {
                 parents
             } else if parents == operation.parents {
                 vec![id.clone()]
             } else {
                 operation.parents = parents;
-                let (_, frozen, namespace) = source_facts
+                let facts = source
+                    .facts
                     .get(&id)
                     .ok_or(PublicationError::MissingSourceFacts)?;
                 OpAttrs(&mut operation.metadata.attributes)
-                    .set_intent(frozen)
+                    .set_intent(&facts.intentional)
                     .map_err(PublicationError::Json)?;
-                operation.metadata.attributes.extend(namespace.clone());
-                for commit in frozen {
+                operation
+                    .metadata
+                    .attributes
+                    .extend(facts.namespace.clone());
+                for commit in &facts.intentional {
                     operation
                         .commit_predecessors
                         .get_or_insert_with(BTreeMap::new)
@@ -538,7 +687,7 @@ impl NodeRepo {
                 }
                 let written = store.write_operation(&operation).block_on()?;
                 if written != id
-                    && (source_ids.contains(&written) || !created.insert(written.clone()))
+                    && (existing.contains(&written) || !created.insert(written.clone()))
                 {
                     return Err(PublicationError::IdentityCollision.into());
                 }
@@ -550,14 +699,27 @@ impl NodeRepo {
             );
             images.insert(id, now);
         }
-        let mut parents = images
-            .get(&head.0)
+        let head = images
+            .get(&source.head.0)
             .cloned()
-            .unwrap_or_else(|| vec![head.0.clone()]);
+            .unwrap_or_else(|| vec![source.head.0.clone()]);
+        Ok(Contraction { head, movements })
+    }
+
+    /// Writes the checkpoint on top of `parents`, one operation per step of the state
+    /// attributes; the first carries the kept predecessors.
+    fn write_cleanup_checkpoint(
+        &self,
+        source: &CleanupSource,
+        token: &str,
+        mut parents: Vec<OperationId>,
+        mut kept: BTreeMap<CommitId, Vec<CommitId>>,
+    ) -> Result<OperationId, NodeError> {
+        let store = self.loader.op_store();
         let mut checkpoint = None;
-        for (step, mut attributes) in attrs.into_iter().enumerate() {
-            OpAttrs(&mut attributes).set_checkpoint(&plan.token, step);
-            let mut tx = repo.start_transaction();
+        for (step, mut attributes) in source.context.iter().cloned().enumerate() {
+            OpAttrs(&mut attributes).set_checkpoint(token, step);
+            let mut tx = source.repo.start_transaction();
             for (key, value) in attributes {
                 tx.set_attribute(key, value);
             }
@@ -568,7 +730,7 @@ impl NodeRepo {
             let mut operation = staged.operation().store_operation().clone();
             operation.parents = parents;
             operation.commit_predecessors = Some(if step == 0 {
-                kept.clone()
+                std::mem::take(&mut kept)
             } else {
                 BTreeMap::new()
             });
@@ -576,32 +738,44 @@ impl NodeRepo {
             parents = vec![id.clone()];
             checkpoint = Some(id);
         }
-        let checkpoint = checkpoint.ok_or(PublicationError::NoCheckpoint)?;
-        // Validate the *prepared native bodies* through the real canonicalization path,
-        // not a second planner projection. Failure leaves the source op heads untouched.
+        Ok(checkpoint.ok_or(PublicationError::NoCheckpoint)?)
+    }
+
+    /// Validate the *prepared native bodies* through the real canonicalization path, not a
+    /// second planner projection. Failure leaves the source op heads untouched.
+    fn check_prepared_cleanup(
+        &mut self,
+        source: &CleanupSource,
+        base: &CanonicalOp,
+        after: &PublicationReport,
+        selected: &BTreeSet<LocalOp>,
+        movements: &HashMap<LocalOp, Vec<LocalOp>>,
+        checkpoint: &OperationId,
+    ) -> Result<(), NodeError> {
         let prepared = self.canonicalize_unchecked(&LocalOp(checkpoint.clone()))?;
-        if self.canonical.read_operation(&prepared)?.view_id != expected_view {
+        if self.canonical.read_operation(&prepared)?.view_id != source.view {
             return Err(PublicationError::ViewChanged.into());
         }
-        if self.publication_foreign_presence(&prepared)? != expected_foreign {
+        if self.publication_foreign_presence(&prepared)? != source.foreign {
             return Err(PublicationError::ForeignPresenceChanged.into());
         }
         let prepared_repo = self.repo_at(&LocalOp(checkpoint.clone()))?;
-        if self.publication_state_attributes(&prepared_repo, &prepared)? != expected_context {
+        if self.publication_state_attributes(&prepared_repo, &prepared)? != source.context {
             return Err(PublicationError::StateChanged.into());
         }
-        for (old, now) in &movements {
+        for (old, now) in movements {
             if selected.contains(old) {
                 continue;
             }
-            if let (Some((view, frozen, _)), [now]) = (source_facts.get(&old.0), now.as_slice()) {
+            if let (Some(facts), [now]) = (source.facts.get(&old.0), now.as_slice()) {
                 let current = self
                     .canonical_of(now)
                     .ok_or(PublicationError::MissingPrepared)?;
                 let operation = self.canonical.read_operation(&current)?;
                 let current_view = self.canonical.read_view(&operation.view_id)?;
-                if operation.view_id != *view
-                    || self.publication_intentional(&current, &operation, &current_view)? != *frozen
+                if operation.view_id != facts.view
+                    || self.publication_intentional(&current, &operation, &current_view)?
+                        != facts.intentional
                 {
                     return Err(PublicationError::UnselectedChanged.into());
                 }
@@ -609,29 +783,33 @@ impl NodeRepo {
         }
         let known: HashSet<_> = self
             .canonical
-            .ancestors_until(std::slice::from_ref(&base), |_| false)?
+            .ancestors_until(std::slice::from_ref(base), |_| false)?
             .into_iter()
             .collect();
         let prepared_ops = self
             .canonical
             .ancestors_until(std::slice::from_ref(&prepared), |id| known.contains(id))?;
         let required = self.publication_commit_closure(self.required_commits(&prepared_ops)?)?;
-        if !intentional.is_subset(&required)
-            || self.publication_kept_versions(&prepared_ops)? != intentional
+        if !source.intentional.is_subset(&required)
+            || self.publication_kept_versions(&prepared_ops)? != source.intentional
         {
             return Err(PublicationError::IntentLost.into());
         }
         let actual =
-            self.publication_report(&prepared_ops, &base, &mut PublicationCache::default())?;
-        if actual.content != plan.after.content || actual.bytes != plan.after.bytes {
+            self.publication_report(&prepared_ops, base, &mut PublicationCache::default())?;
+        if actual.content != after.content || actual.bytes != after.bytes {
             return Err(PublicationError::PreviewMismatch.into());
         }
-        op_heads
-            .update_op_heads(std::slice::from_ref(&head.0), &checkpoint)
-            .block_on()?;
-        drop(lock);
-        let contraction = movements;
-        let checkpoint = LocalOp(checkpoint);
+        Ok(())
+    }
+
+    /// Moves the locked working copies onto the checkpoint now at the head, and forgets
+    /// what was derived from the old head.
+    fn finish_cleanup(
+        &mut self,
+        workspaces: Vec<CleanupWorkspace>,
+        checkpoint: &LocalOp,
+    ) -> Result<(), NodeError> {
         let mut finish_errors = Vec::new();
         for workspace in workspaces {
             if let Err(err) = workspace.locked.finish(checkpoint.0.clone()).block_on() {
@@ -656,6 +834,6 @@ impl NodeRepo {
         if !finish_errors.is_empty() {
             return Err(PublicationError::WorkspacesNotUpdated(finish_errors).into());
         }
-        Ok((plan.selected.len(), contraction, checkpoint))
+        Ok(())
     }
 }

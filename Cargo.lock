@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "jj-musubi"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2935,7 +2935,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "musubi-core"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "hegeltest",
  "serde",
@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "musubi-hub"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "hegeltest",
@@ -2962,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "musubi-jj"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "musubi-sync"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "musubi-testutil"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "jj-lib",
  "reflink-copy",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "musubi-transport"
-version = "0.5.0"
+version = "0.47.0"
 dependencies = [
  "async-trait",
  "bytes",

@@ -135,6 +135,50 @@ theorem terminal_iff_of_progress {α : Sort u} {step : α → α → Prop} {s : 
     exact ht t hst
   · exact quiescent
 
+/-- A run of zero or more steps of `step`. -/
+inductive Steps {α : Sort u} (step : α → α → Prop) : α → α → Prop
+  | refl (s : α) : Steps step s s
+  | tail {s t u : α} : Steps step s t → step t u → Steps step s u
+
+/-- A run can also start with its first step. -/
+theorem Steps.head {α : Sort u} {step : α → α → Prop} {s t u : α} (h1 : step s t)
+    (h2 : Steps step t u) : Steps step s u := by
+  induction h2 with
+  | refl => exact .tail (.refl _) h1
+  | tail _ hst ih => exact .tail ih hst
+
+/-- An invariant that every step preserves holds all along a run. -/
+theorem Steps.invariant {α : Sort u} {step : α → α → Prop} {inv : α → Prop}
+    (preserve : ∀ {s t}, inv s → step s t → inv t) {s t : α} (hs : inv s)
+    (h : Steps step s t) : inv t := by
+  induction h with
+  | refl => exact hs
+  | tail _ hst ih => exact preserve ih hst
+
+/-- A well-founded step relation on an invariant, with progress at every state of the
+invariant that is not `done`, reaches `done` from every state of the invariant. -/
+theorem eventually_done_of_progress {α : Sort u} {step : α → α → Prop} {inv done : α → Prop}
+    (wf : WellFounded (fun t s => inv s ∧ step s t))
+    (preserve : ∀ {s t}, inv s → step s t → inv t)
+    (progress : ∀ {s}, inv s → ¬ done s → ∃ t, step s t) {s : α} (hs : inv s) :
+    ∃ t, Steps step s t ∧ done t := by
+  refine WellFounded.induction (C := fun s => inv s → ∃ t, Steps step s t ∧ done t) wf s
+    (fun s ih hs => ?_) hs
+  by_cases hd : done s
+  · exact ⟨s, .refl s, hd⟩
+  · obtain ⟨t, hst⟩ := progress hs hd
+    obtain ⟨u, hu, hdu⟩ := ih t ⟨hs, hst⟩ (preserve hs hst)
+    exact ⟨u, .head hst hu, hdu⟩
+
+/-- On an invariant that has progress, a run that cannot be extended ends in a `done` state. -/
+theorem done_of_maximal_run {α : Sort u} {step : α → α → Prop} {inv done : α → Prop}
+    (preserve : ∀ {s t}, inv s → step s t → inv t)
+    (progress : ∀ {s}, inv s → ¬ done s → ∃ t, step s t) {s s' : α} (hs : inv s)
+    (hr : Steps step s s') (hmax : ∀ t, ¬ step s' t) : done s' :=
+  Classical.byContradiction fun hd =>
+    let ⟨t, ht⟩ := progress (Steps.invariant (step := step) (inv := inv) preserve hs hr) hd
+    hmax t ht
+
 /-! ## Minimal elements -/
 
 theorem exists_min (P : Nat → Prop) {a : Nat} (ha : P a) :

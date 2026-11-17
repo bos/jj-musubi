@@ -92,6 +92,10 @@ open Musubi
 #assert_axioms Musubi.acc_no_infinite_chain
 #assert_axioms Musubi.no_infinite_run_of_invariant
 #assert_axioms Musubi.terminal_iff_of_progress
+#assert_axioms Musubi.Steps.head
+#assert_axioms Musubi.Steps.invariant
+#assert_axioms Musubi.eventually_done_of_progress
+#assert_axioms Musubi.done_of_maximal_run
 
 #assert_axioms NativeEvents.nodeOK_of_filt
 #assert_axioms NativeEvents.Event.step
@@ -340,6 +344,7 @@ open Musubi
 #assert_axioms terminal_iff_converged
 #assert_axioms eventually_converges
 #assert_axioms maximal_run_converges
+#assert_axioms Core.converged_all_accepted
 #assert_axioms converged_all_accepted
 -- Merged requests
 #assert_axioms measure_agree

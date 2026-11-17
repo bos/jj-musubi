@@ -89,10 +89,8 @@ inductive PStep (N : Nat) : State → State → Prop
       (hrej : s.hub.head ≠ (s.node n).known.head) (hrej' : s.hub.head ≠ h) :
       PStep N s (s.pPushReject n h)
 
-/-- Reflexive-transitive closure of `PStep`. -/
-inductive PSteps (N : Nat) : State → State → Prop
-  | refl (s : State) : PSteps N s s
-  | tail {s t u : State} : PSteps N s t → PStep N t u → PSteps N s u
+/-- Runs of policy steps. -/
+abbrev PSteps (N : Nat) : State → State → Prop := Steps (PStep N)
 
 /-- Converged: every node's heads are exactly `{hub.head}` and it knows the current head. -/
 def Converged (N : Nat) (s : State) : Prop :=
@@ -217,10 +215,8 @@ theorem pstep_reachable {s s' : State} (h : Reachable N s) (hp : PStep N s s') :
       (Or.inr rfl) hlt))
 
 theorem psteps_reachable {s s' : State} (h : Reachable N s) (hp : PSteps N s s') :
-    Reachable N s' := by
-  induction hp with
-  | refl => exact h
-  | tail _ hst ih => exact pstep_reachable ih hst
+    Reachable N s' :=
+  Steps.invariant (inv := Reachable N) pstep_reachable h hp
 
 /-! ## The measure -/
 
@@ -712,9 +708,8 @@ theorem terminal_iff_converged {s : State} (h : Reachable N s) :
   terminal_iff_of_progress (progress h) (fun hc _ => converged_quiescent h hc)
 
 /-- In a converged state every operation any node created is in `anc*(hub.head)`. -/
-theorem converged_all_accepted {s : State} (h : Reachable N s) (hc : Converged N s)
+theorem Core.converged_all_accepted {s : State} (hI : Core N s) (hc : Converged N s)
     {x : Nat} (hx : x < s.U.next) : Anc s.U.par x s.hub.head := by
-  have hI := inv_reachable h
   by_cases hx0 : x = 0
   · subst hx0; exact hI.rootAnc _ hI.headLt
   · obtain ⟨n, hn, hcr⟩ := hI.creatorSome x (by omega) hx
@@ -722,27 +717,21 @@ theorem converged_all_accepted {s : State} (h : Reachable N s) (hc : Converged N
     rw [((hc n hn).1 g).1 hg] at hA
     exact hA
 
-theorem PSteps.head {s t u : State} (h1 : PStep N s t) (h2 : PSteps N t u) :
-    PSteps N s u := by
-  induction h2 with
-  | refl => exact PSteps.tail (PSteps.refl _) h1
-  | tail _ hst ih => exact PSteps.tail ih hst
+/-- In a converged reachable state, every operation is an ancestor of the hub's head. -/
+theorem converged_all_accepted {s : State} (h : Reachable N s) (hc : Converged N s)
+    {x : Nat} (hx : x < s.U.next) : Anc s.U.par x s.hub.head :=
+  (inv_reachable h).toCore.converged_all_accepted hc hx
 
 /-- **Liveness**: from every reachable state, policy steps reach a converged state. -/
 theorem eventually_converges {s : State} (h : Reachable N s) :
-    ∃ s', PSteps N s s' ∧ Converged N s' := by
-  refine WellFounded.induction (C := fun s => Reachable N s → ∃ s', PSteps N s s' ∧
-    Converged N s') (pstep_wf (N := N)) s (fun s ih h => ?_) h
-  by_cases hc : Converged N s
-  · exact ⟨s, PSteps.refl s, hc⟩
-  · obtain ⟨s', hs'⟩ := progress h hc
-    obtain ⟨u, hu, huc⟩ := ih s' ⟨h, hs'⟩ (pstep_reachable h hs')
-    exact ⟨u, PSteps.head hs' hu, huc⟩
+    ∃ s', PSteps N s s' ∧ Converged N s' :=
+  eventually_done_of_progress (inv := Reachable N) (done := Converged N) pstep_wf
+    pstep_reachable progress h
 
 /-- **Liveness**, maximal-run form: every policy run from a reachable state that cannot be
 extended ends in a converged state (and, by `no_infinite_policy_run`, every run is finite). -/
 theorem maximal_run_converges {s s' : State} (h : Reachable N s) (hr : PSteps N s s')
     (hmax : ∀ s'', ¬ PStep N s' s'') : Converged N s' :=
-  (terminal_iff_converged (psteps_reachable h hr)).1 hmax
+  done_of_maximal_run (inv := Reachable N) pstep_reachable progress h hr hmax
 
 end Musubi

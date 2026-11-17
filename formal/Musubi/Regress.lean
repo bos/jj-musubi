@@ -503,10 +503,8 @@ inductive PStepR (N : Nat) : State → State → Prop
       (hrej : s.hub.head ≠ (s.node n).known.head) (hrej' : s.hub.head ≠ h) :
       PStepR N s (s.pPushReject n h)
 
-/-- Reflexive-transitive closure of `PStepR`. -/
-inductive PStepsR (N : Nat) : State → State → Prop
-  | refl (s : State) : PStepsR N s s
-  | tail {s t u : State} : PStepsR N s t → PStepR N t u → PStepsR N s u
+/-- Runs of policy steps. -/
+abbrev PStepsR (N : Nat) : State → State → Prop := Steps (PStepR N)
 
 /-! ### Policy steps are runs of the extended system -/
 
@@ -551,10 +549,8 @@ theorem pstepR_reachable {s s' : State} (h : RReachable N s) (hp : PStepR N s s'
       (Or.inr rfl))
 
 theorem pstepsR_reachable {s s' : State} (h : RReachable N s) (hp : PStepsR N s s') :
-    RReachable N s' := by
-  induction hp with
-  | refl => exact h
-  | tail _ hst ih => exact pstepR_reachable ih hst
+    RReachable N s' :=
+  Steps.invariant (inv := RReachable N) pstepR_reachable h hp
 
 /-! ### The measure -/
 
@@ -1021,37 +1017,20 @@ theorem terminal_iff_convergedR {s : State} (h : RReachable N s) :
 /-- **A remade hive fills from its machines**: once converged, every operation any node
 created is in `anc*(hub.head)`, however much the hub lost on the way. -/
 theorem converged_all_acceptedR {s : State} (h : RReachable N s) (hc : Converged N s)
-    {x : Nat} (hx : x < s.U.next) : Anc s.U.par x s.hub.head := by
-  have hI := invR_reachable h
-  by_cases hx0 : x = 0
-  · subst hx0; exact hI.rootAnc _ hI.headLt
-  · obtain ⟨n, hn, hcr⟩ := hI.creatorSome x (by omega) hx
-    obtain ⟨g, hg, hA⟩ := hI.ownInHeads n x hx hcr
-    rw [((hc n hn).1 g).1 hg] at hA
-    exact hA
-
-theorem PStepsR.head {s t u : State} (h1 : PStepR N s t) (h2 : PStepsR N t u) :
-    PStepsR N s u := by
-  induction h2 with
-  | refl => exact PStepsR.tail (PStepsR.refl _) h1
-  | tail _ hst ih => exact PStepsR.tail ih hst
+    {x : Nat} (hx : x < s.U.next) : Anc s.U.par x s.hub.head :=
+  (invR_reachable h).toCore.converged_all_accepted hc hx
 
 /-- **Liveness** once the hub stops going back: from every state of the extended system,
 policy steps reach a converged state. -/
 theorem eventually_convergesR {s : State} (h : RReachable N s) :
-    ∃ s', PStepsR N s s' ∧ Converged N s' := by
-  refine WellFounded.induction (C := fun s => RReachable N s → ∃ s', PStepsR N s s' ∧
-    Converged N s') (pstepR_wf (N := N)) s (fun s ih h => ?_) h
-  by_cases hc : Converged N s
-  · exact ⟨s, PStepsR.refl s, hc⟩
-  · obtain ⟨s', hs'⟩ := progressR h hc
-    obtain ⟨u, hu, huc⟩ := ih s' ⟨h, hs'⟩ (pstepR_reachable h hs')
-    exact ⟨u, PStepsR.head hs' hu, huc⟩
+    ∃ s', PStepsR N s s' ∧ Converged N s' :=
+  eventually_done_of_progress (inv := RReachable N) (done := Converged N) pstepR_wf
+    pstepR_reachable progressR h
 
 /-- **Liveness**, maximal-run form: every policy run from a state of the extended system that
 cannot be extended ends in a converged state. -/
 theorem maximal_run_convergesR {s s' : State} (h : RReachable N s) (hr : PStepsR N s s')
     (hmax : ∀ s'', ¬ PStepR N s' s'') : Converged N s' :=
-  (terminal_iff_convergedR (pstepsR_reachable h hr)).1 hmax
+  done_of_maximal_run (inv := RReachable N) pstepR_reachable progressR h hr hmax
 
 end Musubi

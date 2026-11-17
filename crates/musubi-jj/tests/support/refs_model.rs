@@ -7,7 +7,6 @@
 //! merges the slot functions make. Equal targets have equal numbers, so the model compares
 //! targets as jj does.
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,9 +30,6 @@ pub struct Slot {
     pub k: RefTarget,
     pub tr: bool,
 }
-
-// One oracle for every model on this thread: the model's requests leave it as they found it.
-thread_local!(static ORACLE: RefCell<Option<Oracle>> = const { RefCell::new(None) });
 
 /// The model, with the targets numbered so far and jj's merges of them.
 pub struct RefsModel {
@@ -183,12 +179,8 @@ impl RefsModel {
             "terms": conflicts,
             "merges": merges,
         });
-        let reply = ORACLE.with(|oracle| {
-            oracle
-                .borrow_mut()
-                .get_or_insert_with(Oracle::spawn)
-                .call(&request)
-        });
+        // The model's requests leave the oracle as they found it.
+        let reply = Oracle::with(|oracle| oracle.call(&request));
         assert_eq!(reply["ok"], true, "the oracle refused {function}: {reply}");
         reply
     }

@@ -934,7 +934,6 @@ fn reply_blobs(reply: &Reply<Vec<u8>, WireAttachment>) -> Vec<(BlobId, u64)> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::task::Context;
@@ -1300,17 +1299,15 @@ mod tests {
             }
         }
 
-        // One oracle for every case: attempts requests leave it as they found it.
-        thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-        let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-        let reply = oracle.call(&json!({
+        let request = json!({
             "op": "attempts",
             "blob": blob,
             "limit": chunk_size(MAX_PAYLOAD),
             "sender": if upload { "upload" } else { "download" },
             "steps": steps,
-        }));
-        ORACLE.set(Some(oracle));
+        });
+        // Attempts requests leave the oracle as they found it.
+        let reply = Oracle::with(|oracle| oracle.call(&request));
         assert_eq!(reply["ok"], true, "the oracle refused the steps: {reply}");
         let modelled = reply["steps"].as_array().unwrap();
         // How many chunks a window has, which the model leaves to the sender, and how many

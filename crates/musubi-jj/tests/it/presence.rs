@@ -6,7 +6,6 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -143,12 +142,10 @@ fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize
 
 #[hegel::test(profile = "presence")]
 fn conformance(tc: TestCase) {
-    // One oracle for every case: presence requests leave it as they found it.
-    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-    let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
     let ops = tc.draw(history());
-    let (computed, modelled) = (computed(&ops), modelled(&mut oracle, &ops));
-    ORACLE.set(Some(oracle));
+    let computed = computed(&ops);
+    // Presence requests leave the oracle as they found it.
+    let modelled = Oracle::with(|oracle| modelled(oracle, &ops));
     for (x, (computed, modelled)) in computed.iter().zip(&modelled).enumerate() {
         assert_eq!(computed, modelled, "at operation {x}");
     }
@@ -215,8 +212,6 @@ fn contracted(
 // As `conformance`, with some operations dropped.
 #[hegel::test(profile = "presence")]
 fn contraction_keeps_presence(tc: TestCase) {
-    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-    let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
     let ops = tc.draw(history());
     // Each operation dropped or not, independently and evenly, so that most cases drop some but
     // not all of a history's operations, however long it is. Printed as the set dropped.
@@ -230,8 +225,8 @@ fn contraction_keeps_presence(tc: TestCase) {
                     .collect::<BTreeSet<usize>>()
             }),
     );
-    let (contracted, modelled) = (contracted(&ops, &dropped), modelled(&mut oracle, &ops));
-    ORACLE.set(Some(oracle));
+    let contracted = contracted(&ops, &dropped);
+    let modelled = Oracle::with(|oracle| modelled(oracle, &ops));
     for (x, (contracted, modelled)) in contracted.iter().zip(&modelled).enumerate() {
         if let Some(contracted) = contracted {
             assert_eq!(

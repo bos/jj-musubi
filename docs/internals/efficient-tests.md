@@ -102,7 +102,8 @@ sync once pushed CI's daemon tests there past their timeout. A test that drives 
 - Keep a long-lived helper across cases. The conformance test's Lean oracle (the executable
   model it checks each step against, [conformance.md](conformance.md)) takes 29 ms to start.
   A case that passes hands its oracle to the next; one that fails drops it, since its state is
-  then unknown.
+  then unknown. `Oracle::with` does this for a test whose requests leave the oracle as they
+  found it.
 
 ## Don't compute what nothing checks
 

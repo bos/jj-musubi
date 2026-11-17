@@ -261,8 +261,6 @@ mod tests {
     use jj_lib::config::StackedConfig;
     use jj_lib::settings::UserSettings;
 
-    use std::cell::Cell;
-
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -349,9 +347,6 @@ mod tests {
             own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
         });
 
-        // One oracle for every case: names requests leave it as they found it.
-        thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-        let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
         let keys: Vec<serde_json::Value> = machines
             .iter()
             .map(|key| serde_json::json!({"name": machine_name(key), "suffix": suffix(key)}))
@@ -379,8 +374,8 @@ mod tests {
                 .map(|(machine, workspace)| serde_json::json!({"machine": machine, "workspace": workspace}))
                 .collect::<Vec<_>>(),
         });
-        let reply = oracle.call(&request);
-        ORACLE.set(Some(oracle));
+        // Names requests leave the oracle as they found it.
+        let reply = Oracle::with(|oracle| oracle.call(&request));
         assert_eq!(
             reply["ok"], true,
             "the oracle refused the machines: {reply}"

@@ -327,8 +327,6 @@ fn renew(path: &Path) -> io::Result<()> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::cell::Cell;
-
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -627,11 +625,8 @@ mod tests {
                 Received::Prefix(have) => told = usize::try_from(have).unwrap(),
             }
         }
-        // One oracle for every case: chunks requests leave it as they found it.
-        thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-        let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-        let modelled = modelled(&mut oracle, &blob, &taken);
-        ORACLE.set(Some(oracle));
+        // Chunks requests leave the oracle as they found it.
+        let modelled = Oracle::with(|oracle| modelled(oracle, &blob, &taken));
         for (at, (taken, model)) in taken.iter().zip(&modelled).enumerate() {
             let received = taken.received.map(|received| match received {
                 Received::Prefix(have) => serde_json::json!(have),

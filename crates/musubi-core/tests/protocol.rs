@@ -9,7 +9,6 @@
 
 mod support;
 
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::convert::Infallible;
 use std::panic;
@@ -518,11 +517,10 @@ fn nodes_recover_from_false_replies(tc: TestCase) {
 // This and the other two conformance tests below make hegel.toml's default number of cases.
 #[hegel::test]
 fn conformance(tc: TestCase) {
-    // One oracle for each case after one that passed, reset by `World::new`: starting one
-    // took longer than most cases. One whose case failed goes, in whatever state it was.
-    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle), Environment::Protocol));
+    // `World::new` resets the oracle, and a case gives it back only if it passes.
+    if let Some(oracle) = run(tc, Some(Oracle::kept()), Environment::Protocol) {
+        oracle.keep();
+    }
 }
 
 /// A head the hub accepted through what survives of the one before need not reach it. Once
@@ -570,14 +568,10 @@ fn going_back_past_an_acceptance_through_survivors_remakes_the_hub() {
 /// it, and switching to prepared records are checked against the Lean model with the rest.
 #[hegel::test]
 fn survivor_advance_conformance(tc: TestCase) {
-    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run_from(
-        tc,
-        Some(oracle),
-        Environment::Protocol,
-        dropped_known,
-    ));
+    let oracle = Some(Oracle::kept());
+    if let Some(oracle) = run_from(tc, oracle, Environment::Protocol, dropped_known) {
+        oracle.keep();
+    }
 }
 
 /// Node 0 makes a few operations, one on another, and drops some of those below its head;
@@ -622,9 +616,9 @@ fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
 /// checks continue through every fault and recovery.
 #[hegel::test]
 fn storage_failures_preserve_operations(tc: TestCase) {
-    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
-    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle), Environment::StorageFailures));
+    if let Some(oracle) = run(tc, Some(Oracle::kept()), Environment::StorageFailures) {
+        oracle.keep();
+    }
 }
 
 #[path = "protocol/storage_boundaries.rs"]

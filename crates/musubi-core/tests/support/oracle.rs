@@ -1,6 +1,7 @@
 //! The Lean model as an oracle: a child process speaking the JSON lines of
 //! docs/internals/conformance.md.
 
+use std::cell::Cell;
 use std::io::BufRead as _;
 use std::io::BufReader;
 use std::io::Write as _;
@@ -20,6 +21,12 @@ pub struct Oracle {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+}
+
+thread_local! {
+    /// The oracle that this thread's last caller gave back, for the next: starting one takes
+    /// longer than most generated cases.
+    static KEPT: Cell<Option<Oracle>> = const { Cell::new(None) };
 }
 
 impl Oracle {
@@ -53,6 +60,28 @@ impl Oracle {
             stdin,
             stdout,
         }
+    }
+
+    /// Calls `f` with this thread's oracle, which it keeps for the next caller, as for
+    /// [`Oracle::kept`]. Only for requests that leave the oracle as they found it, such as
+    /// `names` or `attempts`, or that start by resetting it.
+    pub fn with<R>(f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut oracle = Self::kept();
+        let result = f(&mut oracle);
+        oracle.keep();
+        result
+    }
+
+    /// The oracle this thread's last caller gave back with [`Oracle::keep`], or else a new
+    /// one. A caller that panics, as a failing case does, drops it rather than giving it
+    /// back, since its state is then unknown, and the next caller gets a new one.
+    pub fn kept() -> Self {
+        KEPT.take().unwrap_or_else(Self::spawn)
+    }
+
+    /// Gives the oracle back for this thread's next caller of [`Oracle::kept`].
+    pub fn keep(self) {
+        KEPT.set(Some(self));
     }
 
     /// Sends one request, and returns the reply.

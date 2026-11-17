@@ -1,5 +1,7 @@
 name = "musubi"
 defaultTargets = ["Musubi", "oracle"]
+# Every warning fails the build, an unfinished proof (`sorry`) included.
+leanOptions = { warningAsError = true }
 
 [[lean_lib]]
 name = "Musubi"

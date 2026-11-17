@@ -33,8 +33,9 @@ The models of chunked transfers, per-machine refs, presence, copies, workspace n
 publication and native preparation are separate from the protocol model's state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
-depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer;
-`Musubi/Axioms.lean` prints each one's list.
+depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer.
+The build checks both: it treats the warning a `sorry` gives as an error, and
+`Musubi/Axioms.lean` fails if a main theorem depends on any other axiom.
 
 The protocol and lifecycle models are state machines, with states and a step relation. Other
 models describe functions over histories or file sets. The protocol's step relation is `Step N`,
@@ -58,7 +59,7 @@ lake build
 
 The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses only
 core Lean: no Mathlib, no dependencies. A clean build of the proofs and the oracle takes about a
-minute on 4 cores. It prints the axioms report of `Musubi/Axioms.lean` and runs the `#guard` smoke
+minute on 4 cores. It checks the axioms of `Musubi/Axioms.lean` and runs the `#guard` smoke
 tests in `Musubi/ExecTest.lean` and `Musubi/SupersedeExecTest.lean`.
 
 `./test/run_smoke.sh` builds the conformance oracle alone (`lake build oracle`), replays
@@ -202,7 +203,7 @@ and projection used by native-event replay.
 | `Musubi/NativeLifecycle/Steps.lean` | Executable preparation, revalidation and publication actions. |
 | `Musubi/NativeLifecycle/ConstructionSound.lean`, `Musubi/NativeLifecycle/RunSound.lean` | Conditional construction facts and record custody along executable traces. |
 | `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples; native authentication remains a separate obligation. |
-| `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
+| `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication and native lifecycle requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 

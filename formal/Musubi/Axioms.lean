@@ -1,7 +1,9 @@
 /-
-Axiom audit: every main theorem depends only on `propext`, `Classical.choice`, and
-`Quot.sound`.
+Axiom audit: every main theorem depends only on `propext`, `Classical.choice` and `Quot.sound`.
+`#assert_axioms` fails the build otherwise; a proof left unfinished depends on `sorryAx`.
 -/
+import Lean.Elab.Command
+import Lean.Util.CollectAxioms
 import Musubi.Safety
 import Musubi.Liveness
 import Musubi.Merged
@@ -60,624 +62,637 @@ import Musubi.NativeEvents
 import Musubi.FineAssembly
 import Musubi.Publication
 
+open Lean Elab Command in
+/-- `#assert_axioms t` fails unless `t` is a theorem that depends on no axiom beyond Lean's
+standard three. -/
+elab "#assert_axioms " id:ident : command => do
+  let name ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+  unless (← getConstInfo name).isTheorem do
+    throwErrorAt id m!"{name} is not a theorem"
+  let standard := [``propext, ``Classical.choice, ``Quot.sound]
+  let extra := (← collectAxioms name).filter fun a => !standard.contains a
+  unless extra.isEmpty do
+    logErrorAt id m!"{name} depends on {extra.toList}"
+
 open Musubi
 
-#print axioms Publication.protected_not_charged
-#print axioms Publication.known_not_charged
-#print axioms Publication.protected_content_free
-#print axioms Publication.cleanup_keeps_current_view
-#print axioms Publication.cleanup_keeps_intentional
-#print axioms Publication.cleanup_requires_intentional
-#print axioms Publication.cleanup_keeps_intentional_files
-#print axioms Publication.cleanup_keeps_context
-#print axioms Publication.survivor_parent_survives
-#print axioms Publication.survivor_ancestry
-#print axioms Publication.installed_keeps_intentional_files
-#print axioms Publication.installed_keeps_view_context
-#print axioms Publication.cleanup_keeps_unselected
-#print axioms Publication.uncertain_cleanup_refused
-#print axioms Publication.stale_cleanup_refused
-#print axioms Publication.changed_plan_held
+#assert_axioms Publication.protected_not_charged
+#assert_axioms Publication.known_not_charged
+#assert_axioms Publication.protected_content_free
+#assert_axioms Publication.cleanup_keeps_current_view
+#assert_axioms Publication.cleanup_keeps_intentional
+#assert_axioms Publication.cleanup_requires_intentional
+#assert_axioms Publication.cleanup_keeps_intentional_files
+#assert_axioms Publication.cleanup_keeps_context
+#assert_axioms Publication.survivor_parent_survives
+#assert_axioms Publication.survivor_ancestry
+#assert_axioms Publication.installed_keeps_intentional_files
+#assert_axioms Publication.installed_keeps_view_context
+#assert_axioms Publication.cleanup_keeps_unselected
+#assert_axioms Publication.uncertain_cleanup_refused
+#assert_axioms Publication.stale_cleanup_refused
+#assert_axioms Publication.changed_plan_held
 
--- Shared run facts; the first two are axiom-free.
-#print axioms Musubi.acc_no_infinite_chain
-#print axioms Musubi.no_infinite_run_of_invariant
-#print axioms Musubi.terminal_iff_of_progress
+-- Shared run facts
+#assert_axioms Musubi.acc_no_infinite_chain
+#assert_axioms Musubi.no_infinite_run_of_invariant
+#assert_axioms Musubi.terminal_iff_of_progress
 
-#print axioms NativeEvents.nodeOK_of_filt
-#print axioms NativeEvents.Event.step
-#print axioms NativeEvents.Event.removed_eligible_push
-#print axioms NativeEvents.observed_invariants
-#print axioms NativeEvents.observed_hs
-#print axioms NativeEvents.observed_decisions
-#print axioms NativeEvents.RecordView.mono
-#print axioms NativeEvents.RecordView.applied_current
-#print axioms NativeEvents.RecordView.pending_empty
-#print axioms NativeEvents.RecordView.applied_stays
-#print axioms FineAssembly.Honest.extend
-#print axioms FineAssembly.honest_step
-#print axioms FineAssembly.honest_run
-#print axioms FineAssembly.notice_mem
-#print axioms FineAssembly.FineSource.steps
-#print axioms FineAssembly.fineAt_of
-#print axioms Schedule.index_le
-#print axioms Schedule.monotone
-#print axioms Schedule.before_of_done_before
-#print axioms FineAssembly.hive_converges_observed
+#assert_axioms NativeEvents.nodeOK_of_filt
+#assert_axioms NativeEvents.Event.step
+#assert_axioms NativeEvents.Event.removed_eligible_push
+#assert_axioms NativeEvents.observed_invariants
+#assert_axioms NativeEvents.observed_hs
+#assert_axioms NativeEvents.observed_decisions
+#assert_axioms NativeEvents.RecordView.mono
+#assert_axioms NativeEvents.RecordView.applied_current
+#assert_axioms NativeEvents.RecordView.pending_empty
+#assert_axioms NativeEvents.RecordView.applied_stays
+#assert_axioms FineAssembly.Honest.extend
+#assert_axioms FineAssembly.honest_step
+#assert_axioms FineAssembly.honest_run
+#assert_axioms FineAssembly.notice_mem
+#assert_axioms FineAssembly.FineSource.steps
+-- `FineAssembly.fineAt_of` builds data, not a proof; the theorems that use it are audited.
+#assert_axioms Schedule.index_le
+#assert_axioms Schedule.monotone
+#assert_axioms Schedule.before_of_done_before
+#assert_axioms FineAssembly.hive_converges_observed
 
-#print axioms Exec.cexec_sound
-#print axioms Exec.cexec_ok
-#print axioms Exec.cexecAction_sound
-#print axioms Exec.cexecAction_ok
-#print axioms Exec.cexec_reachable_step
-#print axioms Exec.cexecAction_record_control
-#print axioms Exec.contracted_step_node_drop_mono
-#print axioms Exec.cexec_record_prefix_stabilizes
-#print axioms Exec.cexec_record_and_drop_sets_stabilize
-#print axioms Exec.cutInv_step
-#print axioms Exec.cutHistory_step
-#print axioms Exec.cutHistory_run
-#print axioms Exec.post_cut_run
-#print axioms Exec.stale_accepts_stop
-#print axioms Exec.fresh_accept_aligned
-#print axioms Exec.eventual_aligned_acceptance_witnesses
-#print axioms Exec.packet_source_drops
-#print axioms Exec.packet_accept_fields
-#print axioms Exec.packet_accept_fixed_drops
-#print axioms Exec.packet_sender_aligned
-#print axioms Exec.packet_sender_after_cut_aligned
-#print axioms Exec.packet_source_known
-#print axioms Exec.packet_source_heads
-#print axioms Exec.packet_upload_closes
-#print axioms Exec.packet_upload_closes_from_bases
-#print axioms Exec.packet_upload_closes_split
-#print axioms Exec.packet_checks_of_emit
-#print axioms Exec.packet_checks_force_accept
-#print axioms Exec.cexec_reachable_heads_survive
-#print axioms Exec.current_adoption_enabled
-#print axioms Exec.aligned_records_no_pending
-#print axioms Exec.cexecAction_held
-#print axioms PendingEpoch.pending_names_settle
-#print axioms PendingEpoch.pending_names_fixed
-#print axioms PendingEpoch.pending_names_settle_with_old_known
-#print axioms PendingEpoch.pending_names_settle_from_sources
-#print axioms PendingEpoch.finite_metadata_stabilizes
-#print axioms PendingEpoch.finite_metadata_output_stabilizes
-#print axioms EarlyEntry.Burst.stepB_sound
-#print axioms EarlyEntry.Burst.local_grows_after_inputs
-#print axioms EarlyEntry.Burst.step_rank
-#print axioms EarlyEntry.Burst.no_infinite_burst
-#print axioms EarlyEntry.Control.call_rank
-#print axioms EarlyEntry.Control.no_infinite_calls
-#print axioms EarlyEntry.Control.frame_rank
-#print axioms EarlyEntry.Control.no_infinite_framed
-#print axioms EarlyEntry.Control.pending_push_reached
-#print axioms EarlyEntry.Control.walkB_iff
-#print axioms EarlyEntry.Control.rawControl_guarded
-#print axioms EarlyEntry.Control.callB_sound
-#print axioms EarlyEntry.Control.raw_round_yields
-#print axioms EarlyEntry.Control.Naming.settles
-#print axioms EarlyEntry.Control.fresh_head_reached
-#print axioms EarlyEntry.Control.fresh_fetch_takes
-#print axioms EarlyEntry.Control.fresh_fetch_current
-#print axioms EarlyEntry.Control.FetchLaws.current
-#print axioms EarlyEntry.Control.raw_entry_reached
-#print axioms EarlyEntry.Control.EntryLaws.enters
-#print axioms EarlyEntry.Control.raw_entry_persists
-#print axioms Recovery.eligible_nodes_raw_enter
-#print axioms RawPublish.pendingPush_accepted
-#print axioms RawPublish.stable_no_pendingPush
-#print axioms Recovery.HubSys.request_bounds_run
-#print axioms Recovery.HubSys.history_messages_run
-#print axioms Recovery.HubSys.raw_window_run
-#print axioms Recovery.HubSys.rawStep_of_sys
-#print axioms Recovery.HubSys.global_history_chain
-#print axioms Recovery.HubSys.pending_history_of_sys
-#print axioms SysAcceptance.no_accepting_emit
-#print axioms SysAcceptance.node_settles_accepted
-#print axioms Recovery.aligned_iff_pending_empty
-#print axioms Recovery.HubSys.sys_step_expansion
-#print axioms Recovery.HubSys.path_bk_quiet
-#print axioms Recovery.HubSys.settled_raw_head
-#print axioms Recovery.HubSys.hub_stabilizes_sys
-#print axioms SysAcceptance.eligible_system_converges
-#print axioms SysAcceptance.not_dropped_fixed
-#print axioms SysAcceptance.not_dropped_of
-#print axioms SysAcceptance.PendingLaws.hsurviveOf
-#print axioms SysAcceptance.PendingLaws.hnoCacheOf
-#print axioms SysAcceptance.no_forever_pending
-#print axioms SysAcceptance.PendingLaws.absurd
-#print axioms SysAcceptance.old_effects_stop
-#print axioms SysAcceptance.known_after
-#print axioms SysAcceptance.known_truthful
-#print axioms SysAcceptance.knows_stable_head
-#print axioms SysAcceptance.hive_converges
-#print axioms SysAcceptance.HubAnswer.fetch_step
-#print axioms SysAcceptance.HubAnswer.objects_step
-#print axioms SysAcceptance.HubAnswer.hive_step
-#print axioms SysAcceptance.answer_refused_iff
-#print axioms SysAcceptance.answer_ne_incomplete
-#print axioms SysAcceptance.HubAnswer.push_step
-#print axioms SysAcceptance.HubAnswer.store_step
-#print axioms SysAcceptance.HubAnswer.push_handled
-#print axioms SysAcceptance.HubAnswer.observed_step
-#print axioms SysAcceptance.checkAnswer_expect
-#print axioms Recovery.accepted_sender_pending_empty
-#print axioms Recovery.pending_push_not_accepted_fixed
-#print axioms Recovery.raw_pending_empty_of_fixed_records
-#print axioms Recovery.raw_noneligible_answer_frame
-#print axioms Exec.record_and_drop_sets_stabilize
-#print axioms NodeSys.SysStep.nonanswer_effect
-#print axioms NodeSys.SysStep.answer_effect
-#print axioms NodeSysEntry.filt_step
-#print axioms NodeSysEntry.filt_run_from
-#print axioms NodeSysEntry.runOK_filt_init
-#print axioms Recovery.HubSys.hive_filtered
-#print axioms Recovery.HubSys.hub_stabilizes_hive
-#print axioms Exec.current_pruned_reply_reconstructs
-#print axioms Exec.fresh_record_reply_completes
-#print axioms Exec.serialized_record_reply_completes
-#print axioms Retry.project_own_start
-#print axioms Retry.project_reserve
-#print axioms Retry.project_other_start
-#print axioms Retry.project_finish
-#print axioms Retry.Serial.inv_step
-#print axioms Retry.Serial.step_inbox
-#print axioms Retry.Serial.old_call_effects_stop
-#print axioms Retry.Serial.fresh_reply_no_restart
-#print axioms Retry.Serial.own_reply_learns
-#print axioms Retry.Serial.round_step_serial
-#print axioms Retry.Serial.round_old_effects_stop
-#print axioms Retry.Serial.object_recoveries_stop
-#print axioms Retry.Records.record_disturbances_stop
-#print axioms Retry.Records.no_receipts_when_quiet
-#print axioms Retry.Records.State.guard_fetched
-#print axioms Retry.Records.step_guard
-#print axioms Retry.Records.exec_sound
-#print axioms Retry.Records.step_credit
-#print axioms Retry.Notifications.old_notifications_stop
-#print axioms Retry.publication_empty_pending
-#print axioms HubSuffix.hub_suffix_stabilizes
-#print axioms NodeSettle.write_known
-#print axioms NodeSettle.emit_packet
-#print axioms NodeSettle.node_settles
-#print axioms EarlyEntry.early_entry
-#print axioms EarlyEntry.local_burst_finite
-#print axioms Recovery.node_converges_at_stable_hub
-#print axioms Recovery.refined_suffix_converges
-#print axioms Recovery.accepted_emits_of_packet_handling
-#print axioms Recovery.history_window_run
-#print axioms Recovery.history_window_enters_suffix
-#print axioms Recovery.fresh_observation_eventually
-#print axioms Recovery.own_observation_truthful
-#print axioms Recovery.notification_preserves_truth
-#print axioms Recovery.eligible_nodes_enter
-#print axioms Recovery.eligible_pending_empty
-#print axioms Recovery.eligible_write_unchanged
-#print axioms Recovery.history_reply_stays_truthful
-#print axioms Recovery.history_old_targets_stop
-#print axioms Expansion.expand
-#print axioms Expansion.Path.invariant
-#print axioms Expansion.stabilizes_of_expansion
-#print axioms Retry.Batch.finish_relabel
-#print axioms Retry.Batch.match_relabel
-#print axioms Retry.Batch.finite_batch_completes
-#print axioms NodeSys.node_settles_sys
-#print axioms NodeSys.Grow.toR
-#print axioms NodeSys.scoped_growR
-#print axioms NodeSys.GrowR.same_next
-#print axioms NodeSys.GrowR.one
-#print axioms NodeSys.Exec.scopeB_sound
-#print axioms NodeSys.Exec.growB_sound
-#print axioms NodeSysEntry.early_entry_sys
-#print axioms NodeSysEntry.node_settles_entry
-#print axioms SysFreshCuts.old_replies_stop
-#print axioms SysFreshCuts.old_notes_stop
-#print axioms SysFreshCuts.early_entry_fresh
-#print axioms SysFreshCuts.node_settles_fresh
-#print axioms Recovery.raw_growth_expansion
-#print axioms Recovery.raw_maintenance_expansion
-#print axioms Recovery.HubSys.ledger_covers
-#print axioms Recovery.HubSys.foreign_step_expansion
-#print axioms Recovery.HubNodeSteps.own_step_expansion
-#print axioms Recovery.HubNodeSteps.mid_mergeExisting
-#print axioms Recovery.HubNodeSteps.issue_post_heads
-#print axioms Recovery.HubNodeSteps.heads_nodup_step
-#print axioms NodeSettle.inv_busy
-#print axioms NodeSettle.rank_busy
-#print axioms NodeSys.loc_busy
-#print axioms Recovery.HubSys.suffixStepLaws_filt
-#print axioms SysAcceptance.FineAt.converges
-#print axioms SysAcceptance.NodeIssue.step
-#print axioms SysAcceptance.NodeIssue.hive_step
-#print axioms SysAcceptance.NodeIssue.raw_step
-#print axioms SysAcceptance.namedHead_of_le
-#print axioms SysAcceptance.learn_of_growB
-#print axioms SysAcceptance.learn_new_bare
-#print axioms SysAcceptance.NodeHandle.step
-#print axioms SysAcceptance.NodeHandle.hive_step
-#print axioms SysAcceptance.NodeCore.busy_step
-#print axioms SysAcceptance.NodeCore.idle_step
-#print axioms SysAcceptance.NodeCore.maint_step
-#print axioms SysAcceptance.NodeNotice.step
-#print axioms SysAcceptance.NodeNotice.ignore_step
-#print axioms Recovery.HubSys.answer_step_expansion
-#print axioms Recovery.HubSys.history_window_sys_run
-#print axioms Exec.uncoveredImages_after_advance
-#print axioms Exec.uncoveredImages_singleton_zero
-#print axioms Exec.rmeasureCE_without_drops
-#print axioms Exec.preparedAdvance_safe
-#print axioms Exec.imageAdvance_safe
-#print axioms Exec.imageAccept_safe
-#print axioms Contracted.step_safe
-#print axioms Contracted.step_retains
-#print axioms Contracted.old_expected_accepts_eventually_stop
+#assert_axioms Exec.cexec_sound
+#assert_axioms Exec.cexec_ok
+#assert_axioms Exec.cexecAction_sound
+#assert_axioms Exec.cexecAction_ok
+#assert_axioms Exec.cexec_reachable_step
+#assert_axioms Exec.cexecAction_record_control
+#assert_axioms Exec.contracted_step_node_drop_mono
+#assert_axioms Exec.cexec_record_prefix_stabilizes
+#assert_axioms Exec.cexec_record_and_drop_sets_stabilize
+#assert_axioms Exec.cutInv_step
+#assert_axioms Exec.cutHistory_step
+#assert_axioms Exec.cutHistory_run
+#assert_axioms Exec.post_cut_run
+#assert_axioms Exec.stale_accepts_stop
+#assert_axioms Exec.fresh_accept_aligned
+#assert_axioms Exec.eventual_aligned_acceptance_witnesses
+#assert_axioms Exec.packet_source_drops
+#assert_axioms Exec.packet_accept_fields
+#assert_axioms Exec.packet_accept_fixed_drops
+#assert_axioms Exec.packet_sender_aligned
+#assert_axioms Exec.packet_sender_after_cut_aligned
+#assert_axioms Exec.packet_source_known
+#assert_axioms Exec.packet_source_heads
+#assert_axioms Exec.packet_upload_closes
+#assert_axioms Exec.packet_upload_closes_from_bases
+#assert_axioms Exec.packet_upload_closes_split
+#assert_axioms Exec.packet_checks_of_emit
+#assert_axioms Exec.packet_checks_force_accept
+#assert_axioms Exec.cexec_reachable_heads_survive
+#assert_axioms Exec.current_adoption_enabled
+#assert_axioms Exec.aligned_records_no_pending
+#assert_axioms Exec.cexecAction_held
+#assert_axioms PendingEpoch.pending_names_settle
+#assert_axioms PendingEpoch.pending_names_fixed
+#assert_axioms PendingEpoch.pending_names_settle_with_old_known
+#assert_axioms PendingEpoch.pending_names_settle_from_sources
+#assert_axioms PendingEpoch.finite_metadata_stabilizes
+#assert_axioms PendingEpoch.finite_metadata_output_stabilizes
+#assert_axioms EarlyEntry.Burst.stepB_sound
+#assert_axioms EarlyEntry.Burst.local_grows_after_inputs
+#assert_axioms EarlyEntry.Burst.step_rank
+#assert_axioms EarlyEntry.Burst.no_infinite_burst
+#assert_axioms EarlyEntry.Control.call_rank
+#assert_axioms EarlyEntry.Control.no_infinite_calls
+#assert_axioms EarlyEntry.Control.frame_rank
+#assert_axioms EarlyEntry.Control.no_infinite_framed
+#assert_axioms EarlyEntry.Control.pending_push_reached
+#assert_axioms EarlyEntry.Control.walkB_iff
+#assert_axioms EarlyEntry.Control.rawControl_guarded
+#assert_axioms EarlyEntry.Control.callB_sound
+#assert_axioms EarlyEntry.Control.raw_round_yields
+#assert_axioms EarlyEntry.Control.Naming.settles
+#assert_axioms EarlyEntry.Control.fresh_head_reached
+#assert_axioms EarlyEntry.Control.fresh_fetch_takes
+#assert_axioms EarlyEntry.Control.fresh_fetch_current
+#assert_axioms EarlyEntry.Control.FetchLaws.current
+#assert_axioms EarlyEntry.Control.raw_entry_reached
+#assert_axioms EarlyEntry.Control.EntryLaws.enters
+#assert_axioms EarlyEntry.Control.raw_entry_persists
+#assert_axioms Recovery.eligible_nodes_raw_enter
+#assert_axioms RawPublish.pendingPush_accepted
+#assert_axioms RawPublish.stable_no_pendingPush
+#assert_axioms Recovery.HubSys.request_bounds_run
+#assert_axioms Recovery.HubSys.history_messages_run
+#assert_axioms Recovery.HubSys.raw_window_run
+#assert_axioms Recovery.HubSys.rawStep_of_sys
+#assert_axioms Recovery.HubSys.global_history_chain
+#assert_axioms Recovery.HubSys.pending_history_of_sys
+#assert_axioms SysAcceptance.no_accepting_emit
+#assert_axioms SysAcceptance.node_settles_accepted
+#assert_axioms Recovery.aligned_iff_pending_empty
+#assert_axioms Recovery.HubSys.sys_step_expansion
+#assert_axioms Recovery.HubSys.path_bk_quiet
+#assert_axioms Recovery.HubSys.settled_raw_head
+#assert_axioms Recovery.HubSys.hub_stabilizes_sys
+#assert_axioms SysAcceptance.eligible_system_converges
+#assert_axioms SysAcceptance.not_dropped_fixed
+#assert_axioms SysAcceptance.not_dropped_of
+#assert_axioms SysAcceptance.PendingLaws.hsurviveOf
+#assert_axioms SysAcceptance.PendingLaws.hnoCacheOf
+#assert_axioms SysAcceptance.no_forever_pending
+#assert_axioms SysAcceptance.PendingLaws.absurd
+#assert_axioms SysAcceptance.old_effects_stop
+#assert_axioms SysAcceptance.known_after
+#assert_axioms SysAcceptance.known_truthful
+#assert_axioms SysAcceptance.knows_stable_head
+#assert_axioms SysAcceptance.hive_converges
+#assert_axioms SysAcceptance.HubAnswer.fetch_step
+#assert_axioms SysAcceptance.HubAnswer.objects_step
+#assert_axioms SysAcceptance.HubAnswer.hive_step
+#assert_axioms SysAcceptance.answer_refused_iff
+#assert_axioms SysAcceptance.answer_ne_incomplete
+#assert_axioms SysAcceptance.HubAnswer.push_step
+#assert_axioms SysAcceptance.HubAnswer.store_step
+#assert_axioms SysAcceptance.HubAnswer.push_handled
+#assert_axioms SysAcceptance.HubAnswer.observed_step
+#assert_axioms SysAcceptance.checkAnswer_expect
+#assert_axioms Recovery.accepted_sender_pending_empty
+#assert_axioms Recovery.pending_push_not_accepted_fixed
+#assert_axioms Recovery.raw_pending_empty_of_fixed_records
+#assert_axioms Recovery.raw_noneligible_answer_frame
+#assert_axioms Exec.record_and_drop_sets_stabilize
+#assert_axioms NodeSys.SysStep.nonanswer_effect
+#assert_axioms NodeSys.SysStep.answer_effect
+#assert_axioms NodeSysEntry.filt_step
+#assert_axioms NodeSysEntry.filt_run_from
+#assert_axioms NodeSysEntry.runOK_filt_init
+#assert_axioms Recovery.HubSys.hive_filtered
+#assert_axioms Recovery.HubSys.hub_stabilizes_hive
+#assert_axioms Exec.current_pruned_reply_reconstructs
+#assert_axioms Exec.fresh_record_reply_completes
+#assert_axioms Exec.serialized_record_reply_completes
+#assert_axioms Retry.project_own_start
+#assert_axioms Retry.project_reserve
+#assert_axioms Retry.project_other_start
+#assert_axioms Retry.project_finish
+#assert_axioms Retry.Serial.inv_step
+#assert_axioms Retry.Serial.step_inbox
+#assert_axioms Retry.Serial.old_call_effects_stop
+#assert_axioms Retry.Serial.fresh_reply_no_restart
+#assert_axioms Retry.Serial.own_reply_learns
+#assert_axioms Retry.Serial.round_step_serial
+#assert_axioms Retry.Serial.round_old_effects_stop
+#assert_axioms Retry.Serial.object_recoveries_stop
+#assert_axioms Retry.Records.record_disturbances_stop
+#assert_axioms Retry.Records.no_receipts_when_quiet
+#assert_axioms Retry.Records.State.guard_fetched
+#assert_axioms Retry.Records.step_guard
+#assert_axioms Retry.Records.exec_sound
+#assert_axioms Retry.Records.step_credit
+#assert_axioms Retry.Notifications.old_notifications_stop
+#assert_axioms Retry.publication_empty_pending
+#assert_axioms HubSuffix.hub_suffix_stabilizes
+#assert_axioms NodeSettle.write_known
+#assert_axioms NodeSettle.emit_packet
+#assert_axioms NodeSettle.node_settles
+#assert_axioms EarlyEntry.early_entry
+#assert_axioms EarlyEntry.local_burst_finite
+#assert_axioms Recovery.node_converges_at_stable_hub
+#assert_axioms Recovery.refined_suffix_converges
+#assert_axioms Recovery.accepted_emits_of_packet_handling
+#assert_axioms Recovery.history_window_run
+#assert_axioms Recovery.history_window_enters_suffix
+#assert_axioms Recovery.fresh_observation_eventually
+#assert_axioms Recovery.own_observation_truthful
+#assert_axioms Recovery.notification_preserves_truth
+#assert_axioms Recovery.eligible_nodes_enter
+#assert_axioms Recovery.eligible_pending_empty
+#assert_axioms Recovery.eligible_write_unchanged
+#assert_axioms Recovery.history_reply_stays_truthful
+#assert_axioms Recovery.history_old_targets_stop
+#assert_axioms Expansion.expand
+#assert_axioms Expansion.Path.invariant
+#assert_axioms Expansion.stabilizes_of_expansion
+#assert_axioms Retry.Batch.finish_relabel
+#assert_axioms Retry.Batch.match_relabel
+#assert_axioms Retry.Batch.finite_batch_completes
+#assert_axioms NodeSys.node_settles_sys
+#assert_axioms NodeSys.Grow.toR
+#assert_axioms NodeSys.scoped_growR
+#assert_axioms NodeSys.GrowR.same_next
+#assert_axioms NodeSys.GrowR.one
+#assert_axioms NodeSys.Exec.scopeB_sound
+#assert_axioms NodeSys.Exec.growB_sound
+#assert_axioms NodeSysEntry.early_entry_sys
+#assert_axioms NodeSysEntry.node_settles_entry
+#assert_axioms SysFreshCuts.old_replies_stop
+#assert_axioms SysFreshCuts.old_notes_stop
+#assert_axioms SysFreshCuts.early_entry_fresh
+#assert_axioms SysFreshCuts.node_settles_fresh
+#assert_axioms Recovery.raw_growth_expansion
+#assert_axioms Recovery.raw_maintenance_expansion
+#assert_axioms Recovery.HubSys.ledger_covers
+#assert_axioms Recovery.HubSys.foreign_step_expansion
+#assert_axioms Recovery.HubNodeSteps.own_step_expansion
+#assert_axioms Recovery.HubNodeSteps.mid_mergeExisting
+#assert_axioms Recovery.HubNodeSteps.issue_post_heads
+#assert_axioms Recovery.HubNodeSteps.heads_nodup_step
+#assert_axioms NodeSettle.inv_busy
+#assert_axioms NodeSettle.rank_busy
+#assert_axioms NodeSys.loc_busy
+#assert_axioms Recovery.HubSys.suffixStepLaws_filt
+#assert_axioms SysAcceptance.FineAt.converges
+#assert_axioms SysAcceptance.NodeIssue.step
+#assert_axioms SysAcceptance.NodeIssue.hive_step
+#assert_axioms SysAcceptance.NodeIssue.raw_step
+#assert_axioms SysAcceptance.namedHead_of_le
+#assert_axioms SysAcceptance.learn_of_growB
+#assert_axioms SysAcceptance.learn_new_bare
+#assert_axioms SysAcceptance.NodeHandle.step
+#assert_axioms SysAcceptance.NodeHandle.hive_step
+#assert_axioms SysAcceptance.NodeCore.busy_step
+#assert_axioms SysAcceptance.NodeCore.idle_step
+#assert_axioms SysAcceptance.NodeCore.maint_step
+#assert_axioms SysAcceptance.NodeNotice.step
+#assert_axioms SysAcceptance.NodeNotice.ignore_step
+#assert_axioms Recovery.HubSys.answer_step_expansion
+#assert_axioms Recovery.HubSys.history_window_sys_run
+#assert_axioms Exec.uncoveredImages_after_advance
+#assert_axioms Exec.uncoveredImages_singleton_zero
+#assert_axioms Exec.rmeasureCE_without_drops
+#assert_axioms Exec.preparedAdvance_safe
+#assert_axioms Exec.imageAdvance_safe
+#assert_axioms Exec.imageAccept_safe
+#assert_axioms Contracted.step_safe
+#assert_axioms Contracted.step_retains
+#assert_axioms Contracted.old_expected_accepts_eventually_stop
 
-#print axioms Contract.advanceImages_set
-#print axioms Contract.advanceImages_nodup
-#print axioms Contract.advanceImages_survives
-#print axioms Contract.advanceImages_covers
-#print axioms Contract.advanceImages_singleton_ready
-#print axioms Contract.advanceImages_merge_ready
-#print axioms Contract.advanceImages_merge_keeps
-#print axioms Contract.covered_drops
-#print axioms Contract.covered_image
-#print axioms Contract.covered_upd
-#print axioms Contract.covered_contracted
+#assert_axioms Contract.advanceImages_set
+#assert_axioms Contract.advanceImages_nodup
+#assert_axioms Contract.advanceImages_survives
+#assert_axioms Contract.advanceImages_covers
+#assert_axioms Contract.advanceImages_singleton_ready
+#assert_axioms Contract.advanceImages_merge_ready
+#assert_axioms Contract.advanceImages_merge_keeps
+#assert_axioms Contract.covered_drops
+#assert_axioms Contract.covered_image
+#assert_axioms Contract.covered_upd
+#assert_axioms Contract.covered_contracted
 
-#print axioms AbandonRefs.abstraction_unique
-#print axioms AbandonRefs.adoption_composes
-#print axioms AbandonRefs.publish_current
-#print axioms AbandonRefs.publish_refines
-#print axioms AbandonRefs.fixup_retains
+#assert_axioms AbandonRefs.abstraction_unique
+#assert_axioms AbandonRefs.adoption_composes
+#assert_axioms AbandonRefs.publish_current
+#assert_axioms AbandonRefs.publish_refines
+#assert_axioms AbandonRefs.fixup_retains
 
 -- Safety
-#print axioms inv_reachable
-#print axioms hubClosed
-#print axioms hubMonotone
-#print axioms histStable
-#print axioms acceptedStays
-#print axioms nodeClosed
-#print axioms knownIsHubHistory
-#print axioms hubHistory
-#print axioms headMsgsTruthful
-#print axioms locality
-#print axioms mergeOwnership
-#print axioms mergeOwnershipGhost
-#print axioms noDuplicateMerge
-#print axioms mergeNeverRepeats
-#print axioms advance_result
-#print axioms advance_merge_parents
-#print axioms advance_merge_refines
+#assert_axioms inv_reachable
+#assert_axioms hubClosed
+#assert_axioms hubMonotone
+#assert_axioms histStable
+#assert_axioms acceptedStays
+#assert_axioms nodeClosed
+#assert_axioms knownIsHubHistory
+#assert_axioms hubHistory
+#assert_axioms headMsgsTruthful
+#assert_axioms locality
+#assert_axioms mergeOwnership
+#assert_axioms mergeOwnershipGhost
+#assert_axioms noDuplicateMerge
+#assert_axioms mergeNeverRepeats
+#assert_axioms advance_result
+#assert_axioms advance_merge_parents
+#assert_axioms advance_merge_refines
 -- No feedback
-#print axioms noFeedback
-#print axioms envCreatesOne
-#print axioms converged_quiescent
+#assert_axioms noFeedback
+#assert_axioms envCreatesOne
+#assert_axioms converged_quiescent
 -- Liveness
-#print axioms pstep_reachable
-#print axioms progress
-#print axioms measure_decreases
-#print axioms no_infinite_policy_run
-#print axioms terminal_iff_converged
-#print axioms eventually_converges
-#print axioms maximal_run_converges
-#print axioms converged_all_accepted
+#assert_axioms pstep_reachable
+#assert_axioms progress
+#assert_axioms measure_decreases
+#assert_axioms no_infinite_policy_run
+#assert_axioms terminal_iff_converged
+#assert_axioms eventually_converges
+#assert_axioms maximal_run_converges
+#assert_axioms converged_all_accepted
 -- Merged requests
-#print axioms measure_agree
-#print axioms converged_agree
-#print axioms pushAccept_merged
-#print axioms pushIdem_merged
-#print axioms pushReject_merged
-#print axioms fetch_merged
-#print axioms realize_agree
-#print axioms rmeasure_agree
-#print axioms pushAcceptR_merged
-#print axioms pushIdemR_merged
-#print axioms pushRejectR_merged
-#print axioms fetchR_merged
-#print axioms fetchR_current
+#assert_axioms measure_agree
+#assert_axioms converged_agree
+#assert_axioms pushAccept_merged
+#assert_axioms pushIdem_merged
+#assert_axioms pushReject_merged
+#assert_axioms fetch_merged
+#assert_axioms realize_agree
+#assert_axioms rmeasure_agree
+#assert_axioms pushAcceptR_merged
+#assert_axioms pushIdemR_merged
+#assert_axioms pushRejectR_merged
+#assert_axioms fetchR_merged
+#assert_axioms fetchR_current
 -- A hub that goes back
-#print axioms invR_reachable
-#print axioms hubClosedR
-#print axioms hubHistoryR
-#print axioms nodeClosedR
-#print axioms noFeedbackR
-#print axioms remake_reachable
-#print axioms pstepR_reachable
-#print axioms progressR
-#print axioms measureR_decreases
-#print axioms no_infinite_policy_runR
-#print axioms terminal_iff_convergedR
-#print axioms eventually_convergesR
-#print axioms maximal_run_convergesR
-#print axioms converged_all_acceptedR
-#print axioms RegressScenario.duplicateMerge
-#print axioms RegressScenario.rreachable_not_reachable
+#assert_axioms invR_reachable
+#assert_axioms hubClosedR
+#assert_axioms hubHistoryR
+#assert_axioms nodeClosedR
+#assert_axioms noFeedbackR
+#assert_axioms remake_reachable
+#assert_axioms pstepR_reachable
+#assert_axioms progressR
+#assert_axioms measureR_decreases
+#assert_axioms no_infinite_policy_runR
+#assert_axioms terminal_iff_convergedR
+#assert_axioms eventually_convergesR
+#assert_axioms maximal_run_convergesR
+#assert_axioms converged_all_acceptedR
+#assert_axioms RegressScenario.duplicateMerge
+#assert_axioms RegressScenario.rreachable_not_reachable
 -- Chunked blobs
-#print axioms Chunks.stored_identical
-#print axioms Chunks.session_finishes
-#print axioms Chunks.preach_abs
-#print axioms Chunks.prefix_stored_identical
-#print axioms Chunks.prefix_finishes
-#print axioms Chunks.attempt_progress
-#print axioms Chunks.restart_stalls
-#print axioms Chunks.attempt_decreases
-#print axioms Chunks.late_le
-#print axioms Chunks.ameasure_reread
-#print axioms Chunks.attempts_finish
-#print axioms Chunks.attempts_bounded
-#print axioms Chunks.fair_tsteps
-#print axioms Chunks.fair_unswept
-#print axioms Chunks.fair_arun
-#print axioms Chunks.fair_finishes
-#print axioms Chunks.swept_source_stalls
+#assert_axioms Chunks.stored_identical
+#assert_axioms Chunks.session_finishes
+#assert_axioms Chunks.preach_abs
+#assert_axioms Chunks.prefix_stored_identical
+#assert_axioms Chunks.prefix_finishes
+#assert_axioms Chunks.attempt_progress
+#assert_axioms Chunks.restart_stalls
+#assert_axioms Chunks.attempt_decreases
+#assert_axioms Chunks.late_le
+#assert_axioms Chunks.ameasure_reread
+#assert_axioms Chunks.attempts_finish
+#assert_axioms Chunks.attempts_bounded
+#assert_axioms Chunks.fair_tsteps
+#assert_axioms Chunks.fair_unswept
+#assert_axioms Chunks.fair_arun
+#assert_axioms Chunks.fair_finishes
+#assert_axioms Chunks.swept_source_stalls
 -- Non-vacuity
-#print axioms Scenario.scenario
+#assert_axioms Scenario.scenario
 -- Executable model
-#print axioms Exec.exec_sound
-#print axioms Exec.abs_initE
-#print axioms Exec.exec_reachable
-#print axioms Exec.exec_inv
-#print axioms Exec.exec_rsound
-#print axioms Exec.exec_rreachable
-#print axioms Exec.exec_invR
-#print axioms Exec.exec_remake
-#print axioms Exec.measureE_eq
-#print axioms Exec.rmeasureE_eq
-#print axioms Exec.convergedE_iff
-#print axioms Exec.mem_upOpsL
-#print axioms Exec.mem_upObjsL
-#print axioms Exec.sexec_sound
-#print axioms Exec.sabs_initSE
-#print axioms Exec.sexec_ok
-#print axioms Exec.sexec_allPruned
-#print axioms Exec.sexec_announced_held
-#print axioms Exec.sexec_reachable
-#print axioms Exec.sexec_inv
-#print axioms Exec.smeasureE_eq
-#print axioms Exec.sconvergedE_iff
+#assert_axioms Exec.exec_sound
+#assert_axioms Exec.abs_initE
+#assert_axioms Exec.exec_reachable
+#assert_axioms Exec.exec_inv
+#assert_axioms Exec.exec_rsound
+#assert_axioms Exec.exec_rreachable
+#assert_axioms Exec.exec_invR
+#assert_axioms Exec.exec_remake
+#assert_axioms Exec.measureE_eq
+#assert_axioms Exec.rmeasureE_eq
+#assert_axioms Exec.convergedE_iff
+#assert_axioms Exec.mem_upOpsL
+#assert_axioms Exec.mem_upObjsL
+#assert_axioms Exec.sexec_sound
+#assert_axioms Exec.sabs_initSE
+#assert_axioms Exec.sexec_ok
+#assert_axioms Exec.sexec_allPruned
+#assert_axioms Exec.sexec_announced_held
+#assert_axioms Exec.sexec_reachable
+#assert_axioms Exec.sexec_inv
+#assert_axioms Exec.smeasureE_eq
+#assert_axioms Exec.sconvergedE_iff
 -- Ordered-record reconciliation
-#print axioms Exec.recordMeasureE_eq
-#print axioms Exec.recordConvergedE_iff
-#print axioms Exec.recordMeasure_decreases
-#print axioms Exec.recordPolicy_wf
-#print axioms Exec.reconcile_executable
-#print axioms Exec.record_progress_at_convergence
-#print axioms Exec.record_finish
+#assert_axioms Exec.recordMeasureE_eq
+#assert_axioms Exec.recordConvergedE_iff
+#assert_axioms Exec.recordMeasure_decreases
+#assert_axioms Exec.recordPolicy_wf
+#assert_axioms Exec.reconcile_executable
+#assert_axioms Exec.record_progress_at_convergence
+#assert_axioms Exec.record_finish
 -- Split asynchronous exchanges (the full retry bridge is still open)
-#print axioms measureR_delayed_learn
-#print axioms bad_accept_before_reply
-#print axioms measureR_accept_before_reply
-#print axioms settling_decreases
-#print axioms settling_hub_stabilizes
+#assert_axioms measureR_delayed_learn
+#assert_axioms bad_accept_before_reply
+#assert_axioms measureR_accept_before_reply
+#assert_axioms settling_decreases
+#assert_axioms settling_hub_stabilizes
 -- Retry-control bounds under their explicit epoch constraints
-#print axioms Retry.finish_missing
-#print axioms Retry.start_fresh
-#print axioms Retry.inbox_old_credit
-#print axioms Retry.old_slots_eventually_stop
-#print axioms Retry.fixup_step_credit
-#print axioms Retry.fixup_writes_le_one
-#print axioms Retry.fixups_eventually_stop
-#print axioms Retry.publication_progress
-#print axioms Retry.publication_retry
-#print axioms Retry.publication_tip_cached
+#assert_axioms Retry.finish_missing
+#assert_axioms Retry.start_fresh
+#assert_axioms Retry.inbox_old_credit
+#assert_axioms Retry.old_slots_eventually_stop
+#assert_axioms Retry.fixup_step_credit
+#assert_axioms Retry.fixup_writes_le_one
+#assert_axioms Retry.fixups_eventually_stop
+#assert_axioms Retry.publication_progress
+#assert_axioms Retry.publication_retry
+#assert_axioms Retry.publication_tip_cached
 -- Stabilization of records, without assuming head stabilization
-#print axioms Exec.sexec_record_control
-#print axioms Exec.takeRecs_eq_iff
-#print axioms Exec.eventual_original_chain
-#print axioms Exec.record_prefix_eventually_stabilizes
-#print axioms Exec.sexec_record_prefix_stabilizes
-#print axioms Exec.adopt_pending_subset
-#print axioms Exec.retry_adopt_of_extension
-#print axioms Exec.node_drop_sets_eventually_stabilize
+#assert_axioms Exec.sexec_record_control
+#assert_axioms Exec.takeRecs_eq_iff
+#assert_axioms Exec.eventual_original_chain
+#assert_axioms Exec.record_prefix_eventually_stabilizes
+#assert_axioms Exec.sexec_record_prefix_stabilizes
+#assert_axioms Exec.adopt_pending_subset
+#assert_axioms Exec.retry_adopt_of_extension
+#assert_axioms Exec.node_drop_sets_eventually_stabilize
 -- Contracted expected heads; the original-history embedding is still incomplete
-#print axioms Contract.below_survivor_iff
-#print axioms Contract.below_contracted_iff
-#print axioms Contract.below_two_step
-#print axioms Contract.below_mono
-#print axioms Contract.below_trans
-#print axioms Contract.belowB_iff
-#print axioms Contract.stable_suffix_chain
+#assert_axioms Contract.below_survivor_iff
+#assert_axioms Contract.below_contracted_iff
+#assert_axioms Contract.below_two_step
+#assert_axioms Contract.below_mono
+#assert_axioms Contract.below_trans
+#assert_axioms Contract.belowB_iff
+#assert_axioms Contract.stable_suffix_chain
 -- Per-machine and shared view state
-#print axioms Refs.noSpuriousRevert
-#print axioms Refs.import_moves_only_after_git
-#print axioms Refs.verbatim_reverts
-#print axioms Refs.realize_noninterference
-#print axioms Refs.verbatim_interferes
-#print axioms Refs.merge_in_sync
-#print axioms Refs.remoteNoSpuriousRevert
-#print axioms Refs.remote_reset_without_export
-#print axioms Refs.merge3_synced
-#print axioms Refs.FReach.inv
-#print axioms Refs.fork_merge_inv
-#print axioms Refs.fork_merged_reach
-#print axioms Refs.fork_noSpuriousRevert
-#print axioms Refs.concurrent_records_revert
-#print axioms Refs.TSlot.import_toSlot
-#print axioms Refs.TSlot.import_self
-#print axioms Refs.TSlot.track_toSlot
-#print axioms Refs.TSlot.exportLocal_toSlot
-#print axioms Refs.TSlot.merge_toSlot
-#print axioms Refs.TSlot.merge_WF
-#print axioms Refs.shortcut_agrees
-#print axioms Refs.realizeMerge_eq
-#print axioms Refs.shortcutUnguarded_keeps_absent
-#print axioms Refs.shortcutUnguarded_untracks
-#print axioms Refs.realize_not_WF
-#print axioms Refs.firstBase_reverts
-#print axioms Refs.restoreLocal_inv
-#print axioms Refs.restoreLocal_reach
-#print axioms Refs.restoreRemote_inv
-#print axioms Refs.restoreRemote_cinv
-#print axioms Refs.restore_reverts
-#print axioms Refs.CReach.inv
-#print axioms Refs.conflictedNoSpuriousRevert
-#print axioms Refs.conflicted_import_agrees
-#print axioms Refs.conflicted_resolves
-#print axioms Refs.restore_import_agrees
-#print axioms Refs.restore_conflict_resolves_back
-#print axioms Refs.conflicted_restore_resolves
-#print axioms Refs.besideLocal_inv
-#print axioms Refs.LStep.agrees
-#print axioms Refs.cbeside_inv
-#print axioms Refs.beside_keeps_fetch
-#print axioms Refs.beside_published_apart_disagrees
+#assert_axioms Refs.noSpuriousRevert
+#assert_axioms Refs.import_moves_only_after_git
+#assert_axioms Refs.verbatim_reverts
+#assert_axioms Refs.realize_noninterference
+#assert_axioms Refs.verbatim_interferes
+#assert_axioms Refs.merge_in_sync
+#assert_axioms Refs.remoteNoSpuriousRevert
+#assert_axioms Refs.remote_reset_without_export
+#assert_axioms Refs.merge3_synced
+#assert_axioms Refs.FReach.inv
+#assert_axioms Refs.fork_merge_inv
+#assert_axioms Refs.fork_merged_reach
+#assert_axioms Refs.fork_noSpuriousRevert
+#assert_axioms Refs.concurrent_records_revert
+#assert_axioms Refs.TSlot.import_toSlot
+#assert_axioms Refs.TSlot.import_self
+#assert_axioms Refs.TSlot.track_toSlot
+#assert_axioms Refs.TSlot.exportLocal_toSlot
+#assert_axioms Refs.TSlot.merge_toSlot
+#assert_axioms Refs.TSlot.merge_WF
+#assert_axioms Refs.shortcut_agrees
+#assert_axioms Refs.realizeMerge_eq
+#assert_axioms Refs.shortcutUnguarded_keeps_absent
+#assert_axioms Refs.shortcutUnguarded_untracks
+#assert_axioms Refs.realize_not_WF
+#assert_axioms Refs.firstBase_reverts
+#assert_axioms Refs.restoreLocal_inv
+#assert_axioms Refs.restoreLocal_reach
+#assert_axioms Refs.restoreRemote_inv
+#assert_axioms Refs.restoreRemote_cinv
+#assert_axioms Refs.restore_reverts
+#assert_axioms Refs.CReach.inv
+#assert_axioms Refs.conflictedNoSpuriousRevert
+#assert_axioms Refs.conflicted_import_agrees
+#assert_axioms Refs.conflicted_resolves
+#assert_axioms Refs.restore_import_agrees
+#assert_axioms Refs.restore_conflict_resolves_back
+#assert_axioms Refs.conflicted_restore_resolves
+#assert_axioms Refs.besideLocal_inv
+#assert_axioms Refs.LStep.agrees
+#assert_axioms Refs.cbeside_inv
+#assert_axioms Refs.beside_keeps_fetch
+#assert_axioms Refs.beside_published_apart_disagrees
 -- Which copies a hive shows
-#print axioms Presence.Hist.present_local
-#print axioms Presence.Hist.present_congr
-#print axioms Presence.Hist.work_present
-#print axioms Presence.Hist.forget_absent
-#print axioms Presence.Hist.only_work_returns
-#print axioms Presence.Hist.absence_persists
-#print axioms Presence.Hist.leave_sticks
-#print axioms Presence.Hist.unseen_work_survives
-#print axioms Presence.Hist.forgets_need_fresh_work
-#print axioms Presence.Hist.no_forget_after_complete
-#print axioms Presence.Hist.forget_chain_bounded
-#print axioms Presence.Hist.redundant_forget_noop
-#print axioms Presence.Hist.concurrent_forget_noop
-#print axioms Presence.Hist.present_iff_latest
-#print axioms Presence.Hist.present_iff_umax
-#print axioms Presence.Hist.umax_work
-#print axioms Presence.Hist.umax_forget
-#print axioms Presence.Hist.umax_merge
-#print axioms Presence.Hist.fixup_present
-#print axioms Presence.Hist.pass_present
-#print axioms Presence.EHist.presentB_iff
-#print axioms Presence.EHist.mem_latestB
+#assert_axioms Presence.Hist.present_local
+#assert_axioms Presence.Hist.present_congr
+#assert_axioms Presence.Hist.work_present
+#assert_axioms Presence.Hist.forget_absent
+#assert_axioms Presence.Hist.only_work_returns
+#assert_axioms Presence.Hist.absence_persists
+#assert_axioms Presence.Hist.leave_sticks
+#assert_axioms Presence.Hist.unseen_work_survives
+#assert_axioms Presence.Hist.forgets_need_fresh_work
+#assert_axioms Presence.Hist.no_forget_after_complete
+#assert_axioms Presence.Hist.forget_chain_bounded
+#assert_axioms Presence.Hist.redundant_forget_noop
+#assert_axioms Presence.Hist.concurrent_forget_noop
+#assert_axioms Presence.Hist.present_iff_latest
+#assert_axioms Presence.Hist.present_iff_umax
+#assert_axioms Presence.Hist.umax_work
+#assert_axioms Presence.Hist.umax_forget
+#assert_axioms Presence.Hist.umax_merge
+#assert_axioms Presence.Hist.fixup_present
+#assert_axioms Presence.Hist.pass_present
+#assert_axioms Presence.EHist.presentB_iff
+#assert_axioms Presence.EHist.mem_latestB
 -- Copies, duplicates and moves
-#print axioms Copies.right_hive
-#print axioms Copies.duplicates_refused
-#print axioms Copies.only_join_makes_keys
-#print axioms Copies.moves_followed
-#print axioms Copies.daemon_writes_nothing
-#print axioms Copies.jj_records_path
-#print axioms Copies.refine_ne_copy
-#print axioms Copies.join_refuses_duplicate
-#print axioms Copies.duplicate_taken_for_moved
-#print axioms Copies.move_taken_for_duplicate
+#assert_axioms Copies.right_hive
+#assert_axioms Copies.duplicates_refused
+#assert_axioms Copies.only_join_makes_keys
+#assert_axioms Copies.moves_followed
+#assert_axioms Copies.daemon_writes_nothing
+#assert_axioms Copies.jj_records_path
+#assert_axioms Copies.refine_ne_copy
+#assert_axioms Copies.join_refuses_duplicate
+#assert_axioms Copies.duplicate_taken_for_moved
+#assert_axioms Copies.move_taken_for_duplicate
 
 -- Names
-#print axioms Names.choose_free
-#print axioms Names.localName_injective
+#assert_axioms Names.choose_free
+#assert_axioms Names.localName_injective
 
 -- Contracting abandoned operations out of a history
-#print axioms Contract.cpar_union
-#print axioms Contract.cid_union
-#print axioms Contract.union_absorbs_subset
-#print axioms Contract.cpar_absorbs_subset
-#print axioms Contract.cid_absorbs_subset
-#print axioms Contract.anc_cpar_survives
-#print axioms Contract.image_absorbs_subset
-#print axioms Contract.image_original_survives
-#print axioms Contract.image_ne_dropped_original
-#print axioms Contract.cid_comm
-#print axioms Contract.cid_eq
-#print axioms Contract.superseded_ne
-#print axioms Contract.anc_cpar_iff
+#assert_axioms Contract.cpar_union
+#assert_axioms Contract.cid_union
+#assert_axioms Contract.union_absorbs_subset
+#assert_axioms Contract.cpar_absorbs_subset
+#assert_axioms Contract.cid_absorbs_subset
+#assert_axioms Contract.anc_cpar_survives
+#assert_axioms Contract.image_absorbs_subset
+#assert_axioms Contract.image_original_survives
+#assert_axioms Contract.image_ne_dropped_original
+#assert_axioms Contract.cid_comm
+#assert_axioms Contract.cid_eq
+#assert_axioms Contract.superseded_ne
+#assert_axioms Contract.anc_cpar_iff
 
 -- Presence through a contraction
-#print axioms PresenceContract.pres_eq
-#print axioms PresenceContract.stamp_union
-#print axioms PresenceContract.sid_union
-#print axioms PresenceContract.sid_absorbs_subset
-#print axioms PresenceContract.sid_comm
-#print axioms PresenceContract.stamp_none
-#print axioms PresenceContract.sid_eq
-#print axioms PresenceContract.sid_superseded_ne
+#assert_axioms PresenceContract.pres_eq
+#assert_axioms PresenceContract.stamp_union
+#assert_axioms PresenceContract.sid_union
+#assert_axioms PresenceContract.sid_absorbs_subset
+#assert_axioms PresenceContract.sid_comm
+#assert_axioms PresenceContract.stamp_none
+#assert_axioms PresenceContract.sid_eq
+#assert_axioms PresenceContract.sid_superseded_ne
 
 -- Replicated op abandon
-#print axioms SReachable.base
-#print axioms SRReachable.base
-#print axioms noDuplicateMergeS
-#print axioms sinv_reachable
-#print axioms nodeD_grows
-#print axioms hubD_grows
-#print axioms superseded_never_returns
-#print axioms superseded_never_returns_hub
-#print axioms dropped_never_head
-#print axioms behind_not_carried
-#print axioms allPruned_step
-#print axioms spstepR_reachable
-#print axioms smeasure_decreases
-#print axioms no_infinite_policy_runS
-#print axioms progressS
-#print axioms converged_quiescentS
-#print axioms terminal_iff_convergedS
-#print axioms eventually_convergesS
-#print axioms maximal_run_convergesS
-#print axioms converged_all_droppedS
-#print axioms converged_all_acceptedS
+#assert_axioms SReachable.base
+#assert_axioms SRReachable.base
+#assert_axioms noDuplicateMergeS
+#assert_axioms sinv_reachable
+#assert_axioms nodeD_grows
+#assert_axioms hubD_grows
+#assert_axioms superseded_never_returns
+#assert_axioms superseded_never_returns_hub
+#assert_axioms dropped_never_head
+#assert_axioms behind_not_carried
+#assert_axioms allPruned_step
+#assert_axioms spstepR_reachable
+#assert_axioms smeasure_decreases
+#assert_axioms no_infinite_policy_runS
+#assert_axioms progressS
+#assert_axioms converged_quiescentS
+#assert_axioms terminal_iff_convergedS
+#assert_axioms eventually_convergesS
+#assert_axioms maximal_run_convergesS
+#assert_axioms converged_all_droppedS
+#assert_axioms converged_all_acceptedS
 
 -- Expected values derived from history
-#print axioms Refs.Expected.eval_congr_on
-#print axioms Refs.Expected.eval_congr
-#print axioms Refs.Expected.eval_terminates
-#print axioms Refs.Expected.eval_stable
-#print axioms Refs.Expected.eval_computes
-#print axioms Refs.Expected.eval_without_known_agrees
-#print axioms Refs.Expected.checkpoint
-#print axioms Refs.Expected.conflicted_import_agrees_of_history
+#assert_axioms Refs.Expected.eval_congr_on
+#assert_axioms Refs.Expected.eval_congr
+#assert_axioms Refs.Expected.eval_terminates
+#assert_axioms Refs.Expected.eval_stable
+#assert_axioms Refs.Expected.eval_computes
+#assert_axioms Refs.Expected.eval_without_known_agrees
+#assert_axioms Refs.Expected.checkpoint
+#assert_axioms Refs.Expected.conflicted_import_agrees_of_history
 
 -- Finite native lifecycle fixtures: local execution and the same actual action list.
-#print axioms NativeLifecycle.encodeNative_observed
-#print axioms NativeLifecycle.encodeCanonical_observed
-#print axioms NativeLifecycle.writeRender_captured_records
-#print axioms NativeLifecycle.writeRender_current
-#print axioms NativeLifecycle.planReceipt_origin
-#print axioms NativeLifecycle.planRender_origin
-#print axioms NativeLifecycle.run_has_trace
-#print axioms NativeLifecycle.writeReceiptCanonical_records
-#print axioms NativeLifecycle.writeReceiptNative_records
-#print axioms NativeLifecycle.step_named_custody
-#print axioms NativeLifecycle.runs_named_custody
-#print axioms NativeLifecycle.sourceCounterpart_none
-#print axioms NativeLifecycle.matchingCandidates_gap
-#print axioms NativeLifecycle.chooseTier_selected
-#print axioms NativeLifecycle.chooseSource_selected
-#print axioms NativeLifecycle.candidates_complete
-#print axioms NativeLifecycle.computedSource_selected
-#print axioms NativeLifecycle.descriptionExclusion_necessary
-#print axioms NativeLifecycle.DescriptionExclusion.no_ordinary_body
-#print axioms NativeLifecycle.descriptionExclusion_pinned
-#print axioms NativeLifecycle.matchingCandidates_excluded_necessary
-#print axioms NativeLifecycle.matchingCandidates_accounted
-#print axioms NativeLifecycle.currentGitBody_fields
-#print axioms NativeLifecycle.currentGitBody_frame
-#print axioms NativeLifecycle.currentGitBody_marker
-#print axioms NativeLifecycle.encodeCurrentGit_shape
-#print axioms NativeLifecycle.constructCurrentGit_pinned
-#print axioms NativeLifecycle.refreshCurrentGit_records
-#print axioms NativeLifecycle.refreshCurrentGit_origin
-#print axioms NativeLifecycle.step_source_routes
-#print axioms NativeLifecycle.step_invalidates_source_routes
-#print axioms NativeLifecycle.runs_source_routes
-#print axioms NativeLifecycle.commitRender_current
-#print axioms NativeLifecycle.commitRender_association
-#print axioms NativeLifecycle.rawInitial_construction
-#print axioms NativeLifecycle.construction_step_preserves
-#print axioms NativeLifecycle.runs_construction
-#print axioms NativeLifecycle.certifiedConstructionRun
-#print axioms NativeLifecycle.revalidate_changed_heads
-#print axioms NativeLifecycle.preparationProbe_historical_frame
-#print axioms NativeLifecycle.preparationProbe_captured_records
-#print axioms NativeLifecycle.preparationProbe_source_routes
-#print axioms Musubi.Exec.Json.encodeNet_eq_reference
-#print axioms Musubi.Exec.Json.encodeNet_compress_eq_reference
+#assert_axioms NativeLifecycle.encodeNative_observed
+#assert_axioms NativeLifecycle.encodeCanonical_observed
+#assert_axioms NativeLifecycle.writeRender_captured_records
+#assert_axioms NativeLifecycle.writeRender_current
+#assert_axioms NativeLifecycle.planReceipt_origin
+#assert_axioms NativeLifecycle.planRender_origin
+#assert_axioms NativeLifecycle.run_has_trace
+#assert_axioms NativeLifecycle.writeReceiptCanonical_records
+#assert_axioms NativeLifecycle.writeReceiptNative_records
+#assert_axioms NativeLifecycle.step_named_custody
+#assert_axioms NativeLifecycle.runs_named_custody
+#assert_axioms NativeLifecycle.sourceCounterpart_none
+#assert_axioms NativeLifecycle.matchingCandidates_gap
+#assert_axioms NativeLifecycle.chooseTier_selected
+#assert_axioms NativeLifecycle.chooseSource_selected
+#assert_axioms NativeLifecycle.candidates_complete
+#assert_axioms NativeLifecycle.computedSource_selected
+#assert_axioms NativeLifecycle.descriptionExclusion_necessary
+#assert_axioms NativeLifecycle.DescriptionExclusion.no_ordinary_body
+#assert_axioms NativeLifecycle.descriptionExclusion_pinned
+#assert_axioms NativeLifecycle.matchingCandidates_excluded_necessary
+#assert_axioms NativeLifecycle.matchingCandidates_accounted
+#assert_axioms NativeLifecycle.currentGitBody_fields
+#assert_axioms NativeLifecycle.currentGitBody_frame
+#assert_axioms NativeLifecycle.currentGitBody_marker
+#assert_axioms NativeLifecycle.encodeCurrentGit_shape
+#assert_axioms NativeLifecycle.constructCurrentGit_pinned
+#assert_axioms NativeLifecycle.refreshCurrentGit_records
+#assert_axioms NativeLifecycle.refreshCurrentGit_origin
+#assert_axioms NativeLifecycle.step_source_routes
+#assert_axioms NativeLifecycle.step_invalidates_source_routes
+#assert_axioms NativeLifecycle.runs_source_routes
+#assert_axioms NativeLifecycle.commitRender_current
+#assert_axioms NativeLifecycle.commitRender_association
+#assert_axioms NativeLifecycle.rawInitial_construction
+#assert_axioms NativeLifecycle.construction_step_preserves
+#assert_axioms NativeLifecycle.runs_construction
+-- `NativeLifecycle.certifiedConstructionRun` is a program, not a theorem; the theorems it is
+-- built from are audited above.
+#assert_axioms NativeLifecycle.revalidate_changed_heads
+#assert_axioms NativeLifecycle.preparationProbe_historical_frame
+#assert_axioms NativeLifecycle.preparationProbe_captured_records
+#assert_axioms NativeLifecycle.preparationProbe_source_routes
+#assert_axioms Musubi.Exec.Json.encodeNet_eq_reference
+#assert_axioms Musubi.Exec.Json.encodeNet_compress_eq_reference
 
 -- Integration phase boundaries and request guards are derived without additional axioms.
-#print axioms Musubi.SysAcceptance.CutAt.mono
-#print axioms Musubi.SysAcceptance.record_control_stabilizes
-#print axioms Musubi.SysAcceptance.object_failures_stop
-#print axioms Musubi.SysAcceptance.recovering_reopens_stop
-#print axioms Musubi.SysAcceptance.entry_phase
-#print axioms Musubi.SysAcceptance.entered_phase
-#print axioms Musubi.SysAcceptance.fine_cut
-#print axioms Musubi.SysAcceptance.honest_latched_known
-#print axioms Musubi.SysAcceptance.all_eligible
+#assert_axioms Musubi.SysAcceptance.CutAt.mono
+#assert_axioms Musubi.SysAcceptance.record_control_stabilizes
+#assert_axioms Musubi.SysAcceptance.object_failures_stop
+#assert_axioms Musubi.SysAcceptance.recovering_reopens_stop
+#assert_axioms Musubi.SysAcceptance.entry_phase
+#assert_axioms Musubi.SysAcceptance.entered_phase
+#assert_axioms Musubi.SysAcceptance.fine_cut
+#assert_axioms Musubi.SysAcceptance.honest_latched_known
+#assert_axioms Musubi.SysAcceptance.all_eligible
 
-#print axioms Musubi.NodeSys.nodeOK_issue
+#assert_axioms Musubi.NodeSys.nodeOK_issue
 
-#print axioms Musubi.NodeSys.Issue.start_iff_inactive
-#print axioms Musubi.NodeSys.Fair.reaches_start
-#print axioms Musubi.NodeSys.Fair.reaches_core
+#assert_axioms Musubi.NodeSys.Issue.start_iff_inactive
+#assert_axioms Musubi.NodeSys.Fair.reaches_start
+#assert_axioms Musubi.NodeSys.Fair.reaches_core

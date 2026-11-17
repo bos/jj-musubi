@@ -19,7 +19,7 @@ node processes from some point on is the stable hub's.
 The convergence proof uses this file.
 -/
 import Musubi.NodeSysEntry
-import Musubi.AsyncLiveness
+import Musubi.RecordLiveness
 
 namespace Musubi.SysFreshCuts
 

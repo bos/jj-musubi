@@ -20,7 +20,7 @@ caller must show the pair is.
 
 The convergence proof uses this file.
 -/
-import Musubi.AsyncLiveness
+import Musubi.RecordLiveness
 
 namespace Musubi.HubSuffix
 

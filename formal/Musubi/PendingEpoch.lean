@@ -21,7 +21,7 @@ The convergence proof uses this file except `pending_names_settle_with_old_known
 `pending_names_settle_from_sources`, `finite_metadata_output_stabilizes` and their helpers, which
 are not used by the assembly and stand alone.
 -/
-import Musubi.AsyncLiveness
+import Musubi.RecordLiveness
 
 namespace Musubi.PendingEpoch
 

@@ -1,6 +1,7 @@
 /-
 Basic utilities: sets as predicates, point updates of functions, and finite counting
-over `Nat` ranges (used by the liveness measure), and termination of runs.
+over `Nat` ranges (used by the liveness measure), termination of runs, and traces that stop
+changing: nonincreasing ones of naturals, and ones of lexicographic ranks.
 -/
 
 namespace Musubi
@@ -27,6 +28,28 @@ def upd {α : Type} (f : Nat → α) (i : Nat) (a : α) : Nat → α :=
 
 theorem upd_lt {α : Type} (f : Nat → α) {i j : Nat} (a : α) (h : j < i) :
     upd f i a j = f j := upd_ne f a (Nat.ne_of_lt h)
+
+/-! ## Indicators -/
+
+noncomputable def ind (P : Prop) : Nat := @ite _ P (Classical.propDecidable P) 1 0
+
+theorem ind_pos {P : Prop} (h : P) : ind P = 1 := by
+  unfold ind; split
+  · rfl
+  · contradiction
+
+theorem ind_neg {P : Prop} (h : ¬ P) : ind P = 0 := by
+  unfold ind; split
+  · contradiction
+  · rfl
+
+theorem ind_mono {P Q : Prop} (h : P → Q) : ind P ≤ ind Q := by
+  by_cases hp : P
+  · rw [ind_pos hp, ind_pos (h hp)]; exact Nat.le_refl _
+  · rw [ind_neg hp]; exact Nat.zero_le _
+
+theorem ind_congr {P Q : Prop} (h : P ↔ Q) : ind P = ind Q := by
+  rw [propext h]
 
 /-! ## Counting -/
 
@@ -196,6 +219,19 @@ theorem exists_first {P : Nat → Prop} (h : ∃ n, P n) :
   let ⟨_, ha⟩ := h
   exists_min P ha
 
+/-- A predicate that holds somewhere, and only at numbers up to `x`, holds at a largest one. -/
+theorem exists_max_le {Q : Nat → Prop} {x a : Nat} (ha : Q a) (hle : ∀ m, Q m → m ≤ x) :
+    ∃ m, Q m ∧ ∀ m', Q m' → m' ≤ m := by
+  have hP : x - a ≤ x ∧ Q (x - (x - a)) :=
+    ⟨Nat.sub_le x a, by rw [Nat.sub_sub_self (hle a ha)]; exact ha⟩
+  obtain ⟨d, ⟨hd, hQd⟩, hmin⟩ := exists_min (fun d => d ≤ x ∧ Q (x - d)) hP
+  refine ⟨x - d, hQd, fun m' hm' => ?_⟩
+  have hm'x := hle m' hm'
+  apply Classical.byContradiction
+  intro hgt
+  have hlt : x - m' < d := by omega
+  exact hmin (x - m') hlt ⟨Nat.sub_le x m', by rw [Nat.sub_sub_self hm'x]; exact hm'⟩
+
 /-- Finitely many indices each have a cut after which `P` holds; one cut serves them all. -/
 theorem finite_common_cut (N : Nat) (P : Nat → Nat → Prop)
     (he : ∀ n, n < N → ∃ k, ∀ i, k ≤ i → P n i) :
@@ -209,5 +245,107 @@ theorem finite_common_cut (N : Nat) (P : Nat → Nat → Prop)
     by_cases heq : n = N
     · subst n; exact hj i (by omega)
     · exact hk i (by omega) n (by omega)
+
+/-! ## Traces that stop changing -/
+
+/-- A nonincreasing trace of naturals is eventually constant, at its least value. No bound on
+the time between changes is needed. -/
+theorem nat_trace_stabilizes (f : Nat → Nat) (hf : ∀ i, f (i + 1) ≤ f i) :
+    ∃ k, ∀ i, k ≤ i → f i = f k := by
+  obtain ⟨v, ⟨k, rfl⟩, hmin⟩ := exists_min (fun v => ∃ k, f k = v) ⟨0, rfl⟩
+  refine ⟨k, fun i hi => ?_⟩
+  have hle : f i ≤ f k := by
+    induction hi with
+    | refl => exact Nat.le_refl _
+    | step _ ih => exact Nat.le_trans (hf _) ih
+  have hnot : ¬ f i < f k := fun h => hmin (f i) h ⟨i, rfl⟩
+  omega
+
+/-- Strictly below, first difference first, for lists of one length. -/
+def LexLt : List Nat → List Nat → Prop
+  | a :: as, b :: bs => a < b ∨ (a = b ∧ LexLt as bs)
+  | _, _ => False
+
+def LexLe (x y : List Nat) : Prop := LexLt x y ∨ x = y
+
+theorem lexLt_irrefl : ∀ x : List Nat, ¬ LexLt x x
+  | [] => fun h => False.elim h
+  | _ :: as => fun h => by
+    rcases h with h | ⟨_, h⟩
+    · exact Nat.lt_irrefl _ h
+    · exact lexLt_irrefl as h
+
+theorem lt_hd {a b : Nat} {as bs : List Nat} (h : a < b) : LexLt (a :: as) (b :: bs) :=
+  Or.inl h
+
+theorem lt_cons {a b : Nat} {as bs : List Nat} (h : a ≤ b) (t : a = b → LexLt as bs) :
+    LexLt (a :: as) (b :: bs) := by
+  rcases Nat.lt_or_eq_of_le h with h | h
+  · exact Or.inl h
+  · exact Or.inr ⟨h, t h⟩
+
+theorem le_cons {a b : Nat} {as bs : List Nat} (h : a ≤ b) (t : a = b → LexLe as bs) :
+    LexLe (a :: as) (b :: bs) := by
+  rcases Nat.lt_or_eq_of_le h with h | h
+  · exact Or.inl (Or.inl h)
+  · rcases t h with h' | h'
+    · exact Or.inl (Or.inr ⟨h, h'⟩)
+    · subst h; subst h'; exact Or.inr rfl
+
+theorem LexLt.le {x y : List Nat} (h : LexLt x y) : LexLe x y := Or.inl h
+
+theorem lexLe_head {a b : Nat} {as bs : List Nat} (h : LexLe (a :: as) (b :: bs)) : a ≤ b := by
+  rcases h with h | h
+  · rcases h with h | ⟨h, -⟩
+    · exact Nat.le_of_lt h
+    · exact Nat.le_of_eq h
+  · injection h with h1; exact Nat.le_of_eq h1
+
+theorem lexLe_tail {a : Nat} {as bs : List Nat} (h : LexLe (a :: as) (a :: bs)) :
+    LexLe as bs := by
+  rcases h with h | h
+  · rcases h with h | ⟨-, h⟩
+    · exact absurd h (Nat.lt_irrefl _)
+    · exact Or.inl h
+  · injection h with _ h2; exact Or.inr h2
+
+/-- A run of ranks of one length that never rises stops changing. -/
+theorem lex_stabilizes : ∀ (L : Nat) (f : Nat → List Nat), (∀ i, (f i).length = L) →
+    (∀ i, LexLe (f (i + 1)) (f i)) → ∃ k, ∀ i, k ≤ i → f i = f k := by
+  intro L
+  induction L with
+  | zero =>
+    intro f hl _
+    exact ⟨0, fun i _ => by
+      rw [List.eq_nil_of_length_eq_zero (hl i), List.eq_nil_of_length_eq_zero (hl 0)]⟩
+  | succ L ih =>
+    intro f hl hf
+    have hcons : ∀ i, f i = (f i).headD 0 :: (f i).tail := by
+      intro i
+      have := hl i
+      revert this
+      cases f i with
+      | nil => intro h; simp at h
+      | cons a as => intro _; rfl
+    have hhd : ∀ i, (f (i + 1)).headD 0 ≤ (f i).headD 0 := by
+      intro i
+      have := hf i
+      rw [hcons (i + 1), hcons i] at this
+      exact lexLe_head this
+    obtain ⟨k1, hk1⟩ := nat_trace_stabilizes (fun i => (f i).headD 0) hhd
+    have hh : ∀ i, k1 ≤ i → (f i).headD 0 = (f k1).headD 0 := fun i hi => hk1 i hi
+    have htl : ∀ j, LexLe (f (k1 + j + 1)).tail (f (k1 + j)).tail := by
+      intro j
+      have := hf (k1 + j)
+      rw [hcons (k1 + j + 1), hcons (k1 + j), hh (k1 + j + 1) (by omega),
+        hh (k1 + j) (by omega)] at this
+      exact lexLe_tail this
+    obtain ⟨k2, hk2⟩ := ih (fun j => (f (k1 + j)).tail)
+      (fun j => by simp [hl]) htl
+    refine ⟨k1 + k2, fun i hi => ?_⟩
+    rw [hcons i, hcons (k1 + k2), hh i (by omega), hh (k1 + k2) (by omega)]
+    have e : (f (k1 + (i - k1))).tail = (f (k1 + k2)).tail := hk2 (i - k1) (by omega)
+    rw [show k1 + (i - k1) = i by omega] at e
+    rw [e]
 
 end Musubi

@@ -55,6 +55,38 @@ theorem not_of_lt (hlt : ParLt par) {a x : Nat} (h : x < a) : ¬ Anc par a x :=
 
 end Anc
 
+/-- `anc*(x)` is `x` and what its parents reach. -/
+theorem anc_cases {par : Nat → List Nat} {a x : Nat} (hA : Anc par a x) :
+    a = x ∨ ∃ p ∈ par x, Anc par a p := by
+  cases hA with
+  | refl => exact Or.inl rfl
+  | step hp hA => exact Or.inr ⟨_, hp, hA⟩
+
+/-- Two parent functions that agree throughout `anc*(x)` give `x` the same `anc*`. -/
+theorem anc_local {p₁ p₂ : Nat → List Nat} {x : Nat} (hpar : ∀ b, Anc p₁ b x → p₁ b = p₂ b)
+    {a : Nat} : Anc p₁ a x ↔ Anc p₂ a x := by
+  constructor
+  · intro hA
+    have : ∀ y, Anc p₁ a y → (∀ b, Anc p₁ b y → p₁ b = p₂ b) → Anc p₂ a y := by
+      intro y hy
+      induction hy with
+      | refl => intro _; exact Anc.refl
+      | @step p y hp _ ih =>
+        intro hb
+        have hp₂ : p ∈ p₂ y := by rw [← hb y Anc.refl]; exact hp
+        exact Anc.step hp₂ (ih (fun b hb' => hb b (Anc.trans hb' (Anc.parent hp))))
+    exact this x hA hpar
+  · intro hA
+    have : ∀ y, Anc p₂ a y → Anc p₁ y x → Anc p₁ a y := by
+      intro y hy
+      induction hy with
+      | refl => intro _; exact Anc.refl
+      | @step p y hp _ ih =>
+        intro hyx
+        have hp₁ : p ∈ p₁ y := by rw [hpar y hyx]; exact hp
+        exact Anc.step hp₁ (ih (Anc.trans (Anc.parent hp₁) hyx))
+    exact this x hA Anc.refl
+
 /-! ## Transport across the creation of a fresh operation -/
 
 theorem parLt_upd {par : Nat → List Nat} (hlt : ParLt par) {o : Nat} {L : List Nat}

@@ -49,50 +49,10 @@ import Musubi.Dag
 
 namespace Musubi.Presence
 
-/-- `anc*(x)` is `x` and what its parents reach. -/
-theorem anc_cases {par : Nat → List Nat} {a x : Nat} (hA : Anc par a x) :
-    a = x ∨ ∃ p ∈ par x, Anc par a p := by
-  cases hA with
-  | refl => exact Or.inl rfl
-  | step hp hA => exact Or.inr ⟨_, hp, hA⟩
-
-/-- A predicate that holds somewhere, and only at numbers up to `x`, holds at a largest one. -/
+/-- `Musubi.exists_max_le`, kept for `Supersede.lean` until that file moves to the root name. -/
 theorem exists_max_le {Q : Nat → Prop} {x a : Nat} (ha : Q a) (hle : ∀ m, Q m → m ≤ x) :
-    ∃ m, Q m ∧ ∀ m', Q m' → m' ≤ m := by
-  have hP : x - a ≤ x ∧ Q (x - (x - a)) :=
-    ⟨Nat.sub_le x a, by rw [Nat.sub_sub_self (hle a ha)]; exact ha⟩
-  obtain ⟨d, ⟨hd, hQd⟩, hmin⟩ := exists_min (fun d => d ≤ x ∧ Q (x - d)) hP
-  refine ⟨x - d, hQd, fun m' hm' => ?_⟩
-  have hm'x := hle m' hm'
-  apply Classical.byContradiction
-  intro hgt
-  have hlt : x - m' < d := by omega
-  exact hmin (x - m') hlt ⟨Nat.sub_le x m', by rw [Nat.sub_sub_self hm'x]; exact hm'⟩
-
-/-- Two parent functions that agree throughout `anc*(x)` give `x` the same `anc*`. -/
-theorem anc_local {p₁ p₂ : Nat → List Nat} {x : Nat} (hpar : ∀ b, Anc p₁ b x → p₁ b = p₂ b)
-    {a : Nat} : Anc p₁ a x ↔ Anc p₂ a x := by
-  constructor
-  · intro hA
-    have : ∀ y, Anc p₁ a y → (∀ b, Anc p₁ b y → p₁ b = p₂ b) → Anc p₂ a y := by
-      intro y hy
-      induction hy with
-      | refl => intro _; exact Anc.refl
-      | @step p y hp _ ih =>
-        intro hb
-        have hp₂ : p ∈ p₂ y := by rw [← hb y Anc.refl]; exact hp
-        exact Anc.step hp₂ (ih (fun b hb' => hb b (Anc.trans hb' (Anc.parent hp))))
-    exact this x hA hpar
-  · intro hA
-    have : ∀ y, Anc p₂ a y → Anc p₁ y x → Anc p₁ a y := by
-      intro y hy
-      induction hy with
-      | refl => intro _; exact Anc.refl
-      | @step p y hp _ ih =>
-        intro hyx
-        have hp₁ : p ∈ p₁ y := by rw [hpar y hyx]; exact hp
-        exact Anc.step hp₁ (ih (Anc.trans (Anc.parent hp₁) hyx))
-    exact this x hA Anc.refl
+    ∃ m, Q m ∧ ∀ m', Q m' → m' ≤ m :=
+  Musubi.exists_max_le ha hle
 
 /-- A hive's operation history: each operation's parents, and which operations are work by,
 or forgets of, which copies. Copies are numbered too. -/
@@ -433,7 +393,7 @@ theorem present_iff_latest (hlt : ParLt h.par) {x k : Nat} :
   constructor
   · rintro ⟨w, hw, hW, hn⟩
     obtain ⟨m, ⟨hmx, hmW, hwm⟩, hmax⟩ :=
-      exists_max_le (Q := fun m => Anc h.par m x ∧ h.work m k ∧ Anc h.par w m)
+      Musubi.exists_max_le (Q := fun m => Anc h.par m x ∧ h.work m k ∧ Anc h.par w m)
         ⟨hw, hW, Anc.refl⟩ (fun m hm => hm.1.le hlt)
     refine ⟨m, ⟨hmx, hmW, fun m' hm'x hm'W hmm' => ?_⟩, fun f hf hF hmf => ?_⟩
     · exact Nat.le_antisymm (hmax m' ⟨hm'x, hm'W, Anc.trans hwm hmm'⟩) (hmm'.le hlt)
@@ -458,7 +418,7 @@ def UMax (x k c : Nat) : Prop := h.Uncov x k c ∧ ∀ c', h.Uncov x k c' → An
 theorem exists_umax_above (hlt : ParLt h.par) {y k w : Nat} (hu : h.Uncov y k w) :
     ∃ m, h.UMax y k m ∧ Anc h.par w m := by
   obtain ⟨m, ⟨hmu, hwm⟩, hmax⟩ :=
-    exists_max_le (Q := fun m => h.Uncov y k m ∧ Anc h.par w m) ⟨hu, Anc.refl⟩
+    Musubi.exists_max_le (Q := fun m => h.Uncov y k m ∧ Anc h.par w m) ⟨hu, Anc.refl⟩
       (fun m hm => hm.1.1.le hlt)
   refine ⟨m, ⟨hmu, fun c' hc' hmc' => ?_⟩, hwm⟩
   exact Nat.le_antisymm (hmax c' ⟨hc', Anc.trans hwm hmc'⟩) (hmc'.le hlt)

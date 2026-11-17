@@ -322,7 +322,7 @@ least what they drop), `hnormalDef` and `hsend`.
 
 | File | Contents |
 | --- | --- |
-| `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`, and shared termination/progress facts. |
+| `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`, indicators `ind`, shared termination/progress facts (`Steps`, `eventually_done_of_progress`), and traces that stop changing (`nat_trace_stabilizes`, `lex_stabilizes`). |
 | `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree. |
 | `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
@@ -345,7 +345,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
 | `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
-| `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix. The convergence proof uses only `nat_trace_stabilizes`. |
+| `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix. The convergence proof does not use it. |
 | `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
 | `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
@@ -601,8 +601,9 @@ makes its node good, so the hub head moves at most once per node that is not goo
 ### Abandoned operations (`Contract.lean`, `Supersede.lean`)
 
 `Contract.lean` is about any history (`ParLt par`) and a dropped set `D`. Ids are terms
-(`CId`), so the hash they stand for is injective. `cid` takes an arbitrary immutable content
-function, allowing equal content at different operations. `equal_content_recreates_id` proves
+(`IdTerm`, with content of any type; `CId` is `IdTerm Nat`), so the hash they stand for is
+injective. `cid` takes an arbitrary immutable content function, allowing equal content at
+different operations. `equal_content_recreates_id` proves
 the three-operation counterexample when the content function is constant.
 
 - `cpar_union`, `cid_union`: dropping `D₁`, then `D₂` from what is left, gives the parents and
@@ -610,7 +611,8 @@ the three-operation counterexample when the content function is constant.
 - `cid_eq`, assuming injective immutable content: two survivors' ids under two dropped sets
   are equal only for the same operation,
   with the sets agreeing on its proper ancestors. `superseded_ne`: an id from before a dropped
-  set grew to include the operation or one of its ancestors is no survivor's id after.
+  set grew to include the operation or one of its ancestors is no survivor's id after. Both
+  are instances of `idTerm_cpar_eq` and `idTerm_superseded_ne`, for content of any type.
 - `anc_cpar_iff`: among survivors, contraction keeps ancestry; `cid_congr`: ids depend only on
   what is below.
 
@@ -721,7 +723,8 @@ at a stamped operation is its stamp (`pres`).
   whichever order two dropped sets go in. Given the definitions, this is `cpar_union`: whether
   an operation is stamped, and with what, depends only on its contracted parents and on what
   is gone. `stamp_none`: a history nothing was dropped from has none.
-- `sid_eq`, `sid_superseded_ne`: as `cid_eq` and `superseded_ne`, with stamps.
+- `sid_eq`, `sid_superseded_ne`: as `cid_eq` and `superseded_ne`, with stamps; both are
+  instances of `idTerm_cpar_eq` and `idTerm_superseded_ne`.
 
 What the model leaves to tests: that the Rust's stamp is this definition, computed on the
 history as it is after the drops before; and that the Rust, reading a stamp, finds the
@@ -1308,13 +1311,13 @@ local boundaries of the conditional refinement; they do not by themselves establ
 
 ### Results the convergence proof does not use
 
-The whole of `CutHistory.lean`, `NodeReconcile.lean`, `RecordReplies.lean` and `CallBatch.lean`
-(which justifies sequential native calls and interleaved physical request ids under injective
-correlation) is not used, nor are these parts of other files:
+The whole of `AsyncLiveness.lean`, `CutHistory.lean`, `NodeReconcile.lean`,
+`RecordReplies.lean` and `CallBatch.lean` (which justifies sequential native calls and
+interleaved physical request ids under injective correlation) is not used, nor are these parts
+of other files:
 
 | File | Not used |
 | --- | --- |
-| `AsyncLiveness.lean` | everything except `nat_trace_stabilizes` (a nonincreasing natural-number trace is eventually constant) |
 | `RetryControl.lean` | `fixup_writes_le_one`, `fixups_eventually_stop`, `publication_retry`, `publication_tip_cached` |
 | `RecordStability.lean` | `sexec_record_prefix_stabilizes`, `adopt_pending_subset` |
 | `SerialReply.lean` | the serialized-call model and its invariant (the proof uses `handleHead`, `filteredLearn`, `own_reply_learns`, `object_recoveries_stop`, `wentBack`) |

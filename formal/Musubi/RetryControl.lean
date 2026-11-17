@@ -11,7 +11,7 @@ The convergence proof uses this file except the fix-up write bounds (`fixup_writ
 `fixups_eventually_stop`) and the publication facts (`publication_retry`,
 `publication_tip_cached`), which are not used by the assembly and stand alone.
 -/
-import Musubi.AsyncLiveness
+import Musubi.RecordLiveness
 
 namespace Musubi.Retry
 

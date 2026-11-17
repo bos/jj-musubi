@@ -5,8 +5,8 @@ and acceptance before the acknowledgement arrives. The main results are
 create no fix-ups and never adopt records from an obsolete history, the hub's head and
 sequence number stop changing. That a concrete run has this form is shown elsewhere.
 
-The convergence proof uses only `nat_trace_stabilizes` from this file. The rest, such as
-`settling_hub_stabilizes`, is not used by the assembly and stands alone as a progress result.
+Nothing in this file is used by the assembly: `settling_hub_stabilizes` stands alone as a
+progress result.
 -/
 import Musubi.RecordLiveness
 
@@ -157,19 +157,6 @@ theorem settling_decreases {s t : State} (hr : RReachable N s) (hs : SettlingSte
   | bookkeeping ha =>
     rw [ha.bad_eq]
     exact ⟨Nat.le_refl _, fun h => False.elim (h (by rw [ha.seq, ha.head]))⟩
-
-/-- A nonincreasing trace of naturals is eventually constant, at its least value. No bound on
-the time between changes is needed. -/
-theorem nat_trace_stabilizes (f : Nat → Nat) (hf : ∀ i, f (i + 1) ≤ f i) :
-    ∃ k, ∀ i, k ≤ i → f i = f k := by
-  obtain ⟨v, ⟨k, rfl⟩, hmin⟩ := exists_min (fun v => ∃ k, f k = v) ⟨0, rfl⟩
-  refine ⟨k, fun i hi => ?_⟩
-  have hle : f i ≤ f k := by
-    induction hi with
-    | refl => exact Nat.le_refl _
-    | step _ ih => exact Nat.le_trans (hf _) ih
-  have hnot : ¬ f i < f k := fun h => hmin (f i) h ⟨i, rfl⟩
-  omega
 
 /-- On a run of settling steps, the hub eventually stops accepting: its sequence number and
 head are constant from some point on. -/

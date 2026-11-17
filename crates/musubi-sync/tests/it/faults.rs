@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
+use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -26,6 +28,7 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use hegel::TestCase;
 use hegel::generators as gs;
+use hegel::generators::Generator as _;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub::HubStorage as _;
@@ -142,8 +145,7 @@ fn hub_survives_malformed_requests(tc: TestCase) {
 #[hegel::test(profile = "slow-cases", test_cases = 50)]
 fn calls_finish_once_the_link_is_back(tc: TestCase) {
     let session = session();
-    let call = pick(&tc, &session.calls);
-    tc.note(&call.describe());
+    let call = pick(&tc, "call", &session.calls);
     let at = tc.draw(gs::integers::<usize>().max_value(call.requests));
     let fault = link_fault(&tc);
     run_local(async {
@@ -195,25 +197,28 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
 #[hegel::test(profile = "slow-cases", test_cases = 50)]
 fn calls_survive_malformed_replies(tc: TestCase) {
     let session = session();
-    let call = pick(&tc, &session.calls);
-    tc.note(&call.describe());
+    let call = pick(&tc, "call", &session.calls);
     // The call's requests by kind, so that the one protocol request among a download's
     // dozens of chunks is as likely to get a bad reply as they are.
-    let mut kinds: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    let mut kinds: BTreeMap<(u8, &str), Vec<usize>> = BTreeMap::new();
     for at in 0..call.requests {
         let kind = match Envelope::decode(&session.seen.requests[call.start + at]).unwrap() {
-            HubRequest::Protocol(_) => 0,
-            HubRequest::PutChunk { .. } => 1,
-            HubRequest::GetChunk { .. } => 2,
-            HubRequest::Indirect { .. } => 3,
+            HubRequest::Protocol(_) => (0, "protocol"),
+            HubRequest::PutChunk { .. } => (1, "put_chunk"),
+            HubRequest::GetChunk { .. } => (2, "get_chunk"),
+            HubRequest::Indirect { .. } => (3, "indirect"),
         };
         kinds.entry(kind).or_default().push(at);
     }
-    let kinds: Vec<Vec<usize>> = kinds.into_values().collect();
+    // Each kind printed by name, with the requests of that kind in the call.
+    let kinds: Vec<(&str, Vec<usize>)> = kinds
+        .into_iter()
+        .map(|((_, name), ats)| (name, ats))
+        .collect();
     let mut garbled = BTreeMap::new();
     let replies = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
     for _ in 0..replies {
-        let at = *pick(&tc, pick(&tc, &kinds));
+        let at = *pick(&tc, "request_at", &pick(&tc, "kind", &kinds).1);
         let reply = malformed_reply(&tc, session, call.start + at);
         tc.note(&format!(
             "to request {at} of the call, {}, the hub replies {}",
@@ -1324,8 +1329,15 @@ struct Call {
     reply: Reply<Vec<u8>, ()>,
 }
 
+/// As [`Call::describe`] says it, for a failure that picked it.
+impl Debug for Call {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
+
 impl Call {
-    /// Which call of the session this is, for a note.
+    /// Which call of the session this is, for a note or a failure.
     fn describe(&self) -> String {
         let kind = match self.request {
             Request::Fetch { .. } => "a fetch",
@@ -1623,7 +1635,7 @@ fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let request_kind = tc.draw(gs::sampled_from(kinds));
     let request = match request_kind {
         BadRequest::Garbage => tc.draw_named("garbage", gs::binary().max_size(64)),
-        BadRequest::Mutated => mutate(tc, pick(tc, &seen.requests), seen),
+        BadRequest::Mutated => mutate(tc, pick(tc, "request", &seen.requests), seen),
         BadRequest::PutChunk => {
             let data = tc.draw(gs::binary().max_size(256));
             encode(HubRequest::PutChunk {
@@ -1645,7 +1657,7 @@ fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
                     blob: blob(tc, seen),
                 })
             } else {
-                mutate(tc, pick(tc, &seen.requests), seen)
+                mutate(tc, pick(tc, "request", &seen.requests), seen)
             };
             tc.note(&format!(
                 "the hub is sent, as a blob, {}",
@@ -1753,7 +1765,9 @@ fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
     match reply_kind {
         BadReply::Garbage => tc.draw_named("garbage", gs::binary().max_size(64)),
         BadReply::Mutated => mutate(tc, real.unwrap(), seen),
-        BadReply::Another => (*pick(tc, &session.replies.values().collect::<Vec<_>>())).clone(),
+        BadReply::Another => {
+            (*pick(tc, "reply", &session.replies.values().collect::<Vec<_>>())).clone()
+        }
         BadReply::ChunkAck => {
             let complete = tc.draw(gs::booleans());
             encode(HubReply::ChunkAck {
@@ -1839,7 +1853,7 @@ fn damaged_reply(tc: &TestCase, seen: &Seen, reply: WireReply) -> WireReply {
                     len: number(tc, seen),
                 },
                 (AttachmentDamage::Inline, _) => {
-                    WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
+                    WireAttachment::Inline(mutate(tc, pick(tc, "payload", &seen.payloads), seen))
                 }
                 (_, attachment) => attachment,
             })
@@ -1855,7 +1869,7 @@ fn damaged_push(tc: &TestCase, seen: &Seen) -> WireRequest {
     let damaged = tc.draw(gs::integers::<usize>().max_value(1));
     let mut n = 0;
     map_request(
-        pick(tc, &seen.pushes).clone(),
+        pick(tc, "push", &seen.pushes).clone(),
         |id| id,
         |attachment| {
             let bytes = match attachment {
@@ -1951,7 +1965,7 @@ fn attachment(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireAttachment {
     match attachment_kind {
         AttachmentKind::None => WireAttachment::None,
         AttachmentKind::Inline => {
-            WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
+            WireAttachment::Inline(mutate(tc, pick(tc, "payload", &seen.payloads), seen))
         }
         AttachmentKind::Blob => WireAttachment::Blob {
             blob: blob(tc, seen),
@@ -2056,7 +2070,7 @@ fn number(tc: &TestCase, seen: &Seen) -> u64 {
             ]),
         ),
         NumberKind::Near => {
-            let near = *pick(tc, &seen.numbers);
+            let near = *pick(tc, "number", &seen.numbers);
             let delta = tc.draw(gs::integers::<i64>().min_value(-2).max_value(2));
             near.wrapping_add_signed(delta)
         }
@@ -2068,7 +2082,7 @@ fn number(tc: &TestCase, seen: &Seen) -> u64 {
 fn blob(tc: &TestCase, seen: &Seen) -> BlobId {
     let seen_one = !seen.blobs.is_empty() && tc.draw_named("seen_blob", gs::booleans());
     if seen_one {
-        *pick(tc, &seen.blobs)
+        *pick(tc, "blob", &seen.blobs)
     } else {
         let content = tc.draw(gs::binary().max_size(8));
         BlobId::of_bytes(&content)
@@ -2100,8 +2114,8 @@ fn id(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<u8> {
     kinds.extend([IdKind::Sized, IdKind::Any]);
     let id_kind = tc.draw(gs::sampled_from(kinds));
     match id_kind {
-        IdKind::Head => pick(tc, heads).clone(),
-        IdKind::Seen => pick(tc, &seen.ids).clone(),
+        IdKind::Head => pick(tc, "head", heads).clone(),
+        IdKind::Seen => pick(tc, "id", &seen.ids).clone(),
         IdKind::Sized => {
             let len = tc.draw(gs::sampled_from(vec![20, 32, 64]));
             tc.draw_named("sized_id", gs::binary().min_size(len).max_size(len))
@@ -2205,7 +2219,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `text` with each record digest, 32 or 64 numbers, elided, and then cut to a few hundred
 /// characters, for a note.
-fn brief(text: &str) -> String {
+pub(crate) fn brief(text: &str) -> String {
     const LIMIT: usize = 600;
     const DIGEST: &str = "digest: [";
     let mut compact = String::new();
@@ -2227,8 +2241,14 @@ fn brief(text: &str) -> String {
     }
 }
 
-fn pick<'a, T>(tc: &TestCase, items: &'a [T]) -> &'a T {
-    &items[tc.draw(gs::integers::<usize>().max_value(items.len() - 1))]
+/// One of `items`, for the generators here and in [`crate::lies`]. A failure prints it as
+/// `name`, by its `Debug` cut short as a note is, rather than as its index: one name for every
+/// call, numbered, so it must not be the name of a draw in a test's own body.
+pub(crate) fn pick<'a, T: Debug + Sync>(tc: &TestCase, name: &str, items: &'a [T]) -> &'a T {
+    let items: Vec<&T> = items.iter().collect();
+    let printed = gs::sampled_from(items)
+        .print_with(|item, printer| printer.text(&brief(&format!("{item:?}"))));
+    tc.draw_named(name, printed)
 }
 
 fn encode(request: HubRequest) -> Vec<u8> {

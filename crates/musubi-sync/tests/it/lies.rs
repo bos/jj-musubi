@@ -27,6 +27,9 @@ use musubi_sync::wire::map_request;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
+use crate::faults::brief;
+use crate::faults::pick;
+
 const ALPHA: usize = 0;
 const BETA: usize = 1;
 
@@ -286,16 +289,16 @@ fn lie(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
             Reply::Head {
                 kind: head_kind,
                 seq: seq(tc, seen),
-                head: pick(tc, &seen.ops).clone(),
-                records: pick(tc, &seen.records).clone(),
+                head: pick(tc, "head", &seen.ops).clone(),
+                records: pick(tc, "records", &seen.records).clone(),
             }
         }
         Lie::Fetched => fetched(tc, seen),
         Lie::Objects => Reply::Objects {
             for_ops: ops(tc, seen),
-            attachment: pick(tc, &seen.attachments).clone(),
+            attachment: pick(tc, "attachment", &seen.attachments).clone(),
         },
-        Lie::Another => pick(tc, &seen.replies).clone(),
+        Lie::Another => pick(tc, "reply", &seen.replies).clone(),
     }
 }
 
@@ -345,7 +348,7 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
             pruned: seen.records[0].clone(),
         }
     } else {
-        (*pick(tc, &fetches)).clone()
+        (*pick(tc, "fetch", &fetches)).clone()
     })
     else {
         unreachable!()
@@ -356,7 +359,7 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     }
     let other_head = tc.draw(gs::booleans());
     if other_head {
-        head = pick(tc, &seen.ops).clone();
+        head = pick(tc, "head", &seen.ops).clone();
     }
     if !ops.is_empty() {
         let at = tc.draw(gs::integers::<usize>().max_value(ops.len() - 1));
@@ -379,15 +382,15 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     }
     let other_ops_attachment = tc.draw(gs::booleans());
     if other_ops_attachment {
-        ops_attachment = pick(tc, &seen.attachments).clone();
+        ops_attachment = pick(tc, "ops_attachment", &seen.attachments).clone();
     }
     let other_objects = tc.draw(gs::booleans());
     if other_objects {
-        objects = pick(tc, &seen.attachments).clone();
+        objects = pick(tc, "objects", &seen.attachments).clone();
     }
     let other_records = tc.draw(gs::booleans());
     if other_records {
-        records = pick(tc, &seen.records).clone();
+        records = pick(tc, "records", &seen.records).clone();
     }
     Reply::Fetched {
         seq,
@@ -417,7 +420,7 @@ fn seq(tc: &TestCase, seen: &Seen) -> u64 {
     let near = if seen.seqs.is_empty() {
         0
     } else {
-        *pick(tc, &seen.seqs)
+        *pick(tc, "seq", &seen.seqs)
     };
     let shift = tc.draw(gs::sampled_from(vec![
         SeqLie::Same,
@@ -437,35 +440,9 @@ fn seq(tc: &TestCase, seen: &Seen) -> u64 {
 #[hegel::test_helper]
 fn ops(tc: &TestCase, seen: &Seen) -> Vec<OpId> {
     let count = tc.draw(gs::integers::<usize>().max_value(3));
-    (0..count).map(|_| pick(tc, &seen.ops).clone()).collect()
-}
-
-fn pick<'a, T>(tc: &TestCase, items: &'a [T]) -> &'a T {
-    &items[tc.draw(gs::integers::<usize>().max_value(items.len() - 1))]
-}
-
-/// `text` with each record digest, 32 or 64 numbers, elided, and then cut to a few hundred
-/// characters, for a note.
-fn brief(text: &str) -> String {
-    const LIMIT: usize = 600;
-    const DIGEST: &str = "digest: [";
-    let mut compact = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(DIGEST) {
-        let (head, tail) = rest.split_at(start + DIGEST.len());
-        compact.push_str(head);
-        let Some(end) = tail.find(']') else {
-            rest = tail;
-            break;
-        };
-        compact.push_str("..");
-        rest = &tail[end..];
-    }
-    compact.push_str(rest);
-    match compact.char_indices().nth(LIMIT) {
-        Some((end, _)) => format!("{}...", &compact[..end]),
-        None => compact,
-    }
+    (0..count)
+        .map(|_| pick(tc, "op", &seen.ops).clone())
+        .collect()
 }
 
 /// The environment's clock, for its nodes, so that a case replays exactly.

@@ -72,7 +72,7 @@ def imageAcceptSafeB (ses : SEState) (S : List Nat) (d : Nat)
 def imageAcceptB (ses : SEState) (n : Nat) (S O : List Nat) (e d : Nat)
     (A : List Rec) (D : List Nat) : Bool :=
   ses.es.parOK &&
-    (ses.sups.any fun s => s.1 == n && recEq s.2.1 A && seteq s.2.2.1 D && s.2.2.2 == d) &&
+    (ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped D && s.head == d) &&
     recEq A ses.recs &&
     !ses.remDL.contains d && !(pendingOf A D).contains d &&
     ses.es.inNet (.push n S O e d) && decide (ses.es.hub.head ≠ d) &&
@@ -145,7 +145,8 @@ def SEState.preparedAdvance (ses : SEState) (n : Nat) (R : List Rec) : SEState :
 
 def preparedAdvanceB (N : Nat) (ses : SEState) (n : Nat) (R : List Rec) : Bool :=
   ses.es.parOK && decide (n < N) &&
-    (ses.dmsgs.any fun e => e.1 == n && recEq e.2.1 R && ses.heldPrefix n e.2.1 e.2.2) &&
+    (ses.dmsgs.any fun e => e.node == n && recEq e.log.recs R &&
+      ses.heldPrefix n e.log.recs e.log.pruned) &&
     ((ses.es.nodeOf n).heads.any (flat R).contains) &&
     !(preparedHeads ses n R).isEmpty &&
     (preparedHeads ses n R).all (ses.es.nodeOf n).lops.contains &&
@@ -257,8 +258,8 @@ rollback must recover to a closed target; an explicit remake models environment-
 recovery otherwise. This does not model every observable damaged-store prefix. -/
 def legacyOutcomeB (ses : SEState) : SAction → Bool
   | .base (.hubPushReject n S O e d) =>
-    !(ses.sups.any fun packet => packet.1 == n && packet.2.2.2 == d &&
-      imageAcceptB ses n S O e d packet.2.1 packet.2.2.1)
+    !(ses.sups.any fun packet => packet.node == n && packet.head == d &&
+      imageAcceptB ses n S O e d packet.applied packet.dropped)
   | .base (.hubForget S O) =>
     (List.range (ses.es.hub.seq + 1)).all fun i =>
       (ancL ses.es.parF (ses.es.hub.histF i)).all (ses.es.forget S O).hub.ops.contains
@@ -284,66 +285,58 @@ def cexecStep (N : Nat) (ses : SEState) (a : SAction) : Except String SEState :=
       else .error error
     | _ => .error error
 
+/-- What `cexecStep` accepting an action says: `sexecStep` accepted it and the rejection check
+passed, or `sexecStep` refused it and one of the two added steps applies. -/
+theorem cexecStep_ok (h : cexecStep N ses a = .ok t) :
+    (sexecStep N ses a = .ok t ∧ legacyOutcomeB ses a = true) ∨
+    (∃ n, a = .base (.advance n) ∧ imageAdvanceB N ses n = true ∧ t = ses.imageAdvance n) ∨
+    (∃ n S O e d A D, a = .hubSupAccept n S O e d A D ∧ imageAcceptB ses n S O e d A D = true ∧
+      t = ses.imageAccept n S O d D) := by
+  unfold cexecStep at h
+  cases hs : sexecStep N ses a with
+  | ok s =>
+    rw [hs] at h
+    simp only at h
+    split at h
+    · cases h; exact Or.inl ⟨rfl, by assumption⟩
+    · contradiction
+  | error error =>
+    rw [hs] at h
+    cases a with
+    | base a =>
+      cases a <;> simp only at h
+      all_goals first | contradiction | skip
+      split at h
+      · cases h; exact Or.inr (Or.inl ⟨_, rfl, by assumption, rfl⟩)
+      · contradiction
+    | hubSupAccept n S O e d A D =>
+      simp only at h
+      split at h
+      · cases h; exact Or.inr (Or.inr ⟨n, S, O, e, d, A, D, rfl, by assumption, rfl⟩)
+      · contradiction
+    | _ => contradiction
+
 /-- Every accepted action is an old checked step or one of the two explicit new steps.
 In particular the theorem does not incorrectly identify the new accepts with SRStep. -/
 theorem cexec_sound (hok : SEOK ses) (h : cexecStep N ses a = .ok t) :
     ContractedRStep N ses t := by
-  unfold cexecStep at h
-  cases hs : sexecStep N ses a with
-  | ok s =>
-    rw [hs] at h
-    simp only at h
-    split at h
-    · cases h; exact .legacy _ _ (sexec_sound hok hs)
-    · contradiction
-  | error error =>
-    rw [hs] at h
-    cases a with
-    | base a =>
-      cases a <;> simp only at h
-      all_goals first | contradiction | skip
-      split at h
-      · cases h; exact .advance _ _ (by assumption)
-      · contradiction
-    | hubSupAccept n S O e d A D =>
-      simp only at h
-      split at h
-      · cases h; exact .accept _ _ _ _ _ _ _ _ (by assumption)
-      · contradiction
-    | _ => contradiction
+  rcases cexecStep_ok h with ⟨hs, -⟩ | ⟨n, rfl, hg, rfl⟩ | ⟨n, S, O, e, d, A, D, rfl, hg, rfl⟩
+  · exact .legacy _ _ (sexec_sound hok hs)
+  · exact .advance _ _ hg
+  · exact .accept _ _ _ _ _ _ _ _ hg
 
 /-- The record-custody premise needed by the legacy soundness theorem is kept across the
 new boundaries too. Advancing changes no records; accepting appends at most one record. -/
 theorem cexec_ok (hok : SEOK ses) (h : cexecStep N ses a = .ok t) : SEOK t := by
-  unfold cexecStep at h
-  cases hs : sexecStep N ses a with
-  | ok s =>
-    rw [hs] at h
-    simp only at h
-    split at h
-    · cases h; exact sexec_ok hok hs
-    · contradiction
-  | error error =>
-    rw [hs] at h
-    cases a with
-    | base a =>
-      cases a <;> simp only at h
-      all_goals first | contradiction | skip
-      split at h
-      · cases h; exact ⟨hok.applied, hok.pruned, hok.hist, hok.held⟩
-      · contradiction
-    | hubSupAccept n S O e d A D =>
-      simp only at h
-      split at h
-      · cases h
-        refine { hok with pruned := ?_, hist := ?_ }
-        · exact Nat.le_trans hok.pruned (length_takeRecs _ _)
-        · intro entry he
-          rcases List.mem_cons.1 he with rfl | he
-          · exact Nat.le_trans hok.pruned (length_takeRecs _ _)
-          · exact hok.hist entry he
-      · contradiction
-    | _ => contradiction
+  rcases cexecStep_ok h with ⟨hs, -⟩ | ⟨n, rfl, hg, rfl⟩ | ⟨n, S, O, e, d, A, D, rfl, hg, rfl⟩
+  · exact sexec_ok hok hs
+  · exact ⟨hok.applied, hok.pruned, hok.hist, hok.held⟩
+  · refine { hok with pruned := ?_, hist := ?_ }
+    · exact Nat.le_trans hok.pruned (length_takeRecs _ _)
+    · intro entry he
+      rcases List.mem_cons.1 he with rfl | he
+      · exact Nat.le_trans hok.pruned (length_takeRecs _ _)
+      · exact hok.hist entry he
 
 inductive CAction
   | old (action : SAction)
@@ -355,7 +348,7 @@ inductive CAction
 and rejection of the very push that repairs a dropped expected head. -/
 def imageRejectB (ses : SEState) (n : Nat) (S O : List Nat) (e d : Nat)
     (A : List Rec) (D : List Nat) : Bool :=
-  (ses.sups.any fun s => s.1 == n && recEq s.2.1 A && seteq s.2.2.1 D && s.2.2.2 == d) &&
+  (ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped D && s.head == d) &&
     recEq A ses.recs && !ses.remDL.contains d && !(pendingOf A D).contains d &&
     (!decide (ses.es.hub.head = e) ||
       ((ses.es.hubStore S O).closedB d &&

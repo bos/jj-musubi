@@ -44,9 +44,42 @@ def recEq : List Rec → List Rec → Bool
   | a :: A, b :: B => seteq a b && recEq A B
   | _, _ => false
 
-/-- The value for key `i` in an association list, newest entry first. -/
-def assocF {α : Type} (l : List (Nat × α)) (i : Nat) (d : α) : α :=
-  ((l.find? (fun p => p.1 == i)).map Prod.snd).getD d
+/-- A supersede in flight: what a node sent with a push. -/
+structure Sup where
+  /-- The node that sent it. -/
+  node : Nat
+  /-- The hub records the node had taken last. -/
+  applied : List Rec
+  /-- The node's dropped set. -/
+  dropped : List Nat
+  /-- The head of the push it rides on. -/
+  head : Nat
+  deriving Repr
+
+/-- The hub's records, and how many of its first records it has pruned. -/
+structure RecLog where
+  /-- The hub's records, oldest first. -/
+  recs : List Rec
+  /-- How many of the first `recs` the hub has pruned. -/
+  pruned : Nat
+  deriving Repr
+
+/-- The hub's records as of the head it accepted at sequence number `seq`. -/
+structure HistEntry where
+  seq : Nat
+  log : RecLog
+  deriving Repr
+
+/-- The hub's records as announced to node `node`. -/
+structure DropMsg where
+  node : Nat
+  log : RecLog
+  deriving Repr
+
+/-- The records the hub had at sequence number `i`; none if no entry names it. The first entry
+for `i` wins, and entries are kept newest first. -/
+def logAt (l : List HistEntry) (i : Nat) : RecLog :=
+  ((l.find? (fun e => e.seq == i)).map (·.log)).getD ⟨[], 0⟩
 
 /-- The executable state with supersedes. -/
 structure SEState where
@@ -57,7 +90,7 @@ structure SEState where
   pruned : Nat
   /-- Ghost: the hub's records, and how many of them it had pruned, as of the head accepted at
   each sequence number, newest entry first (default none), as `EHub.hist` keeps heads. -/
-  recHist : List (Nat × List Rec × Nat)
+  recHist : List HistEntry
   /-- Each node's dropped set (default empty). -/
   nodeD : List (Nat × List Nat)
   /-- The hub's records each node took last (default none). -/
@@ -65,11 +98,11 @@ structure SEState where
   /-- Every list of the hub's records each node has taken, its last among them (default: none
   but the empty one). Having taken them, it has dropped what they drop. -/
   held : List (Nat × List (List Rec))
-  /-- Supersedes sent: the node, the records it took last, its dropped set, and the head of the
+  /-- Supersedes sent, with the records each node took last, its dropped set and the head of the
   push they ride on. -/
-  sups : List (Nat × List Rec × List Nat × Nat)
+  sups : List Sup
   /-- The hub's records, as announced to a node, with how many of them it had pruned. -/
-  dmsgs : List (Nat × List Rec × Nat)
+  dmsgs : List DropMsg
   deriving Repr
 
 def initSE : SEState where
@@ -88,8 +121,8 @@ namespace SEState
 def nodeDF (ses : SEState) (n : Nat) : List Nat := assocF ses.nodeD n []
 def appliedF (ses : SEState) (n : Nat) : List Rec := assocF ses.applied n []
 def heldF (ses : SEState) (n : Nat) : List (List Rec) := assocF ses.held n [[]]
-def recHistF (ses : SEState) (i : Nat) : List Rec := (assocF ses.recHist i ([], 0)).1
-def prunedHistF (ses : SEState) (i : Nat) : Nat := (assocF ses.recHist i ([], 0)).2
+def recHistF (ses : SEState) (i : Nat) : List Rec := (logAt ses.recHist i).recs
+def prunedHistF (ses : SEState) (i : Nat) : Nat := (logAt ses.recHist i).pruned
 
 /-- The hub's dropped set. -/
 def hubDL (ses : SEState) : List Nat := flat ses.recs
@@ -121,8 +154,8 @@ def sabs (ses : SEState) : SState where
   hubPHist := fun i => setP (flat ((ses.recHistF i).take (ses.prunedHistF i)))
   nodeD := fun n => setP (ses.nodeDF n)
   sups := fun n T Δ h => ∃ e ∈ ses.sups,
-    e.1 = n ∧ T = setP (flat e.2.1) ∧ Δ = setP e.2.2.1 ∧ h = e.2.2.2
-  dmsgs := fun n Δ => ∃ e ∈ ses.dmsgs, e.1 = n ∧ Δ = setP (flat e.2.1)
+    e.node = n ∧ T = setP (flat e.applied) ∧ Δ = setP e.dropped ∧ h = e.head
+  dmsgs := fun n Δ => ∃ e ∈ ses.dmsgs, e.node = n ∧ Δ = setP (flat e.log.recs)
 
 /-! ## Actions -/
 
@@ -159,24 +192,12 @@ def SAction.goesBack : SAction → Bool
   | .base a => a.goesBack
   | _ => false
 
-/-- Check a guard; on failure, report `msg`. -/
-def sreq (c : Bool) (msg : Unit → String) (k : Unit → Except String SEState) :
-    Except String SEState :=
-  if c then k () else .error (msg ())
-
-theorem sreq_ok {c : Bool} {msg : Unit → String} {k : Unit → Except String SEState}
-    {ses' : SEState} (h : sreq c msg k = .ok ses') : c = true ∧ k () = .ok ses' := by
-  unfold sreq at h
-  cases c with
-  | false => cases h
-  | true => exact ⟨rfl, h⟩
-
 /-- The node indices either state has an entry for: every other node is `ENode.init` in both. -/
 def nodeKeys (es es' : EState) : List Nat := es.nodes.map Prod.fst ++ es'.nodes.map Prod.fst
 
 /-- A push to `h` carries a supersede whose records are the hub's. -/
 def carriedB (ses : SEState) (h : Nat) : Bool :=
-  ses.sups.any fun e => e.2.2.2 == h && recEq e.2.1 ses.recs
+  ses.sups.any fun e => e.head == h && recEq e.applied ses.recs
 
 /-- `HeadOK`: the hub's head stays, or moves as it accepts a push to a head it doesn't remember
 dropping, and, once it has pruned any records, whose records are its own. -/
@@ -194,7 +215,7 @@ def headsOKB (ses : SEState) (es' : EState) : Bool :=
 def SEState.withBase (ses : SEState) (es' : EState) : SEState :=
   { ses with es := es',
              recHist := if es'.hub.seq == ses.es.hub.seq then ses.recHist
-                        else (es'.hub.seq, ses.recs, ses.pruned) :: ses.recHist }
+                        else ⟨es'.hub.seq, ⟨ses.recs, ses.pruned⟩⟩ :: ses.recHist }
 
 /-- Node `n`'s dropped set becomes `D`. -/
 def SEState.setD (ses : SEState) (n : Nat) (D : List Nat) : SEState :=
@@ -210,11 +231,11 @@ def SEState.takeRecs (ses : SEState) (Δ : List Nat) : List Rec :=
 /-- The hub accepts a push to `es'` that drops `Δ`. -/
 def SEState.supAccept (ses : SEState) (es' : EState) (Δ : List Nat) : SEState :=
   { ses with es := es', recs := ses.takeRecs Δ,
-             recHist := (es'.hub.seq, ses.takeRecs Δ, ses.pruned) :: ses.recHist }
+             recHist := ⟨es'.hub.seq, ⟨ses.takeRecs Δ, ses.pruned⟩⟩ :: ses.recHist }
 
 /-- The hub prunes its first `k` records. -/
 def SEState.pruneR (ses : SEState) (k : Nat) : SEState :=
-  { ses with pruned := k, recHist := (ses.es.hub.seq, ses.recs, k) :: ses.recHist }
+  { ses with pruned := k, recHist := ⟨ses.es.hub.seq, ⟨ses.recs, k⟩⟩ :: ses.recHist }
 
 /-- Node `n` takes records `R`. -/
 def SEState.adoptR (ses : SEState) (n : Nat) (R : List Rec) : SEState :=
@@ -231,72 +252,73 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
       match a.regressSeq with
       | some i => .ok { ses with es := es', recs := ses.recHistF i, pruned := ses.prunedHistF i }
       | none =>
-        sreq (headOKB ses es')
+        req (headOKB ses es')
           (fun _ => s!"supersede: the hub's new head {es'.hub.head} comes without its records, \
             or is one it dropped") fun _ =>
-        sreq (headsOKB ses es')
+        req (headsOKB ses es')
           (fun _ => "supersede: a node's new head is one it dropped") fun _ =>
         .ok (ses.withBase es')
   | .abandon n D =>
-    sreq (decide (n < N)) (fun _ => s!"abandon: node {n} out of range") fun _ =>
-    sreq (D.all fun x => (ses.es.nodeOf n).heads.any fun h => ancB ses.es.parF x h)
+    req (decide (n < N)) (fun _ => s!"abandon: node {n} out of range") fun _ =>
+    req (D.all fun x => (ses.es.nodeOf n).heads.any fun h => ancB ses.es.parF x h)
       (fun _ => s!"abandon: {showL D} not all below node {n}'s heads") fun _ =>
-    sreq (D.all fun x => !(ses.es.nodeOf n).heads.contains x)
+    req (D.all fun x => !(ses.es.nodeOf n).heads.contains x)
       (fun _ => s!"abandon: {showL D} drops a head of node {n}") fun _ =>
-    sreq (!D.contains root) (fun _ => "abandon: drops the root") fun _ =>
+    req (!D.contains root) (fun _ => "abandon: drops the root") fun _ =>
     .ok (ses.setD n (union (ses.nodeDF n) D))
   | .sendSup n d =>
-    sreq (decide (n < N)) (fun _ => s!"sendSup: node {n} out of range") fun _ =>
-    sreq (!(flat (ses.appliedF n)).contains d)
+    req (decide (n < N)) (fun _ => s!"sendSup: node {n} out of range") fun _ =>
+    req (!(flat (ses.appliedF n)).contains d)
       (fun _ => s!"sendSup: node {n} pushes {d}, which a record it took drops") fun _ =>
-    .ok { ses with sups := ses.sups ++ [(n, ses.appliedF n, ses.nodeDF n, d)] }
+    .ok { ses with sups := ses.sups ++ [⟨n, ses.appliedF n, ses.nodeDF n, d⟩] }
   | .sendD n =>
-    sreq (decide (n < N)) (fun _ => s!"sendD: node {n} out of range") fun _ =>
-    .ok { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs, ses.pruned)] }
+    req (decide (n < N)) (fun _ => s!"sendD: node {n} out of range") fun _ =>
+    .ok { ses with dmsgs := ses.dmsgs ++ [⟨n, ⟨ses.recs, ses.pruned⟩⟩] }
   | .adopt n R =>
-    sreq (decide (n < N)) (fun _ => s!"adopt: node {n} out of range") fun _ =>
-    sreq (ses.dmsgs.any fun e => e.1 == n && recEq e.2.1 R && ses.heldPrefix n e.2.1 e.2.2)
+    req (decide (n < N)) (fun _ => s!"adopt: node {n} out of range") fun _ =>
+    req (ses.dmsgs.any fun e =>
+        e.node == n && recEq e.log.recs R && ses.heldPrefix n e.log.recs e.log.pruned)
       (fun _ => s!"adopt: records {repr R} not announced to node {n}, or announced with \
         records pruned that it never took") fun _ =>
-    sreq ((ses.es.nodeOf n).heads.all fun h => !(flat R).contains h)
+    req ((ses.es.nodeOf n).heads.all fun h => !(flat R).contains h)
       (fun _ => s!"adopt: records drop a head of node {n}") fun _ =>
     .ok (ses.adoptR n R)
   | .hubSupAccept n S O e d A Δ =>
-    sreq (ses.sups.any fun s => s.1 == n && recEq s.2.1 A && seteq s.2.2.1 Δ && s.2.2.2 == d)
+    req (ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped Δ && s.head == d)
       (fun _ => s!"hubSupAccept: no supersede {showL Δ} from node {n} with {d} in net")
       fun _ =>
-    sreq (recEq A ses.recs)
+    req (recEq A ses.recs)
       (fun _ => s!"hubSupAccept: node {n}'s records are not the hub's") fun _ =>
-    sreq (!ses.remDL.contains d && !(pendingOf A Δ).contains d)
+    req (!ses.remDL.contains d && !(pendingOf A Δ).contains d)
       (fun _ => s!"hubSupAccept: new head {d} is dropped") fun _ =>
     match execStep N ses.es (.hubPushAccept n S O e d) with
     | .error e => .error e
     | .ok es' =>
-      sreq (headsOKB ses es')
+      req (headsOKB ses es')
         (fun _ => "supersede: a node's new head is one it dropped") fun _ =>
       .ok (ses.supAccept es' Δ)
   | .hubPushRefuse n S O e d A Δ =>
-    sreq (ses.es.inNet (.push n S O e d))
+    req (ses.es.inNet (.push n S O e d))
       (fun _ => s!"hubPushRefuse: push({e}, {d}) from node {n} not in net") fun _ =>
-    sreq (ses.sups.any fun s => s.1 == n && recEq s.2.1 A && seteq s.2.2.1 Δ && s.2.2.2 == d)
+    req (ses.sups.any fun s => s.node == n && recEq s.applied A && seteq s.dropped Δ && s.head == d)
       (fun _ => s!"hubPushRefuse: no supersede {showL Δ} from node {n} with {d} in net")
       fun _ =>
-    sreq (!recEq A ses.recs || ses.remDL.contains d || (pendingOf A Δ).contains d)
+    req (!recEq A ses.recs || ses.remDL.contains d || (pendingOf A Δ).contains d)
       (fun _ => s!"hubPushRefuse: node {n}'s records are the hub's, and {d} isn't dropped")
       fun _ =>
     .ok ses
   | .prune k =>
-    sreq (decide (ses.pruned ≤ k))
+    req (decide (ses.pruned ≤ k))
       (fun _ => s!"prune: pruned {ses.pruned} records already, more than {k}") fun _ =>
-    sreq (decide (k ≤ ses.recs.length))
+    req (decide (k ≤ ses.recs.length))
       (fun _ => s!"prune: {k} records, of {ses.recs.length}") fun _ =>
-    sreq ((List.range N).all fun n => ses.heldPrefix n ses.recs k)
+    req ((List.range N).all fun n => ses.heldPrefix n ses.recs k)
       (fun _ => s!"prune: a node has never taken the first {k} records") fun _ =>
     .ok (ses.pruneR k)
 
 /-- The executable step. -/
 def sexecStep (N : Nat) (ses : SEState) (a : SAction) : Except String SEState :=
-  sreq ses.es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
+  req ses.es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
   sexecCore N ses a
 
 /-! ## The liveness measure

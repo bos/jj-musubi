@@ -98,7 +98,7 @@ def mergeReceiver (atParent : Bool) : SEState :=
       lops := [0, 1, 2, 3, 4], heads := [2], known := (2, 4) }
     let follower := { accepted with
       nodeD := [], es := accepted.es.setNode 1 nd,
-      dmsgs := [(1, [[2]], 0)] }
+      dmsgs := [⟨1, ⟨[[2]], 0⟩⟩] }
     match cexecAction 2 follower (.advancePrepared 1 [[2]]) with
     | .error _ => false
     | .ok switched =>

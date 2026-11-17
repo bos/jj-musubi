@@ -120,8 +120,8 @@ head come from Emit and the stable hub; custody comes from its actual send. The 
 supplies survival, comparison and closure, not a successful outcome or rank decrease. -/
 structure PacketPrimitives (s : SEState) (p : PushPacket) : Prop where
   par : s.es.parOK = true
-  ledger : (s.sups.any fun q => q.1 == p.node && recEq q.2.1 p.applied &&
-    seteq q.2.2.1 p.allDrops && q.2.2.2 == p.new) = true
+  ledger : (s.sups.any fun q => q.node == p.node && recEq q.applied p.applied &&
+    seteq q.dropped p.allDrops && q.head == p.new) = true
   survives : !s.remDL.contains p.new = true
   pending : !(pendingOf p.applied p.allDrops).contains p.new = true
   sent : s.es.inNet (.push p.node p.ops p.objs p.expected p.new) = true
@@ -170,15 +170,13 @@ theorem packet_accept_effect {N : Nat} {s t : SEState} {p : PushPacket}
     simp only at h
     split at h
     · cases h
-      obtain ⟨-, hs⟩ := sreq_ok hs
+      peel hs with -
       simp only [sexecCore] at hs
-      obtain ⟨-, hs⟩ := sreq_ok hs
-      obtain ⟨-, hs⟩ := sreq_ok hs
-      obtain ⟨-, hs⟩ := sreq_ok hs
+      peel hs with - - -
       split at hs
       · cases hs
       · rename_i es' he
-        obtain ⟨-, hs⟩ := sreq_ok hs
+        peel hs with -
         cases hs
         obtain ⟨-, -, -, hh, hseq⟩ := execStep_hubPushAccept_guards he
         exact ⟨hh, hseq⟩

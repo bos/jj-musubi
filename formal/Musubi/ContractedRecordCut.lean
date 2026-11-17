@@ -49,29 +49,10 @@ including recovery steps unavailable in the older relation. -/
 theorem cexec_record_control {N : Nat} {s t : SEState} {a : SAction}
     (h : cexecStep N s a = .ok t) (hnr : a.goesBack = false) :
     (t.recs = s.recs ∨ ∃ D, t.recs = s.takeRecs D) ∧ s.pruned ≤ t.pruned := by
-  unfold cexecStep at h
-  cases hs : sexecStep N s a with
-  | ok result =>
-    rw [hs] at h
-    simp only at h
-    split at h
-    · cases h; exact sexec_record_control hs hnr
-    · contradiction
-  | error error =>
-    rw [hs] at h
-    cases a with
-    | base action =>
-      cases action <;> simp only at h
-      all_goals first | contradiction | skip
-      split at h
-      · cases h; exact ⟨Or.inl rfl, Nat.le_refl _⟩
-      · contradiction
-    | hubSupAccept n S O e d A D =>
-      simp only at h
-      split at h
-      · cases h; exact ⟨Or.inr ⟨D, rfl⟩, Nat.le_refl _⟩
-      · contradiction
-    | _ => contradiction
+  rcases cexecStep_ok h with ⟨hs, -⟩ | ⟨n, rfl, -, rfl⟩ | ⟨n, S, O, e, d, A, D, rfl, -, rfl⟩
+  · exact sexec_record_control hs hnr
+  · exact ⟨Or.inl rfl, Nat.le_refl _⟩
+  · exact ⟨Or.inr ⟨D, rfl⟩, Nat.le_refl _⟩
 
 theorem cexecAction_record_control {N : Nat} {s t : SEState} {a : CAction}
     (h : cexecAction N s a = .ok t) (hnr : a.goesBack = false) :

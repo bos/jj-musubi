@@ -21,7 +21,7 @@ theorem sexec_record_control {N : Nat} {s t : SEState} {a : SAction}
     (h : sexecStep N s a = .ok t) (hnr : a.goesBack = false) :
     (t.recs = s.recs ∨ ∃ D, t.recs = s.takeRecs D) ∧ s.pruned ≤ t.pruned := by
   simp only [sexecStep] at h
-  obtain ⟨_, h⟩ := sreq_ok h
+  peel h with _
   cases a with
   | base b =>
     cases hs : execStep N s.es b with
@@ -34,50 +34,47 @@ theorem sexec_record_control {N : Nat} {s t : SEState} {a : SAction}
         simp [SAction.goesBack, Action.goesBack] at hnr
       | none =>
         simp only [sexecCore, hs, hr] at h
-        obtain ⟨_, h⟩ := sreq_ok h
-        obtain ⟨_, h⟩ := sreq_ok h
+        peel h with _ _
         cases h
         exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | abandon n D =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _ _ _ _
     cases h
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | sendSup n d =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _ _
     cases h
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | sendD n =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _
     cases h
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | adopt n R =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _ _ _
     cases h
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | hubSupAccept n S O e d A D =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _ _ _
     cases hs : execStep N s.es (.hubPushAccept n S O e d) with
     | error e => rw [hs] at h; cases h
     | ok es' =>
       rw [hs] at h
-      obtain ⟨_, h⟩ := sreq_ok h
+      peel h with _
       cases h
       exact ⟨Or.inr ⟨D, rfl⟩, Nat.le_refl _⟩
   | hubPushRefuse n S O e d A D =>
     simp only [sexecCore] at h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with _ _ _
     cases h
     exact ⟨Or.inl rfl, Nat.le_refl _⟩
   | prune k =>
     simp only [sexecCore] at h
-    obtain ⟨hp, h⟩ := sreq_ok h
-    obtain ⟨_, h⟩ := sreq_ok h; obtain ⟨_, h⟩ := sreq_ok h
+    peel h with hp _ _
     cases h
     exact ⟨Or.inl rfl, of_decide_eq_true hp⟩
 

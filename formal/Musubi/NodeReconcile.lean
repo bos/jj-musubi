@@ -117,13 +117,13 @@ holds all its drops. The native policy checks this adoption before merge, transf
 theorem current_adoption_enabled {N : Nat} {s : SEState} {n : Nat} {R : List Rec}
     (hpar : s.es.parOK = true) (hn : n < N) (hheads : NodeHeadsSurvive s)
     (hheld : ∀ x, x ∈ flat R → x ∈ s.nodeDF n)
-    (hmsg : (s.dmsgs.any fun e => e.1 == n && recEq e.2.1 R &&
-      s.heldPrefix n e.2.1 e.2.2) = true) :
+    (hmsg : (s.dmsgs.any fun e => e.node == n && recEq e.log.recs R &&
+      s.heldPrefix n e.log.recs e.log.pruned) = true) :
     cexecAction N s (.old (.adopt n R)) = .ok (s.adoptR n R) := by
   have hnone : ∀ x ∈ (s.es.nodeOf n).heads, x ∉ flat R :=
     fun x hx hr => hheads n x hx (hheld x hr)
   have hadopt : sexecStep N s (.adopt n R) = .ok (s.adoptR n R) := by
-    simpa [sexecStep, sexecCore, sreq, hpar, hn, hmsg] using hnone
+    simpa [sexecStep, sexecCore, req, hpar, hn, hmsg] using hnone
   simp only [cexecAction, cexecStep, hadopt, legacyOutcomeB, ite_true]
 
 /-- Eligibility plus current ordered records leaves no unpublished drops. The core's

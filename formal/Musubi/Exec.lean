@@ -92,11 +92,13 @@ def birthF (es : EState) (x : Nat) : Nat := ((es.findOp x).map EOp.birth).getD 0
 
 end EState
 
-def EHub.histF (h : EHub) (i : Nat) : Nat :=
-  ((h.hist.find? (fun p => p.1 == i)).map Prod.snd).getD root
+/-- The value for key `i` in an association list, newest entry first, or `d` if there is none. -/
+def assocF {α : Type} (l : List (Nat × α)) (i : Nat) (d : α) : α :=
+  ((l.find? (fun p => p.1 == i)).map Prod.snd).getD d
 
-def nodeAt (l : List (Nat × ENode)) (i : Nat) : ENode :=
-  ((l.find? (fun p => p.1 == i)).map Prod.snd).getD ENode.init
+def EHub.histF (h : EHub) (i : Nat) : Nat := assocF h.hist i root
+
+def nodeAt (l : List (Nat × ENode)) (i : Nat) : ENode := assocF l i ENode.init
 
 def EState.nodeOf (es : EState) (i : Nat) : ENode := nodeAt es.nodes i
 
@@ -332,12 +334,12 @@ def Action.goesBack : Action → Bool
   | _ => false
 
 /-- Check a guard; on failure, report `msg`. -/
-def req (c : Bool) (msg : Unit → String) (k : Unit → Except String EState) :
-    Except String EState :=
+def req {σ : Type} (c : Bool) (msg : Unit → String) (k : Unit → Except String σ) :
+    Except String σ :=
   if c then k () else .error (msg ())
 
-theorem req_ok {c : Bool} {msg : Unit → String} {k : Unit → Except String EState}
-    {es' : EState} (h : req c msg k = .ok es') : c = true ∧ k () = .ok es' := by
+theorem req_ok {σ : Type} {c : Bool} {msg : Unit → String} {k : Unit → Except String σ}
+    {s : σ} (h : req c msg k = .ok s) : c = true ∧ k () = .ok s := by
   unfold req at h
   cases c with
   | false => cases h
@@ -561,6 +563,11 @@ def execStep (N : Nat) (es : EState) (a : Action) : Except String EState :=
 /-- A hive made again, empty (`HubDir::remake`): the hub goes back to the root, then keeps
 only the root. -/
 def remakeActions : List Action := [.hubRegress 0, .hubForget [root] []]
+
+/-- Runs actions in turn, stopping at the first one rejected. -/
+def run (N : Nat) (es : EState) : List Action → Except String EState
+  | [] => .ok es
+  | a :: as => do run N (← execStep N es a) as
 
 /-! ## The liveness measure
 

@@ -37,7 +37,7 @@ theorem execStep_hub_fixed {N : Nat} {es es' : EState} {a : Action}
     (hp : ∀ n S O e d, a ≠ .hubPushAccept n S O e d)
     (hr : a.goesBack = false) :
     es'.hub.head = es.hub.head ∧ es'.hub.seq = es.hub.seq := by
-  obtain ⟨-, h⟩ := req_ok h
+  peel h with -
   cases a with
   | casAccept n e d => exact absurd rfl (hc n e d)
   | hubPushAccept n S O e d => exact absurd rfl (hp n S O e d)
@@ -57,11 +57,9 @@ theorem execStep_hubPushAccept_guards {N : Nat} {es es' : EState} {n : Nat}
     es.hub.head ≠ d ∧ es.hub.head = e ∧ ancB es.parF e d = true ∧
       es'.hub.head = d ∧ es'.hub.seq = es.hub.seq + 1 := by
   have hm := execStep_hubPushAccept h
-  obtain ⟨-, h⟩ := req_ok h
+  peel h with -
   simp only [execCore] at h
-  obtain ⟨-, h⟩ := req_ok h
-  obtain ⟨hne, h⟩ := req_ok h
-  obtain ⟨he, h⟩ := req_ok h
+  peel h with - hne he
   obtain ⟨ha, -⟩ := req_ok h
   exact ⟨of_decide_eq_true hne, of_decide_eq_true he, ha, hm.2, hm.1⟩
 
@@ -82,22 +80,23 @@ acceptance of a pushed head against a ledgered supersede. -/
 inductive StepShape (N : Nat) (s t : SEState) : Prop
   | quiet (hsups : t.sups = s.sups) (hrecs : t.recs = s.recs)
       (hhead : t.es.hub.head = s.es.hub.head) (hseq : t.es.hub.seq = s.es.hub.seq)
-  | send (n d : Nat) (hn : n < N) (hsups : t.sups = s.sups ++ [(n, s.appliedF n, s.nodeDF n, d)])
+  | send (n d : Nat) (hn : n < N) (hsups : t.sups = s.sups ++ [⟨n, s.appliedF n, s.nodeDF n, d⟩])
       (hd : d ∉ flat (s.appliedF n)) (hrecs : t.recs = s.recs)
       (hhead : t.es.hub.head = s.es.hub.head) (hseq : t.es.hub.seq = s.es.hub.seq)
   | accept (n e d : Nat) (A : List Rec) (D : List Nat)
       (hsups : t.sups = s.sups) (hrecs : t.recs = s.takeRecs D)
       (hhead : t.es.hub.head = d) (hseq : t.es.hub.seq = s.es.hub.seq + 1)
       (he : s.es.hub.head = e) (hne : e ≠ d) (hpar : ParLt s.es.parF)
-      (hledger : ∃ p ∈ s.sups, p.1 = n ∧ recEq p.2.1 A = true ∧ seteq p.2.2.1 D = true ∧
-        p.2.2.2 = d)
+      (hledger : ∃ p ∈ s.sups, p.node = n ∧ recEq p.applied A = true ∧ seteq p.dropped D = true ∧
+        p.head = d)
       (hrec : recEq A s.recs = true) (hpend : d ∉ pendingOf A D)
       (hcmp : Anc s.es.parF e d ∨ belowB s.es.parF (acceptDrops s A D).contains e d = true)
 
 theorem ledger_of_any {s : SEState} {n d : Nat} {A : List Rec} {D : List Nat}
-    (h : (s.sups.any fun p => p.1 == n && recEq p.2.1 A && seteq p.2.2.1 D && p.2.2.2 == d)
+    (h : (s.sups.any fun p => p.node == n && recEq p.applied A && seteq p.dropped D && p.head == d)
       = true) :
-    ∃ p ∈ s.sups, p.1 = n ∧ recEq p.2.1 A = true ∧ seteq p.2.2.1 D = true ∧ p.2.2.2 = d := by
+    ∃ p ∈ s.sups, p.node = n ∧ recEq p.applied A = true ∧ seteq p.dropped D = true ∧
+      p.head = d := by
   obtain ⟨p, hp, hq⟩ := List.any_eq_true.1 h
   simp only [Bool.and_eq_true, beq_iff_eq] at hq
   exact ⟨p, hp, hq.1.1.1, hq.1.1.2, hq.1.2, hq.2⟩
@@ -114,7 +113,7 @@ theorem base_quiet {N : Nat} {s t : SEState} {b : Action}
     (h : sexecStep N s (.base b) = .ok t)
     (hu : (CAction.old (.base b)).unledgeredAccept = false)
     (hr : b.goesBack = false) : StepShape N s t := by
-  obtain ⟨-, h⟩ := sreq_ok h
+  peel h with -
   simp only [sexecCore] at h
   split at h
   · cases h
@@ -124,8 +123,7 @@ theorem base_quiet {N : Nat} {s t : SEState} {b : Action}
       have := regressSeq_some hi
       subst this
       simp [Action.goesBack] at hr
-    · obtain ⟨-, h⟩ := sreq_ok h
-      obtain ⟨-, h⟩ := sreq_ok h
+    · peel h with - -
       cases h
       have hf := execStep_hub_fixed hes
         (fun n e d hb => by subst hb; simp [CAction.unledgeredAccept] at hu)
@@ -146,40 +144,37 @@ theorem step_shape {N : Nat} {s t : SEState} {a : CAction}
         cases a with
         | base b => exact base_quiet hs hu hr
         | abandon n D =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨-, hs⟩ := sreq_ok hs; obtain ⟨-, hs⟩ := sreq_ok hs
-          obtain ⟨-, hs⟩ := sreq_ok hs; obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with - - - -
           cases hs
           exact .quiet rfl rfl rfl rfl
         | sendSup n d =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨hn, hs⟩ := sreq_ok hs; obtain ⟨hd, hs⟩ := sreq_ok hs
+          peel hs with hn hd
           cases hs
           exact .send n d (of_decide_eq_true hn) rfl (not_mem_of_contains_false hd) rfl rfl rfl
         | sendD n =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           cases hs
           exact .quiet rfl rfl rfl rfl
         | adopt n R =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨-, hs⟩ := sreq_ok hs; obtain ⟨-, hs⟩ := sreq_ok hs
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with - - -
           cases hs
           exact .quiet rfl rfl rfl rfl
         | hubSupAccept n S O e d A D =>
-          obtain ⟨hok, hs⟩ := sreq_ok hs
+          peel hs with hok
           simp only [sexecCore] at hs
-          obtain ⟨hl, hs⟩ := sreq_ok hs; obtain ⟨hrec, hs⟩ := sreq_ok hs
-          obtain ⟨hdr, hs⟩ := sreq_ok hs
+          peel hs with hl hrec hdr
           split at hs
           · cases hs
           · rename_i es' hes
-            obtain ⟨-, hs⟩ := sreq_ok hs
+            peel hs with -
             cases hs
             obtain ⟨hne, he, ha, hh, hq⟩ := execStep_hubPushAccept_guards hes
             have hlt := parOK_parLt hok
@@ -188,17 +183,15 @@ theorem step_shape {N : Nat} {s t : SEState} {a : CAction}
               (not_mem_of_contains_false hdr.2) (.inl ((ancB_iff hlt).1 ha))
             exact fun h' => hne (he.trans h')
         | hubPushRefuse n S O e d A D =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨-, hs⟩ := sreq_ok hs; obtain ⟨-, hs⟩ := sreq_ok hs
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with - - -
           cases hs
           exact .quiet rfl rfl rfl rfl
         | prune k =>
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with -
           simp only [sexecCore] at hs
-          obtain ⟨-, hs⟩ := sreq_ok hs; obtain ⟨-, hs⟩ := sreq_ok hs
-          obtain ⟨-, hs⟩ := sreq_ok hs
+          peel hs with - - -
           cases hs
           exact .quiet rfl rfl rfl rfl
       · cases h
@@ -240,8 +233,8 @@ has not dropped, and ledger entries consistent with their sender's records when 
 structure CutInv (s : SEState) : Prop where
   ok : SEOK s
   head : s.es.hub.head ∉ s.hubDL
-  ledgerApplied : ∀ p ∈ s.sups, ∀ x, x ∈ flat p.2.1 → x ∈ p.2.2.1
-  ledgerHead : ∀ p ∈ s.sups, p.2.2.2 ∉ flat p.2.1
+  ledgerApplied : ∀ p ∈ s.sups, ∀ x, x ∈ flat p.applied → x ∈ p.dropped
+  ledgerHead : ∀ p ∈ s.sups, p.head ∉ flat p.applied
 
 theorem cutInv_init : CutInv initSE where
   ok := seok_init
@@ -263,8 +256,8 @@ theorem mem_of_seteq {a b : List Nat} (h : seteq a b = true) (x : Nat) : x ∈ a
 /-- A ledgered acceptance's new head is not one the hub has dropped, nor one its push drops. -/
 theorem accept_head_fresh {s : SEState} {n d : Nat} {A : List Rec} {D : List Nat}
     (hI : CutInv s)
-    (hledger : ∃ p ∈ s.sups, p.1 = n ∧ recEq p.2.1 A = true ∧ seteq p.2.2.1 D = true ∧
-      p.2.2.2 = d)
+    (hledger : ∃ p ∈ s.sups, p.node = n ∧ recEq p.applied A = true ∧ seteq p.dropped D = true ∧
+      p.head = d)
     (hrec : recEq A s.recs = true) (hpend : d ∉ pendingOf A D) :
     d ∉ s.hubDL ∧ d ∉ D := by
   obtain ⟨p, hp, -, hpa, -, hpd⟩ := hledger
@@ -326,8 +319,8 @@ theorem post_cut_step {N : Nat} {s t : SEState} {a : CAction} (hI : CutInv s)
     (hu : a.unledgeredAccept = false) (hr : a.goesBack = false)
     (hfix : t.recs = s.recs) :
     (t.es.hub.head = s.es.hub.head ∧ t.es.hub.seq = s.es.hub.seq) ∨
-      ((∃ p ∈ s.sups, p.2.2.2 = t.es.hub.head ∧
-          (∀ x, x ∈ flat p.2.1 ↔ x ∈ s.hubDL) ∧ (∀ x, x ∈ p.2.2.1 ↔ x ∈ s.hubDL)) ∧
+      ((∃ p ∈ s.sups, p.head = t.es.hub.head ∧
+          (∀ x, x ∈ flat p.applied ↔ x ∈ s.hubDL) ∧ (∀ x, x ∈ p.dropped ↔ x ∈ s.hubDL)) ∧
         Anc s.es.parF s.es.hub.head t.es.hub.head ∧ s.es.hub.head < t.es.hub.head ∧
         t.es.hub.seq = s.es.hub.seq + 1) := by
   rcases step_shape h hu hr with
@@ -380,9 +373,9 @@ theorem post_cut_run (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k)
     (i : Nat) (hi : k ≤ i) :
     ((run (i + 1)).es.hub.head = (run i).es.hub.head ∧
         (run (i + 1)).es.hub.seq = (run i).es.hub.seq) ∨
-      ((∃ p ∈ (run i).sups, p.2.2.2 = (run (i + 1)).es.hub.head ∧
-          (∀ x, x ∈ flat p.2.1 ↔ x ∈ (run k).hubDL) ∧
-          (∀ x, x ∈ p.2.2.1 ↔ x ∈ (run k).hubDL)) ∧
+      ((∃ p ∈ (run i).sups, p.head = (run (i + 1)).es.hub.head ∧
+          (∀ x, x ∈ flat p.applied ↔ x ∈ (run k).hubDL) ∧
+          (∀ x, x ∈ p.dropped ↔ x ∈ (run k).hubDL)) ∧
         Anc (run i).es.parF (run i).es.hub.head (run (i + 1)).es.hub.head ∧
         (run i).es.hub.head < (run (i + 1)).es.hub.head ∧
         (run (i + 1)).es.hub.seq = (run i).es.hub.seq + 1) := by
@@ -416,8 +409,8 @@ since its push still has that push accepted until then; this bounds such accepts
 assuming the hub stops accepting or any node's dropped set is fixed. -/
 theorem stale_accepts_stop (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k).recs) :
     ∃ k', k ≤ k' ∧ ∀ i, k' ≤ i → (run (i + 1)).es.hub.head ≠ (run i).es.hub.head →
-      ∀ p ∈ (run k).sups, p.2.2.2 ≠ (run (i + 1)).es.hub.head := by
-  let M := ((run k).sups.map fun p => p.2.2.2).sum
+      ∀ p ∈ (run k).sups, p.head ≠ (run (i + 1)).es.hub.head := by
+  let M := ((run k).sups.map fun p => p.head).sum
   let f := fun j => M + 1 - (run (k + j)).es.hub.head
   have hle : ∀ j, (run (k + j)).es.hub.head ≤ (run (k + j + 1)).es.hub.head :=
     fun j => post_cut_head_le run acts h0 hs hu hr k hrec (k + j) (by omega)
@@ -446,7 +439,8 @@ include hs hu hr in
 its node's records and dropped set at `j`. -/
 theorem ledger_appended (k : Nat) :
     ∀ i, k ≤ i → ∀ p ∈ (run i).sups, p ∉ (run k).sups →
-      ∃ j, k ≤ j ∧ j < i ∧ p.2.1 = (run j).appliedF p.1 ∧ p.2.2.1 = (run j).nodeDF p.1 ∧ p.1 < N
+      ∃ j, k ≤ j ∧ j < i ∧ p.applied = (run j).appliedF p.node ∧
+        p.dropped = (run j).nodeDF p.node ∧ p.node < N
   | 0, hi, p, hp, hn => by
     have : k = 0 := by omega
     subst this
@@ -457,8 +451,8 @@ theorem ledger_appended (k : Nat) :
       exact absurd hp hn
     have hi' : k ≤ i := by omega
     have older : p ∈ (run i).sups →
-        ∃ j, k ≤ j ∧ j < i + 1 ∧ p.2.1 = (run j).appliedF p.1 ∧
-          p.2.2.1 = (run j).nodeDF p.1 ∧ p.1 < N := fun hp' => by
+        ∃ j, k ≤ j ∧ j < i + 1 ∧ p.applied = (run j).appliedF p.node ∧
+          p.dropped = (run j).nodeDF p.node ∧ p.node < N := fun hp' => by
       obtain ⟨j, h1, h2, h3, h4, h5⟩ := ledger_appended k i hi' p hp' hn
       exact ⟨j, h1, by omega, h3, h4, h5⟩
     rcases step_shape (hs i) (hu i) (hr i) with
@@ -480,16 +474,16 @@ on, as `node_drop_sets_eventually_stabilize` provides for each node, it is the h
 cut on. -/
 theorem fresh_accept_aligned (k : Nat) (hrec : ∀ i, k ≤ i → (run i).recs = (run k).recs)
     (i : Nat) (hi : k ≤ i) (hmove : (run (i + 1)).es.hub.head ≠ (run i).es.hub.head)
-    (hfresh : ∀ p ∈ (run k).sups, p.2.2.2 ≠ (run (i + 1)).es.hub.head) :
-    ∃ p ∈ (run i).sups, p.1 < N ∧ p.2.2.2 = (run (i + 1)).es.hub.head ∧ p ∉ (run k).sups ∧
-      (∃ j, k ≤ j ∧ j < i ∧ ∀ x, x ∈ (run j).nodeDF p.1 ↔ x ∈ (run k).hubDL) ∧
-      ((∀ j, k ≤ j → ∀ x, x ∈ (run j).nodeDF p.1 ↔ x ∈ (run k).nodeDF p.1) →
-        ∀ x, x ∈ (run k).nodeDF p.1 ↔ x ∈ (run k).hubDL) := by
+    (hfresh : ∀ p ∈ (run k).sups, p.head ≠ (run (i + 1)).es.hub.head) :
+    ∃ p ∈ (run i).sups, p.node < N ∧ p.head = (run (i + 1)).es.hub.head ∧ p ∉ (run k).sups ∧
+      (∃ j, k ≤ j ∧ j < i ∧ ∀ x, x ∈ (run j).nodeDF p.node ↔ x ∈ (run k).hubDL) ∧
+      ((∀ j, k ≤ j → ∀ x, x ∈ (run j).nodeDF p.node ↔ x ∈ (run k).nodeDF p.node) →
+        ∀ x, x ∈ (run k).nodeDF p.node ↔ x ∈ (run k).hubDL) := by
   rcases post_cut_run run acts h0 hs hu hr k hrec i hi with h | ⟨⟨p, hp, hpd, -, hpD⟩, -⟩
   · exact absurd h.1 hmove
   have hn : p ∉ (run k).sups := fun h => hfresh p h hpd
   obtain ⟨j, hj1, hj2, -, hjD, hpN⟩ := ledger_appended run acts hs hu hr k i hi p hp hn
-  have hal : ∀ x, x ∈ (run j).nodeDF p.1 ↔ x ∈ (run k).hubDL := fun x => by
+  have hal : ∀ x, x ∈ (run j).nodeDF p.node ↔ x ∈ (run k).hubDL := fun x => by
     rw [← hjD]; exact hpD x
   refine ⟨p, hp, hpN, hpd, hn, ⟨j, hj1, hj2, hal⟩, fun hnode x => ?_⟩
   exact (hnode j hj1 x).symm.trans (hal x)

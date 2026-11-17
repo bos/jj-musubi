@@ -77,14 +77,12 @@ theorem packet_accept_fields {N : Nat} {s t : SEState} {p : PushPacket}
     simp only at h
     split at h
     · cases h
-      obtain ⟨_, hs⟩ := sreq_ok hs
+      peel hs with _
       simp only [sexecCore] at hs
-      obtain ⟨_, hs⟩ := sreq_ok hs
-      obtain ⟨hrec, hs⟩ := sreq_ok hs
-      obtain ⟨_, hs⟩ := sreq_ok hs
+      peel hs with _ hrec _
       split at hs
       · cases hs
-      · obtain ⟨_, hs⟩ := sreq_ok hs
+      · peel hs with _
         cases hs
         exact ⟨hrec, rfl⟩
     · contradiction

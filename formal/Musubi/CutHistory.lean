@@ -21,7 +21,7 @@ structure CutHistory (s : SEState) : Prop where
 theorem cutHistory_init : CutHistory initSE := by
   refine ⟨cutInv_init, rfl, ?_⟩
   intro i _
-  simp [initSE, SEState.recHistF, assocF, flat]
+  simp [initSE, SEState.recHistF, logAt, flat]
 
 /-- Apart from acceptance, the base actions leave the saved head history alone, including
 rollback, which selects a slot rather than modifying one. -/
@@ -30,7 +30,7 @@ theorem execStep_hist_fixed {N : Nat} {es es' : EState} {a : Action}
     (hc : ∀ n e d, a ≠ .casAccept n e d)
     (hp : ∀ n S O e d, a ≠ .hubPushAccept n S O e d) :
     es'.hub.hist = es.hub.hist := by
-  obtain ⟨-, h⟩ := req_ok h
+  peel h with -
   cases a with
   | casAccept n e d => exact absurd rfl (hc n e d)
   | hubPushAccept n S O e d => exact absurd rfl (hp n S O e d)
@@ -48,13 +48,9 @@ theorem execStep_accept_hist {N : Nat} {es es' : EState} {n : Nat}
     {S O : List Nat} {e d : Nat}
     (h : execStep N es (.hubPushAccept n S O e d) = .ok es') :
     es'.hub.hist = (es.hub.seq + 1, d) :: es.hub.hist := by
-  obtain ⟨-, h⟩ := req_ok h
+  peel h with -
   simp only [execCore] at h
-  obtain ⟨-, h⟩ := req_ok h
-  obtain ⟨-, h⟩ := req_ok h
-  obtain ⟨-, h⟩ := req_ok h
-  obtain ⟨-, h⟩ := req_ok h
-  obtain ⟨-, h⟩ := req_ok h
+  peel h with - - - - -
   cases h
   simp [send_hub, EState.hubAccept, EState.hubStore,
     EState.hubStoreOps, EState.hubStoreObjs]
@@ -62,15 +58,12 @@ theorem execStep_accept_hist {N : Nat} {es es' : EState} {n : Nat}
 theorem histF_saved (hub : EHub) (k d i : Nat) :
     ({ hub with hist := (k, d) :: hub.hist }).histF i =
       if i = k then d else hub.histF i := by
-  simp only [EHub.histF]
-  by_cases hi : i = k
-  · subst i; simp
-  · simp [hi, Ne.symm hi]
+  simp only [EHub.histF, assocF_cons]
 
 theorem recHistF_saved (s : SEState) (k p i : Nat) (R : List Rec) :
-    ({ s with recHist := (k, R, p) :: s.recHist }).recHistF i =
+    ({ s with recHist := ⟨k, ⟨R, p⟩⟩ :: s.recHist }).recHistF i =
       if i = k then R else s.recHistF i := by
-  simp only [SEState.recHistF, assocF_cons]
+  simp only [SEState.recHistF, logAt_cons]
   split <;> rfl
 
 /-- A non-rollback step either leaves both histories and the current pair alone, or saves
@@ -109,21 +102,21 @@ theorem supAccept_history {s : SEState} {es : EState} {D : List Nat}
     · change es.hub.histF i = s.es.hub.histF i
       have h := histF_saved s.es.hub es.hub.seq es.hub.head i
       simpa [EHub.histF, hist, hi] using h
-    · simp [SEState.supAccept, SEState.recHistF, assocF_cons, hi]
+    · simp [SEState.supAccept, SEState.recHistF, logAt_cons, hi]
 
 theorem prune_history {s : SEState} (hat : s.es.hub.histF s.es.hub.seq = s.es.hub.head)
     (k : Nat) : HistoryUpdate s (s.pruneR k) := by
   refine .save (by simp [SEState.pruneR]) (by exact hat) ?_ ?_
-  · simp [SEState.pruneR, SEState.recHistF, assocF_cons]
+  · simp [SEState.pruneR, SEState.recHistF, logAt_cons]
   · intro i hi
     change i ≠ s.es.hub.seq at hi
-    exact ⟨rfl, by simp [SEState.pruneR, SEState.recHistF, assocF_cons, hi]⟩
+    exact ⟨rfl, by simp [SEState.pruneR, SEState.recHistF, logAt_cons, hi]⟩
 
 theorem base_history {N : Nat} {s t : SEState} {b : Action}
     (h : sexecStep N s (.base b) = .ok t)
     (hu : (CAction.old (.base b)).unledgeredAccept = false)
     (hr : b.goesBack = false) : HistoryUpdate s t := by
-  obtain ⟨-, h⟩ := sreq_ok h
+  peel h with -
   simp only [sexecCore] at h
   split at h
   · cases h
@@ -133,8 +126,7 @@ theorem base_history {N : Nat} {s t : SEState} {b : Action}
       have := regressSeq_some hi
       subst this
       simp [Action.goesBack] at hr
-    · obtain ⟨-, h⟩ := sreq_ok h
-      obtain ⟨-, h⟩ := sreq_ok h
+    · peel h with - -
       cases h
       have hc : ∀ n e d, b ≠ .casAccept n e d := by
         intro n e d he; subst b; simp [CAction.unledgeredAccept] at hu
@@ -151,30 +143,26 @@ theorem sexec_history {N : Nat} {s t : SEState} {a : SAction}
   cases a with
   | base b => exact base_history h hu hr
   | hubSupAccept n S O e d A D =>
-    obtain ⟨-, h⟩ := sreq_ok h
+    peel h with -
     simp only [sexecCore] at h
-    obtain ⟨-, h⟩ := sreq_ok h
-    obtain ⟨-, h⟩ := sreq_ok h
-    obtain ⟨-, h⟩ := sreq_ok h
+    peel h with - - -
     split at h
     · cases h
     · rename_i es' hes
-      obtain ⟨-, h⟩ := sreq_ok h
+      peel h with -
       cases h
       obtain ⟨-, -, -, hh, hs⟩ := execStep_hubPushAccept_guards hes
       apply supAccept_history hs
       rw [execStep_accept_hist hes, hs, hh]
   | prune k =>
-    obtain ⟨-, h⟩ := sreq_ok h
+    peel h with -
     simp only [sexecCore] at h
-    obtain ⟨-, h⟩ := sreq_ok h
-    obtain ⟨-, h⟩ := sreq_ok h
-    obtain ⟨-, h⟩ := sreq_ok h
+    peel h with - - -
     cases h
     exact prune_history hat k
   | abandon n D | sendSup n D | sendD n | adopt n D | hubPushRefuse n S O e d A D =>
-    obtain ⟨-, h⟩ := sreq_ok h
-    simp only [sexecCore, sreq] at h
+    peel h with -
+    simp only [sexecCore, req] at h
     repeat' split at h
     all_goals first | contradiction | (cases h; exact .frame rfl rfl rfl rfl)
 
@@ -258,7 +246,7 @@ theorem CutHistory.rollback {N : Nat} {s t : SEState} {i : Nat}
     simp only at h
     split at h
     · cases h
-      obtain ⟨-, hs⟩ := sreq_ok hs
+      peel hs with -
       simp only [sexecCore] at hs
       split at hs
       · contradiction

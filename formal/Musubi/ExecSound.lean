@@ -12,6 +12,28 @@ namespace Musubi.Exec
 
 open Musubi
 
+/-- `peel h with p₁ … pₖ` takes apart a step that checks `k` guards with `req`, as `execCore` and
+`sexecCore` do: `h : req c₁ m₁ (fun _ => … req cₖ mₖ (fun _ => r)) = .ok s` becomes
+`pᵢ : cᵢ = true` and `h : r () = .ok s`. The number of patterns must equal the number of guards.
+Each `pᵢ` is an `rcases` pattern; `-` discards that guard's hypothesis. -/
+syntax "peel " ident " with" (ppSpace colGt Lean.Parser.Tactic.rcasesPatLo)* : tactic
+
+macro_rules
+  | `(tactic| peel $_ with) => `(tactic| skip)
+  | `(tactic| peel $h with $p $ps*) =>
+    `(tactic| (obtain ⟨$p, $h:ident⟩ := req_ok $h; peel $h with $ps*))
+
+/-- `unstep [f, …] h with p₁ … pₖ`: `h` says a step that checks `k` guards returned `.ok s`.
+Unfolds the step functions `f`, then `peel`s `h` (so the number of patterns must equal the number
+of guards, and `-` discards a guard's hypothesis), naming the guards `pᵢ : cᵢ = true`. It ends
+with `cases h`, which substitutes the resulting state `s` for what the step returned. -/
+syntax "unstep " "[" Lean.Parser.Tactic.simpLemma,* "]" ident " with"
+  (ppSpace colGt Lean.Parser.Tactic.rcasesPatLo)* : tactic
+
+macro_rules
+  | `(tactic| unstep [$fs,*] $h with $ps*) =>
+    `(tactic| (simp only [$fs,*] at $h:ident; peel $h with $ps*; cases $h:ident))
+
 /-! ## List and lookup lemmas -/
 
 @[simp] theorem mem_union {x : Nat} {l S : List Nat} : x ∈ union l S ↔ x ∈ l ∨ x ∈ S := by
@@ -38,9 +60,19 @@ theorem find?_cons_if {α : Type} (a : α) (l : List α) (p : α → Bool) :
   simp only [List.find?_cons]
   split <;> simp_all
 
-theorem find?_filter_ne (l : List (Nat × ENode)) {n i : Nat} (hi : i ≠ n) :
-    (l.filter (fun p => p.1 != n)).find? (fun p => p.1 == i) =
-      l.find? (fun p => p.1 == i) := by
+theorem assocF_cons {α : Type} (k : Nat) (v d : α) (l : List (Nat × α)) (i : Nat) :
+    assocF ((k, v) :: l) i d = if i = k then v else assocF l i d := by
+  unfold assocF
+  rw [find?_cons_if]
+  by_cases hi : i = k
+  · subst hi; simp
+  · have : ((k, v).1 == i) = false := by simp; omega
+    simp [this, hi]
+
+theorem assocF_filter_ne {α : Type} (l : List (Nat × α)) {n i : Nat} (d : α) (hi : i ≠ n) :
+    assocF (l.filter (fun p => p.1 != n)) i d = assocF l i d := by
+  unfold assocF
+  congr 2
   induction l with
   | nil => rfl
   | cons a l ih =>
@@ -50,15 +82,16 @@ theorem find?_filter_ne (l : List (Nat × ENode)) {n i : Nat} (hi : i ≠ n) :
       simp [hne]
     · simp [ha, find?_cons_if, ih]
 
-theorem nodeAt_setN (l : List (Nat × ENode)) (n : Nat) (nd : ENode) (i : Nat) :
-    nodeAt (setN l n nd) i = if i = n then nd else nodeAt l i := by
-  unfold nodeAt setN
-  rw [find?_cons_if]
+theorem assocF_set {α : Type} (l : List (Nat × α)) (n : Nat) (v d : α) (i : Nat) :
+    assocF ((n, v) :: l.filter (fun p => p.1 != n)) i d = if i = n then v else assocF l i d := by
+  rw [assocF_cons]
   by_cases hi : i = n
-  · subst hi; simp
-  · have : ((n, nd).1 == i) = false := by simp; omega
-    rw [this, find?_filter_ne l hi]
-    simp [hi]
+  · simp [hi]
+  · simp only [hi, ↓reduceIte]; exact assocF_filter_ne l d hi
+
+theorem nodeAt_setN (l : List (Nat × ENode)) (n : Nat) (nd : ENode) (i : Nat) :
+    nodeAt (setN l n nd) i = if i = n then nd else nodeAt l i :=
+  assocF_set l n nd ENode.init i
 
 theorem state_ext {s t : State} (h1 : s.U = t.U) (h2 : s.hub = t.hub) (h3 : s.node = t.node)
     (h4 : s.net = t.net) : s = t := by
@@ -386,36 +419,27 @@ theorem abs_hubAccept (d : Nat) : abs (es.hubAccept d) = (abs es).hubAccept d :=
   congr 1
   funext i
   simp only [EState.hubAccept, EHub.histF, upd]
-  rw [find?_cons_if]
+  rw [assocF_cons]
   by_cases hi : i = es.hub.seq + 1
   · subst hi; simp [abs]
-  · have : (es.hub.seq + 1 == i) = false := by simp; omega
-    simp only [this]; simp [hi, abs, EHub.histF]
+  · simp [hi, abs, EHub.histF]
 
 end commute
 
 /-! ## Soundness -/
 
-theorem not_bcast_getHead (n : Nat) : ∀ s h, EMsg.getHead n ≠ .notifyAll s h := by
-  intros; exact fun h => by cases h
-
-/-- `n` is not the broadcast notification (for any non-broadcast constructor). -/
+/-- The message is not the broadcast notification (for any non-broadcast constructor). -/
 macro "nb" : term => `(fun _ _ h => by cases h)
 
 theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.parF)
     (hb : a.goesBack = false) (h : execCore N es a = .ok es') : Step N (abs es) (abs es') := by
   cases a with
   | userOp n p O =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     rw [abs_userOp hlt O (of_decide_eq_true h3)]
     exact Or.inl (EnvStep.userOp _ n p O (of_decide_eq_true h1) (List.contains_iff_mem.1 h2))
   | merge n L O =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨_, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 _
     rw [abs_mergeOp]
     simp only [Bool.and_eq_true, List.all_eq_true, List.contains_iff_mem] at h2
     obtain ⟨a, ha, hb⟩ := List.any_eq_true.1 h3
@@ -423,36 +447,26 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     refine Or.inl (EnvStep.merge _ n L O (of_decide_eq_true h1)
       (fun x => ⟨h2.1 x, h2.2 x⟩) ⟨a, b, ha, hb, by simpa using hab⟩)
   | getHead n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.getHead _ n (of_decide_eq_true h1))
   | learn n k sq hd =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     rw [abs_setNode]
     exact Or.inr (SyncStep.learn _ n k sq hd (of_decide_eq_true h1) (inNet_net nb h2)
       (of_decide_eq_true h3))
   | fetchOps n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb]
     refine Or.inr (SyncStep.fetchOps _ n (setP S) (of_decide_eq_true h1) ?_)
     intro x hx
     exact (ancB_iff hlt).1 (List.all_eq_true.1 h2 x hx)
   | fetchObjs n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.fetchObjs _ n (setP S) (of_decide_eq_true h1))
   | recvOps n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     have e : abs (es.setNode n { es.nodeOf n with sops := union (es.nodeOf n).sops S }) =
         (abs es).recvOps n (setP S) := by
       rw [abs_setNode]; unfold State.recvOps; congr 1
@@ -460,9 +474,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [e]
     exact Or.inr (SyncStep.recvOps _ n (setP S) (of_decide_eq_true h1) (inNet_net nb h2))
   | recvObjs n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     have e : abs (es.setNode n { es.nodeOf n with sobj := union (es.nodeOf n).sobj S }) =
         (abs es).recvObjs n (setP S) := by
       rw [abs_setNode]; unfold State.recvObjs; congr 1
@@ -470,10 +482,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [e]
     exact Or.inr (SyncStep.recvObjs _ n (setP S) (of_decide_eq_true h1) (inNet_net nb h2))
   | realize n x =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨h4, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 h4
     have e : abs (es.setNode n { es.nodeOf n with
         lops := union (es.nodeOf n).lops [x]
         lobj := union (es.nodeOf n).lobj (es.objsF x) }) = (abs es).realize n x := by
@@ -489,9 +498,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
       simp only [Bool.or_eq_true, List.contains_iff_mem] at this
       exact this
   | advance n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     have e : abs (es.setNode n { es.nodeOf n with
         heads := maxL es.parF ((es.nodeOf n).heads ++ [(es.nodeOf n).known.2]) }) =
         (abs es).advance n := by
@@ -508,56 +515,39 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     simp only [Bool.not_eq_true', List.any_eq_false] at h3
     exact h3 g hg (by rw [ancB_iff hlt]; exact hA)
   | uploadOps n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.uploadOps _ n (setP S) (of_decide_eq_true h1)
       (fun x hx => List.contains_iff_mem.1 (List.all_eq_true.1 h2 x hx)))
   | uploadObjs n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.uploadObjs _ n (setP S) (of_decide_eq_true h1)
       (fun x hx => List.contains_iff_mem.1 (List.all_eq_true.1 h2 x hx)))
   | push n e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.push _ n e d (of_decide_eq_true h1) (List.contains_iff_mem.1 h2))
   | pushAll n S O e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨h4, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 h4
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.pushAll _ n (setP S) (setP O) e d (of_decide_eq_true h1)
       (fun x hx => List.contains_iff_mem.1 (List.all_eq_true.1 h2 x hx))
       (fun o ho => List.contains_iff_mem.1 (List.all_eq_true.1 h3 o ho))
       (List.contains_iff_mem.1 h4))
   | fetchAll n b H =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.fetchAll _ n b (setP H) (of_decide_eq_true h1))
   | crashNode n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     exact Or.inr (SyncStep.crashNode _ n (of_decide_eq_true h1))
   | loseKnown n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_setNode]
     exact Or.inr (SyncStep.loseKnown _ n (of_decide_eq_true h1))
   | loseVolatile n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     have e : abs (es.setNode n { es.nodeOf n with known := (0, root), sops := [], sobj := [] }) =
         (abs es).setNode n { (abs es).node n with known := (0, root), sops := fun _ => False,
                                                   sobj := fun _ => False } := by
@@ -566,27 +556,19 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [e]
     exact Or.inr (SyncStep.loseVolatile _ n (of_decide_eq_true h1))
   | hubGetHead n =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.hubGetHead _ n (inNet_net nb h1))
   | hubPutOps n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb, abs_hubStoreOps]
     exact Or.inr (SyncStep.hubPutOps _ n (setP S) (inNet_net nb h1))
   | hubPutObjs n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb, abs_hubStoreObjs]
     exact Or.inr (SyncStep.hubPutObjs _ n (setP S) (inNet_net nb h1))
   | hubGetOps n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     have e : (EMsg.ops n (S.filter (es.hub.ops.contains ·))).toMsg =
         Msg.ops n (fun x => setP S x ∧ (abs es).hub.ops x) := by
@@ -595,9 +577,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [e]
     exact Or.inr (SyncStep.hubGetOps _ n (setP S) (inNet_net nb h1))
   | hubGetObjs n S =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb]
     have e : (EMsg.objs n (S.filter (es.hub.objs.contains ·))).toMsg =
         Msg.objs n (fun x => setP S x ∧ (abs es).hub.objs x) := by
@@ -606,23 +586,16 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [e]
     exact Or.inr (SyncStep.hubGetObjs _ n (setP S) (inNet_net nb h1))
   | casIdem n e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.casIdem _ n e d (inNet_net nb h1) (of_decide_eq_true h2))
   | casAccept n e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨h4, h⟩ := req_ok h; obtain ⟨h5, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 h4 h5
     rw [abs_send_notify, abs_send _ nb, abs_hubAccept]
     exact Or.inr (SyncStep.casAccept _ n e d (inNet_net nb h1) (of_decide_eq_true h2)
       (of_decide_eq_true h3) ((ancB_iff hlt).1 h4) ((closedB_iff hlt).1 h5))
   | casReject n e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     rw [abs_send _ nb]
     refine Or.inr (SyncStep.casReject _ n e d (inNet_net nb h1) (of_decide_eq_true h2) ?_)
     rintro ⟨he, ha, hc⟩
@@ -632,26 +605,19 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [this] at h3
     cases h3
   | hubPushIdem n S O e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2
     rw [abs_send _ nb, abs_hubStore]
     exact Or.inr (SyncStep.hubPushIdem _ n (setP S) (setP O) e d (inNet_net nb h1)
       (of_decide_eq_true h2))
   | hubPushAccept n S O e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨h4, h⟩ := req_ok h; obtain ⟨h5, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 h4 h5
     rw [abs_send_notify, abs_send _ nb, abs_hubAccept, abs_hubStore]
     have hc : ClosedAt ((abs es).hubStore (setP S) (setP O)) d := by
       rw [← abs_hubStore]; exact (closedB_iff (es := es.hubStore S O) hlt).1 h5
     exact Or.inr (SyncStep.hubPushAccept _ n (setP S) (setP O) e d (inNet_net nb h1)
       (of_decide_eq_true h2) (of_decide_eq_true h3) ((ancB_iff hlt).1 h4) hc)
   | hubPushReject n S O e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     rw [abs_send _ nb, abs_hubStore]
     refine Or.inr (SyncStep.hubPushReject _ n (setP S) (setP O) e d (inNet_net nb h1)
       (of_decide_eq_true h2) ?_)
@@ -663,10 +629,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
       · rw [← abs_hubStore]; exact (closedB_iff (es := es.hubStore S O) hlt).1 hc
       · rw [(ancB_iff hlt).2 ha'] at ha; cases ha
   | hubPushIncomplete n S O e d =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    obtain ⟨h4, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3 h4
     rw [abs_send _ nb, abs_hubStore]
     refine Or.inr (SyncStep.hubPushIncomplete _ n (setP S) (setP O) e d (inNet_net nb h1)
       (of_decide_eq_true h2) (of_decide_eq_true h3) ?_)
@@ -677,9 +640,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [this] at h4
     cases h4
   | hubFetch n b H =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1
     rw [abs_send _ nb, abs_send _ nb, abs_send _ nb]
     have e1 : (EMsg.ops n (es.sinceOpsL b)).toMsg = Msg.ops n ((abs es).sinceOps b) := by
       show Msg.ops n _ = Msg.ops n _
@@ -695,9 +656,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     cases h
     exact Or.inr (SyncStep.crashHub _)
   | hubForget S O =>
-    simp only [execCore] at h
-    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
-    cases h
+    unstep [execCore] h with h1 h2 h3
     simp only [List.all_eq_true, List.contains_iff_mem] at h1 h2
     exact Or.inr (SyncStep.hubForget _ (setP S) (setP O) (fun x hx => h1 x hx)
       (fun o ho => h2 o ho) ((closedB_iff (es := es.forget S O) hlt).1 h3))
@@ -709,7 +668,7 @@ theorem abs_regress (i : Nat) : abs (es.regress i) = (abs es).regress i := rfl
 hub going back, is a step of the relational model between the abstracted states. -/
 theorem exec_sound {N : Nat} {es es' : EState} {a : Action} (hb : a.goesBack = false)
     (h : execStep N es a = .ok es') : Step N (abs es) (abs es') := by
-  obtain ⟨hwf, h⟩ := req_ok h
+  peel h with hwf
   exact execCore_sound (parOK_parLt hwf) hb h
 
 /-- **Soundness with a hub that goes back**: every action `execStep` accepts is a step of
@@ -721,10 +680,7 @@ theorem exec_rsound {N : Nat} {es es' : EState} {a : Action}
   | true =>
     cases a with
     | hubRegress i =>
-      obtain ⟨-, h⟩ := req_ok h
-      simp only [execCore] at h
-      obtain ⟨hi, h⟩ := req_ok h
-      cases h
+      unstep [execStep, execCore] h with - hi
       exact Or.inr ⟨i, of_decide_eq_true hi, abs_regress i⟩
     | _ => cases hb
 
@@ -778,11 +734,6 @@ theorem exec_rreachable {N : Nat} {es : EState} (h : ExecRReachable N es) :
 theorem exec_invR {N : Nat} {es : EState} (h : ExecRReachable N es) : InvR N (abs es) :=
   invR_reachable (exec_rreachable h)
 
-/-- Runs actions in turn, stopping at the first one rejected. -/
-def run (N : Nat) (es : EState) : List Action → Except String EState
-  | [] => .ok es
-  | a :: as => do run N (← execStep N es a) as
-
 /-- A run of accepted actions stays among the states reachable through `execStep`. -/
 theorem run_rreachable {N : Nat} {as : List Action} {es es' : EState}
     (h : ExecRReachable N es) (hr : run N es as = .ok es') : ExecRReachable N es' := by
@@ -812,14 +763,8 @@ theorem exec_remake {N : Nat} {es es' : EState} (h : ExecRReachable N es)
     | ok es2 =>
       rw [h2] at hr
       cases hr
-      obtain ⟨-, h1⟩ := req_ok h1
-      simp only [execCore] at h1
-      obtain ⟨-, h1⟩ := req_ok h1
-      cases h1
-      obtain ⟨-, h2⟩ := req_ok h2
-      simp only [execCore] at h2
-      obtain ⟨-, h2⟩ := req_ok h2; obtain ⟨-, h2⟩ := req_ok h2; obtain ⟨-, h2⟩ := req_ok h2
-      cases h2
+      unstep [execStep, execCore] h1 with - -
+      unstep [execStep, execCore] h2 with - - - -
       have h0 : es.hub.histF 0 = root := (exec_invR h).hist0
       refine state_ext rfl ?_ rfl rfl
       show Hub.mk _ _ _ _ _ = Hub.mk _ _ _ _ _

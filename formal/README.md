@@ -676,7 +676,9 @@ pruned sets it had then. A hub that lost part of that closure is made again inst
   original ancestry and each node's heads keep what they reached (`ChainOK`), as every policy step
   does; `schain_of_run`: every state reached by such steps satisfies it. An acceptance whose push
   dropped the hub's head, or an advance or prepared adoption that leaves work below no head, can
-  reach a state where it fails: liveness from such a state is not proved.
+  reach a state where it fails: liveness from such a state is not proved here, though the
+  asynchronous convergence theorem covers it under its premises ([Contracted
+  ancestry](#contracted-ancestry)).
 - `spstepR_reachable`, `smeasure_decreases`, `no_infinite_policy_runS`, `progressS`,
   `converged_quiescentS`, `terminal_iff_convergedS`, `eventually_convergesS`,
   `maximal_run_convergesS`: liveness once the hub stops going back, for the policy `SPStepR`,
@@ -1232,7 +1234,12 @@ images are below the fix-up (`a_push_can_drop_its_expected_head_and_reuse_a_cach
 an interrupted adoption and a hub rollback). `SStep.sup` accepts by that comparison, so this is
 a step of the one relation, and `SInv` holds after it. The hub's history is then a chain only in
 the hub's own comparison (`SInv.histBelow`), and the liveness theorems, which need an original
-chain (`SChain`), say nothing of the states that follow.
+chain (`SChain`), say nothing of the states that follow. `FineAssembly.hive_converges_observed`
+covers them, under its premises. Those are assumed only from a record cut on (`historyWindow`
+starts at the hub's sequence there), and an acceptance like this one adds to the hub's drops, so
+it comes before the records stop changing; from then on every acceptance is in original
+ancestry (`hub_moves_original`), as `HubLaw.guards` requires. The executable hub decision there
+checks `belowB` (`Exec.PacketPrimitives.descends` in `PacketAcceptance.lean`).
 
 - `Contract.lean`: `Below` says every surviving image of the expected head is below the new
   head, and `belowB` (`ContractOrder.lean`) also checks that the image is nonempty, as the hub

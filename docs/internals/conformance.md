@@ -251,11 +251,13 @@ interrupted adoption and hub rollback to reach an accepted push whose expected h
 original ancestor of the cached fix-up: the pending drops contract that head into ancestors of
 the fix-up, and the trace then converges. `SStep.sup` accepts through those surviving images
 too, and `SInv` holds after it; the liveness theorems, which need an original chain (`SChain`),
-say nothing of the states that follow. The core harness checks such a comparison under the
-acceptance's full retained record union and packet drops. Rejection is packet-specific too: the
-oracle refuses a plain rejection when a supersede it would accept is in flight. It retains the
-acceptance's drop set for subsequent history checks, even after the hub prunes the
-corresponding record ids.
+say nothing of the states that follow, which `FineAssembly.hive_converges_observed` covers under
+its premises ([formal/README.md, "Contracted
+ancestry"](../../formal/README.md#contracted-ancestry)). The core harness checks such a
+comparison under the acceptance's full retained record union and packet drops. Rejection is
+packet-specific too: the oracle refuses a plain rejection when a supersede it would accept is in
+flight. It retains the acceptance's drop set for subsequent history checks, even after the hub
+prunes the corresponding record ids.
 
 `ContractOrder.lean` defines `Below` for the comparison through all surviving images, and
 `belowB` additionally requires a nonempty image, as `HubAdapter::descends` does. The real

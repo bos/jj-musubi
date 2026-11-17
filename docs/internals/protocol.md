@@ -426,8 +426,10 @@ takes prepared records together with the frontier they leave:
 
 The properties of the protocol without abandons that rest on original ancestry, such as
 **HubMonotone** and **MergeOwnership**, are not proved for runs with abandons. A push that drops
-the hub's head can leave that head below no later head in original ancestry, and liveness from
-the states after it is not proved.
+the hub's head can leave that head below no later head in original ancestry, and this model's
+liveness from the states after it is not proved. The asynchronous convergence theorem below
+covers them under its premises, which are assumed only from a record cut on: such a push adds to
+the hub's drops, so it comes before that cut.
 
 This model is separate from the raw-namespace asynchronous convergence refinement in
 `FineAssembly.hive_converges_observed` ([#78](https://github.com/bos/jj-musubi/issues/78)). The

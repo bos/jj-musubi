@@ -43,13 +43,15 @@ def getNats (j : Json) (k : String) : Except String (List Nat) := do
   let a ← j.getObjValAs? (Array Nat) k
   pure a.toList
 
-def decodeHeadKind : String → Except String HeadKind
-  | "head" => pure .head
-  | "accepted" => pure .accepted
-  | "rejected" => pure .rejected
-  | "incomplete" => pure .incomplete
-  | "notify" => pure .notify
-  | k => throw s!"unknown headKind {k}"
+/-- The wire name of each `HeadKind`; the codec reads and writes names by this one table. -/
+def headKindNames : List (String × HeadKind) :=
+  [("head", .head), ("accepted", .accepted), ("rejected", .rejected),
+    ("incomplete", .incomplete), ("notify", .notify)]
+
+def decodeHeadKind (k : String) : Except String HeadKind :=
+  match headKindNames.lookup k with
+  | some h => pure h
+  | none => throw s!"unknown headKind {k}"
 
 /-- The fields of a push to the hub: the node, the operations and objects it sends, and the
 head it expects and the one it sets. -/
@@ -145,12 +147,13 @@ def sortNats (l : List Nat) : List Nat := (l.mergeSort (· ≤ ·)).eraseDups
 
 def nats (l : List Nat) : Json := toJson (sortNats l).toArray
 
-def headKindStr : HeadKind → String
-  | .head => "head"
-  | .accepted => "accepted"
-  | .rejected => "rejected"
-  | .incomplete => "incomplete"
-  | .notify => "notify"
+def headKindStr (h : HeadKind) : String :=
+  ((headKindNames.find? (·.2 == h)).map (·.1)).getD ""
+
+/-- Every `HeadKind` is in the table, so `headKindStr` never falls back to the empty string. -/
+theorem decodeHeadKind_headKindStr (h : HeadKind) :
+    decodeHeadKind (headKindStr h) = pure h := by
+  cases h <;> rfl
 
 def msgObj (kind : String) (n : Nat) (rest : List (String × Json)) : Json :=
   Json.mkObj ([("msg", Json.str kind), ("node", toJson n)] ++ rest)
@@ -175,7 +178,8 @@ def encodeMsg (N : Nat) : EMsg → List Json
   | .fetch n b H => [msgObj "fetch" n [("base", toJson b), ("haves", nats H)]]
   | .notifyAll sq h =>
     (List.range N).map fun n =>
-      msgObj "head" n [("headKind", Json.str "notify"), ("seq", toJson sq), ("head", toJson h)]
+      msgObj "head" n [("headKind", Json.str (headKindStr .notify)), ("seq", toJson sq),
+        ("head", toJson h)]
 
 /-- Sort key `(msg, node, whole message)`. -/
 def msgKey (j : Json) : String × Nat × String :=

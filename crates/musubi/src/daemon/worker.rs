@@ -39,6 +39,7 @@ use super::status::publication_held;
 use super::sync::known;
 use super::sync::leave_hive;
 use super::sync::open_driver;
+use crate::backoff::Backoff;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::Membership;
@@ -177,7 +178,7 @@ async fn serve_retrying(
     hubs: &Hubs,
 ) {
     let mut waiting = vec![];
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = Backoff::new(Duration::from_secs(1), MAX_BACKOFF);
     loop {
         let started = now();
         match serve_async(key, &mut commands, status, progress, &mut waiting, hubs).await {
@@ -185,9 +186,9 @@ async fn serve_retrying(
             Err(err) => {
                 let message = format!("{err:#}");
                 if err.downcast_ref::<Suspended>().is_some() {
-                    tracing::warn!("{message}; looking again in {backoff:?}");
+                    tracing::warn!("{message}; looking again in {:?}", backoff.peek());
                 } else {
-                    tracing::error!("{message}; retrying in {backoff:?}");
+                    tracing::error!("{message}; retrying in {:?}", backoff.peek());
                 }
                 // Into the copy, if it is where its entry says; never into what is there
                 // instead.
@@ -204,12 +205,11 @@ async fn serve_retrying(
         }
         let succeeded = status.succeeded_since(started);
         if succeeded {
-            backoff = Duration::from_secs(1);
+            backoff.reset();
         }
-        if pause(backoff, &mut commands, &mut waiting).await {
+        if pause(backoff.next(), &mut commands, &mut waiting).await {
             return;
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -319,7 +319,7 @@ async fn serve_async(
             .ok()
     });
     let mut poll = tokio::time::interval(POLL_INTERVAL);
-    let mut backoff = Duration::from_millis(500);
+    let mut backoff = Backoff::new(Duration::from_millis(500), MAX_BACKOFF);
     let mut retry = false;
     // Whether the connection coming back has cut short a wait to retry since the last sync
     // that worked.
@@ -407,13 +407,12 @@ async fn serve_async(
             // Nothing failed here, so nothing need start over; and the connection coming
             // back always ends the wait, since no sync ran that could lose it again.
             let stopped = tokio::select! {
-                stopped = pause(backoff, commands, waiting) => stopped,
+                stopped = pause(backoff.next(), commands, waiting) => stopped,
                 () = reconnections.next() => false,
             };
             if stopped {
                 return Ok(());
             }
-            backoff = (backoff * 2).min(MAX_BACKOFF);
             continue;
         }
         unreachable = None;
@@ -482,7 +481,7 @@ async fn serve_async(
         }
         match result {
             Ok(_) => {
-                backoff = Duration::from_millis(500);
+                backoff.reset();
                 retry = false;
                 woke_early = false;
                 if gc_checked.is_none_or(|checked| checked.elapsed() >= GC_CHECK_INTERVAL) {
@@ -498,7 +497,7 @@ async fn serve_async(
                     // No reconnect/reopen loop for a policy hold. Keep the immutable
                     // accounting cache, and keep listening for incoming and local work.
                     retry = false;
-                    backoff = Duration::from_millis(500);
+                    backoff.reset();
                     continue;
                 }
                 tracing::warn!("{err:#}");
@@ -529,7 +528,7 @@ async fn serve_async(
                 // otherwise come straight back, again and again.
                 reconnections.seen();
                 let stopped = tokio::select! {
-                    stopped = pause(backoff, commands, waiting) => stopped,
+                    stopped = pause(backoff.next(), commands, waiting) => stopped,
                     () = reconnections.next(), if !woke_early => {
                         woke_early = true;
                         false
@@ -538,7 +537,6 @@ async fn serve_async(
                 if stopped {
                     return Ok(());
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
     }

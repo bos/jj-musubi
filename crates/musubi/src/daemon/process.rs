@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 use crate::agent;
+use crate::backoff::Backoff;
 use crate::config;
 use crate::control;
 use crate::control::ControlClient;
@@ -252,7 +253,7 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
     // A child that exits may have lost a race with another command's daemon, which is as
     // good: keep looking for one until the deadline.
     let mut exited = None;
-    let mut pause = FIRST_POLL;
+    let mut pause = Backoff::new(FIRST_POLL, LAST_POLL);
     loop {
         if let Some(client) = running(socket).await? {
             return Ok(client);
@@ -277,8 +278,7 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
                 tail.join("\n")
             );
         }
-        tokio::time::sleep(pause).await;
-        pause = (pause * 2).min(LAST_POLL);
+        tokio::time::sleep(pause.next()).await;
     }
 }
 
@@ -357,7 +357,7 @@ pub fn detach(command: &mut std::process::Command) {
 /// starting, asked once it listens.
 pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut pause = FIRST_POLL;
+    let mut pause = Backoff::new(FIRST_POLL, LAST_POLL);
     loop {
         let running = Running::find()?;
         let mut client = socket.connect().await?;
@@ -389,8 +389,7 @@ pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
                  stopped from here"
             );
         }
-        tokio::time::sleep(pause).await;
-        pause = (pause * 2).min(LAST_POLL);
+        tokio::time::sleep(pause.next()).await;
     }
     wait_until_stopped(socket).await?;
     Ok(true)
@@ -428,14 +427,13 @@ fn terminate(_: &Running) -> anyhow::Result<bool> {
 /// its socket.
 async fn wait_until_stopped(socket: &Socket) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut pause = FIRST_POLL;
+    let mut pause = Backoff::new(FIRST_POLL, LAST_POLL);
     while socket.connect().await?.is_some() || Running::find()?.is_some() {
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "the daemon on {socket} did not stop"
         );
-        tokio::time::sleep(pause).await;
-        pause = (pause * 2).min(LAST_POLL);
+        tokio::time::sleep(pause.next()).await;
     }
     Ok(())
 }

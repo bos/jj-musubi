@@ -1,6 +1,7 @@
 //! `musubi`: replicate jj repositories between machines.
 
 mod agent;
+mod backoff;
 mod cli;
 mod clone_config;
 mod completion;

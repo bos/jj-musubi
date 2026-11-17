@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::hash::Hash;
 
+use crate::message::Head;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
 use crate::message::RecordState;
@@ -243,7 +244,7 @@ pub enum Handled<O> {
     /// Took in a `Fetched` reply: adopted its `(seq, head)` if it was newer, and staged its
     /// operations and their objects if they were all in `anc*(known.head)`.
     Fetched {
-        learned: Option<(u64, O)>,
+        learned: Option<Head<O>>,
         staged: Vec<O>,
     },
     /// Staged the objects of an `Objects` reply.
@@ -256,7 +257,7 @@ pub enum Handled<O> {
 
 pub struct NodeCore<O> {
     root: O,
-    known: (u64, O),
+    known: Head<O>,
     /// Staged operations to realize, in order: each one's parents are local or earlier,
     /// and its objects are available. Planned by one walk, rather than one per step, for
     /// `known.head`, and dropped with it.
@@ -282,7 +283,10 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     /// A node that has just started: it knows only the root operation.
     pub fn new(root: O) -> Self {
         Self {
-            known: (0, root.clone()),
+            known: Head {
+                seq: 0,
+                head: root.clone(),
+            },
             root,
             plan: VecDeque::new(),
             hub_records: None,
@@ -290,7 +294,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         }
     }
 
-    pub fn known(&self) -> &(u64, O) {
+    pub fn known(&self) -> &Head<O> {
         &self.known
     }
 
@@ -318,7 +322,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     where
         R: LocalRepo<Op = O>,
     {
-        let heads = repo.heads_for(&self.known.1)?;
+        let heads = repo.heads_for(&self.known.head)?;
         // Take the hub's records first. Where they drop a head, advancing finishes taking
         // them even if the hub's head is already below that old, dropped head.
         let mut records_drop_head = false;
@@ -336,7 +340,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             repo.merge_heads()?;
             return Ok(Step::Merged);
         }
-        let known = self.known.1.clone();
+        let known = self.known.head.clone();
         if !repo.is_local(&known)? {
             if self.plan.is_empty() {
                 let survey = Self::survey(repo, &known)?;
@@ -366,7 +370,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         // The hub accepted `known`, and this node has it: fetch from here next time, so
         // that nothing is fetched twice, even when `known` is this node's own push. A
         // restart forgets `known`, so its root says nothing.
-        if self.known.0 > 0 && repo.accepted_base()? != known {
+        if self.known.seq > 0 && repo.accepted_base()? != known {
             repo.set_accepted_base(&known)?;
         }
         let records = repo.records()?;
@@ -432,7 +436,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             "pushing {head:?}, which this node dropped"
         );
         repo.share()?;
-        let known = self.known.1.clone();
+        let known = self.known.head.clone();
         let ops = repo.ops_between(head, &known)?;
         repo.permit_publication(&ops, &known)?;
         repo.pushing(head)?;
@@ -553,14 +557,14 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 head,
                 records,
             } => {
-                if seq > self.known.0 {
+                if seq > self.known.seq {
                     // First, so that a failure leaves the reply to be taken again.
                     repo.learned(&head)?;
                     self.learn(seq, head.clone());
                     self.note_records(repo, kind, records)?;
                     Ok(Handled::Learned { kind, seq, head })
                 } else {
-                    if seq == self.known.0 && head == self.known.1 {
+                    if seq == self.known.seq && head == self.known.head {
                         self.note_records(repo, kind, records)?;
                     }
                     Ok(Handled::Ignored)
@@ -577,14 +581,14 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 new_records,
                 pruned,
             } => {
-                if seq > self.known.0 {
+                if seq > self.known.seq {
                     repo.learned(&head)?;
                 }
-                let learned = (seq > self.known.0).then(|| {
+                let learned = (seq > self.known.seq).then(|| {
                     self.learn(seq, head.clone());
-                    (seq, head.clone())
+                    self.known.clone()
                 });
-                if seq == self.known.0 && head == self.known.1 {
+                if seq == self.known.seq && head == self.known.head {
                     if !new_records.is_empty() {
                         repo.store_record_ops(&new_records, &ops_attachment)?;
                     }
@@ -592,9 +596,9 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 }
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
                 // MergeOwnership, depend on (docs/internals/protocol.md, "Fetch").
-                if ops.is_empty() || head != self.known.1 || !all_reach(&head, &ops) {
+                if ops.is_empty() || head != self.known.head || !all_reach(&head, &ops) {
                     return Ok(match learned {
-                        Some((seq, head)) => Handled::Learned {
+                        Some(Head { seq, head }) => Handled::Learned {
                             kind: HeadKind::Head,
                             seq,
                             head,
@@ -747,14 +751,14 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             | Reply::Refused { .. } => return false,
             Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => (*seq, head),
         };
-        seq < self.known.0 || (seq == self.known.0 && *head != self.known.1)
+        seq < self.known.seq || (seq == self.known.seq && *head != self.known.head)
     }
 
     /// Adopts `(seq, head)`. A plan made for the head known before may realize operations
     /// that aren't in `anc*(head)`, if the hub went back, so it goes, and so do the records
     /// known as of it.
     fn learn(&mut self, seq: u64, head: O) {
-        self.known = (seq, head);
+        self.known = Head { seq, head };
         self.plan.clear();
         self.hub_records = None;
     }
@@ -822,7 +826,7 @@ mod tests {
     #[test]
     fn a_reply_older_than_what_the_node_knows_says_the_hub_went_back() {
         let mut core = NodeCore::new(0);
-        core.known = (4, 40);
+        core.known = Head { seq: 4, head: 40 };
         for kind in [
             HeadKind::Head,
             HeadKind::Accepted,

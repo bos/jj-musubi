@@ -9,6 +9,8 @@ use std::time::SystemTime;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
 use musubi_core::hub::HubStorage as _;
+use musubi_core::hub::Notice;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
@@ -284,7 +286,7 @@ impl HubService {
     /// records. The operations and objects in `closure(head)` don't change while the head
     /// doesn't, and the hub only ever adds the rest.
     fn hive_state(&self) -> HiveState {
-        let (seq, head) = self.hub.head();
+        let Head { seq, head } = self.hub.head();
         HiveState {
             seq,
             head,
@@ -437,7 +439,7 @@ impl HubService {
             Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
             _ => Outcome::Other,
         };
-        if let Some((seq, head, _)) = &handled.publish {
+        if let Some(Notice { seq, head, .. }) = &handled.publish {
             tracing::info!(
                 "accepted {pushed} operations; the head is now {seq} ({})",
                 short(head)
@@ -456,11 +458,13 @@ impl HubService {
                 })
             },
         )?;
-        let notice = handled.publish.map(|(seq, head, records)| HeadNotice {
-            seq,
-            head: head.to_bytes(),
-            records,
-        });
+        let notice = handled
+            .publish
+            .map(|Notice { seq, head, records }| HeadNotice {
+                seq,
+                head: head.to_bytes(),
+                records,
+            });
         Ok((HubReply::Protocol(reply), notice))
     }
 

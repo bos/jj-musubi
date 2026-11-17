@@ -94,7 +94,7 @@ fn an_empty_object_reply_retries_from_the_remade_hub() {
     // Beta starts against the rolled-back hub. Alpha republishes while beta's notice is
     // delayed, so beta's own stale push is rejected and teaches it the old head.
     poll(&mut hive, 1);
-    assert_eq!(hive.hive.members[1].core.known().1, base);
+    assert_eq!(hive.hive.members[1].core.known().head, base);
     hive.commit(1, "beta-only", "beta work escapes the objects-only loop");
     poll(&mut hive, 0);
     let request = next_request(&mut hive, 0);
@@ -138,13 +138,13 @@ fn an_empty_object_reply_retries_from_the_remade_hub() {
         err.to_string(),
         "the hub did not supply the objects this machine needs"
     );
-    assert_eq!(member.core.known().1, old);
+    assert_eq!(member.core.known().head, old);
 
     // The daemon's existing error recovery reopens before its next round. Beta finishes
     // that round without waiting for alpha to restore the old head or its missing objects.
     hive.reopen(1);
     hive.hive.sync(1).unwrap();
-    assert_eq!(hive.hive.members[1].core.known().1, hive.hive.hub_head());
+    assert_eq!(hive.hive.members[1].core.known().head, hive.hive.hub_head());
     assert!(
         !hive
             .node(1)

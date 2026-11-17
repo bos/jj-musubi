@@ -9,6 +9,7 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use musubi_core::hub::HubStorage;
+use musubi_core::message::Head;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
 use musubi_core::message::Records;
@@ -233,8 +234,11 @@ impl HubStorage for FakeHub {
     type Attachment = Vec<Obj>;
     type Error = Infallible;
 
-    fn head(&self) -> (u64, Op) {
-        (self.seq, self.head)
+    fn head(&self) -> Head<Op> {
+        Head {
+            seq: self.seq,
+            head: self.head,
+        }
     }
 
     fn set_head(&mut self, seq: u64, head: &Op, dropped: &[Op]) -> Result<(), Infallible> {

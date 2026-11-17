@@ -1618,7 +1618,7 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
         .collect();
     let known = loop {
         let member = &mut f.hive.members[THERE];
-        let known = member.core.known().1.clone();
+        let known = member.core.known().head.clone();
         if member.adapter.is_local(&known).unwrap() {
             break known;
         }

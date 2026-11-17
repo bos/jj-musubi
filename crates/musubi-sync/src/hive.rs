@@ -9,6 +9,7 @@ use std::path::Path;
 
 use musubi_core::hub;
 use musubi_core::hub::Handled;
+use musubi_core::hub::Notice;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -197,7 +198,7 @@ impl Hive {
         member
             .core
             .handle_reply(&mut member.adapter, through(&request, handled.reply))?;
-        if let Some((seq, head, records)) = handled.publish {
+        if let Some(Notice { seq, head, records }) = handled.publish {
             for member in &mut self.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,

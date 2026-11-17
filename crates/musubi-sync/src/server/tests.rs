@@ -407,7 +407,8 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     }
     assert!(published > 0);
     assert_eq!(store.head(), (last.0, &last.1));
-    assert_eq!(alpha_driver.known(), &last);
+    let known = alpha_driver.known();
+    assert_eq!((known.seq, &known.head), (last.0, &last.1));
     assert_eq!(recovery.opens.load(Ordering::SeqCst), 2);
     assert!(!worker.worker.thread.is_finished());
     assert!(!other_worker.worker.thread.is_finished());

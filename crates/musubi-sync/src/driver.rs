@@ -1,5 +1,6 @@
 //! Runs a node's policy against a remote hub.
 
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -40,7 +41,7 @@ impl NodeDriver {
         })
     }
 
-    pub fn known(&self) -> &(u64, OpId) {
+    pub fn known(&self) -> &Head<OpId> {
         self.core.known()
     }
 
@@ -72,7 +73,7 @@ impl NodeDriver {
                     // Learning the head alone, as after a restart, changes nothing here.
                     let Tally { pushed, realized } = self.tally;
                     if pushed > 0 || realized > 0 {
-                        let (seq, head) = self.core.known();
+                        let Head { seq, head } = self.core.known();
                         tracing::info!(
                             "synced: {pushed} operations pushed, {realized} realized; \
                              the hive is at {seq} ({})",
@@ -133,7 +134,7 @@ impl NodeDriver {
         self.remote.progress().set(Activity::Asking);
         let reply = self.remote.call(request).await?;
         if self.core.hub_went_back(&reply) {
-            let (seq, head) = self.core.known();
+            let Head { seq, head } = self.core.known();
             tracing::warn!(
                 "the hub has gone back from {seq} ({}), having lost heads it accepted: \
                  starting over from where it is",
@@ -202,7 +203,7 @@ fn log_handled(handled: &Handled<OpId>) {
             tracing::debug!("learned the hive's head ({kind}): {seq} ({})", short(head));
         }
         Handled::Fetched { learned, staged } => match learned {
-            Some((seq, head)) => tracing::debug!(
+            Some(Head { seq, head }) => tracing::debug!(
                 "staged {} fetched operations; the hive is at {seq} ({})",
                 staged.len(),
                 short(head)

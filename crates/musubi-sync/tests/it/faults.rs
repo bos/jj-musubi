@@ -29,6 +29,7 @@ use hegel::generators as gs;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub::HubStorage as _;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
@@ -124,7 +125,7 @@ fn hub_survives_malformed_requests(tc: TestCase) {
     let (reply, _) = hub.handle_bytes(&fetch, MAX_PAYLOAD).unwrap();
     match Envelope::<HubReply>::decode(&reply).unwrap() {
         HubReply::Protocol(Reply::Fetched { head, .. }) => {
-            assert_eq!(head, hub.hub().head().1.to_bytes());
+            assert_eq!(head, hub.hub().head().head.to_bytes());
         }
         HubReply::Indirect { .. } => {}
         other => panic!("a fetch from scratch got {other:?}"),
@@ -1422,7 +1423,11 @@ fn record(dir: &Path) {
         big_commit(&beta, "from beta");
         beta_node.sync().await.unwrap();
         alpha_node.sync().await.unwrap();
-        session = Some((link.sent(), link.replies(), alpha_node.known().1.to_bytes()));
+        session = Some((
+            link.sent(),
+            link.replies(),
+            alpha_node.known().head.to_bytes(),
+        ));
     });
     let (requests, replies, head) = session.unwrap();
     std::fs::create_dir_all(dir).unwrap();
@@ -1448,7 +1453,7 @@ fn record(dir: &Path) {
             copy_tree(&hub_dir, &snapshots.join((n + 1).to_string()));
         }
     }
-    assert_eq!(hub.hub().head().1.to_bytes(), head);
+    assert_eq!(hub.hub().head().head.to_bytes(), head);
 }
 
 /// Writes `frames` to one file, each after its length.
@@ -1944,7 +1949,7 @@ fn download(hub: &mut HubService, blob: BlobId, len: u64) -> Vec<u8> {
 fn heads(hub: &HubService, session: &Session) -> Vec<Vec<u8>> {
     let canonical = hub.hub().store().canonical();
     vec![
-        hub.hub().head().1.to_bytes(),
+        hub.hub().head().head.to_bytes(),
         canonical.root_operation_id().0.to_bytes(),
         session.head.clone(),
     ]
@@ -1952,19 +1957,19 @@ fn heads(hub: &HubService, session: &Session) -> Vec<Vec<u8>> {
 
 /// The head moves only forward, to an operation whose closure the hub has (HubMonotone and
 /// HubClosed, docs/internals/protocol.md).
-fn check_head(hub: &HubService, before: &(u64, OpId)) {
+fn check_head(hub: &HubService, before: &Head<OpId>) {
     let adapter = hub.hub();
-    let (seq, head) = adapter.head();
-    if head == before.1 {
-        assert_eq!(seq, before.0);
+    let Head { seq, head } = adapter.head();
+    if head == before.head {
+        assert_eq!(seq, before.seq);
     } else {
         assert!(
-            seq > before.0,
+            seq > before.seq,
             "the head's seq went from {} to {seq}",
-            before.0
+            before.seq
         );
         assert!(
-            adapter.descends(&before.1, &head, &[]).unwrap(),
+            adapter.descends(&before.head, &head, &[]).unwrap(),
             "the head moved to an operation that doesn't descend from it"
         );
     }

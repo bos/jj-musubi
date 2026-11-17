@@ -552,7 +552,7 @@ fn own_workspaces_named_like_one_added_meanwhile_are_own() {
             hive.hive.sync(1).unwrap();
             hive.hive.fetch(0).unwrap();
             let member = &mut hive.hive.members[0];
-            while !member.adapter.is_local(&member.core.known().1).unwrap() {
+            while !member.adapter.is_local(&member.core.known().head).unwrap() {
                 let step = member.core.step(&mut member.adapter).unwrap();
                 assert!(matches!(step, Step::Realized(_)), "{step:?}");
             }

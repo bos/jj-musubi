@@ -728,7 +728,7 @@ impl World {
                 m,
                 WorkspaceTrim {
                     copy: self.fx.machine_key(m),
-                    input: CanonicalOp(self.fx.hive.members[m].core.known().1.clone()),
+                    input: CanonicalOp(self.fx.hive.members[m].core.known().head.clone()),
                     wrote_fixup: false,
                     seen,
                     before,

@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use musubi_core::hub::HubStorage;
-use musubi_core::message::{OpEntry, RecordState, Records};
+use musubi_core::message::{Head, OpEntry, RecordState, Records};
 use musubi_core::node::LocalRepo;
 use serde_json::{Value, json};
 
@@ -192,7 +192,7 @@ impl HubStorage for Fallible<FakeHub> {
     type Attachment = Vec<Obj>;
     type Error = StorageError;
 
-    fn head(&self) -> (u64, Op) {
+    fn head(&self) -> Head<Op> {
         self.inner.head()
     }
     fn records(&self) -> RecordState {

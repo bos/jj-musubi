@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 
+use musubi_core::message::Head;
+
 use super::super::model::Op;
 use super::super::model::ROOT;
 use super::super::model::Univ;
@@ -80,7 +82,7 @@ impl World {
             repo.heads,
             "heads form an antichain"
         );
-        let (seq, head) = *self.cores[n].known();
+        let (seq, head) = self.known(n);
         assert!(
             self.misled[n]
                 || self.hist.get(seq as usize) == Some(&head)
@@ -132,7 +134,11 @@ impl World {
     pub fn converged(&self) -> bool {
         self.repos.iter().zip(&self.cores).all(|(repo, core)| {
             repo.heads == BTreeSet::from([self.hub.head])
-                && *core.known() == (self.hub.seq, self.hub.head)
+                && *core.known()
+                    == Head {
+                        seq: self.hub.seq,
+                        head: self.hub.head,
+                    }
                 && repo.applied == self.hub.records
                 && repo.dropped == self.hub.dropped()
         })

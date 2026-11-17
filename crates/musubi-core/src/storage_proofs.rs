@@ -5,7 +5,9 @@
 use crate::hub::CasOutcome;
 use crate::hub::HandledBy;
 use crate::hub::HubStorage;
+use crate::hub::Notice;
 use crate::hub::Push;
+use crate::message::Head;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
 use crate::message::RecordState;
@@ -59,8 +61,11 @@ impl HubStorage for Storage {
     type Attachment = u8;
     type Error = ();
 
-    fn head(&self) -> (u64, u8) {
-        (self.seq, self.head)
+    fn head(&self) -> Head<u8> {
+        Head {
+            seq: self.seq,
+            head: self.head,
+        }
     }
 
     fn set_head(&mut self, seq: u64, head: &u8, dropped: &[u8]) -> Result<(), ()> {
@@ -173,7 +178,7 @@ fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
         "an error retains uploaded objects before acceptance"
     );
     assert!(storage.closed(storage.head));
-    assert!(storage.descends_from(before.1, storage.head));
+    assert!(storage.descends_from(before.head, storage.head));
     // The only possible transition is 1 -> 2, once, even after an error or a replay.
     assert_eq!(storage.seq, u64::from(storage.head));
     assert!(storage.head == 1 || storage.head == 2);
@@ -193,7 +198,7 @@ fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
             else {
                 panic!("matching records and no drops cannot be refused");
             };
-            assert_eq!((seq, head), storage.head());
+            assert_eq!(Head { seq, head }, storage.head());
             assert_eq!(records, storage.records());
             assert_eq!(kind == HeadKind::Accepted, storage.head == 2);
             if objects == 3 && storage.head != 2 {
@@ -201,9 +206,9 @@ fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
                 assert_eq!(outcome, CasOutcome::Rejected);
             }
             if outcome == CasOutcome::Accepted {
-                assert_eq!(before, (1, 1));
-                assert_eq!(expected, before.1);
-                assert_eq!(handled.publish, Some((seq, head, records)));
+                assert_eq!(before, Head { seq: 1, head: 1 });
+                assert_eq!(expected, before.head);
+                assert_eq!(handled.publish, Some(Notice { seq, head, records }));
             } else {
                 assert_eq!(storage.head(), before);
                 assert!(handled.publish.is_none());

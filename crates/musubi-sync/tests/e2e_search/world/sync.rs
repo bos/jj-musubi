@@ -6,6 +6,7 @@ use std::fs;
 
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub::HubStorage as _;
+use musubi_core::hub::Notice;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -259,7 +260,7 @@ impl World {
                 .core
                 .handle_reply(&mut member.adapter, handled.reply)?;
         }
-        if let Some((seq, head, records)) = handled.publish {
+        if let Some(Notice { seq, head, records }) = handled.publish {
             for member in &mut hive.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,

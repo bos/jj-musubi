@@ -3,6 +3,7 @@
 //! The hub is a function of its storage: [`handle`] answers one request. Callers must run it
 //! for one request at a time per hive, which makes every `Push` atomic.
 
+use crate::message::Head;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
 use crate::message::RecordState;
@@ -16,7 +17,7 @@ pub trait HubStorage {
     type Error;
 
     /// The current `(seq, head)`.
-    fn head(&self) -> (u64, Self::Op);
+    fn head(&self) -> Head<Self::Op>;
 
     /// Replaces the head, which must be stored before this returns. A supersede's `dropped`
     /// becomes the next record, less what the records drop already, if that leaves any: the
@@ -120,8 +121,16 @@ pub trait HubStorage {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Handled<O, A> {
     pub reply: Reply<O, A>,
-    /// A new head to publish to every node, after the reply, with the hub's records as of it.
-    pub publish: Option<(u64, O, RecordState)>,
+    /// A new head to publish to every node, after the reply.
+    pub publish: Option<Notice<O>>,
+}
+
+/// A new head, with the hub's records as of it: what a `Notify` tells every node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice<O> {
+    pub seq: u64,
+    pub head: O,
+    pub records: RecordState,
 }
 
 /// [`Handled`] for a given storage.
@@ -158,7 +167,7 @@ pub fn handle<S: HubStorage>(
             records,
         } => {
             storage.report(&machine, &records);
-            let (seq, head) = storage.head();
+            let Head { seq, head } = storage.head();
             let (records_from, new_records) = storage.records_since(&records)?;
             let (ops, ops_attachment) = storage.ops_with_records(&head, &base, &new_records)?;
             let ids: Vec<S::Op> = ops.iter().map(|entry| entry.id.clone()).collect();
@@ -272,7 +281,7 @@ impl<O: Clone + Eq, A> Push<'_, O, A> {
         }
         storage.store_ops(self.ops, self.ops_attachment)?;
         storage.store_objects(self.ops, self.objects)?;
-        let (seq, head) = storage.head();
+        let Head { seq, head } = storage.head();
         let answer = |outcome, kind, seq, head, records| {
             let reply = Reply::Head {
                 kind,
@@ -316,7 +325,11 @@ impl<O: Clone + Eq, A> Push<'_, O, A> {
                 head: self.new.clone(),
                 records: records.clone(),
             };
-            let publish = Some((seq + 1, self.new.clone(), records));
+            let publish = Some(Notice {
+                seq: seq + 1,
+                head: self.new.clone(),
+                records,
+            });
             return Ok((CasOutcome::Accepted, Handled { reply, publish }));
         }
         answer(CasOutcome::Rejected, HeadKind::Rejected, seq, head, records)

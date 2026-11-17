@@ -369,7 +369,7 @@ fn nodes_follow_a_hub_that_went_back() {
     assert!(beta.jj(&["log", "-r", "all()"]).contains("from alpha"));
     assert!(alpha.jj(&["log", "-r", "all()"]).contains("from beta"));
     assert_eq!(hive.members[a].core.known(), hive.members[b].core.known());
-    assert_eq!(hive.members[a].core.known().0, hive.hub.store().head().0);
+    assert_eq!(hive.members[a].core.known().seq, hive.hub.store().head().0);
 }
 
 /// A hive whose store was corrupt, made again empty, fills from its machines' repositories
@@ -411,5 +411,5 @@ fn a_remade_hive_fills_from_its_machines() {
         hive.members[b].core.known(),
         "both know the head alpha pushed"
     );
-    assert_eq!(hive.members[a].core.known().0, hive.hub.store().head().0);
+    assert_eq!(hive.members[a].core.known().seq, hive.hub.store().head().0);
 }

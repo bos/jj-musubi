@@ -325,7 +325,7 @@ fn forgotten_working_copies_can_be_abandoned() {
     let mut advanced = false;
     for _ in 0..24 {
         let member = &mut hive.hive.members[1];
-        assert_eq!(member.core.known().1, target);
+        assert_eq!(member.core.known().head, target);
         let before = member.adapter.heads_for(&target).unwrap();
         assert_eq!(before.len(), 1);
         assert!(member.adapter.pending().unwrap().is_empty());

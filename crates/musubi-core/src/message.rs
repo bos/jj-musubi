@@ -22,6 +22,13 @@ pub enum HeadKind {
     Notify,
 }
 
+/// A `(seq, head)` pair: the hub's `seq`th head, `head`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Head<O> {
+    pub seq: u64,
+    pub head: O,
+}
+
 /// The hub's records as a party took them: how many, and a digest of them all, so that two
 /// parties can tell whether they took the same ones (docs/internals/protocol.md,
 /// "Supersedes"). A record is a set of operations the hive dropped at once.

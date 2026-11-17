@@ -322,7 +322,7 @@ fn a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known() {
     );
     assert!(hive.node(0).pending_drops().is_empty());
     assert_eq!(heads.len(), 1);
-    assert_eq!(heads[0].0, known.1);
+    assert_eq!(heads[0].0, known.head);
     let member = &mut hive.hive.members[0];
     assert!(matches!(
         member.core.step(&mut member.adapter).unwrap(),
@@ -1184,7 +1184,7 @@ fn dropped_head_held(
     let mut adopted = false;
     let mut realized = false;
     for _ in 0..32 {
-        let known = member.core.known().1.clone();
+        let known = member.core.known().head.clone();
         if adopted && member.adapter.is_local(&known).unwrap() {
             realized = true;
             break;
@@ -1486,7 +1486,7 @@ fn local_burst_conforms_across_a_pending_namespace() {
     }
     fn snapshot(hive: &Fixture, raw: &[CanonicalOp]) -> Snapshot {
         let member = &hive.hive.members[1];
-        let known = member.core.known().1.clone();
+        let known = member.core.known().head.clone();
         let repo = member.adapter.repo();
         let heads = repo
             .local_heads()
@@ -1814,7 +1814,7 @@ fn interrupted_git_export_can_leave_aliased_operation_heads() {
             .update_op_heads(&[], &original.0),
     )
     .unwrap();
-    let known = member.core.known().1.clone();
+    let known = member.core.known().head.clone();
     let heads = member.adapter.heads_for(&known).unwrap();
     assert_eq!(heads, vec![canonical.0.clone(), canonical.0.clone()]);
     let second = member.core.step(&mut member.adapter).unwrap();
@@ -2276,7 +2276,7 @@ fn advancing_to_what_survives_of_a_dropped_head() {
             matches!(step, musubi_core::node::Step::Adopted),
             "{case}: {step:?}"
         );
-        assert_eq!(hive.hive.members[1].core.known().1, kept, "{case}");
+        assert_eq!(hive.hive.members[1].core.known().head, kept, "{case}");
         let kept_hub = HubOp(CanonicalOp(kept.clone()));
         assert!(hive.node(1).is_dropped(&kept_hub), "{case}");
 
@@ -3788,7 +3788,7 @@ fn abandoning_twice_around_another_machines_record_publishes_all() {
             // its own unpublished original. Its complete head closure is already written
             // without either original, so contracting just the hub's drops keeps its id.
             let member = &mut hive.hive.members[0];
-            let heads = member.adapter.heads_for(&member.core.known().1).unwrap();
+            let heads = member.adapter.heads_for(&member.core.known().head).unwrap();
             assert!(!heads.is_empty());
             assert_eq!(member.adapter.records().unwrap(), hive.hive.hub.records());
             let applied = member.adapter.applied_records().unwrap();
@@ -4359,13 +4359,13 @@ fn a_command_inside_a_full_trim_keeps_workspace_owners() {
     hive.hive.fetch(1).unwrap();
     for _ in 0..64 {
         let member = &mut hive.hive.members[1];
-        if member.adapter.is_local(&member.core.known().1).unwrap() {
+        if member.adapter.is_local(&member.core.known().head).unwrap() {
             break;
         }
         let step = member.core.step(&mut member.adapter).unwrap();
         assert!(matches!(step, Step::Realized(_)), "{step:?}");
     }
-    let known = hive.hive.members[1].core.known().1.clone();
+    let known = hive.hive.members[1].core.known().head.clone();
     hive.node(1).settle().unwrap();
     let records = hive.hive.hub.store().records().to_vec();
     assert!(
@@ -5374,7 +5374,7 @@ fn a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup() {
     hive.hive.sync(1).unwrap();
     let d_hub = hive.hive.hub_head();
     hive.hive.sync(2).unwrap();
-    assert_eq!(hive.hive.members[2].core.known().1, d_hub);
+    assert_eq!(hive.hive.members[2].core.known().head, d_hub);
     hive.commit(1, "e", "beta keeps this");
     hive.repo(1).jj(&["op", "abandon", &d.0]);
     hive.hive.sync(1).unwrap();
@@ -5435,7 +5435,7 @@ fn a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup() {
     let current_head = hive.hive.hub_head();
     let member = &mut hive.hive.members[2];
     assert_eq!(member.adapter.records().unwrap(), records);
-    assert_eq!(member.core.known().1, current_head);
+    assert_eq!(member.core.known().head, current_head);
     assert!(matches!(
         member.core.step(&mut member.adapter).unwrap(),
         Step::Idle
@@ -6220,13 +6220,13 @@ fn a_forward_bookmark_survives_a_command_inside_a_trim_advance() {
     hive.hive.fetch(1).unwrap();
     for _ in 0..64 {
         let member = &mut hive.hive.members[1];
-        if member.adapter.is_local(&member.core.known().1).unwrap() {
+        if member.adapter.is_local(&member.core.known().head).unwrap() {
             break;
         }
         let step = member.core.step(&mut member.adapter).unwrap();
         assert!(matches!(step, Step::Realized(_)), "{step:?}");
     }
-    let known = hive.hive.members[1].core.known().1.clone();
+    let known = hive.hive.members[1].core.known().head.clone();
     assert!(hive.hive.members[1].adapter.is_local(&known).unwrap());
     hive.node(1).settle().unwrap();
     assert_eq!(hive.hive.hub.store().pruned(), 0);

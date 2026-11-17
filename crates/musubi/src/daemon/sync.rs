@@ -80,10 +80,10 @@ pub(super) fn open_driver(
 
 /// The hive's head as `driver` knows it.
 pub(super) fn known(driver: &NodeDriver) -> Synced {
-    let (seq, head) = driver.known();
+    let known = driver.known();
     Synced {
-        seq: *seq,
-        head: head.hex(),
+        seq: known.seq,
+        head: known.head.hex(),
     }
 }
 

@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 
 use musubi_core::hub;
 use musubi_core::hub::CasOutcome;
+use musubi_core::hub::Notice;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
@@ -277,7 +279,7 @@ impl World {
         let before = self.storage_begin();
         let burst_before = self.oracle.as_ref().map(|_| {
             (
-                self.cores[node].known().1,
+                self.cores[node].known().head,
                 self.repos[node].applied.clone(),
                 self.repos[node].dropped.clone(),
                 self.burst_state(node),
@@ -445,7 +447,7 @@ impl World {
         else {
             return;
         };
-        assert_eq!(*expected, self.cores[node].known().1);
+        assert_eq!(*expected, self.cores[node].known().head);
         assert_eq!(self.repos[node].heads, BTreeSet::from([*new]));
         let Some(oracle) = &mut self.oracle else {
             return;
@@ -454,7 +456,7 @@ impl World {
         let reply = oracle.call(&json!({
             "op": "pushSnapshot", "node": node,
             "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
-            "expected": expected, "new": new, "knownSeq": self.cores[node].known().0,
+            "expected": expected, "new": new, "knownSeq": self.cores[node].known().seq,
             "applied": records_json(&applied), "pending": dropped,
         }));
         assert_eq!(reply["ok"], true, "push snapshot failed: {reply}");
@@ -674,7 +676,7 @@ impl World {
         node: usize,
         reply: Rep,
         actions: Vec<Value>,
-        publish: Option<(u64, Op, RecordState)>,
+        publish: Option<Notice<Op>>,
         announced: bool,
     ) {
         // A storage error must never be reported as a successful publication. Check the
@@ -689,7 +691,7 @@ impl World {
             }
             _ => {}
         }
-        if let Some((seq, head, _)) = &publish {
+        if let Some(Notice { seq, head, .. }) = &publish {
             assert_eq!(
                 (*seq, *head),
                 (self.hub.seq, self.hub.head),
@@ -734,7 +736,7 @@ impl World {
             Reply::Refused { .. } => vec![],
         };
         self.send(model, Payload::Reply(node, reply));
-        if let Some((seq, head, records)) = publish {
+        if let Some(Notice { seq, head, records }) = publish {
             assert_eq!(seq as usize, self.hist.len());
             self.hist.push(head);
             for target in 0..self.nodes() {
@@ -755,7 +757,7 @@ impl World {
     /// the node takes as saying where the hub is now (`NodeCore::handle_reply`).
     fn node_handle(&mut self, node: usize, reply: Rep, own: bool) {
         let before = self.storage_begin();
-        let known_before = *self.cores[node].known();
+        let known_before = self.known(node);
         let incoming = match &reply {
             Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => Some((*seq, *head)),
             Reply::Objects { .. } | Reply::Refused { .. } => None,
@@ -782,7 +784,7 @@ impl World {
         let handled = match handled {
             Ok(handled) => handled,
             Err(error) => {
-                let (seq, head) = *self.cores[node].known();
+                let (seq, head) = self.known(node);
                 if (seq, head) != known_before && seq > 0 {
                     actions.push(json!({"kind": "learn", "node": node,
                         "headKind": kind_name(head_kind), "seq": seq, "head": head}));
@@ -799,7 +801,7 @@ impl World {
             }));
             assert_eq!(expected["ok"], true, "head control failed: {expected}");
             assert_eq!(expected["restart"], json!(restarted));
-            assert_eq!(expected["known"], json!(self.cores[node].known()));
+            assert_eq!(expected["known"], json!(self.known(node)));
         }
         match handled {
             Handled::Learned { kind, seq, head } => {
@@ -807,7 +809,7 @@ impl World {
                 self.act_all(actions);
             }
             Handled::Fetched { learned, staged } => {
-                if let Some((seq, head)) = learned {
+                if let Some(Head { seq, head }) = learned {
                     actions.push(json!({"kind": "learn", "node": node, "headKind": "head", "seq": seq, "head": head}));
                 }
                 actions.push(
@@ -1012,7 +1014,7 @@ impl World {
         let repo = &self.repos[node];
         // Not newer than what the node knows, or it would believe the head too.
         let reply = Reply::Fetched {
-            seq: self.cores[node].known().0,
+            seq: self.cores[node].known().seq,
             head,
             ops: vec![OpEntry { id: op, parents }],
             ops_attachment: vec![],
@@ -1069,7 +1071,8 @@ impl World {
     }
 
     pub fn known(&self, node: usize) -> (u64, Op) {
-        *self.cores[node].known()
+        let Head { seq, head } = *self.cores[node].known();
+        (seq, head)
     }
 
     /// A buggy hub: `node` takes `reply`, which the hub never sent, as an answer to its own
@@ -1120,7 +1123,7 @@ impl World {
     }
 
     pub fn known_head(&self, node: usize) -> Op {
-        self.cores[node].known().1
+        self.cores[node].known().head
     }
 
     /// Stops environment actions, makes the network reliable, and runs every node's policy
@@ -1214,7 +1217,7 @@ impl World {
         self.has_oracle().then(|| NodeView {
             lops: repo.lops.clone(),
             heads: repo.heads.clone(),
-            known: *self.cores[node].known(),
+            known: self.known(node),
             dropped: repo.dropped.clone(),
             applied: repo.applied.clone(),
             crash_pending: repo.crash_before_objects,
@@ -1291,7 +1294,7 @@ impl World {
             .iter()
             .zip(&self.cores)
             .map(|(repo, core)| {
-                let (seq, head) = core.known();
+                let Head { seq, head } = *core.known();
                 json!({
                     "lops": repo.lops, "lobj": repo.lobj, "heads": repo.heads,
                     "known": [seq, head], "sops": repo.sops.keys().collect::<Vec<_>>(), "sobj": repo.sobj,

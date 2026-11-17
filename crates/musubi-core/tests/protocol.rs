@@ -19,6 +19,7 @@ use hegel::generators as gs;
 use musubi_core::hub::CasOutcome;
 use musubi_core::hub::HubStorage;
 use musubi_core::hub::Push;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
@@ -732,10 +733,10 @@ fn head_replies_update_records_only_for_the_known_pair() {
                         head: named
                     }
                 );
-                assert_eq!(core.known(), &(seq, named));
+                assert_eq!(core.known(), &Head { seq, head: named });
             } else {
                 assert_eq!(handled, Handled::Ignored);
-                assert_eq!(core.known(), &(2, head));
+                assert_eq!(core.known(), &Head { seq: 2, head });
             }
             let step = core.step(&mut repo).unwrap();
             if !takes_records {
@@ -839,10 +840,10 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
                     head: named
                 }
             );
-            assert_eq!(core.known(), &(seq, named));
+            assert_eq!(core.known(), &Head { seq, head: named });
         } else {
             assert_eq!(handled, Handled::Ignored);
-            assert_eq!(core.known(), &(2, head));
+            assert_eq!(core.known(), &Head { seq: 2, head });
         }
         let step = core.step(&mut repo).unwrap();
         assert_eq!(
@@ -1200,8 +1201,11 @@ impl HubStorage for Scripted {
     type Attachment = ();
     type Error = Infallible;
 
-    fn head(&self) -> (u64, u32) {
-        (self.seq, self.head)
+    fn head(&self) -> Head<u32> {
+        Head {
+            seq: self.seq,
+            head: self.head,
+        }
     }
 
     fn set_head(&mut self, seq: u64, head: &u32, _: &[u32]) -> Result<(), Infallible> {

@@ -11,6 +11,7 @@ use std::time::Instant;
 use anyhow::bail;
 use jj_lib::backend::CommitId;
 use musubi_core::hub::HubStorage;
+use musubi_core::message::Head;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
 use musubi_hub::store::Contracted;
@@ -260,9 +261,12 @@ impl HubStorage for HubAdapter {
     type Attachment = Attachment;
     type Error = anyhow::Error;
 
-    fn head(&self) -> (u64, OpId) {
+    fn head(&self) -> Head<OpId> {
         let (seq, head) = self.store.head();
-        (seq, head.clone())
+        Head {
+            seq,
+            head: head.clone(),
+        }
     }
 
     fn set_head(&mut self, seq: u64, head: &OpId, dropped: &[OpId]) -> anyhow::Result<()> {

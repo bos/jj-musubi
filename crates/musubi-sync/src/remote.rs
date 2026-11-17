@@ -275,13 +275,9 @@ impl RemoteHub {
         let mut lanes = Lanes::new(self);
         let mut furthest = Furthest::default();
         let mut resends = 0;
-        let mut asked = false;
         let reply = loop {
             let further = furthest.further;
-            match self
-                .ask(&attempt, &mut lanes, &mut asked, &mut furthest)
-                .await
-            {
+            match self.ask(&mut attempt, &mut lanes, &mut furthest).await {
                 Err(err) if timed_out(&err) && furthest.further > further => {
                     resends = 0;
                     tracing::debug!("no reply in time, having moved some chunks; going on");
@@ -292,25 +288,17 @@ impl RemoteHub {
                 }
                 reply => break reply?,
             }
-            // Once the request has gone, the hub has what it names, until it answers it, and
-            // answers a repeat as before without them, unless the hive has changed since: then
-            // the call fails, and the sync starts over.
-            if asked {
-                attempt.uploads = &[];
-                attempt.upload_len = 0;
-            }
         };
         self.receive(reply, &mut lanes, &mut furthest).await
     }
 
     /// Sends a request once, with what it uploads, and returns the hub's reply, which may
     /// be a blob to download. A request too large to send whole goes again each time: the
-    /// hub lets go of it once it has it. Sets `asked` once the request goes.
+    /// hub lets go of it once it has it. Once the request goes, `attempt` uploads nothing more.
     async fn ask(
         &self,
-        attempt: &Attempt<'_>,
+        attempt: &mut Attempt<'_>,
         lanes: &mut Lanes<'_>,
-        asked: &mut bool,
         furthest: &mut Furthest,
     ) -> anyhow::Result<HubReply> {
         let lane = lanes.lane(attempt.upload_len).await;
@@ -336,9 +324,12 @@ impl RemoteHub {
             }
         };
         self.progress.set(Activity::Asking);
-        *asked = true;
-        // The hub lets go of them once it has the request.
+        // The hub lets go of them once it has the request. Then it has what the request names,
+        // until it answers it, and answers a repeat as before without them, unless the hive
+        // has changed since: then the call fails, and the sync starts over.
         self.forget(attempt.uploads);
+        attempt.uploads = &[];
+        attempt.upload_len = 0;
         if let Some((blob, _)) = attempt.whole {
             self.forget(&[blob]);
         }

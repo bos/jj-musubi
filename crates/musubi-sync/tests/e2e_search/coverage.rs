@@ -590,6 +590,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     // A negative control of a design musubi does not use.
     ("verbatim_replication_reverts_bookmarks", None),
+    // Native callbacks pause inside an adapter call; generated rules run between calls.
+    (
+        "helper_single_head_becomes_multihead_characterization",
+        None,
+    ),
 ];
 
 /// Counts belong to one report, including every attempted case's rule activity. A witness

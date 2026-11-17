@@ -15,6 +15,9 @@ mod private_overlap;
 #[path = "native_multibase_tests.rs"]
 mod multibase;
 
+#[path = "native_concurrency_tests.rs"]
+mod concurrency;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;

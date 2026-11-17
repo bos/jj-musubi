@@ -1411,7 +1411,32 @@ These schedules cover the publication window (the successful final reread throug
 every included helper window (branch choice through load and export) explicitly, including
 cleanup after publication locks are released.
 They do not establish a universal native writer lock. Abandon/integrate after-reread overlap
-and the one-to-multihead helper window remain separate characterization work.
+and the one-to-multihead helper window are outside that theorem's schedule.
+
+The sibling `native_concurrency_tests.rs` separately characterizes two fixed schedules on
+pinned jj 0.47.1. `abandon_after_equal_reread_characterization` completes a real native
+operation abandon after the equal reread, while both publication locks remain held. The old
+ancestor becomes reachable again when the prepared publication finishes, and a subsequent
+`merge_heads` does not remove it. The two deliberately added bookmarks retain their targets.
+`native_inflight_transaction_also_restores_abandoned_ancestry` reproduces that ancestry
+resurrection with a plain jj transaction loaded before the abandon. This establishes the
+native concurrency behavior, not a new musubi-specific data-loss finding or general safety
+outside E1. Integrate overlap and gc are not exercised by these fixtures.
+
+`helper_single_head_becomes_multihead_characterization` completes an actual historical
+describe after the helper's one-head branch observation. The loader merges the two heads and
+rebases the topic bookmark, but the direct branch returns without exporting it: physical Git
+and its import record retain the old target. A second `merge_heads` does not repair it; an
+ordinary `jj status` does. The same command completed before the branch observation reaches
+the normal multihead/export route and exports the rebased target. This is a known product
+limitation, pinned deliberately until its fix replaces the stale-target assertion. It is
+distinct from a native CLI command doing its own unexported merge. No arbitrary interleaving,
+physical HEAD, failed-CAS, full lifecycle simulation or search-coverage claim follows.
+
+Run only these schedules with `cargo nextest run -p musubi-jj --lib
+-E 'test(/native_contract_tests::concurrency::/)'`. `MUSUBI_CONCURRENCY_DUMP` optionally names
+an external directory for raw before/after bodies, views, head/effect events and command
+outcomes. The native commands have an eight-second bound and are killed and reaped on expiry.
 
 `complete_receipt_and_body_observation_is_pure` checks the exact raw-input observer against
 repository bytes (native, canonical, original evidence, records and physical Git), native heads,

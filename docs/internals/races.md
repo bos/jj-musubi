@@ -86,6 +86,7 @@ own work brings it back ([design.md, "Copies that go away"](design.md#copies-tha
 
 | Race | Outcome | Test |
 | --- | --- | --- |
+| A native historical command adds a second head after musubi's helper chose its single-head branch | A known limitation: the native load can rebase a bookmark without exporting it. Git retains the old target through another `merge_heads`; an ordinary `jj status` exports the new target. | `helper_single_head_becomes_multihead_characterization` (also checks the normal multihead/export control) |
 | An ordinary jj command follows a native operation merge that selects a new bookmark, while Git still matches the merged import record | jj exports the selected bookmark even though importing changes nothing. | `an_unchanged_import_exports_a_bookmark_selected_by_a_merge` |
 | Same bookmark moved to different commits | Conflicted bookmark on every machine. Each colocated `.git` keeps its own branch value, because jj does not export conflicted bookmarks. No later `jj` command resolves it silently. Resolving it on one machine resolves it everywhere and updates every `.git`. | `same_bookmark_moved_to_different_commits` |
 | Same bookmark created at the same commit | No conflict. | `same_bookmark_created_at_the_same_commit` |

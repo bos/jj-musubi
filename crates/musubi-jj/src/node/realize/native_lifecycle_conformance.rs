@@ -11,7 +11,7 @@ use serde_json::json;
 #[path = "native_preparation_probe_replay.rs"]
 mod preparation_probe_replay;
 
-fn bounded_native_command(repo: &TestRepo, args: &[&str]) -> Value {
+pub(super) fn bounded_native_command(repo: &TestRepo, args: &[&str]) -> Value {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 

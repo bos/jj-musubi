@@ -198,9 +198,10 @@ structure SystemBindings (N : Nat) (run : Nat → Sys) (acts : Nat → Act) (rec
   /-- At a sample, the latch is the sample time. -/
   latchAtSample : ∀ n p, n < N → O.latch n (O.sched n p) = O.sched n p
 
-/-- A push is eventually handled, one request at a time, with the effect of that same immutable
-packet and its checks. This combines native correspondence with an eventual-handling
-assumption. That the hub stays fixed through the handling is derived after stabilization. -/
+/-- Two laws of the hub. `answer`: each push is eventually handled, one request at a time, with
+the effect of that same immutable packet and its checks; it combines native correspondence with
+an eventual-handling assumption. `climbs`: from the record cut the hub's every step climbs raw
+ancestry. That the hub stays fixed through the handling is derived after stabilization. -/
 structure HubHandling (N : Nat) (run : Nat → Sys) (recs : Nat → Exec.SEState)
     (adopts fails : Nat → Nat → Bool) (O : HiveObs ρ α) : Prop where
   /-- A push at `t` is answered at or after `t`, and the answer moves the hub as
@@ -212,6 +213,19 @@ structure HubHandling (N : Nat) (run : Nat → Sys) (recs : Nat → Exec.SEState
         RawPublish.Hub) =
       RawPublish.after ⟨(run (O.answerAt n t)).hub.seq, (run (O.answerAt n t)).hub.head⟩
         (O.pkt n t) (O.checks n t)
+  /-- The raw-ancestry hub law of `HubLaw`, read from the record cut `k`: the hub's head exists
+  there, the raw graph only grows, and each step leaves the hub as it is or accepts, moving to
+  the next sequence number and a different existing head that has the old head in its raw
+  ancestry (`HubClimb`). Natively it holds when no new drop is taken, which `CutAt` ensures by
+  fixing the records and drops, and the hub's head at `k` survives the hub's records. The second
+  condition is not derived: a hub rollback may leave the head dropped by records the hub keeps,
+  and a push can then be accepted by contracted ancestry without a new drop, off raw ancestry.
+  It is what native checking must cover. The earlier `historyWindow` premise assumed the same
+  chain over the same interval, so the trust is no wider. The `RawGrow` clause rests on
+  `QuietAt.noLoss`. -/
+  climbs : ∀ k, CutAt N recs adopts fails k → QuietAt N O k →
+    (run k).hub.head < (run k).next ∧
+    ∀ i, k ≤ i → RawGrow (run i) (run (i + 1)) ∧ HubClimb (run i) (run (i + 1))
 
 end Source
 

@@ -91,6 +91,7 @@ import Musubi.FineAssembly
 #print Musubi.SysAcceptance.HiveContracts
 #print Musubi.SysAcceptance.Source.Environment
 #print Musubi.SysAcceptance.Source.Scheduling
+#print Musubi.SysAcceptance.FineSnapshot
 #print Musubi.SysAcceptance.FineStart
 #print Musubi.FineAssembly.FineSource
 #print axioms Musubi.FineAssembly.hive_converges_observed
@@ -99,8 +100,9 @@ LEAN
 
 Add new main results to `Musubi/Axioms.lean` and the build's imports. The axiom list and the
 expanded premises answer different questions. `HiveContracts` inherits its source groups;
-inspect the relevant groups as well as the assembly. `FineStart` owns the starting snapshot
-shared by `FineAt` and `FineSource`. `SysAcceptance.Phases` derives the named phase boundaries;
+inspect the relevant groups as well as the assembly. `FineSnapshot` owns the starting snapshot
+shared by `FineSource` and `FineStart`, which adds the history window that `FineAt` takes and
+`hive_converges_observed` derives. `SysAcceptance.Phases` derives the named phase boundaries;
 `SysAcceptance.Convergence` composes them. `HiveFilter.lean` owns the eligible-run projection.
 The formal guide's
 [reading path](../../formal/README.md#reading-the-integration-proofs) locates these interfaces.

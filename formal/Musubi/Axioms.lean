@@ -191,6 +191,8 @@ open Musubi
 #assert_axioms NodeSysEntry.runOK_filt_init
 #assert_axioms Recovery.HubSys.hive_filtered
 #assert_axioms Recovery.HubSys.hub_stabilizes_hive
+#assert_axioms Recovery.HubSys.history_window_of_climbs
+#assert_axioms SysAcceptance.history_window_from_record_cut
 #assert_axioms Retry.project_own_start
 #assert_axioms Retry.project_reserve
 #assert_axioms Retry.project_other_start

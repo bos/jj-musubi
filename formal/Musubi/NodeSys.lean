@@ -413,6 +413,26 @@ structure HubLaw where
     p.recs = h.recs ∧ p.expected = h.head ∧ p.new ≠ h.head ∧ Anc par h.head p.new ∧
       p.new ∉ p.pending
 
+/-- How the hub moves in one step from `g` to `g'` once records are fixed, when raw ancestry is
+the only guard (`HubLaw.guards` read from the record cut). It keeps its sequence number and
+head, or accepts: the next sequence number, a different head that exists in `g`, and the old
+head among its raw ancestors. The hub's records are not constrained. -/
+inductive HubClimb (g g' : Sys) : Prop
+  | stay (seq : g'.hub.seq = g.hub.seq) (head : g'.hub.head = g.hub.head) : HubClimb g g'
+  | climb (seq : g'.hub.seq = g.hub.seq + 1) (different : g'.hub.head ≠ g.hub.head)
+      (bound : g'.hub.head < g.next) (above : Anc g.par g.hub.head g'.hub.head) :
+      HubClimb g g'
+
+theorem HubClimb.seq_le {g g' : Sys} (h : HubClimb g g') : g.hub.seq ≤ g'.hub.seq := by
+  cases h with
+  | stay => omega
+  | climb => omega
+
+theorem HubClimb.seq_le_succ {g g' : Sys} (h : HubClimb g g') : g'.hub.seq ≤ g.hub.seq + 1 := by
+  cases h with
+  | stay => omega
+  | climb => omega
+
 inductive CoreKind
   | busy
   | idle

@@ -5,11 +5,13 @@ Each removed push is tied to its own decision event; maintenance is excluded aft
 
 The primitive boundaries have separate owners:
 - `HiveContracts`: grouped source effects, environment, completion and scheduling obligations.
-- `FineStart`: the starting snapshot shared by `FineAt` and `FineSource`.
+- `FineSnapshot`: the starting snapshot shared by `FineSource` and `FineStart`, which adds the
+  hub's history window for `FineAt`.
 - `FineSource`: event replay and bindings, graph acyclicity, native advance, lawful decisions
   and fine-system fairness.
 - `hive_converges_observed`: native record identity and custody (`views`), the hub's records
   at the cut (`hubRecs`), and their change only with native records or pruning (`hubRecsStep`).
+  It derives the history window at the fine cut from `HiveContracts` (`climbs`, `histBind`).
 
 Entry, old-effect cutoffs and stabilization are derived. Eventual handling and restarts are
 source obligations, as is the termination of automatic native writes (`autoWritesStop`).
@@ -25,7 +27,7 @@ open Musubi NodeSettle NodeSys NodeSysEntry SysAcceptance NativeEvents Recovery.
 
 /-! ## The fine system, assembled -/
 
-/-- Native replay and its laws at the fine cut. `FineStart` owns the initial snapshot;
+/-- Native replay and its laws at the fine cut. `FineSnapshot` owns the initial snapshot;
 `inFlight` supplies honesty of the eligible nodes' replies and notifications already in flight
 from `t0`.
 
@@ -41,7 +43,7 @@ supplies its quietness, fixed records, empty pending drops and old-effect cutoff
 structure FineSource (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
     [DecidablePred E] (run : Nat → Sys) (acts : Nat → Act) (k w : Nat) (initial : Nat → Nat)
     (t0 : Nat) (auto : Nat → Nat → Prop)
-    extends FineStart D law E run k w initial where
+    extends FineSnapshot D law E run k where
   /-- Node count used by the executable packet-decision model. -/
   decisionNodes : Nat
   decodeRecords : Nat → List Exec.Rec
@@ -72,8 +74,8 @@ theorem FineSource.steps {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
   rw [S.replayActs j, S.replay j, show k + j + 1 = k + (j + 1) from rfl, S.replay (j + 1)]
   exact observed_hs (run k) S.events (fun _ => dummy S.rawRoot) h0 hb j
 
-/-- The fine system's premises, from the replay and the laws `FineSource` names. Assumes, from
-the cut on:
+/-- The fine system's premises, from the replay and the laws `FineSource` names, and the
+history window `hw` at the cut. Assumes, from the cut on:
 * no eligible node makes an automatic write (`hnoAuto`), so each advance's cleanup writes
   nothing;
 * the hub's records stay (`hr`);
@@ -86,6 +88,7 @@ def fineAt_of {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {E : Nat → Prop} [DecidablePred E] {run : Nat → Sys} {acts : Nat → Act} {k w : Nat}
     {initial : Nat → Nat} {t0 : Nat} {auto : Nat → Nat → Prop}
     (S : FineSource N D law E run acts k w initial t0 auto)
+    (hw : Recovery.HistoryWindow w (state (run k) initial))
     (hnoAuto : ∀ i, k ≤ i → ∀ n, E n → ¬ auto n i) (time : t0 ≤ (run k).time)
     (hr : ∀ i, k ≤ i → (run i).hub.recs = (run k).hub.recs)
     (pending : ∀ i, k ≤ i → ∀ n, E n → ((run i).node n).ns.pending = [])
@@ -97,9 +100,9 @@ def fineAt_of {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     FineAt N D law E run acts k w initial := by
   have hsteps := S.steps
   have honest := honest_run (fun j => run (k + j)) (fun j => acts (k + j)) initial hsteps
-    (S.inFlight.honest S.historyWindow.window S.historyWindow.histHead time)
+    (S.inFlight.honest hw.window hw.histHead time)
   refine {
-    toFineStart := S.toFineStart
+    toFineStart := { toFineSnapshot := S.toFineSnapshot, historyWindow := hw }
     decisionNodes := S.decisionNodes
     decodeRecords := S.decodeRecords
     steps := ?_
@@ -152,7 +155,9 @@ open Musubi.EarlyEntry.Control in
 * quietness excludes maintenance and advance cleanup writes;
 * the completed active sample and old-effects cutoff exclude stale replies and notifications;
 * native record identity and custody give empty pending drops and unchanged applied records;
-* fixed native records keep the fine system's hub records fixed.
+* fixed native records keep the fine system's hub records fixed;
+* the hub's history window at the cut follows from `climbs`, which `HiveContracts` asks from
+  the record cut, and `histBind`.
 
 The replay, native correspondence and fairness obligations remain explicit premises. -/
 theorem hive_converges_observed {ρ α : Type} [DecidableEq ρ] {N : Nat}
@@ -220,7 +225,10 @@ theorem hive_converges_observed {ρ α : Type} [DecidableEq ρ] {N : Nat}
   have V := (views recordCut cutLaws).mono afterRecord
   have pending := V.pending_empty afterRecord cutLaws.records (hubRecs recordCut cutLaws) entry
   have applied := V.applied_stays entry
-  exact ⟨fineAt_of (fine recordCut fineCut cutLaws quiet boundary) hnoAuto
+  -- the hub's history from the record cut: nothing lost, and each move climbs raw ancestry
+  have S := fine recordCut fineCut cutLaws quiet boundary
+  have window := history_window_from_record_cut C cutLaws quiet afterRecord S.parentsFirst
+  exact ⟨fineAt_of S window hnoAuto
     (by rw [C.clock fineCut]; exact afterRecord) hr
     (fun i hi n hE => pending n hE i hi) (fun i hi n hE => applied n hE.1 i hi) hm takes notes⟩
 

@@ -89,7 +89,7 @@ structure EnteredPhase {ρ α : Type} (N : Nat) (Rof : Nat → ρ) (wOf : Nat �
 
 /-- The observed boundary supplied to native replay: every node is entered and has completed
 an active sample after old effects stopped. The snapshot correspondence laws are in
-`FineStart`; activity alone identifies no core event and proves no normalized heads. -/
+`FineSnapshot`; activity alone identifies no core event and proves no normalized heads. -/
 structure FineCut {ρ α : Type} (N : Nat) (Rof : Nat → ρ) (wOf : Nat → Nat)
     (O : HiveObs ρ α) (recordCut cut : Nat) : Prop where
   afterRecord : recordCut ≤ cut

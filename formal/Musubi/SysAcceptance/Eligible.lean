@@ -67,13 +67,13 @@ end Hive
 open Musubi.Recovery.HubSys in
 /-- The eligible system's starting snapshot at `k`: the raw root `rawRoot` (plain data) and
 invariants that the actual observation at `k` must satisfy; raw entry alone does not give them.
+The hub's history window is not among them: `FineStart` adds it, derived from the contracts.
 
 `distinctHeads` is a snapshot obligation, established by native prelude realignment and a
 completed merge; an active sampled event alone does not. `heads_nodup_step` preserves it
-afterwards. The other fields give the snapshot's well-formed state, root, request bounds and
-history window. -/
-structure FineStart (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
-    (run : Nat → Sys) (k w : Nat) (initial : Nat → Nat) where
+afterwards. The other fields give the snapshot's well-formed state, root and request bounds. -/
+structure FineSnapshot (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
+    (run : Nat → Sys) (k : Nat) where
   rawRoot : Nat
   nodes : ∀ n, E n → NodeSys.NodeOK D n (run k) ∧ ObjsOK n (run k)
   system : SysOK law (run k)
@@ -82,13 +82,22 @@ structure FineStart (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat �
   rootBound : rawRoot < (run k).next
   rootParents : (run k).par rawRoot = []
   requestBounds : RequestBounds (run k)
-  historyWindow : Recovery.HistoryWindow w (state (run k) initial)
   distinctHeads : ∀ n, E n → Recovery.HubNodeSteps.HeadsNodup (run k) n
 
 open Musubi.Recovery.HubSys in
-/-- The eligible system after the fine cut. `FineStart` holds the snapshot; the fields here
-hold its later steps, graph law, fixed records, quiet maintenance, decisions and fairness.
-`FineAssembly.fineAt_of` builds this interface from native event replay.
+/-- `FineStart` is the starting snapshot together with the hub's history window: `w`, the record
+cut's sequence number, is at most the hub's, and from `w` the history is a chain of ancestors with increasing ids
+(`Recovery.HistoryWindow`). `FineAssembly.hive_converges_observed` derives the window from the
+contracts. -/
+structure FineStart (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
+    (run : Nat → Sys) (k w : Nat) (initial : Nat → Nat)
+    extends FineSnapshot D law E run k where
+  historyWindow : Recovery.HistoryWindow w (state (run k) initial)
+
+open Musubi.Recovery.HubSys in
+/-- The eligible system after the fine cut. `FineStart` holds the snapshot and its window; the
+fields here hold its later steps, graph law, fixed records, quiet maintenance, decisions and
+fairness. `FineAssembly.fineAt_of` builds this interface from native event replay.
 
 `FineAt.converges` takes the known pair's honesty and eligibility's node bound as separate
 hypotheses. Completion and scheduling (`fair`, `pushFair`) are assumed. -/

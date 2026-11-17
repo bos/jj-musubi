@@ -68,6 +68,17 @@ theorem parents_same {g g' : Sys} (hn : g'.next = g.next)
   · exact hp x ‹x < g.next›
   · rfl
 
+/-- `ParLt (parents g)` follows from every existing operation's parents being smaller than it.
+That is a native DAG contract, not a consequence of RawGrow alone: RawGrow only protects old
+parents, and says nothing about new ones. -/
+theorem parents_parLt {g : Sys} (hp : ∀ x, x < g.next → ∀ p ∈ g.par x, p < x) :
+    ParLt (parents g) := by
+  intro x p h
+  by_cases hx : x < g.next
+  · simp only [parents, hx, ↓reduceIte] at h
+    exact hp x hx p h
+  · simp [parents, hx] at h
+
 /-- Steps that keep `next` and the parents below it keep the raw universe of `state`. -/
 theorem state_usame {g g' : Sys} {hist hist' : Nat → Nat}
     (hn : g'.next = g.next) (hp : ∀ x, x < g.next → g'.par x = g.par x) :

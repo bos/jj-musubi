@@ -180,6 +180,21 @@ theorem knows_stable_head
   exact (congrArg Known.head pair).trans (congrArg Snap.head (hhub a ha))
 
 
+/-- From the record cut to any later time, the hub's history is a window from the cut's
+sequence number: nothing is lost, so `histBind` gives the head at each time, and `climbs` makes
+each move to the next sequence number a step up raw ancestry. -/
+theorem history_window_from_record_cut
+    (C : HiveContracts N run acts recs B epoch adopts fails recLabel Rof wOf O)
+    {recordCut cut : Nat} (hcut : CutAt N recs adopts fails recordCut)
+    (hq : QuietAt N O recordCut) (afterRecord : recordCut ≤ cut)
+    (parentsFirst : ∀ i x, x < (run i).next → ∀ p ∈ (run i).par x, p < x) :
+    Recovery.HistoryWindow (run recordCut).hub.seq
+      (Recovery.HubSys.state (run cut) O.hist) := by
+  obtain ⟨head, steps⟩ := C.climbs recordCut hcut hq
+  exact Recovery.HubSys.history_window_of_climbs afterRecord head (fun i hi => (steps i hi).1)
+    (fun i hi => (steps i hi).2) (fun i _ _ => parentsFirst i)
+    (fun i hi _ => C.histBind i fun s hs => hq.noLoss s (by omega))
+
 /-! ## Records and environmental recovery stop -/
 
 /-- Fixed native records and drops, followed by the old-effect cutoff, force adoptions and

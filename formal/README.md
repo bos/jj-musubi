@@ -91,8 +91,8 @@ place. Start there:
       entry, scheduling and system bindings. Completion and fairness obligations stay explicit.
    4. `SysAcceptance/Phases.lean` derives quiet records, persistent entry, a completed active
       sample and final eligibility.
-   5. `SysAcceptance/Eligible.lean` owns `FineStart` and `FineAt`, and `Acceptance.lean` owns
-      `eligible_system_converges`.
+   5. `SysAcceptance/Eligible.lean` owns `FineSnapshot`, `FineStart` and `FineAt`, and
+      `Acceptance.lean` owns `eligible_system_converges`.
    6. `FineAssembly.lean` builds `FineAt` from the event replay and `FineSource`;
       `FineAssembly/Honesty.lean` proves the invariant on replies and notifications that
       assembly uses.
@@ -105,13 +105,14 @@ becomes a step of the fine system, to which the hub and node proofs apply. The *
 (`FineCut`) is the time from which every node has entered and has completed an active sample
 after old effects stopped; the fine system starts there. Three names derive from it:
 
-* `FineStart` is the fine system's starting snapshot at the fine cut;
+* `FineSnapshot` is the fine system's starting snapshot at the fine cut, and `FineStart` adds
+  the hub's history window to it;
 * `FineAt` is the fine system's interface from that cut: `FineStart`, its steps, graph law,
   fixed records, decisions and fairness. `FineAt.converges` concludes `Converges` for it;
-* `FineSource` is the same interface read from native event replay. `FineAssembly.fineAt_of`
-  builds `FineAt` from it;
-* `hive_converges_observed` takes a `FineSource` for every fine cut, and derives the rest of
-  `FineAt`.
+* `FineSource` is the same interface read from native event replay, on `FineSnapshot`.
+  `FineAssembly.fineAt_of` builds `FineAt` from it and the window;
+* `hive_converges_observed` takes a `FineSource` for every fine cut, derives the history window
+  (`history_window_from_record_cut`) and the rest of `FineAt`.
 
 `Pending/Contracts.lean` separates the abstract round's control and publication laws from
 survival facts derived from native naming. `known_after` in `Phases.lean` supplies the shared
@@ -135,10 +136,10 @@ The premises, in the order of the statement:
 
 * `label`, `decodeR` and `origin` are the adapter's data: they read a native record identity as
   a model id and as executable records, and name each operation's original.
-* `C : HiveContracts` has 8 groups and 42 fields.
+* `C : HiveContracts` has 8 groups and 43 fields.
 * `views`, `hubRecs` and `hubRecsStep` tie the records of the native observer, the hub and the
   fine nodes together.
-* `fine` yields a `FineSource` (12 fields) and its `FineStart` (10 fields). It is asked at every
+* `fine` yields a `FineSource` (12 fields) and its `FineSnapshot` (9 fields). It is asked at every
   `recordCut` and `cut` that satisfy `CutAt`, `QuietAt` and `FineCut`, not only at the pair the
   proof picks, which it chooses by existence.
 
@@ -169,12 +170,19 @@ Check these specially:
   pre-entry run (`EntryLaws`), including `objects_step` and `idle_restarts`, which require
   eventual round restarts.
 * `FineSource.inFlight` is the one part of the honesty invariant that is not derived. Its
-  window, head and clock parts follow from `historyWindow` and `clock`; the replay proves honesty
-  of traffic sent after the cut. A reply or notice already in flight at the cut has a snapshot
-  that no contract constrains: `ownHead`, `noteHead` and `replyBind` bind the observer's times,
-  and only replies consumed after the cut. So `inFlight` cannot be derived from the other
-  premises.
+  window, head and clock parts follow from the derived history window and `clock`; the replay
+  proves honesty of traffic sent after the cut. A reply or notice already in flight at the cut
+  has a snapshot that no contract constrains: `ownHead`, `noteHead` and `replyBind` bind the
+  observer's times, and only replies consumed after the cut. So `inFlight` cannot be derived
+  from the other premises.
 * `HubHandling.answer` joins an eventual-handling assumption to a correspondence.
+* `HubHandling.climbs` holds natively when no new drop is taken, which `CutAt` ensures, and the
+  hub's head at the cut survives the hub's records. The second condition is not derived. The
+  shipping hub accepts a push that drops its head by contracted ancestry, which can move the
+  head off its raw ancestry ([below](#contracted-ancestry)), and a hub rollback may leave the
+  head dropped by records the hub keeps. An auditor checks, against the native hub, that this
+  cannot happen from the cut. The `historyWindow` premise it replaces assumed the same chain
+  over the same interval, so the trust is no wider.
 
 ### Record effects (`Source.RecordEffects`)
 
@@ -254,8 +262,9 @@ Check these specially:
 | Field | Says | Tag | Why from the cut |
 | --- | --- | --- | --- |
 | `answer` | a push is handled at or after it is sent, and the hub then is `RawPublish.after` its packet and checks | **correspondence** and **progress/fairness** | a remade hub can drop a push before the cut |
+| `climbs` | from the record cut `k`, the hub's head exists; the raw graph only grows; and each step leaves the hub's sequence number and head as they are, or moves to the next sequence number and a different existing head with the old head among its raw ancestors (`HubClimb`); its `RawGrow` clause rests on `QuietAt.noLoss`: no remade hub, object loss or gc after the cut | **correspondence** | no new drop is taken, so an accept compares raw ancestry (`HubLaw.guards`), provided the hub's head at `k` survives the hub's records (not derived); otherwise an accept that drops the head compares contracted ancestry, which can jump the raw history |
 
-### The starting snapshot (`FineStart`)
+### The starting snapshot (`FineSnapshot`)
 
 `rawRoot` is data: the id of the raw root. Every other field is an **invariant at a cut**, at the
 fine cut `k` and for the eligible nodes. Each holds of a well-formed state and is kept by every
@@ -270,8 +279,16 @@ step after `k`, but no bound step leads to `k` from the start, so the proof cann
 | `time` | every reply and notice was made in the past (`TimeOK`) |
 | `objectReplies` | a reply to an objects request is objects |
 | `requestBounds` | a push in flight names an existing operation |
-| `historyWindow` | parents have smaller ids (`parLt`); the hub's head is an existing operation (`headLt`) and is the history's entry at the hub's sequence (`histHead`); `w`, the record cut's sequence, is at most that sequence (`window`); and from `w` the hub's history is a chain of ancestors (`chain`) with strictly increasing ids (`strict`) |
 | `distinctHeads` | each eligible node's heads, and those of its step in flight, are distinct |
+
+The hub's history window is not among them. `FineStart` adds it, and `hive_converges_observed`
+derives it (`history_window_from_record_cut`) from `HubHandling.climbs`, `Knowledge.histBind`
+and `FineSource.parentsFirst`: from the record cut `w`, nothing is lost, so the history holds the
+head at each time, and each move to the next sequence number is a step up raw ancestry. That gives
+parents with smaller ids (`parLt`); the hub's head an existing operation (`headLt`) and the
+history's entry at the hub's sequence (`histHead`); `w`, the record cut's sequence, at most that
+sequence (`window`); and from `w` the hub's history a chain of ancestors (`chain`) with strictly
+increasing ids (`strict`).
 
 ### Replay and fairness (`FineSource`)
 
@@ -367,10 +384,10 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/NodeSettle.lean` | Finite local control after hub stabilization, from individual calls and local scheduling. |
 | `Musubi/CallBatch.lean` | Sequential finite call batches and injective virtual/wire-id correlation. Not used by the convergence proof. |
 | `Musubi/Expansion.lean` | Expand each actual event to a positive finite path and transfer stabilization back. |
-| `Musubi/NodeSys.lean` | Joint graph/control model, named request guards and hub-answer law, invariants and shared scheduling facts. |
+| `Musubi/NodeSys.lean` | Joint graph/control model, named request guards, hub-answer law and the raw-ancestry climb (`HubClimb`), invariants and shared scheduling facts. |
 | `Musubi/NodeSysExec.lean` | Check structural writes with canonical id reuse. |
 | `Musubi/NativeEvents.lean` | Replay event data and derive its eligible system run. |
-| `Musubi/FineAssembly.lean` | Assemble the fine system from event replay, a shared starting snapshot and source bindings. |
+| `Musubi/FineAssembly.lean` | Assemble the fine system from event replay, a starting snapshot, the derived history window and source bindings. |
 | `Musubi/FineAssembly/Honesty.lean` | Preserve honest replies and notifications along the actual replay. |
 | `Musubi/Schedule.lean` | Shared bounds on event indices, sampling order and batch completion. |
 | `Musubi/NodeSysEntry.lean` | Derive node entry and preserve the joint control invariants under individual-call fairness. |
@@ -380,19 +397,19 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/SysAcceptance/Acceptance.lean` | Actual request decisions and stable-hub acceptance. |
 | `Musubi/SysAcceptance/Pending.lean` | The control/publication contradiction for a node that stays pending. |
 | `Musubi/SysAcceptance/Pending/Contracts.lean` | Shared round, control and publication interfaces; native naming laws derive survival. |
-| `Musubi/SysAcceptance/Eligible.lean` | Filtering and convergence of eligible nodes, with the shared starting snapshot and fine-run interface. |
+| `Musubi/SysAcceptance/Eligible.lean` | Filtering and convergence of eligible nodes, with the starting snapshot, its history window and the fine-run interface. |
 | `Musubi/SysAcceptance/Events.lean` | Individual hub and node observations projected into system steps. |
 | `Musubi/SysAcceptance/Observations.lean` | Grouped hive observations and their sampled entry, fetch and pending views. |
 | `Musubi/SysAcceptance/Cuts.lean` | Named phase boundaries and quiet-suffix conditions. |
-| `Musubi/SysAcceptance/Contracts.lean` | Source laws grouped by responsibility, with completion and fairness assumptions. |
-| `Musubi/SysAcceptance/Phases.lean` | Derive old-effect, recovery, entry and fine cuts, truthful knowledge and final eligibility. |
+| `Musubi/SysAcceptance/Contracts.lean` | Source laws grouped by responsibility, with completion and fairness assumptions, and the hub's climb from the record cut. |
+| `Musubi/SysAcceptance/Phases.lean` | Derive old-effect, recovery, entry and fine cuts, the hub's history window at the fine cut, truthful knowledge and final eligibility. |
 | `Musubi/SysAcceptance/Convergence.lean` | Compose the derived phases into hive convergence. |
-| `Musubi/HubSys.lean` | Read raw hub and node policy fields from that same joint system. |
+| `Musubi/HubSys.lean` | Reads the hub's and nodes' policy fields out of the one joint system as a `Musubi.State`, with `parents`, which is acyclic when every operation's parents are smaller than it. |
 | `Musubi/HubLedger.lean` | Retain actual send-time packet fields and prove coverage of outstanding eligible requests. |
 | `Musubi/RawExpansion.lean`, `Musubi/RawMaintenance.lean` | Expand finite raw write batches, counting actual maintenance operations. |
 | `Musubi/HubNodeSteps.lean` | Refine eligible node events to hub-suffix paths under explicit native primitive laws. |
 | `Musubi/HubAnswers.lean` | Derive the suffix accept or frame from the actual immutable request and hub answer. |
-| `Musubi/HubHistory.lean` | The hub's history of the joint run, by sequence number. |
+| `Musubi/HubHistory.lean` | The hub's history of the joint run, by sequence number, and its history window from a climbing hub. |
 | `Musubi/RequestBounds.lean` | Derive request bounds, expand actual joint events, and prove the hub stabilizes. |
 | `Musubi/PendingEpoch.lean` | Bound pending alias changes with partial normalization and per-original coherence. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, including contracted acceptance, survivor advance and prepared adoption, checked at build time. |
@@ -1235,11 +1252,11 @@ an interrupted adoption and a hub rollback). `SStep.sup` accepts by that compari
 a step of the one relation, and `SInv` holds after it. The hub's history is then a chain only in
 the hub's own comparison (`SInv.histBelow`), and the liveness theorems, which need an original
 chain (`SChain`), say nothing of the states that follow. `FineAssembly.hive_converges_observed`
-covers them, under its premises. Those are assumed only from a record cut on (`historyWindow`
-starts at the hub's sequence there), and an acceptance like this one adds to the hub's drops, so
-it comes before the records stop changing; from then on every acceptance is in original
-ancestry (`hub_moves_original`), as `HubLaw.guards` requires. The executable hub decision there
-checks `belowB` (`Exec.PacketPrimitives.descends` in `PacketAcceptance.lean`).
+covers them, under its premises. Those are assumed only from a record cut on (`climbs` and the
+history window it gives start at the hub's sequence there), and an acceptance like this one adds
+to the hub's drops, so it comes before the records stop changing; from then on every acceptance
+is in original ancestry (`hub_moves_original`), as `HubLaw.guards` requires. The executable hub
+decision there checks `belowB` (`Exec.PacketPrimitives.descends` in `PacketAcceptance.lean`).
 
 - `Contract.lean`: `Below` says every surviving image of the expected head is below the new
   head, and `belowB` (`ContractOrder.lean`) also checks that the image is nonempty, as the hub

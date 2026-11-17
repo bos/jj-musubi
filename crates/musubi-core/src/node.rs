@@ -20,6 +20,14 @@ use crate::message::Reply;
 use crate::message::Request;
 
 /// A node's persistent state, in canonical terms.
+///
+/// The methods with default bodies keep state only the jj repository has: names of pending
+/// drops to reconcile, record bodies and received records, and what this node pushed and may
+/// publish. The core's model keeps none of it: it leaves most of them to the defaults, and
+/// overrides the others only so that a test can observe or set them. Tests with real
+/// repositories cover what the jj repository does in them: docs/internals/conformance.md,
+/// "Record custody and recovery" and "Snapshot publication", and the rows of
+/// docs/internals/races.md on abandoning a push and on holding a publication.
 pub trait LocalRepo {
     type Op: Clone + Ord + Hash + Debug;
     type Attachment;
@@ -33,7 +41,7 @@ pub trait LocalRepo {
 
     /// Reads the heads and names pending drops against the known hub history, after
     /// noticing any local abandonment. This renames bookkeeping, not local history.
-    /// A backend whose ids are immutable identities needs no separate name reconciliation.
+    /// The core's model gives each operation one name, so it has nothing to rename.
     fn heads_for(&mut self, _known: &Self::Op) -> Result<Vec<Self::Op>, Self::Error> {
         self.heads()
     }
@@ -79,8 +87,8 @@ pub trait LocalRepo {
     ) -> Result<(), Self::Error>;
 
     /// Stores the canonical bodies and parent closure of whole records without staging
-    /// them as ancestors of the current head. A backend whose ids already describe its
-    /// immutable operations needs no separate metadata storage.
+    /// them as ancestors of the current head. The core's model holds every operation's body
+    /// already.
     fn store_record_ops(
         &mut self,
         _records: &[Vec<Self::Op>],
@@ -127,9 +135,9 @@ pub trait LocalRepo {
     /// The hub's records this node took last.
     fn applied_records(&self) -> Result<Records<Self::Op>, Self::Error>;
 
-    /// Whether received records still need reconciliation. A backend may retain them before
-    /// realizing their history, so it can recover them even when the hub announces the same
-    /// records this node already applied.
+    /// Whether received records still need reconciliation. The jj repository keeps them before
+    /// realizing their history, so that it can recover them even when the hub announces the
+    /// same records this node already applied.
     fn has_record_receipts(&self) -> Result<bool, Self::Error> {
         Ok(false)
     }

@@ -414,6 +414,9 @@ pub struct FakeRepo {
     pub object_checks: Cell<usize>,
     /// Canonical record bodies requested even when no current-head operations are staged.
     pub stored_record_ops: Option<Vec<Vec<Op>>>,
+    /// Received records a real repository holds in custody, which taking records clears. The
+    /// stateful model tests leave this false: the model's node takes records atomically.
+    pub record_receipts: bool,
     /// Crash before writing the next objects to stage: a real repository writes operations
     /// and objects separately.
     pub crash_before_objects: bool,
@@ -462,6 +465,7 @@ impl FakeRepo {
             staged_reads: Cell::new(0),
             object_checks: Cell::new(0),
             stored_record_ops: None,
+            record_receipts: false,
             crash_before_objects: false,
             objects_lost: false,
             dropped: BTreeSet::new(),
@@ -513,6 +517,7 @@ impl FakeRepo {
         self.dropped.extend(flat(records));
         self.applied = records.to_vec();
         self.prepared = None;
+        self.record_receipts = false;
         if !self.held.contains(&self.applied) {
             self.held.push(self.applied.clone());
         }
@@ -704,6 +709,10 @@ impl LocalRepo for FakeRepo {
             base: self.univ.borrow_mut().record_state(&[]),
             records: self.applied.clone(),
         })
+    }
+
+    fn has_record_receipts(&self) -> Result<bool, Infallible> {
+        Ok(self.record_receipts)
     }
 
     fn records(&self) -> Result<RecordState, Infallible> {

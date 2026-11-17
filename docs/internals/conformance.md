@@ -383,8 +383,11 @@ names of one original. The following real-repository tests cover those boundarie
 Custody and applied records are distinct: saving a receipt does not report its effects as
 applied. The `recordEpoch` route checks the equal-record adoption that consumes custody and
 makes those effects pending. The core retains an equal-record announcement while receipts
-need reconciliation. `advance` clears its staged graph and ancestry cache when record state
-changes, even if a later part of the advance fails.
+need reconciliation, and takes it, which consumes them:
+`record_receipts_retake_records_equal_to_those_applied` checks this against an opt-in receipt
+flag on the core harness's fake, which the generated runs leave unset. `advance` clears its
+staged graph and ancestry cache when record state changes, even if a later part of the advance
+fails.
 
 The production driver ends a round on an incomplete reply with a refusal error. The low-level
 hive harness can continue past that boundary, so its bounded retry traces do not demonstrate

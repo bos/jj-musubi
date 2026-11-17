@@ -360,6 +360,12 @@ impl LocalRepo for Fallible<FakeRepo> {
         Ok(())
     }
 
+    fn has_record_receipts(&self) -> Result<bool, StorageError> {
+        // No fault point: the generated runs hold no receipts, and one would shift every
+        // storage countdown after it.
+        Ok(infallible(self.inner.has_record_receipts()))
+    }
+
     fn stage_objects(&mut self, ops: &[Op], objs: &Vec<Obj>) -> Result<(), StorageError> {
         let hit = self.enter("node.stage_objects", !objs.is_empty(), objs.len() > 1)?;
         let prefix;

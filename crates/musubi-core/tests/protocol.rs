@@ -866,6 +866,65 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
     }
 }
 
+/// While received records await reconciliation, a node takes the hub's records again even
+/// when they equal those it applied, which clears the receipts; without receipts it has
+/// nothing to take. A real repository keeps receipts in custody, so that records a hub lost
+/// still become pending drops (`RecordEpoch.lean`), which the model's atomic node never
+/// reaches. Ignoring `has_record_receipts` in `note_announced` or in `step` fails this.
+#[test]
+fn record_receipts_retake_records_equal_to_those_applied() {
+    use musubi_core::message::Records;
+    use musubi_core::node::{LocalRepo as _, NodeCore, Step};
+    use support::model::{FakeRepo, ROOT, Univ};
+
+    for receipts in [false, true] {
+        let univ = Rc::new(RefCell::new(Univ::new()));
+        let mut repo = FakeRepo::new(univ.clone(), 0);
+        let (dropped, _) = repo.user_op(ROOT, 0);
+        let (head, _) = repo.user_op(dropped, 0);
+        let empty = univ.borrow_mut().record_state(&[]);
+        let applied = univ.borrow_mut().record_state(&[vec![dropped]]);
+        repo.adopt(&Records {
+            base: empty.clone(),
+            records: vec![vec![dropped]],
+        })
+        .unwrap();
+        repo.record_receipts = receipts;
+        let mut core = NodeCore::new(ROOT);
+        core.handle(
+            &mut repo,
+            Reply::Head {
+                kind: HeadKind::Head,
+                seq: 1,
+                head,
+                records: applied.clone(),
+            },
+        )
+        .unwrap();
+        core.handle(
+            &mut repo,
+            Reply::Fetched {
+                seq: 1,
+                head,
+                ops: vec![],
+                ops_attachment: vec![],
+                objects: vec![],
+                records: applied,
+                records_from: 0,
+                new_records: vec![vec![dropped]],
+                pruned: empty,
+            },
+        )
+        .unwrap();
+        if receipts {
+            assert_eq!(core.step(&mut repo).unwrap(), Step::Adopted);
+            assert!(!repo.record_receipts, "taking records clears the receipts");
+        }
+        assert_eq!(core.step(&mut repo).unwrap(), Step::Idle, "{receipts}");
+        assert_eq!(repo.applied, vec![vec![dropped]], "{receipts}");
+    }
+}
+
 /// A push from the hub's head whose closure the hub still lacks is `Incomplete`, not
 /// `Rejected`: a node takes `Rejected` for a lost race, and would fetch and push the same
 /// again forever, though it can't send what it lacks.

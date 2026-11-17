@@ -46,21 +46,25 @@ fn a_drop_outside_the_hub_head_is_remembered_without_a_cached_image() {
     // A lost drop can be published after the hub starts again at its root. Its metadata
     // arrives with the packet, beside the surviving head's closure.
     let contracted = hub.contract(&[HubOp(dropped.clone())]).unwrap();
+    assert!(hub.missing_closure(&new.0, &contracted).unwrap().is_empty());
+    hub.set_head(1, &new.0, contracted).unwrap();
+    assert!(hub.is_superseded(&dropped.0));
+    assert_eq!(hub.current(&dropped.0), vec![dropped.0.clone()]);
     assert!(
-        hub.missing_closure_with(&new.0, Some(&contracted))
+        !hub.missing_closure(&dropped.0, &hub.uncontracted())
             .unwrap()
             .is_empty()
     );
-    hub.set_head(1, &new.0, Some(contracted)).unwrap();
-    assert!(hub.is_superseded(&dropped.0));
-    assert_eq!(hub.current(&dropped.0), vec![dropped.0.clone()]);
-    assert!(!hub.missing_closure(&dropped.0).unwrap().is_empty());
 
     drop(hub);
     let hub = HubStore::open(&path).unwrap();
     assert!(hub.is_superseded(&dropped.0));
     assert_eq!(hub.current(&dropped.0), vec![dropped.0.clone()]);
-    assert!(!hub.missing_closure(&dropped.0).unwrap().is_empty());
+    assert!(
+        !hub.missing_closure(&dropped.0, &hub.uncontracted())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -82,17 +86,17 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     let a = hub.canonical().write_operation(&op).unwrap();
     op.parents = vec![a.0.clone()];
     let x = hub.canonical().write_operation(&op).unwrap();
-    assert!(hub.missing_closure(&x.0).unwrap().is_empty());
-    hub.set_head(1, &x.0, None).unwrap();
-    let contracted = hub.contract(&[HubOp(a.clone())]).unwrap();
-    let now = contracted.image(&x.0)[0].clone();
-    assert_ne!(now, a.0);
     assert!(
-        hub.missing_closure_with(&now, Some(&contracted))
+        hub.missing_closure(&x.0, &hub.uncontracted())
             .unwrap()
             .is_empty()
     );
-    hub.set_head(2, &now, Some(contracted)).unwrap();
+    hub.set_head(1, &x.0, hub.uncontracted()).unwrap();
+    let contracted = hub.contract(&[HubOp(a.clone())]).unwrap();
+    let now = contracted.image(&x.0)[0].clone();
+    assert_ne!(now, a.0);
+    assert!(hub.missing_closure(&now, &contracted).unwrap().is_empty());
+    hub.set_head(2, &now, contracted).unwrap();
     assert!(!hub.is_superseded(&now));
     assert!(hub.is_superseded(&a.0));
 
@@ -112,7 +116,7 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
             .is_ancestor_of(&CanonicalOp(now.clone()), &next)
             .unwrap()
     );
-    hub.set_head(3, &next.0, Some(again)).unwrap();
+    hub.set_head(3, &next.0, again).unwrap();
     assert_eq!(hub.record_count(), count);
     assert_eq!(hub.current(&x.0), old_image);
     assert_eq!(hub.current(&now), vec![now.clone()]);
@@ -131,7 +135,11 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     hub.canonical()
         .import_operation(&forged_id, &bytes)
         .unwrap();
-    assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
+    assert!(
+        !hub.missing_closure(&forged_id.0, &hub.uncontracted())
+            .unwrap()
+            .is_empty()
+    );
     drop(hub);
     let hub = HubStore::open(&path).unwrap();
     assert_eq!(hub.head().1, &next.0);
@@ -140,7 +148,11 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     assert_eq!(hub.current(&now), vec![now]);
     let again = hub.contract(&[HubOp(a), HubOp(x)]).unwrap();
     assert_eq!(again.image(&next.0), vec![next.0.clone()]);
-    assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
+    assert!(
+        !hub.missing_closure(&forged_id.0, &hub.uncontracted())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn canonical_ancestry(node: &NodeRepo, head: &CanonicalOp) -> Vec<CanonicalOp> {
@@ -170,7 +182,11 @@ fn closure_and_head_persist() {
     let hub_dir = env.root().join("hub");
     let mut hub = HubStore::init(&hub_dir, Backend::GIT).unwrap();
     assert!(!hub.descends_from_head(&head.0).unwrap() || *hub.head().1 == head.0);
-    assert!(!hub.missing_closure(&head.0).unwrap().is_empty());
+    assert!(
+        !hub.missing_closure(&head.0, &hub.uncontracted())
+            .unwrap()
+            .is_empty()
+    );
 
     // Operations alone are not enough: the commits are missing.
     let ops = canonical_ancestry(&node, &head);
@@ -184,7 +200,7 @@ fn closure_and_head_persist() {
         hub.canonical().import_operation(id, &op_bytes).unwrap();
     }
     assert!(hub.descends_from_head(&head.0).unwrap());
-    let missing = hub.missing_closure(&head.0).unwrap();
+    let missing = hub.missing_closure(&head.0, &hub.uncontracted()).unwrap();
     assert!(
         missing.iter().all(|m| m.starts_with("commit ")),
         "{missing:?}"
@@ -199,9 +215,12 @@ fn closure_and_head_persist() {
     hub.object_store()
         .import(bundle.path(), &wants, &[])
         .unwrap();
-    assert_eq!(hub.missing_closure(&head.0).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        hub.missing_closure(&head.0, &hub.uncontracted()).unwrap(),
+        Vec::<String>::new()
+    );
 
-    hub.set_head(1, &head.0, None).unwrap();
+    hub.set_head(1, &head.0, hub.uncontracted()).unwrap();
     // Refs name the head's visible heads, for git to index.
     let refs = Command::new("git")
         .arg("-C")
@@ -376,8 +395,11 @@ fn closure_check_skips_accepted_history() {
         .export(&required(&node, &first_ops), &[], bundle_file.path())
         .unwrap();
     unpack_loose(bundle_file.path(), &hub_dir.join("git"));
-    assert_eq!(hub.missing_closure(&first.0).unwrap(), Vec::<String>::new());
-    hub.set_head(1, &first.0, None).unwrap();
+    assert_eq!(
+        hub.missing_closure(&first.0, &hub.uncontracted()).unwrap(),
+        Vec::<String>::new()
+    );
+    hub.set_head(1, &first.0, hub.uncontracted()).unwrap();
 
     repo.write_file("b", "two");
     repo.jj(&["commit", "-m", "two"]);
@@ -413,7 +435,7 @@ fn closure_check_skips_accepted_history() {
     )
     .unwrap();
     assert_eq!(
-        hub.missing_closure(&second.0).unwrap(),
+        hub.missing_closure(&second.0, &hub.uncontracted()).unwrap(),
         Vec::<String>::new()
     );
 }
@@ -446,7 +468,7 @@ fn small_edits_stay_small_beside_a_bitmap() {
     hub.object_store()
         .import(bundle.path(), &old_wants, &[])
         .unwrap();
-    hub.set_head(1, &old.0, None).unwrap();
+    hub.set_head(1, &old.0, hub.uncontracted()).unwrap();
     // A bitmap index of what the head reaches, as the hub's gc writes once it's big.
     let git_dir = hub_dir.join("git");
     let repack = Command::new("git")

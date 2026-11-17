@@ -400,6 +400,16 @@ impl HubStore {
         self.accepted.contains_key(op)
     }
 
+    /// The history with nothing more dropped: the contraction that changes nothing.
+    pub fn uncontracted(&self) -> Contracted {
+        Contracted {
+            dropped_origins: HashSet::new(),
+            head: self.head().1.clone(),
+            dropped: vec![],
+            images: HashMap::new(),
+        }
+    }
+
     /// Replaces the head, taking `contracted`'s record with it, if it drops anything. The
     /// caller has checked that `new` is closed and descends from the current head, once that
     /// is dropped.
@@ -407,30 +417,16 @@ impl HubStore {
         &mut self,
         seq: u64,
         new: &OperationId,
-        contracted: Option<Contracted>,
+        contracted: Contracted,
     ) -> Result<(), StoreError> {
         assert_eq!(
             seq,
             self.history.len() as u64,
             "heads are accepted in sequence"
         );
-        let record = contracted
-            .as_ref()
-            .map(|contracted| contracted.dropped.clone())
-            .unwrap_or_default();
-        append_head(&self.dir, seq, new, &record)?;
-        if let Some(contracted) = contracted {
-            self.take(contracted);
-        }
-        let accepted = self.unaccepted_ancestors(new)?;
-        for id in accepted {
-            self.accepted_origins.insert(
-                self.canonical.original_id(&CanonicalOp(id.clone()))?,
-                id.clone(),
-            );
-            self.accepted.insert(id, seq);
-        }
-        self.history.push(new.clone());
+        append_head(&self.dir, seq, new, &contracted.dropped)?;
+        self.take(contracted);
+        self.accept(new.clone())?;
         // Upkeep, which a push mustn't fail over.
         if let Err(err) = self.mark_head(new) {
             tracing::warn!("indexing what head {} reaches: {err}", new.hex());
@@ -452,7 +448,7 @@ impl HubStore {
         Ok(self.object_store().mark_head(&heads)?)
     }
 
-    /// Accepts `head` as the next head, as read back from the log.
+    /// Accepts `head` as the next head, with its ancestors not accepted yet.
     fn accept(&mut self, head: OperationId) -> Result<(), StoreError> {
         let seq = self.history.len() as u64;
         for id in self.unaccepted_ancestors(&head)? {
@@ -568,27 +564,21 @@ impl HubStore {
     /// Accepted operations are closed (HubClosed), so the check covers only what is new:
     /// the walk stops at accepted operations, and so does the walk over objects, at the
     /// commits of those it reached and of the head.
-    pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
-        self.missing_closure_with(op, None)
-    }
-
-    /// [`Self::missing_closure`], once the history drops what `contracted` drops: its rewrites
-    /// of accepted operations are closed as those are, with the same views.
-    pub fn missing_closure_with(
+    ///
+    /// The history is taken as it is once it drops what `contracted` drops
+    /// ([`Self::uncontracted`] for nothing more): its rewrites of accepted operations are
+    /// closed as those are, with the same views.
+    pub fn missing_closure(
         &self,
         op: &OperationId,
-        contracted: Option<&Contracted>,
+        contracted: &Contracted,
     ) -> Result<Vec<String>, StoreError> {
         let rewrites: HashSet<&OperationId> = contracted
-            .map(|contracted| {
-                contracted
-                    .images
-                    .iter()
-                    .filter(|(old, _)| !contracted.dropped.contains(old))
-                    .filter_map(|(_, images)| images.first())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .images
+            .iter()
+            .filter(|(old, _)| !contracted.dropped.contains(old))
+            .filter_map(|(_, images)| images.first())
+            .collect();
         let mut missing = vec![];
         let mut reached = vec![];
         let mut boundary = BTreeSet::from([self.head().1.clone()]);
@@ -599,7 +589,7 @@ impl HubStore {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if self.is_superseded(&id) || contracted.is_some_and(|c| c.dropped.contains(&id)) {
+            if self.is_superseded(&id) || contracted.dropped.contains(&id) {
                 missing.push(format!("operation {} was abandoned", id.hex()));
                 continue;
             }
@@ -613,10 +603,11 @@ impl HubStore {
                 continue;
             }
             let (operation, origin) = self.canonical.read_operation_and_original(&canonical)?;
-            let dropped_here = contracted.is_some_and(|c| c.dropped_origins.contains(&origin));
+            let dropped_here = contracted.dropped_origins.contains(&origin);
             let accepted_id = self.accepted_origins.get(&origin).map(|old| {
                 contracted
-                    .and_then(|c| c.images.get(old))
+                    .images
+                    .get(old)
                     .and_then(|images| images.first())
                     .unwrap_or(old)
             });

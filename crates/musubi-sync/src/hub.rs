@@ -272,10 +272,10 @@ impl HubStorage for HubAdapter {
     fn set_head(&mut self, seq: u64, head: &OpId, dropped: &[OpId]) -> anyhow::Result<()> {
         let contracted = if dropped.is_empty() {
             self.contracted.take();
-            None
+            self.store.uncontracted()
         } else {
             self.with_contracted(dropped, |_| Ok(()))?;
-            self.contracted.take()
+            self.contracted.take().expect("contracted above")
         };
         Ok(self.store.set_head(seq, head, contracted)?)
     }
@@ -442,10 +442,10 @@ impl HubStorage for HubAdapter {
 
     fn is_closed(&self, op: &OpId, dropped: &[OpId]) -> anyhow::Result<bool> {
         let missing = if dropped.is_empty() {
-            self.store.missing_closure(op)?
+            self.store.missing_closure(op, &self.store.uncontracted())?
         } else {
             self.with_contracted(dropped, |contracted| {
-                Ok(self.store.missing_closure_with(op, Some(contracted))?)
+                Ok(self.store.missing_closure(op, contracted)?)
             })?
         };
         if !missing.is_empty() {

@@ -320,7 +320,12 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     assert!(accepted.0 > 0);
     let store = HubStore::open(&hive_dir).unwrap();
     assert_eq!(store.head(), (accepted.0, &accepted.1));
-    assert!(store.missing_closure(&accepted.1).unwrap().is_empty());
+    assert!(
+        store
+            .missing_closure(&accepted.1, &store.uncontracted())
+            .unwrap()
+            .is_empty()
+    );
     let records = HubAdapter::new(store, &hive_dir).unwrap();
     let records = musubi_core::hub::HubStorage::records(&records);
 
@@ -395,7 +400,12 @@ async fn a_worker_reopens_its_service_after_a_panic() {
         let notice = Envelope::<HeadNotice>::decode(&message.payload).unwrap();
         let head = OpId::new(notice.head);
         assert!(notice.seq > last.0);
-        assert!(store.missing_closure(&head).unwrap().is_empty());
+        assert!(
+            store
+                .missing_closure(&head, &store.uncontracted())
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             store
                 .canonical()

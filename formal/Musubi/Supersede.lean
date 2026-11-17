@@ -324,7 +324,7 @@ theorem step_heads_cover {s t : State} (hI : InvR N s) (hs : Step N s t) {m x : 
     | advance n hn hk hna =>
       by_cases hmn : m = n
       · subst hmn
-        have hB : ∀ y, ((s.node m).heads y ∨ y = (s.node m).known.2) → y < s.U.next := by
+        have hB : ∀ y, ((s.node m).heads y ∨ y = (s.node m).known.head) → y < s.U.next := by
           rintro y (hy | rfl)
           · exact hI.headsLt hy
           · exact hI.knownLt m
@@ -854,44 +854,44 @@ set with its push (`supPush`), or first writes the fix-up operation on its head 
 (`supFix`), as musubi does. -/
 inductive SPStepR (N : Nat) : SState → SState → Prop
   | learn (S : SState) (n : Nat) (hn : n < N)
-      (hs : (S.s.node n).known ≠ (S.s.hub.seq, S.s.hub.head)) :
+      (hs : (S.s.node n).known ≠ ⟨S.s.hub.seq, S.s.hub.head⟩) :
       SPStepR N S (S.withBase (S.s.pLearn n))
   | realize (S : SState) (n x : Nat) (hn : n < N) (hc : Consistent S.s n)
-      (hx : Anc S.s.U.par x (S.s.node n).known.2) (hnl : ¬ (S.s.node n).lops x)
+      (hx : Anc S.s.U.par x (S.s.node n).known.head) (hnl : ¬ (S.s.node n).lops x)
       (hp : ∀ p ∈ S.s.U.par x, (S.s.node n).lops p) :
       SPStepR N S (S.withBase (S.s.pRealize n x))
-  | advance (S : SState) (n : Nat) (hn : n < N) (hk : (S.s.node n).lops (S.s.node n).known.2)
-      (hna : ¬ ∃ h, (S.s.node n).heads h ∧ Anc S.s.U.par (S.s.node n).known.2 h)
-      (hd : ¬ S.nodeD n (S.s.node n).known.2) :
+  | advance (S : SState) (n : Nat) (hn : n < N) (hk : (S.s.node n).lops (S.s.node n).known.head)
+      (hna : ¬ ∃ h, (S.s.node n).heads h ∧ Anc S.s.U.par (S.s.node n).known.head h)
+      (hd : ¬ S.nodeD n (S.s.node n).known.head) :
       SPStepR N S (S.withBase (S.s.advance n))
   | merge (S : SState) (n : Nat) (L O : List Nat) (hn : n < N)
       (hL : ∀ x, x ∈ L ↔ (S.s.node n).heads x) (h2 : ∃ a b, a ∈ L ∧ b ∈ L ∧ a ≠ b) :
       SPStepR N S (S.withBase (S.s.mergeOp n L O))
   | pushAccept (S : SState) (n h : Nat) (hn : n < N)
-      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
-      (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hacc : S.s.hub.head = (S.s.node n).known.2)
+      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.head)
+      (hk : Anc S.s.U.par (S.s.node n).known.head h) (hacc : S.s.hub.head = (S.s.node n).known.head)
       (hD : ∀ x, S.nodeD n x ↔ S.hubD x) :
       SPStepR N S ((S.sendSupS n h (S.nodeD n)).withBase (S.s.pPushAccept n h))
   | pushIdem (S : SState) (n h : Nat) (hn : n < N)
-      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
-      (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hidem : S.s.hub.head = h) :
+      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.head)
+      (hk : Anc S.s.U.par (S.s.node n).known.head h) (hidem : S.s.hub.head = h) :
       SPStepR N S (S.withBase (S.s.pPushIdem n h))
   | pushReject (S : SState) (n h : Nat) (hn : n < N)
-      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
-      (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hrej : S.s.hub.head ≠ (S.s.node n).known.2)
+      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.head)
+      (hk : Anc S.s.U.par (S.s.node n).known.head h) (hrej : S.s.hub.head ≠ (S.s.node n).known.head)
       (hrej' : S.s.hub.head ≠ h) :
       SPStepR N S (S.withBase (S.s.pPushReject n h))
   | adopt (S : SState) (n : Nat) (hn : n < N) (hlag : ∃ x, S.hubD x ∧ ¬ S.nodeD n x)
       (hheads : ∀ h, (S.s.node n).heads h → ¬ S.hubD h) :
       SPStepR N S (S.adoptHub n)
   | supPush (S : SState) (n h : Nat) (hn : n < N)
-      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
-      (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hacc : S.s.hub.head = (S.s.node n).known.2)
+      (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.head)
+      (hk : Anc S.s.U.par (S.s.node n).known.head h) (hacc : S.s.hub.head = (S.s.node n).known.head)
       (hsub : ∀ x, S.hubD x → S.nodeD n x) (hpend : ∃ x, S.nodeD n x ∧ ¬ S.hubD x) :
       SPStepR N S (S.supWith n h (S.s.pPushAccept n h))
   | supFix (S : SState) (n g : Nat) (hn : n < N)
       (hh : ∀ y, (S.s.node n).heads y ↔ y = g)
-      (hk : (S.s.node n).known = (S.s.hub.seq, S.s.hub.head))
+      (hk : (S.s.node n).known = ⟨S.s.hub.seq, S.s.hub.head⟩)
       (hkg : Anc S.s.U.par S.s.hub.head g)
       (hsub : ∀ x, S.hubD x → S.nodeD n x) (hpend : ∃ x, S.nodeD n x ∧ ¬ S.hubD x) :
       SPStepR N S (S.supWith n S.s.U.next ((S.s.userOp n g []).pPushAccept n S.s.U.next))
@@ -930,7 +930,7 @@ theorem setNode_heads {s : State} {n : Nat} {nd : Node} (h : nd.heads = (s.node 
   · rw [setNode_ne hi]
 
 theorem pRealize_srun {S : SState} {n x : Nat} (hn : n < N)
-    (hx : Anc S.s.U.par x (S.s.node n).known.2) (hc : HubHas S.s x)
+    (hx : Anc S.s.U.par x (S.s.node n).known.head) (hc : HubHas S.s x)
     (hp : ∀ p ∈ S.s.U.par x, (S.s.node n).lops p) :
     SRSteps N S { S with s := S.s.pRealize n x } := by
   have r1 := frame_tail (SRSteps.refl S) (SyncStep.fetchOps S.s n (· = x) hn (fun y hy => hy ▸ hx))
@@ -964,7 +964,7 @@ theorem pUpload_srun {S : SState} {n hd : Nat} (hn : n < N) (hI : InvR N S.s)
       exact hI.lObjs n y o (lopsAnc hy) hoy)) rfl rfl (fun _ => rfl)
   have r4 := frame_tail r3 (SyncStep.hubPutObjs _ n (S.s.upObjs n hd) (Or.inr rfl)) rfl rfl
     (fun _ => rfl)
-  exact frame_tail r4 (SyncStep.push _ n (S.s.node n).known.2 hd hn hl) rfl rfl (fun _ => rfl)
+  exact frame_tail r4 (SyncStep.push _ n (S.s.node n).known.head hd hn hl) rfl rfl (fun _ => rfl)
 
 /-- Learning the head in a reply, at any sequence number. -/
 theorem learn_srun {S T : SState} (h : SRSteps N S T) {n : Nat} {k : HeadKind} {sq hd : Nat}
@@ -979,14 +979,14 @@ theorem hist_cur_eq {S : SState} (hI : SInv N S) : S.hubDHist S.s.hub.seq = S.hu
 /-- An upload, a push the hub accepts, carrying records that drop what it pruned, and learning
 the head. -/
 theorem pushAccept_srun {S : SState} (hS : SRReachable N S) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (S.s.node n).heads y ↔ y = hd) (hne : hd ≠ (S.s.node n).known.2)
-    (hk : Anc S.s.U.par (S.s.node n).known.2 hd) (hacc : S.s.hub.head = (S.s.node n).known.2)
+    (hh : ∀ y, (S.s.node n).heads y ↔ y = hd) (hne : hd ≠ (S.s.node n).known.head)
+    (hk : Anc S.s.U.par (S.s.node n).known.head hd) (hacc : S.s.hub.head = (S.s.node n).known.head)
     (hc : Carried S hd) (hdh : ¬ Remembered S hd) :
     SRSteps N S (S.withBase (S.s.pPushAccept n hd)) := by
   have hI := sinv_reachable hS
   have hIb := hI.base
   have r := pUpload_srun (S := S) hn hIb (hIb.headsLocal n hd ((hh hd).2 rfl))
-  have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.2 hd
+  have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.head hd
     (Or.inr rfl) (fun e => hne ((show S.s.hub.head = hd from e).symm.trans hacc)) hacc hk
     (pUpload_closed_of hIb.hubClosed (by rw [hacc]; exact Anc.refl))
   have st := SStep.base { S with s := S.s.pUpload n hd } _ (Or.inr hcas)
@@ -1054,13 +1054,13 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hA : AllPruned
   | pushIdem n hd hn hh hne hk hidem =>
     rw [keep (t := S.s.pPushIdem n hd) rfl]
     have r := pUpload_srun (S := S) hn hIb (hIb.headsLocal n hd ((hh hd).2 rfl))
-    have r' := frame_tail r (SyncStep.casIdem _ n (S.s.node n).known.2 hd (Or.inr rfl) hidem)
+    have r' := frame_tail r (SyncStep.casIdem _ n (S.s.node n).known.head hd (Or.inr rfl) hidem)
       rfl rfl (fun _ => rfl)
     exact (learn_srun r' (k := .accepted) hn (Or.inr rfl)).reachable hS
   | pushReject n hd hn hh hne hk hrej hrej' =>
     rw [keep (t := S.s.pPushReject n hd) rfl]
     have r := pUpload_srun (S := S) hn hIb (hIb.headsLocal n hd ((hh hd).2 rfl))
-    have r' := frame_tail r (SyncStep.casReject _ n (S.s.node n).known.2 hd (Or.inr rfl)
+    have r' := frame_tail r (SyncStep.casReject _ n (S.s.node n).known.head hd (Or.inr rfl)
       hrej' (fun ⟨e, _, _⟩ => hrej e)) rfl rfl (fun _ => rfl)
     exact (learn_srun r' (k := .rejected) hn (Or.inr rfl)).reachable hS
   | adopt n hn hlag hheads =>
@@ -1072,7 +1072,7 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hA : AllPruned
     have S1 := hS.step (Or.inl (SStep.sendSup S n hd (S.nodeD n) hn (fun _ h => h) hdn))
     have r := pUpload_srun (S := S.sendSupS n hd (S.nodeD n)) hn hIb
       (hIb.headsLocal n hd ((hh hd).2 rfl))
-    have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.2 hd
+    have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.head hd
       (Or.inr rfl) (fun e => hne ((show S.s.hub.head = hd from e).symm.trans hacc)) hacc hk
       (pUpload_closed_of hIb.hubClosed (by rw [hacc]; exact Anc.refl))
     have st := SStep.sup { S.sendSupS n hd (S.nodeD n) with s := S.s.pUpload n hd } _ n
@@ -1117,25 +1117,25 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hA : AllPruned
       (S.nodeD n) hn (fun _ h => h) (hfD _ (hI.node n))))
     have hIu : InvR N (S.s.userOp n g []) := invR_rstep hIb (Or.inl (Or.inl hu))
     have huknown : ((S.s.userOp n g []).node n).known =
-        (S.s.hub.seq, S.s.hub.head) := by
+        ⟨S.s.hub.seq, S.s.hub.head⟩ := by
       simp only [State.userOp, createOp_known]; exact hk
     have hul : ((S.s.userOp n g []).node n).lops S.s.U.next := by
       simp [State.userOp, State.createOp]
     have r := pUpload_srun
       (S := ({ S with s := S.s.userOp n g [] }).sendSupS n S.s.U.next (S.nodeD n)) hn hIu hul
     have hfk : Anc (S.s.userOp n g []).U.par
-        ((S.s.userOp n g []).node n).known.2 S.s.U.next := by
+        ((S.s.userOp n g []).node n).known.head S.s.U.next := by
       rw [huknown]
       have hLlt : ∀ q ∈ [g], q < S.s.U.next := by
         intro q hq; simp at hq; rw [hq]; exact hIb.headsLt hg
       exact ((anc_upd_iff hIb.parLt hLlt (hIb.headsLt hg)).2 hkg).trans
         (Anc.parent (by simp))
-    have hfne : S.s.U.next ≠ ((S.s.userOp n g []).node n).known.2 := by
+    have hfne : S.s.U.next ≠ ((S.s.userOp n g []).node n).known.head := by
       rw [huknown]; exact Nat.ne_of_gt (hIb.headLt)
     have huhead : (S.s.userOp n g []).hub.head =
-        ((S.s.userOp n g []).node n).known.2 := by rw [huknown]; rfl
+        ((S.s.userOp n g []).node n).known.head := by rw [huknown]; rfl
     have hcas := SyncStep.casAccept (N := N) ((S.s.userOp n g []).pUpload n S.s.U.next)
-      n ((S.s.userOp n g []).node n).known.2 S.s.U.next (Or.inr rfl)
+      n ((S.s.userOp n g []).node n).known.head S.s.U.next (Or.inr rfl)
       (fun e => hfne ((show (S.s.userOp n g []).hub.head = S.s.U.next from e).symm.trans
         huhead)) huhead hfk
       (pUpload_closed_of hIu.hubClosed (by rw [huhead]; exact Anc.refl))
@@ -1333,7 +1333,7 @@ theorem no_infinite_policy_runS {S : SState} (h : SRReachable N S) (hA : AllPrun
 dropped set. -/
 def NodeDone (S : SState) (n : Nat) : Prop :=
   (∀ y, (S.s.node n).heads y ↔ y = S.s.hub.head) ∧
-    (S.s.node n).known = (S.s.hub.seq, S.s.hub.head) ∧ ∀ x, S.nodeD n x ↔ S.hubD x
+    (S.s.node n).known = ⟨S.s.hub.seq, S.s.hub.head⟩ ∧ ∀ x, S.nodeD n x ↔ S.hubD x
 
 /-- What node `n` can do: take a policy step; or nothing, being done; or it waits, on a hub
 head it has dropped and isn't past, or with its only head one the hub has dropped. -/
@@ -1351,24 +1351,24 @@ theorem node_step_or {S : SState} (h : SRReachable N S) {n : Nat} (hn : n < N) :
     exact Or.inl ⟨_, SPStepR.merge S n (headsList S.s n) [] hn hmem
       ⟨a, b, (hmem a).2 ha, (hmem b).2 hb, hab⟩⟩
   -- 2. learn
-  by_cases hk : (S.s.node n).known ≠ (S.s.hub.seq, S.s.hub.head)
+  by_cases hk : (S.s.node n).known ≠ ⟨S.s.hub.seq, S.s.hub.head⟩
   · exact Or.inl ⟨_, SPStepR.learn S n hn hk⟩
   have hk := Classical.not_not.1 hk
-  have hk2 : (S.s.node n).known.2 = S.s.hub.head := by rw [hk]
+  have hk2 : (S.s.node n).known.head = S.s.hub.head := by rw [hk]
   have hcons : Consistent S.s n := by
     unfold Consistent; rw [hk]; exact ⟨Nat.le_refl _, hIb.histHead⟩
   -- 3. fetch and realize
-  by_cases hnloc : ¬ (S.s.node n).lops (S.s.node n).known.2
+  by_cases hnloc : ¬ (S.s.node n).lops (S.s.node n).known.head
   · obtain ⟨x, ⟨hxa, hxl⟩, hmin⟩ := exists_min
-      (fun x => Anc S.s.U.par x (S.s.node n).known.2 ∧ ¬ (S.s.node n).lops x)
-      (a := (S.s.node n).known.2) ⟨Anc.refl, hnloc⟩
+      (fun x => Anc S.s.U.par x (S.s.node n).known.head ∧ ¬ (S.s.node n).lops x)
+      (a := (S.s.node n).known.head) ⟨Anc.refl, hnloc⟩
     refine Or.inl ⟨_, SPStepR.realize S n x hn hcons hxa hxl (fun p hp => ?_)⟩
     refine Classical.byContradiction fun hpl => ?_
     exact hmin p (hIb.parLt x p hp) ⟨(Anc.parent hp).trans hxa, hpl⟩
   have hloc := Classical.not_not.1 hnloc
   -- 4. advance, unless the head is one this node dropped
-  by_cases hnadv : ¬ ∃ g, (S.s.node n).heads g ∧ Anc S.s.U.par (S.s.node n).known.2 g
-  · by_cases hd : S.nodeD n (S.s.node n).known.2
+  by_cases hnadv : ¬ ∃ g, (S.s.node n).heads g ∧ Anc S.s.U.par (S.s.node n).known.head g
+  · by_cases hd : S.nodeD n (S.s.node n).known.head
     · rw [hk2] at hd hnadv
       exact Or.inr (Or.inr (Or.inl ⟨hd, hnadv⟩))
     · exact Or.inl ⟨_, SPStepR.advance S n hn hloc hnadv hd⟩
@@ -1398,8 +1398,8 @@ theorem node_step_or {S : SState} (h : SRReachable N S) {n : Nat} (hn : n < N) :
   · -- 6. push
     by_cases hgD : S.hubD g
     · exact Or.inr (Or.inr (Or.inr ⟨g, hsingle, hkg, hgk, hgD⟩))
-    have hne : g ≠ (S.s.node n).known.2 := by rw [hk2]; exact hgk
-    have hkg' : Anc S.s.U.par (S.s.node n).known.2 g := by rw [hk2]; exact hkg
+    have hne : g ≠ (S.s.node n).known.head := by rw [hk2]; exact hgk
+    have hkg' : Anc S.s.U.par (S.s.node n).known.head g := by rw [hk2]; exact hkg
     by_cases hD : ∀ x, S.nodeD n x ↔ S.hubD x
     · exact Or.inl ⟨_, SPStepR.pushAccept S n g hn hsingle hne hkg' hk2.symm hD⟩
     by_cases hlag : ∃ x, S.hubD x ∧ ¬ S.nodeD n x

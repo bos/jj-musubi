@@ -351,7 +351,7 @@ def rawSurvey (base : NS) (par : Nat → List Nat) (loc stg obj : Nat → Bool) 
     loc := fun x => loc x = true
     stg := fun x => stg x = true
     obj := fun x => obj x = true
-    known := (base.known.1, H) }
+    known := ⟨base.known.seq, H⟩ }
 
 theorem raw_survey_guard {base : NS} {par : Nat → List Nat} {loc stg obj : Nat → Bool}
     {H : Nat} {r : Reads} (hlt : ParLt par) (hloc : r.knownLocal = loc H)
@@ -360,7 +360,8 @@ theorem raw_survey_guard {base : NS} {par : Nat → List Nat} {loc stg obj : Nat
     (hobjs : r.missObjs = true ↔ MissObjs (rawSurvey base par loc stg obj H)) :
     r.knownLocal = false → r.ready = false → r.missOps = true ∨ r.missObjs = true := by
   intro hk hr
-  have hl : ¬ (rawSurvey base par loc stg obj H).loc (rawSurvey base par loc stg obj H).known.2 :=
+  have hl : ¬ (rawSurvey base par loc stg obj H).loc
+      (rawSurvey base par loc stg obj H).known.head :=
     by
       change ¬ loc H = true
       rw [← hloc, hk]
@@ -600,7 +601,7 @@ def rawControl (raw images : List Nat) (par : Nat → List Nat) (anc : Nat → N
 /-- A core state to read the raw survey graph into: `rawSurvey` replaces all that the survey
 reads. -/
 def surveyBase : NS :=
-  ⟨(0, 0), [], none, none, 0, [], false, [], [], fun _ => [], 0, fun _ => False,
+  ⟨⟨0, 0⟩, [], none, none, 0, [], false, [], [], fun _ => [], 0, fun _ => False,
     fun _ => False, fun _ => False, false⟩
 
 /-- The survey's guard, derived: on the raw graph, with the closure holding the known head's

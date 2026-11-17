@@ -14,7 +14,7 @@ open Musubi Musubi.NodeSettle
 /-- What NodeSettle's steps need of a state, wherever the hub's head is. -/
 structure LInv (σ : NS) : Prop where
   parLt : ParLt σ.par
-  knownLt : σ.known.2 < σ.next
+  knownLt : σ.known.head < σ.next
   headsNe : σ.heads ≠ []
   headsLt : ∀ y ∈ σ.heads, y < σ.next
   imgNe : σ.img ≠ []
@@ -23,7 +23,7 @@ structure LInv (σ : NS) : Prop where
 /-- NodeSettle's context for a burst with known pair `K`: the hub's records `R`, and a pair that
 is not `K`, so that none of NodeSettle's replies, which teach the context's pair, is part of a
 burst. -/
-def bctx (R : Nat) (drops : Nat → Nat → Prop) (K : Nat × Nat) : Ctx :=
+def bctx (R : Nat) (drops : Nat → Nat → Prop) (K : Known) : Ctx :=
   ⟨K.1 + 1, K.2, R, drops⟩
 
 theorem LInv.sinv {σ : NS} (I : LInv σ) (R : Nat) (drops : Nat → Nat → Prop) :
@@ -37,7 +37,7 @@ theorem LInv.sinv {σ : NS} (I : LInv σ) (R : Nat) (drops : Nat → Nat → Pro
   imgLt := I.imgLt
   recs := by
     intro h
-    have h1 := congrArg Prod.fst h
+    have h1 := congrArg Known.seq h
     simp only [bctx] at h1
     omega
 

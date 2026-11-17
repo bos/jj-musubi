@@ -253,7 +253,7 @@ theorem sys_suffix_entry {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {
     (hk : ∀ n, E n → NodeSys.NodeOK D n g)
     (hp : ∀ n, E n → (g.node n).ns.pending = [])
     (hknown : ∀ n, E n → HonestSnap w hist g
-      ⟨(known g n).1, (known g n).2, g.hub.recs⟩)
+      ⟨(known g n).seq, (known g n).head, g.hub.recs⟩)
     (hb : RequestBounds g) :
     HubSuffix.Inv E w (view E g hist (collectPackets (fun _ => none) g.reqs)) := by
   apply history_window_enters_suffix hi hknown
@@ -271,10 +271,10 @@ theorem settled_raw_head {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {
     (hs : NodeSettle.Settled ⟨g.hub.seq, H, R, D n⟩ (g.node n).ns) :
     (g.node n).emb H = g.hub.head ∧ ∀ x, heads g n x ↔ x = g.hub.head := by
   have agree := state_repo_agrees hk hs.pending
-  have knownEq : known g n = (g.hub.seq, (g.node n).emb H) := by
+  have knownEq : known g n = ⟨g.hub.seq, (g.node n).emb H⟩ := by
     rw [agree.2, hs.known]
   have truthful := (hi.known n hn).2.2
-  change hist (known g n).1 = (known g n).2 at truthful
+  change hist (known g n).seq = (known g n).head at truthful
   rw [knownEq] at truthful
   have raw : (g.node n).emb H = g.hub.head := truthful.symm.trans hi.histHead
   refine ⟨raw, fun x => ?_⟩
@@ -292,7 +292,7 @@ theorem hub_stabilizes_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
     (hb : RequestBounds (run 0))
     (hi : HistoryWindow w (state (run 0) initial))
     (hknown : ∀ n, E n → HonestSnap w initial (run 0)
-      ⟨(known (run 0) n).1, (known (run 0) n).2, (run 0).hub.recs⟩)
+      ⟨(known (run 0) n).seq, (known (run 0) n).head, (run 0).hub.recs⟩)
     (hl : ∀ i, SuffixStepLaws E D law (run 0).reqs w (histories run initial i)
       (acts i) (run i) (run (i + 1)))
     (hN : ∀ n, E n → n < N) (kb : Nat)
@@ -482,7 +482,7 @@ theorem hive_filtered {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw
     (hb : RequestBounds (run k))
     (hi : HistoryWindow w (state (run k) initial))
     (hknown : ∀ n, E n → HonestSnap w initial (run k)
-      ⟨(known (run k) n).1, (known (run k) n).2, (run k).hub.recs⟩)
+      ⟨(known (run k) n).seq, (known (run k) n).head, (run k).hub.recs⟩)
     (hl : ∀ i, NodeStepLaws E D w (histories (fun j => run (k + j)) initial i) (acts (k + i))
       (run (k + i)) (run (k + i + 1)))
     (hm : ∀ i, k ≤ i → ∀ n, E n → acts i ≠ .core n .maint)
@@ -492,7 +492,7 @@ theorem hive_filtered {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw
       (∀ n, RunOK law D n (ρ 0)) ∧
       RequestBounds (ρ 0) ∧ HistoryWindow w (state (ρ 0) initial) ∧
       (∀ n, E n → HonestSnap w initial (ρ 0)
-        ⟨(known (ρ 0) n).1, (known (ρ 0) n).2, (ρ 0).hub.recs⟩) ∧
+        ⟨(known (ρ 0) n).seq, (known (ρ 0) n).head, (ρ 0).hub.recs⟩) ∧
       (∀ i, SuffixStepLaws E D law (ρ 0).reqs w (histories ρ initial i) (acts (k + i)) (ρ i)
         (ρ (i + 1))) ∧
       (∀ i, histories ρ initial i = histories (fun j => run (k + j)) initial i) := by
@@ -566,7 +566,7 @@ theorem hub_stabilizes_hive {N : Nat} {D : Nat → Nat → Nat → Prop} {law : 
     (hb : RequestBounds (run k))
     (hi : HistoryWindow w (state (run k) initial))
     (hknown : ∀ n, E n → HonestSnap w initial (run k)
-      ⟨(known (run k) n).1, (known (run k) n).2, (run k).hub.recs⟩)
+      ⟨(known (run k) n).seq, (known (run k) n).head, (run k).hub.recs⟩)
     (hl : ∀ i, NodeStepLaws E D w (histories (fun j => run (k + j)) initial i) (acts (k + i))
       (run (k + i)) (run (k + i + 1)))
     (hN : ∀ n, E n → n < N) (hm : ∀ i, k ≤ i → ∀ n, E n → acts i ≠ .core n .maint)

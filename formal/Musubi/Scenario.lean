@@ -31,7 +31,7 @@ theorem userOp_node_ne {s : State} {n p i : Nat} {O : List Nat} (h : i ≠ n) :
 
 theorem node1_s1 : s1.node 1 = initNode := by rw [s1, userOp_node_ne (by decide)]; rfl
 theorem node0_s2 : s2.node 0 = s1.node 0 := by rw [s2, userOp_node_ne (by decide)]
-theorem known0_s2 : (s2.node 0).known = (0, root) := by
+theorem known0_s2 : (s2.node 0).known = ⟨0, root⟩ := by
   rw [node0_s2]; simp only [s1, State.userOp, createOp_known]; rfl
 
 theorem r1 : Reachable 2 s1 :=
@@ -73,7 +73,7 @@ theorem node1_s3 : s3.node 1 = s2.node 1 := by
   simp [s3, State.pPushAccept, State.learn, setNode_ne]
 
 theorem r4 : Reachable 2 s4 := by
-  have hk : (s3.node 1).known = (0, root) := by
+  have hk : (s3.node 1).known = ⟨0, root⟩ := by
     rw [node1_s3, s2]; simp only [State.userOp, createOp_known]; rw [node1_s1]; rfl
   refine pstep_reachable r3 (PStep.pushReject s3 1 2 (by decide)
     (by rw [node1_s3]; exact heads_s2_1) ?_ ?_ ?_ ?_)
@@ -82,7 +82,7 @@ theorem r4 : Reachable 2 s4 := by
   · rw [hk]; decide
   · decide
 
-theorem node1_s4 : (s4.node 1).known = (1, 1) ∧ (s4.node 1).lops = (s2.node 1).lops ∧
+theorem node1_s4 : (s4.node 1).known = ⟨1, 1⟩ ∧ (s4.node 1).lops = (s2.node 1).lops ∧
     (s4.node 1).heads = (s2.node 1).heads := by
   simp [s4, State.pPushReject, State.learn, node1_s3]
   exact ⟨rfl, rfl⟩
@@ -103,7 +103,7 @@ theorem r5 : Reachable 2 s5 := by
     rw [node1_s4.2.1, lops_s2_1]
     exact Or.inl hp'
 
-theorem node1_s5 : (s5.node 1).known = (1, 1) ∧ (s5.node 1).lops 1 ∧
+theorem node1_s5 : (s5.node 1).known = ⟨1, 1⟩ ∧ (s5.node 1).lops 1 ∧
     (s5.node 1).heads = (s2.node 1).heads := by
   have h := node1_s4
   refine ⟨?_, ?_, ?_⟩ <;>
@@ -121,7 +121,7 @@ theorem not_anc_1_2 : ¬ Anc s2.U.par 1 2 := by
     subst hp'
     exact absurd (hA'.le (inv_reachable r2).parLt) (by decide)
 
-theorem hna_s5 : ¬ ∃ h, (s5.node 1).heads h ∧ Anc s5.U.par (s5.node 1).known.2 h := by
+theorem hna_s5 : ¬ ∃ h, (s5.node 1).heads h ∧ Anc s5.U.par (s5.node 1).known.head h := by
   rw [node1_s5.1, node1_s5.2.2, U_s5]
   rintro ⟨h, hh, hA⟩
   rw [heads_s2_1] at hh
@@ -154,7 +154,7 @@ theorem r7 : Reachable 2 s7 := by
   simp
 
 theorem r8 : Reachable 2 s8 := by
-  have hk : (s7.node 1).known = (1, 1) := by
+  have hk : (s7.node 1).known = ⟨1, 1⟩ := by
     simp only [s7, State.mergeOp, createOp_known]
     simp [s6, State.advance, node1_s5.1]
   refine pstep_reachable r7 (PStep.pushAccept s7 1 3 (by decide) ?_ ?_ ?_ ?_)

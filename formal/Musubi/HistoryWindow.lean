@@ -21,8 +21,8 @@ truthful pair and sequence upper bound. At their common cut, all pre-entry packe
 current generation, so the strong sender invariant is initially vacuous. -/
 theorem history_window_enters_suffix {E : Nat → Prop} {w : Nat} {g : GState}
     (h : HistoryWindow w g.s)
-    (hk : ∀ n, E n → w ≤ (g.s.node n).known.1 ∧ (g.s.node n).known.1 ≤ g.s.hub.seq ∧
-      g.s.hub.hist (g.s.node n).known.1 = (g.s.node n).known.2)
+    (hk : ∀ n, E n → w ≤ (g.s.node n).known.seq ∧ (g.s.node n).known.seq ≤ g.s.hub.seq ∧
+      g.s.hub.hist (g.s.node n).known.seq = (g.s.node n).known.head)
     (hh : ∀ n, E n → ∀ y, (g.s.node n).heads y → y < g.s.U.next)
     (hpk : ∀ p ∈ g.pk, p.new < g.s.U.next ∧ p.tag = none) : HubSuffix.Inv E w g :=
   inv_entry h.parLt h.headLt h.histHead h.window h.chain h.strict hk hh hpk

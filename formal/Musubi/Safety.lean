@@ -85,7 +85,7 @@ theorem nodeClosed {s : State} (h : Reachable N s) (n : Nat) :
 /-- **KnownIsHubHistory**: `known.head` is the head the hub accepted at `known.seq`.
 (`hist` is the ghost history of accepted heads; see `histStable` and `hubHistory`.) -/
 theorem knownIsHubHistory {s : State} (h : Reachable N s) (n : Nat) :
-    (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2 :=
+    (s.node n).known.seq ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.seq = (s.node n).known.head :=
   (inv_reachable h).known n
 
 /-- The ghost history is a chain of strictly increasing heads starting at the root. -/
@@ -194,16 +194,16 @@ theorem mergeNeverRepeats {s : State} (h : Reachable N s) {n : Nat} {L : List Na
 
 /-- `protocol.md`, policy step 3: after `Advance`, `|heads| ≥ 2` or `heads = {known.head}`. -/
 theorem advance_result {s : State} (h : Reachable N s) {n : Nat}
-    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g) :
-    (∀ y, ((s.advance n).node n).heads y ↔ y = (s.node n).known.2) ∨
+    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.head g) :
+    (∀ y, ((s.advance n).node n).heads y ↔ y = (s.node n).known.head) ∨
       ∃ a b, ((s.advance n).node n).heads a ∧ ((s.advance n).node n).heads b ∧ a ≠ b := by
   have hI := inv_reachable h
   have H := fun y => advance_heads_iff (y := y) hI hna
   have hh : ((s.advance n).node n).heads =
-      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) := by
+      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) := by
     simp [State.advance]
   rw [hh]
-  by_cases hex : ∃ g, (s.node n).heads g ∧ ¬ Anc s.U.par g (s.node n).known.2
+  by_cases hex : ∃ g, (s.node n).heads g ∧ ¬ Anc s.U.par g (s.node n).known.head
   · obtain ⟨g, hg, hng⟩ := hex
     refine Or.inr ⟨g, _, (H g).2 (Or.inr ⟨hg, hng⟩), (H _).2 (Or.inl rfl), ?_⟩
     rintro rfl; exact hng Anc.refl
@@ -221,9 +221,9 @@ theorem advance_result {s : State} (h : Reachable N s) {n : Nat}
 /-- The parents used by an advance's merge are exactly the incoming head and the old heads
 not below it. In particular, taking only some of the concurrent heads is not a model step. -/
 theorem advance_merge_parents {s : State} (h : Reachable N s) {n : Nat} {L : List Nat}
-    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g)
-    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.2) :
-    ∀ x, x ∈ (s.node n).known.2 :: L ↔ ((s.advance n).node n).heads x := by
+    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.head g)
+    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.head) :
+    ∀ x, x ∈ (s.node n).known.head :: L ↔ ((s.advance n).node n).heads x := by
   intro x
   have hp := advance_heads_iff (inv_reachable h) hna (y := x)
   simpa [State.advance, hL x] using hp.symm
@@ -234,11 +234,11 @@ provided `L` enumerates every concurrent head. This is a two-step run, not a `Sy
 `noFeedback` applies to its advance component only. The merge retains all local operations,
 creates exactly one fresh operation and does not change the hub or the messages. -/
 theorem advance_merge_refines {s : State} (h : Reachable N s) {n : Nat} {L O : List Nat}
-    (hn : n < N) (hk : (s.node n).lops (s.node n).known.2)
-    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g)
-    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.2)
+    (hn : n < N) (hk : (s.node n).lops (s.node n).known.head)
+    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.head g)
+    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.head)
     (hne : ∃ x, x ∈ L) :
-    let t := (s.advance n).mergeOp n ((s.node n).known.2 :: L) O
+    let t := (s.advance n).mergeOp n ((s.node n).known.head :: L) O
     SyncStep N s (s.advance n) ∧ EnvStep N (s.advance n) t ∧ Reachable N t ∧
       t.U.next = s.U.next + 1 ∧ t.hub = s.hub ∧ t.net = s.net ∧
       (∀ x, (s.node n).lops x → (t.node n).lops x) := by
@@ -246,11 +246,11 @@ theorem advance_merge_refines {s : State} (h : Reachable N s) {n : Nat} {L O : L
   have ha := SyncStep.advance s n hn hk hna
   have hp := advance_merge_parents h hna hL
   obtain ⟨x, hx⟩ := hne
-  have hne' : x ≠ (s.node n).known.2 := by
+  have hne' : x ≠ (s.node n).known.head := by
     intro heq
     exact ((hL x).1 hx).2 (heq ▸ Anc.refl)
-  have hm := EnvStep.merge (s.advance n) n ((s.node n).known.2 :: L) O hn hp
-    ⟨x, (s.node n).known.2, List.mem_cons_of_mem _ hx, List.mem_cons_self, hne'⟩
+  have hm := EnvStep.merge (s.advance n) n ((s.node n).known.head :: L) O hn hp
+    ⟨x, (s.node n).known.head, List.mem_cons_of_mem _ hx, List.mem_cons_self, hne'⟩
   refine ⟨ha, hm, .step (.step h (Or.inr ha)) (Or.inl hm), rfl, rfl, rfl, ?_⟩
   intro y hy
   simpa [State.mergeOp, State.createOp, State.advance] using

@@ -33,8 +33,8 @@ to slots; these are the semantic fields that must come from that same send-time 
 def PushPacket.sourceMatchesB (N : Nat) (s : SEState) (p : PushPacket) : Bool :=
   decide (p.node < N) && recEq p.applied (s.appliedF p.node) &&
     seteq p.allDrops (s.nodeDF p.node) &&
-    decide (p.expected = (s.es.nodeOf p.node).known.2) &&
-    decide (p.knownSeq = (s.es.nodeOf p.node).known.1) &&
+    decide (p.expected = (s.es.nodeOf p.node).known.head) &&
+    decide (p.knownSeq = (s.es.nodeOf p.node).known.seq) &&
     (s.es.nodeOf p.node).heads.contains p.new &&
     (s.es.nodeOf p.node).heads.all (· == p.new) &&
     p.pending.all (fun x => !(flat p.applied).contains x)
@@ -52,9 +52,9 @@ theorem packet_source_drops {N : Nat} {s : SEState} {p : PushPacket}
 
 theorem packet_source_known {N : Nat} {s : SEState} {p : PushPacket}
     (h : p.sourceMatchesB N s = true) :
-    (s.es.nodeOf p.node).known = (p.knownSeq, p.expected) := by
+    (s.es.nodeOf p.node).known = ⟨p.knownSeq, p.expected⟩ := by
   simp only [PushPacket.sourceMatchesB, Bool.and_eq_true, decide_eq_true_eq] at h
-  exact Prod.ext h.1.1.1.2.symm h.1.1.1.1.2.symm
+  exact Known.ext h.1.1.1.2.symm h.1.1.1.1.2.symm
 
 theorem packet_source_heads {N : Nat} {s : SEState} {p : PushPacket}
     (h : p.sourceMatchesB N s = true) (x : Nat) :

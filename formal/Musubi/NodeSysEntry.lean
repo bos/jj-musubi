@@ -533,7 +533,7 @@ theorem writeRes_known {σ σ1 : NS} {new : Nat} (W : WriteRes σ σ1 new) : σ1
 and its records. -/
 theorem handle_knows {c : Ctx} {σi posti σ' : NS} {k : Kind} {as : List Ans}
     (hk : k ≠ .fetchObjs) (hap : k = .push → σi.ap = c.R) (hh : Handle c σi k posti as σ') :
-    σ'.known = (c.S, c.H) ∧ σ'.hubRecs = some c.R := by
+    σ'.known = ⟨c.S, c.H⟩ ∧ σ'.hubRecs = some c.R := by
   cases k with
   | start => obtain ⟨σ1, F, rfl⟩ := hh; exact ⟨F.known, F.hubRecs⟩
   | fetchPoll =>
@@ -553,7 +553,7 @@ theorem handle_knows {c : Ctx} {σi posti σ' : NS} {k : Kind} {as : List Ans}
   | writePoll => exact ⟨hh.known, hh.hubRecs⟩
 
 theorem sinv_of_linv {c : Ctx} {σ : NS} (I : LInv σ) (hH : c.H < σ.next)
-    (hr : σ.known = (c.S, c.H) → σ.hubRecs = some c.R) : NodeSettle.SInv c σ :=
+    (hr : σ.known = ⟨c.S, c.H⟩ → σ.hubRecs = some c.R) : NodeSettle.SInv c σ :=
   ⟨I.parLt, I.knownLt, hH, I.headsNe, I.headsLt, I.imgNe, I.imgLt, hr⟩
 
 section Quiet
@@ -693,7 +693,7 @@ theorem quiet_step {t0 : Nat} {st : Snap} (K : RunOK law D n g) (R : StableReps 
           exact h
         · rw [e]
           refine issue_busy hi (by decide) hh' rfl (fun _ h => ?_) (fun _ hc' => ?_)
-          · have h1 := congrArg Prod.fst h
+          · have h1 := congrArg Known.seq h
             simp only [bctx] at h1
             omega
           · obtain ⟨⟨s, hs⟩, -⟩ := hc'
@@ -720,7 +720,7 @@ theorem obs_knows {t0 : Nat} {st : Snap} (K : RunOK law D n g) (R : StableReps t
     (hold : ∀ r ∈ g.reps, r ∉ g'.reps → r.node = n → t0 ≤ r.time)
     (hnotes : ∀ nt, a = .notice n nt → nt.snap = st)
     (hs : SysStep N D law a g g') (ho : Observes n g a g') :
-    ∃ H, (g'.node n).ns.known = (st.seq, H) ∧ H < (g'.node n).ns.next ∧
+    ∃ H, (g'.node n).ns.known = ⟨st.seq, H⟩ ∧ H < (g'.node n).ns.next ∧
       (g'.node n).emb H = st.head ∧ (g'.node n).ns.hubRecs = some st.recs ∧
       (g'.node n).wait = none := by
   rcases ho with ⟨nt0, rfl⟩ | ⟨rfl, w0, hw0, hk0, hpush0⟩

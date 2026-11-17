@@ -112,8 +112,8 @@ def Event.Binds (e : Event) (N : Nat) (D : Nat → Nat → Nat → Prop) (law : 
   | .notice data => E data.node ∧ data.Binds D g
   | .ignore n nt => E n ∧ (g.node n).wait = none ∧ (g.node n).ns.act = false ∧
     nt ∈ g.notes ∧ nt.node = n ∧
-    (nt.snap.seq < (g.node n).ns.known.1 ∨ (nt.snap.seq = (g.node n).ns.known.1 ∧
-      (g.node n).emb (g.node n).ns.known.2 ≠ nt.snap.head))
+    (nt.snap.seq < (g.node n).ns.known.seq ∨ (nt.snap.seq = (g.node n).ns.known.seq ∧
+      (g.node n).emb (g.node n).ns.known.head ≠ nt.snap.head))
   | .read data ans => data.Binds g (e.apply N law g) ans ∧
     (E data.req.node ∨ data.req ∈ old) ∧
     ((data.req.body = .fetch ∧ ans = .fetched data.snap) ∨

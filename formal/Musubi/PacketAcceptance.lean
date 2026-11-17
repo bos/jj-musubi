@@ -141,7 +141,7 @@ the remaining primitive laws are deliberately not disguised as a liveness premis
 theorem packet_checks_of_emit {c : NodeSettle.Ctx} {σ σ1 : NodeSettle.NS} {new : Nat}
     {s : SEState} {p : PushPacket} (hi : NodeSettle.SInv c σ)
     (hem : NodeSettle.Emit c σ σ1 new) (hnative : PacketPrimitives s p)
-    (hexpected : p.expected = σ.known.2) (hnew : p.new = new)
+    (hexpected : p.expected = σ.known.head) (hnew : p.new = new)
     (hhead : s.es.hub.head = c.H)
     (decode : Nat → List Rec)
     (hsource : p.applied = decode σ.ap) (hhub : s.recs = decode c.R) : PacketChecks s p := by
@@ -341,9 +341,9 @@ theorem after_accepted_ne {h : Hub} {p : Push} {c : Checks} (ha : answer h p c =
 known head is local and below a head, there are pending drops, and the new head is not the
 known one, raw ids compared (`new == known` polls instead). That its records are the hub's
 is the hub's check, not a field of the push. -/
-structure PendingPush (known : Nat × Nat) (p : Push) : Prop where
-  expected : p.expected = known.2
-  moved : p.new ≠ known.2
+structure PendingPush (known : Known) (p : Push) : Prop where
+  expected : p.expected = known.head
+  moved : p.new ≠ known.head
   pending : p.dropped ≠ []
 
 /-- The hub's `descends(expected, new, dropped)` from raw facts alone: the hub names the
@@ -361,8 +361,8 @@ theorem descends_of_images {par : Nat → List Nat} {images : List Nat} {head ne
 /-- On a hub at `h` whose head the node knows, the pending push is accepted, given the hub's
 checks of it: its records the hub's, as the hub compares them; not dropped, as the node
 asserts it never pushes; closed once uploaded; and `descends`. -/
-theorem pendingPush_accepted {known : Nat × Nat} {p : Push} {c : Checks} {h : Hub}
-    (b : PendingPush known p) (hk : known.2 = h.head) (hr : c.recordsMatch = true)
+theorem pendingPush_accepted {known : Known} {p : Push} {c : Checks} {h : Hub}
+    (b : PendingPush known p) (hk : known.head = h.head) (hr : c.recordsMatch = true)
     (hd : c.dropped = false) (hc : c.closed = true) (hdesc : c.descends = true) :
     answer h p c = .accepted := by
   refine answer_accepted hr hd ?_ ?_ hc hdesc
@@ -370,8 +370,8 @@ theorem pendingPush_accepted {known : Nat × Nat} {p : Push} {c : Checks} {h : H
   · rw [b.expected, hk]
 
 /-- So a hub that stays as it is answers no such push. -/
-theorem stable_no_pendingPush {known : Nat × Nat} {p : Push} {c : Checks} {h : Hub}
-    (b : PendingPush known p) (hk : known.2 = h.head) (hr : c.recordsMatch = true)
+theorem stable_no_pendingPush {known : Known} {p : Push} {c : Checks} {h : Hub}
+    (b : PendingPush known p) (hk : known.head = h.head) (hr : c.recordsMatch = true)
     (hd : c.dropped = false) (hc : c.closed = true) (hdesc : c.descends = true)
     (hstable : after h p c = h) : False :=
   after_accepted_ne (pendingPush_accepted b hk hr hd hc hdesc) hstable

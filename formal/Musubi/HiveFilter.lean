@@ -331,7 +331,7 @@ notifications, which filtering only thins (`runOK_filt_init`). -/
 
 /-- The dummy's core state: one label, `0`, its known head and only op head, and inactive. -/
 def dummyNS : NS where
-  known := (0, 0)
+  known := ⟨0, 0⟩
   plan := []
   hubRecs := none
   annc := none

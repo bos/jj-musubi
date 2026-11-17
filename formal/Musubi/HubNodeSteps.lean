@@ -82,11 +82,11 @@ theorem anc_down {σ : NS} {emb : Nat → Nat} {g : Sys} (S : Scoped σ emb g) (
 /-! ## The native laws -/
 
 /-- The frontier of a node's op heads and its known head: those not below another. -/
-def Frontier (σ : NS) : Nat → Prop := maxSet σ.par (fun y => y ∈ σ.heads ∨ y = σ.known.2)
+def Frontier (σ : NS) : Nat → Prop := maxSet σ.par (fun y => y ∈ σ.heads ∨ y = σ.known.head)
 
 /-- `advance`'s guard in `NodeCore::step` (`Loc.advance`). -/
 def AdvGuard (σ : NS) : Prop :=
-  σ.heads.length < 2 ∧ σ.loc σ.known.2 ∧ (¬ ∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none
+  σ.heads.length < 2 ∧ σ.loc σ.known.head ∧ (¬ ∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none
 
 /-- The native full-frontier advance, a primitive law of an `advance_to(known)` call that makes no
 other semantic write (its working-copy cleanup, `replace_abandoned_working_copies`, writing
@@ -101,7 +101,7 @@ already present. With nothing written, the op heads are distinct canonical opera
 physical op heads with one canonical form (an alias) arise only from an interrupted export, a
 failure. -/
 structure FullAdv (σ σ' : NS) : Prop where
-  img : σ.img = [σ.known.2]
+  img : σ.img = [σ.known.head]
   out : (σ'.next = σ.next ∧ (∀ y, y ∈ σ'.heads ↔ Frontier σ y) ∧ σ'.heads.Nodup) ∨
     ((∃ a b, Frontier σ a ∧ Frontier σ b ∧ a ≠ b) ∧ σ'.next = σ.next + 1 ∧
       (∀ y, y ∈ σ'.par σ.next ↔ Frontier σ y) ∧ σ'.heads = [σ.next]) ∨
@@ -122,16 +122,16 @@ def HonestSnap (w : Nat) (hist : Nat → Nat) (g : Sys) (s : Snap) : Prop :=
 /-- The raw frontier of a node's raw heads and raw known head is the image of its labels'. -/
 theorem raw_frontier {σ : NS} {emb : Nat → Nat} {g : Sys} (S : Scoped σ emb g) (I : LInv σ)
     {H : Nat → Prop} (hH : ∀ y, H y ↔ ∃ l ∈ σ.heads, emb l = y) (y : Nat) :
-    maxSet (parents g) (fun y => H y ∨ y = emb σ.known.2) y ↔
+    maxSet (parents g) (fun y => H y ∨ y = emb σ.known.head) y ↔
       ∃ l, l < σ.next ∧ emb l = y ∧ Frontier σ l := by
-  have inS : ∀ y, (H y ∨ y = emb σ.known.2) ↔
-      ∃ l, l < σ.next ∧ emb l = y ∧ (l ∈ σ.heads ∨ l = σ.known.2) := by
+  have inS : ∀ y, (H y ∨ y = emb σ.known.head) ↔
+      ∃ l, l < σ.next ∧ emb l = y ∧ (l ∈ σ.heads ∨ l = σ.known.head) := by
     intro y
     rw [hH]
     constructor
     · rintro (⟨l, hl, rfl⟩ | rfl)
       · exact ⟨l, I.headsLt l hl, rfl, Or.inl hl⟩
-      · exact ⟨σ.known.2, I.knownLt, rfl, Or.inr rfl⟩
+      · exact ⟨σ.known.head, I.knownLt, rfl, Or.inr rfl⟩
     · rintro ⟨l, -, rfl, hl | rfl⟩
       · exact Or.inl ⟨l, hl, rfl⟩
       · exact Or.inr rfl
@@ -165,8 +165,8 @@ theorem heads_of {g : Sys} {n : Nat} {L : List Nat} {e : Nat → Nat}
   unfold heads
   rw [hr, he]
 
-theorem known_of {g : Sys} {n : Nat} {K : Nat × Nat} {e : Nat → Nat}
-    (hr : (g.node n).repo.known = K) (he : (g.node n).repoEmb = e) : known g n = (K.1, e K.2) := by
+theorem known_of {g : Sys} {n : Nat} {K : Known} {e : Nat → Nat}
+    (hr : (g.node n).repo.known = K) (he : (g.node n).repoEmb = e) : known g n = ⟨K.1, e K.2⟩ := by
   unfold known
   rw [hr, he]
 
@@ -242,11 +242,11 @@ theorem view_frame (hn : g'.next = g.next) (hp : ∀ x, x < g.next → g'.par x 
 theorem view_learn (hE : E n) (s : Snap) (hon : HonestSnap w hist g s) (hn : g'.next = g.next)
     (hp : ∀ x, x < g.next → g'.par x = g.par x) (hhub : g'.hub = g.hub)
     (hother : ∀ m, m ≠ n → g'.node m = g.node m) (hh : heads g' n = heads g n)
-    (hk : known g' n = (s.seq, s.head)) (hgen : (g'.node n).gen = (g.node n).gen) :
+    (hk : known g' n = ⟨s.seq, s.head⟩) (hgen : (g'.node n).gen = (g.node n).gen) :
     HubSuffix.Step E w (view E g hist pk) (view E g' hist pk) := by
   refine .learn n s.seq hE hon.1 hon.2.1 (state_usame hn hp) (state_hub_same hhub rfl)
     (fun m _ hm => state_node_same (hother m hm)) hh ?_ (gens_same hother hgen) rfl
-  show known g' n = (s.seq, hist s.seq)
+  show known g' n = ⟨s.seq, hist s.seq⟩
   rw [hk, hon.2.2]
 
 /-- A push of the node's single head, the packet the ledger records. -/
@@ -261,10 +261,10 @@ theorem view_send (hE : E n) (d : Nat) (hd : ∀ y, heads g n y ↔ y = d) (hn :
 
 /-- The raw frontier of the node's heads and known head, as the suffix's `advance` takes it. -/
 def rawFrontier (g : Sys) (n : Nat) : Nat → Prop :=
-  maxSet (parents g) (fun y => heads g n y ∨ y = (known g n).2)
+  maxSet (parents g) (fun y => heads g n y ∨ y = (known g n).head)
 
 /-- An advance that writes nothing. -/
-theorem view_advance (hE : E n) (hna : ¬ ∃ h, heads g n h ∧ Anc (parents g) (known g n).2 h)
+theorem view_advance (hE : E n) (hna : ¬ ∃ h, heads g n h ∧ Anc (parents g) (known g n).head h)
     (hn : g'.next = g.next) (hp : ∀ x, x < g.next → g'.par x = g.par x) (hhub : g'.hub = g.hub)
     (hother : ∀ m, m ≠ n → g'.node m = g.node m) (hh : heads g' n = rawFrontier g n)
     (hk : known g' n = known g n) (hgen : (g'.node n).gen = (g.node n).gen) :
@@ -274,7 +274,7 @@ theorem view_advance (hE : E n) (hna : ¬ ∃ h, heads g n h ∧ Anc (parents g)
 
 /-- An advance's move of the op heads to the frontier, before the merge that writes it. -/
 theorem view_advance_mid (hE : E n)
-    (hna : ¬ ∃ h, heads g n h ∧ Anc (parents g) (known g n).2 h) :
+    (hna : ¬ ∃ h, heads g n h ∧ Anc (parents g) (known g n).head h) :
     HubSuffix.Step E w (view E g hist pk) (withHeads (view E g hist pk) n (rawFrontier g n)) := by
   refine .advance n hE hna ⟨rfl, rfl⟩ ⟨rfl, rfl, rfl⟩ (fun m _ hm => ?_) ?_ ?_ rfl rfl
   · show (upd (state g hist).node n _ m).heads = _ ∧ (upd (state g hist).node n _ m).known = _
@@ -389,7 +389,7 @@ theorem handle_known {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ'
     {new : Nat} {as : List Ans} (hi : Issue d σ k post new) (hck : σi.known = σ.known)
     (hcp : posti.known = post.known) (hh : Handle c σi k posti as σ') :
     σ'.known = post.known ∨
-      (σ'.known = (c.S, c.H) ∧ k ≠ .fetchObjs ∧ (k = .push → ∃ s, Ans.head s ∈ as)) := by
+      (σ'.known = ⟨c.S, c.H⟩ ∧ k ≠ .fetchObjs ∧ (k = .push → ∃ s, Ans.head s ∈ as)) := by
   cases k with
   | start =>
     obtain ⟨σ1, F, rfl⟩ := hh
@@ -483,9 +483,9 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
       heads_of (congrArg NS.heads r0.1) r0.2
     have h1 : ∀ y, heads g' m y ↔ ∃ l ∈ σ'.heads, emb' l = y :=
       heads_of (congrArg NS.heads r1.1) r1.2
-    have k0 : known g m = ((g.node m).ns.known.1, (g.node m).emb (g.node m).ns.known.2) :=
+    have k0 : known g m = ⟨(g.node m).ns.known.seq, (g.node m).emb (g.node m).ns.known.head⟩ :=
       known_of (congrArg NS.known r0.1) r0.2
-    have k1 : known g' m = (σ'.known.1, emb' σ'.known.2) :=
+    have k1 : known g' m = ⟨σ'.known.seq, emb' σ'.known.head⟩ :=
       known_of (congrArg NS.known r1.1) r1.2
     have hpar : ∀ x, x < g.next → g'.par x = g.par x := hg.parRaw
     -- the known pair stays, and its label keeps its raw id
@@ -587,7 +587,7 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
         rw [hσ'] at h
         exact h
       have hk : known g' m = known g m := hkeep hv.ext.known
-      have hna : ¬ ∃ h, heads g m h ∧ Anc (parents g) (known g m).2 h := by
+      have hna : ¬ ∃ h, heads g m h ∧ Anc (parents g) (known g m).head h := by
         rintro ⟨h, hh, hanc⟩
         obtain ⟨l, hl, rfl⟩ := (h0 h).1 hh
         rw [k0] at hanc
@@ -754,9 +754,9 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
       rw [e]; exact ⟨rfl, rfl⟩
     have h0 : ∀ y, heads g m y ↔ ∃ l ∈ (g.node m).ns.heads, (g.node m).emb l = y :=
       heads_of (congrArg NS.heads r0.1) r0.2
-    have k0 : known g m = ((g.node m).ns.known.1, (g.node m).emb (g.node m).ns.known.2) :=
+    have k0 : known g m = ⟨(g.node m).ns.known.seq, (g.node m).emb (g.node m).ns.known.head⟩ :=
       known_of (congrArg NS.known r0.1) r0.2
-    have k1 : known g' m = (post.known.1, emb1 post.known.2) :=
+    have k1 : known g' m = ⟨post.known.seq, emb1 post.known.head⟩ :=
       known_of (congrArg NS.known r1.1) r1.2
     have hpar : ∀ x, x < g.next → g'.par x = g.par x := hg.parRaw
     -- a step that writes nothing: the view's node is as it was
@@ -797,8 +797,8 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
         congr 1
         have hg0 : post.next - (g.node m).ns.next = 0 := by rw [hpost]; simp [norm]
         simp only [packet, pkt, sent, view, generations, hE, ↓reduceIte, hg0, Nat.add_zero]
-        show (⟨m, some (g.node m).gen, post.known.1, emb1 post.known.2, emb1 new⟩ : Packet) =
-          ⟨m, some (g.node m).gen, (known g m).1, (known g m).2, (g.node m).emb new⟩
+        show (⟨m, some (g.node m).gen, post.known.seq, emb1 post.known.head, emb1 new⟩ : Packet) =
+          ⟨m, some (g.node m).gen, (known g m).seq, (known g m).head, (g.node m).emb new⟩
         rw [k0, hpost]
         simp only [norm]
         rw [hg.embOld _ I.knownLt, hg.embOld _ hnew]
@@ -855,9 +855,9 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
       rw [heads_of (congrArg NS.heads r1.1) r1.2, hσh]
     have hn : g'.next = g.next := hrest.2.2.2.2.1
     have hpar : ∀ x, x < g.next → g'.par x = g.par x := fun x _ => by rw [hrest.2.2.2.2.2]
-    have k0 : known g m = (w.post.known.1, w.emb w.post.known.2) :=
+    have k0 : known g m = ⟨w.post.known.seq, w.emb w.post.known.head⟩ :=
       known_of (congrArg NS.known r0.1) r0.2
-    have k1 : known g' m = (σ'.known.1, embi σ'.known.2) :=
+    have k1 : known g' m = ⟨σ'.known.seq, embi σ'.known.head⟩ :=
       known_of (congrArg NS.known r1.1) r1.2
     rcases handle_known W.issue hck hcpk hh with hkn | ⟨hkn, hk1, hk2⟩
     · have hk : known g' m = known g m := by
@@ -879,7 +879,7 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
         have h := hf r hr
         rcases hs with hs | hs <;> rw [hs] at h <;> exact ⟨h.1, h.2.2.1⟩
       have hon := hrep r (hrs r hr).1 (fun h => ((hreps r).1 h).2 hr) (hrs r hr).2.1 s hs
-      have hk : known g' m = (s.seq, s.head) := by rw [k1, hkn]; simp only; rw [hfit.1, hfit.2]
+      have hk : known g' m = ⟨s.seq, s.head⟩ := by rw [k1, hkn]; simp only; rw [hfit.1, hfit.2]
       exact ⟨single (view_learn hE s hon hn hpar hrest.1 hother hheads hk hgen)⟩
   | notice m nt c σi posti σ' embi hw ha hn' hnn hnew hl hc hf hh hnode hnotes hrest ht =>
     simp only [Act.about] at hab
@@ -896,7 +896,7 @@ theorem own_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
     have hheads : heads g' m = heads g m := by
       refine heads_eq h0 (fun y => ?_) (fun l hl' => hl.embOld l (I.headsLt l hl'))
       rw [heads_of (congrArg NS.heads r1.1) r1.2, hh.heads, hci]
-    have hk : known g' m = (nt.snap.seq, nt.snap.head) := by
+    have hk : known g' m = ⟨nt.snap.seq, nt.snap.head⟩ := by
       rw [known_of (congrArg NS.known r1.1) r1.2, hh.known]
       simp only
       rw [hf.1, hf.2.2.1]

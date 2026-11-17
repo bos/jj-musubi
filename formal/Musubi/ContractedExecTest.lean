@@ -16,7 +16,7 @@ def receiver : SEState :=
               ⟨2, [1], [], some 0, false, 0⟩,
               ⟨3, [0], [], some 1, false, 0⟩]
       hub := { initE.hub with ops := [0, 1, 2], head := 2, seq := 1, hist := [(1, 2)] }
-      nodes := [(1, { ENode.init with lops := [0, 1, 3], heads := [3], known := (1, 2) })] }
+      nodes := [(1, { ENode.init with lops := [0, 1, 3], heads := [3], known := ⟨1, 2⟩ })] }
     nodeD := [(1, [2])] }
 
 def run (s : SEState) : List SAction → Except String SEState
@@ -74,7 +74,7 @@ def mergeReceiver (atParent : Bool) : SEState :=
       hub := { initE.hub with ops := [0, 1, 2, 3, 4], head := 4, seq := 1, hist := [(1, 4)] }
       nodes := [(1, { ENode.init with
         lops := [0, 1, 2, 3, 4],
-        heads := [if atParent then 2 else 1], known := (1, 4) })] }
+        heads := [if atParent then 2 else 1], known := ⟨1, 4⟩ })] }
     nodeD := [(1, [4])] }
 
 #guard ([true, false] : List Bool).all fun atParent =>
@@ -95,7 +95,7 @@ def mergeReceiver (atParent : Bool) : SEState :=
   | .error _ => false
   | .ok accepted =>
     let nd := { accepted.es.nodeOf 1 with
-      lops := [0, 1, 2, 3, 4], heads := [2], known := (2, 4) }
+      lops := [0, 1, 2, 3, 4], heads := [2], known := ⟨2, 4⟩ }
     let follower := { accepted with
       nodeD := [], es := accepted.es.setNode 1 nd,
       dmsgs := [⟨1, ⟨[[2]], 0⟩⟩] }

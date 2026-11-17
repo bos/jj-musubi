@@ -17,9 +17,9 @@ head. The reply must belong to the current history; recovery from an obsolete hi
 outside this lemma. Network, staging and hub stores are deliberately unconstrained. -/
 theorem measureR_delayed_learn {s t : State} {n sq hd : Nat}
     (hn : n < N) (hc : Consistent s n) (hsq : sq ≤ s.hub.seq)
-    (hhist : s.hub.hist sq = hd) (hlt : (s.node n).known.1 < sq)
+    (hhist : s.hub.hist sq = hd) (hlt : (s.node n).known.seq < sq)
     (f : RFrame s t n) (hheads : (t.node n).heads = (s.node n).heads)
-    (hknown : (t.node n).known = (sq, hd)) :
+    (hknown : (t.node n).known = ⟨sq, hd⟩) :
     Lex6 (rmeasure N t) (rmeasure N s) := by
   have hc' : Consistent t n := by
     unfold Consistent
@@ -128,9 +128,9 @@ inductive SettlingStep (N : Nat) : State → State → Prop
       (hh : t.hub.head = s.hub.head) (hs : t.hub.seq = s.hub.seq) : SettlingStep N s t
   | delayed {s t : State} {n sq hd : Nat} (hn : n < N)
       (hc : Consistent s n) (hsq : sq ≤ s.hub.seq) (hhist : s.hub.hist sq = hd)
-      (hlt : (s.node n).known.1 < sq) (f : RFrame s t n)
+      (hlt : (s.node n).known.seq < sq) (f : RFrame s t n)
       (hheads : (t.node n).heads = (s.node n).heads)
-      (hknown : (t.node n).known = (sq, hd)) : SettlingStep N s t
+      (hknown : (t.node n).known = ⟨sq, hd⟩) : SettlingStep N s t
   | accept {s t : State} {n hd : Nat} (hn : n < N) (hc : Consistent s n)
       (hh : ∀ y, (s.node n).heads y ↔ y = hd)
       (hne : hd ≠ s.hub.head) (hdesc : Anc s.U.par s.hub.head hd)

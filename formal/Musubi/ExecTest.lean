@@ -33,7 +33,7 @@ def errorOf : Except String EState → String
 -- The full run is accepted and ends with both nodes at the hub head.
 #guard match run 2 initE (pre ++ rest) with
   | .ok es => es.hub.head == 1 && es.hub.seq == 1 && (es.nodeOf 0).heads == [1] &&
-      (es.nodeOf 1).heads == [1] && (es.nodeOf 1).known == (1, 1)
+      (es.nodeOf 1).heads == [1] && (es.nodeOf 1).known == ⟨1, 1⟩
   | .error _ => false
 
 -- A stale notification is not learned twice.
@@ -53,7 +53,7 @@ def merged : List Action :=
 
 #guard match run 2 initE merged with
   | .ok es => es.hub.head == 1 && es.hub.seq == 1 && (es.nodeOf 1).heads == [1] &&
-      (es.nodeOf 1).known == (1, 1)
+      (es.nodeOf 1).known == ⟨1, 1⟩
   | .error _ => false
 
 -- A push from the head whose upload leaves the closure incomplete is incomplete, not
@@ -80,7 +80,7 @@ def merged : List Action :=
   "hubRegress: seq 2 is above the hub's seq 1"
 #guard match run 2 initE (merged ++ [.hubRegress 0]) with
   | .ok es => es.hub.head == root && es.hub.seq == 0 && es.hub.ops.contains 1 &&
-      (es.nodeOf 1).known == (1, 1)
+      (es.nodeOf 1).known == ⟨1, 1⟩
   | .error _ => false
 
 -- The hub forgets only what it stores, and keeps `closure(head)`. Made again, it holds the
@@ -91,7 +91,7 @@ def merged : List Action :=
   "hubForget: closure of head 1 not kept (missing op 1)"
 #guard match run 2 initE (merged ++ remakeActions) with
   | .ok es => es.hub.head == root && es.hub.seq == 0 && es.hub.ops == [root] &&
-      es.hub.objs.isEmpty && (es.nodeOf 1).known == (1, 1) && (es.nodeOf 1).lops.contains 1
+      es.hub.objs.isEmpty && (es.nodeOf 1).known == ⟨1, 1⟩ && (es.nodeOf 1).lops.contains 1
   | .error _ => false
 
 -- A node that knew the head the hub forgot restarts, and learns the head the hub accepts
@@ -99,7 +99,7 @@ def merged : List Action :=
 #guard match run 2 initE (merged ++ [.hubRegress 0, .userOp 0 root [], .pushAll 0 [2] [] root 2,
     .hubPushAccept 0 [2] [] root 2, .loseKnown 1, .fetchAll 1 root [], .hubFetch 1 root [],
     .learn 1 .head 1 2]) with
-  | .ok es => es.hub.head == 2 && es.hub.seq == 1 && (es.nodeOf 1).known == (1, 2)
+  | .ok es => es.hub.head == 2 && es.hub.seq == 1 && (es.nodeOf 1).known == ⟨1, 2⟩
   | .error _ => false
 
 -- The merged run: the push uploads `upOps` and `upObjs`, and the measure falls along it to

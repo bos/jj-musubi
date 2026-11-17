@@ -44,8 +44,8 @@ structure Node where
   /-- Objects present in the local object store. -/
   lobj : OSet
   heads : OSet
-  /-- `known = (seq, OpId)`. -/
-  known : Nat × Nat
+  /-- `known = ⟨seq, OpId⟩`. -/
+  known : Known
   /-- `staged` operations. -/
   sops : OSet
   /-- `staged` objects. -/
@@ -101,7 +101,7 @@ def initNode : Node where
   lops := (· = root)
   lobj := fun _ => False
   heads := (· = root)
-  known := (0, root)
+  known := ⟨0, root⟩
   sops := fun _ => False
   sobj := fun _ => False
 
@@ -161,7 +161,7 @@ def mergeOp (s : State) (n : Nat) (L O : List Nat) : State :=
 
 /-- `Learn(sq, h)` when `sq > known.seq`. -/
 def learn (s : State) (n sq h : Nat) : State :=
-  s.setNode n { s.node n with known := (sq, h) }
+  s.setNode n { s.node n with known := ⟨sq, h⟩ }
 
 def recvOps (s : State) (n : Nat) (S : OSet) : State :=
   s.setNode n { s.node n with sops := fun x => (s.node n).sops x ∨ S x }
@@ -178,7 +178,7 @@ def realize (s : State) (n x : Nat) : State :=
 /-- `Advance`: `heads := max(heads ∪ {known.head})`. -/
 def advance (s : State) (n : Nat) : State :=
   s.setNode n { s.node n with
-    heads := maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) }
+    heads := maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) }
 
 def hubStoreOps (s : State) (S : OSet) : State :=
   { s with hub := { s.hub with ops := fun x => s.hub.ops x ∨ S x } }
@@ -231,13 +231,13 @@ inductive SyncStep (N : Nat) : State → State → Prop
   -- node side
   | getHead (s : State) (n : Nat) (hn : n < N) : SyncStep N s (s.send (.getHead n))
   | learn (s : State) (n : Nat) (k : HeadKind) (sq h : Nat) (hn : n < N)
-      (hm : s.net (.head n k sq h)) (hs : (s.node n).known.1 < sq) :
+      (hm : s.net (.head n k sq h)) (hs : (s.node n).known.seq < sq) :
       SyncStep N s (s.learn n sq h)
   /-- Relaxation: `Learn` without its staleness filter (may move `known` backwards). -/
   | learnUnfiltered (s : State) (n : Nat) (k : HeadKind) (sq h : Nat) (hn : n < N)
       (hm : s.net (.head n k sq h)) : SyncStep N s (s.learn n sq h)
   | fetchOps (s : State) (n : Nat) (S : OSet) (hn : n < N)
-      (hS : ∀ x, S x → Anc s.U.par x (s.node n).known.2) :
+      (hS : ∀ x, S x → Anc s.U.par x (s.node n).known.head) :
       SyncStep N s (s.send (.getOps n S))
   | fetchObjs (s : State) (n : Nat) (S : OSet) (hn : n < N) :
       SyncStep N s (s.send (.getObjs n S))
@@ -249,8 +249,8 @@ inductive SyncStep (N : Nat) : State → State → Prop
       (hp : ∀ p ∈ s.U.par x, (s.node n).lops p)
       (ho : ∀ o ∈ s.U.objs x, (s.node n).lobj o ∨ (s.node n).sobj o) :
       SyncStep N s (s.realize n x)
-  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.2)
-      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.head)
+      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
       SyncStep N s (s.advance n)
   | uploadOps (s : State) (n : Nat) (S : OSet) (hn : n < N)
       (hS : ∀ x, S x → (s.node n).lops x) : SyncStep N s (s.send (.putOps n S))
@@ -270,11 +270,11 @@ inductive SyncStep (N : Nat) : State → State → Prop
   /-- Relaxation (stronger than `protocol.md` requires): a restarting node may lose `known`
   while keeping `staged` (what the Rust node does: it persists staged files, not `known`). -/
   | loseKnown (s : State) (n : Nat) (hn : n < N) :
-      SyncStep N s (s.setNode n { s.node n with known := (0, root) })
+      SyncStep N s (s.setNode n { s.node n with known := ⟨0, root⟩ })
   /-- Relaxation (stronger than `protocol.md` requires): a crash may also lose `known` and
   `staged`, as if they were volatile. -/
   | loseVolatile (s : State) (n : Nat) (hn : n < N) :
-      SyncStep N s (s.setNode n { s.node n with known := (0, root), sops := fun _ => False,
+      SyncStep N s (s.setNode n { s.node n with known := ⟨0, root⟩, sops := fun _ => False,
                                                 sobj := fun _ => False })
   -- hub side
   | hubGetHead (s : State) (n : Nat) (hm : s.net (.getHead n)) :

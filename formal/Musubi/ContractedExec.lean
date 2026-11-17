@@ -14,22 +14,22 @@ open Musubi Contract
 def SEState.imageAdvance (ses : SEState) (n : Nat) : SEState :=
   { ses with es := ses.es.setNode n { ses.es.nodeOf n with
       heads := advanceImages ses.es.parF (ses.nodeDF n).contains
-        (ses.es.nodeOf n).heads (ses.es.nodeOf n).known.2 } }
+        (ses.es.nodeOf n).heads (ses.es.nodeOf n).known.head } }
 
 def imageAdvanceB (N : Nat) (ses : SEState) (n : Nat) : Bool :=
   let nd := ses.es.nodeOf n
-  let images := exp ses.es.parF (ses.nodeDF n).contains nd.known.2
-  ses.es.parOK && decide (n < N) && decide (nd.known.2 < ses.es.next) &&
-    (ses.nodeDF n).contains nd.known.2 && !images.isEmpty &&
+  let images := exp ses.es.parF (ses.nodeDF n).contains nd.known.head
+  ses.es.parOK && decide (n < N) && decide (nd.known.head < ses.es.next) &&
+    (ses.nodeDF n).contains nd.known.head && !images.isEmpty &&
     images.all nd.lops.contains &&
-    !(nd.heads.any (belowB ses.es.parF (ses.nodeDF n).contains nd.known.2))
+    !(nd.heads.any (belowB ses.es.parF (ses.nodeDF n).contains nd.known.head))
 
 def SEState.cabs (ses : SEState) : Contracted.View :=
   ⟨abs ses.es, ses.hubDL.contains, fun n => (ses.nodeDF n).contains⟩
 
 theorem cabs_imageAdvance {ses : SEState} {n : Nat} (hlt : ParLt ses.es.parF) :
     (ses.imageAdvance n).cabs =
-      ses.cabs.advanceImages n (ses.es.nodeOf n).known.2 := by
+      ses.cabs.advanceImages n (ses.es.nodeOf n).known.head := by
   unfold SEState.cabs SEState.imageAdvance Contracted.View.advanceImages
   simp only [abs_setNode]
   congr 1
@@ -132,7 +132,7 @@ theorem imageAccept_safe (h : Contracted.Safe ses.cabs)
 drop set. Switching them expands every old head under the prepared set, as well as known. -/
 def preparedHeads (ses : SEState) (n : Nat) (R : List Rec) : List Nat :=
   let D := (union (ses.nodeDF n) (flat R)).contains
-  maxL ses.es.parF (dd (((ses.es.nodeOf n).heads ++ [(ses.es.nodeOf n).known.2]).flatMap
+  maxL ses.es.parF (dd (((ses.es.nodeOf n).heads ++ [(ses.es.nodeOf n).known.head]).flatMap
     (exp ses.es.parF D)))
 
 def SEState.preparedFrontier (ses : SEState) (n : Nat) (R : List Rec) : SEState :=

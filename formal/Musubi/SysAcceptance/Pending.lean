@@ -41,7 +41,7 @@ theorem no_forever_pending {ρ α : Type} [DecidableEq ρ] {hub : RawPublish.Hub
     obtain ⟨hdesc, -, -⟩ := choose_push hi
     obtain ⟨-, -, hd, hp, hn⟩ := control.hguard i hact
     obtain ⟨he, hnk, hpend, habove⟩ := publication.hpkt i hact hpush
-    have b : RawPublish.PendingPush (hub.seq, hub.head) (R.pkt i) := by
+    have b : RawPublish.PendingPush ⟨hub.seq, hub.head⟩ (R.pkt i) := by
       refine ⟨he, ?_, ?_⟩
       · intro h
         rw [hn] at hnk

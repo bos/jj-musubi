@@ -689,9 +689,9 @@ structure NodeNotice.Binds (D : Nat → Nat → Nat → Prop) (e : NodeNotice) (
   between : (g.node e.node).ns.act = false
   inFlight : e.note ∈ g.notes
   own : e.note.node = e.node
-  newer : (g.node e.node).ns.known.1 < e.note.snap.seq ∨
-    (e.note.snap.seq = (g.node e.node).ns.known.1 ∧
-      (g.node e.node).emb (g.node e.node).ns.known.2 = e.note.snap.head)
+  newer : (g.node e.node).ns.known.seq < e.note.snap.seq ∨
+    (e.note.snap.seq = (g.node e.node).ns.known.seq ∧
+      (g.node e.node).emb (g.node e.node).ns.known.head = e.note.snap.head)
   grow : Exec.growB (Exec.observe g (g.node e.node).ns (g.node e.node).emb)
     (Exec.observe g e.σi e.embi) = true
   nothing : Closed (g.node e.node).ns (g.node e.node).emb g e.note.snap.head →
@@ -723,8 +723,8 @@ step: between rounds, its own notification in flight leaves, the node unchanged.
 theorem NodeNotice.ignore_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {g : Sys} {n : Nat} {nt : Note} (hw : (g.node n).wait = none) (ha : (g.node n).ns.act = false)
     (hn : nt ∈ g.notes) (hnn : nt.node = n)
-    (hold : nt.snap.seq < (g.node n).ns.known.1 ∨ (nt.snap.seq = (g.node n).ns.known.1 ∧
-      (g.node n).emb (g.node n).ns.known.2 ≠ nt.snap.head)) :
+    (hold : nt.snap.seq < (g.node n).ns.known.seq ∨ (nt.snap.seq = (g.node n).ns.known.seq ∧
+      (g.node n).emb (g.node n).ns.known.head ≠ nt.snap.head)) :
     SysStep N D law (.ignore n) g { g with notes := g.notes.erase nt, time := g.time + 1 } :=
   .ignore n nt hw ha hn hnn hold rfl rfl ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩ rfl
 

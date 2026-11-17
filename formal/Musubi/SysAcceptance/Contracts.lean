@@ -73,13 +73,13 @@ are conditional on loss having stopped, not on the hub already being stable. -/
 structure Knowledge (N : Nat) (run : Nat → Sys) (O : HiveObs ρ α) : Prop where
   ownHead : ∀ n t id a, n < N → ¬ O.reopen n t → O.own n t = some (id, a) →
     O.callAt n id ≤ a ∧ a ≤ t ∧
-    (O.seq n (t + 1), O.known n (t + 1)) = Retry.Serial.handleHead O.root true false
-      (O.seq n t, O.known n t) ((run a).hub.seq, (run a).hub.head)
+    ⟨O.seq n (t + 1), O.known n (t + 1)⟩ = Retry.Serial.handleHead O.root true false
+      ⟨O.seq n t, O.known n t⟩ ⟨(run a).hub.seq, (run a).hub.head⟩
   noteHead : ∀ n t a, n < N → ¬ O.reopen n t → O.note n t = some a →
-    a ≤ t ∧ (O.seq n (t + 1), O.known n (t + 1)) = Retry.Serial.handleHead O.root false true
-      (O.seq n t, O.known n t) ((run a).hub.seq, (run a).hub.head)
+    a ≤ t ∧ ⟨O.seq n (t + 1), O.known n (t + 1)⟩ = Retry.Serial.handleHead O.root false true
+      ⟨O.seq n t, O.known n t⟩ ⟨(run a).hub.seq, (run a).hub.head⟩
   quietKnown : ∀ n t, n < N → ¬ O.reopen n t → O.own n t = none → O.note n t = none →
-    (O.seq n (t + 1), O.known n (t + 1)) = (O.seq n t, O.known n t)
+    (⟨O.seq n (t + 1), O.known n (t + 1)⟩ : Known) = ⟨O.seq n t, O.known n t⟩
   rootSeq : ∀ a, (run a).hub.seq = 0 → (run a).hub.head = O.root
   hubSeqStep : ∀ t, ¬ O.lost t → (run t).hub.seq ≤ (run (t + 1)).hub.seq
   histBind : ∀ a, (∀ s, a ≤ s → ¬ O.lost s) → O.hist ((run a).hub.seq) = (run a).hub.head
@@ -147,7 +147,7 @@ structure SystemBindings (N : Nat) (run : Nat → Sys) (acts : Nat → Act) (rec
   freshOwn : ∀ n t, n < N → O.reply n t = .fresh → ∃ u id a, t ≤ u ∧ u ≤ O.doneAt n t ∧
     O.own n u = some (id, a) ∧ O.callAt n id = t
   latchKnown : ∀ n t, n < N →
-    Recovery.HubSys.known (run t) n = (O.seq n (O.latch n t), O.known n (O.latch n t))
+    Recovery.HubSys.known (run t) n = ⟨O.seq n (O.latch n t), O.known n (O.latch n t)⟩
   latchLe : ∀ n t, n < N → O.latch n t ≤ t
   latchMono : ∀ n t t', n < N → t ≤ t' → O.latch n t ≤ O.latch n t'
   latchAtSample : ∀ n p, n < N → O.latch n (O.sched n p) = O.sched n p

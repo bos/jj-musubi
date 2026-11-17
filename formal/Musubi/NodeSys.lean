@@ -234,15 +234,15 @@ inductive Loc (d : Nat → Nat → Prop) : NS → NS → Prop
   | prune {σ σ' : NS} (x : Nat) (hg : Go (lctx d σ) σ) (h2 : 2 ≤ σ.heads.length)
       (hM : Keeps σ [x]) (he : σ' = pruneTo (norm σ) x) : Loc d σ σ'
   | realizePlan {σ σ' : NS} (x : Nat) (rest : List Nat) (hg : Go (lctx d σ) σ)
-      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2) (hp : σ.plan = x :: rest)
+      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.head) (hp : σ.plan = x :: rest)
       (he : σ' = realize (norm σ) x rest) : Loc d σ σ'
   | realizeSurvey {σ σ' : NS} (x : Nat) (L : List Nat) (hg : Go (lctx d σ) σ)
-      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2) (hp : σ.plan = [])
+      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.head) (hp : σ.plan = [])
       (hr : Ready σ x) (he : σ' = realize (norm σ) x L) : Loc d σ σ'
   | advanceTake {σ σ' : NS} (A : Nat) (hg : Go (lctx d σ) σ) (h1 : σ.heads.length < 2)
-      (hl : σ.loc σ.known.2) (ha : (norm σ).annc = some A)
+      (hl : σ.loc σ.known.head) (ha : (norm σ).annc = some A)
       (ht : Take (lctx d σ) { norm σ with plan := [] } σ' A) : Loc d σ σ'
-  | advance {σ σ' : NS} (hg : Go (lctx d σ) σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
+  | advance {σ σ' : NS} (hg : Go (lctx d σ) σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.head)
       (hd : ¬ ∃ y ∈ σ.heads, Desc σ y) (ha : (norm σ).annc = none) (hv : Adv (norm σ) σ') :
       Loc d σ σ'
 
@@ -261,7 +261,7 @@ structure FetchPoll (d : Nat → Nat → Prop) (σ post : NS) : Prop where
   active : σ.act = true
   go : Go (lctx d σ) σ
   atMostOneHead : σ.heads.length < 2
-  notLocal : ¬ σ.loc σ.known.2
+  notLocal : ¬ σ.loc σ.known.head
   planEmpty : σ.plan = []
   noReady : ¬ ∃ x, Ready σ x
   missingOps : MissOps σ
@@ -271,7 +271,7 @@ structure FetchObjects (d : Nat → Nat → Prop) (σ post : NS) : Prop where
   active : σ.act = true
   go : Go (lctx d σ) σ
   atMostOneHead : σ.heads.length < 2
-  notLocal : ¬ σ.loc σ.known.2
+  notLocal : ¬ σ.loc σ.known.head
   planEmpty : σ.plan = []
   noReady : ¬ ∃ x, Ready σ x
   noMissingOps : ¬ MissOps σ
@@ -282,7 +282,7 @@ structure DifferPoll (d : Nat → Nat → Prop) (σ post : NS) : Prop where
   active : σ.act = true
   go : Go (lctx d σ) σ
   atMostOneHead : σ.heads.length < 2
-  knownLocal : σ.loc σ.known.2
+  knownLocal : σ.loc σ.known.head
   covers : ∃ y ∈ σ.heads, Desc σ y
   different : Differ σ
   noAnnouncement : (norm σ).annc = none
@@ -292,25 +292,25 @@ structure Push (d : Nat → Nat → Prop) (σ post : NS) (new : Nat) : Prop wher
   active : σ.act = true
   go : Go (lctx d σ) σ
   atMostOneHead : σ.heads.length < 2
-  knownLocal : σ.loc σ.known.2
+  knownLocal : σ.loc σ.known.head
   covers : ∃ y ∈ σ.heads, Desc σ y
   noAnnouncement : (norm σ).annc = none
   noDifference : ¬ Differ σ
-  work : σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.2]
+  work : σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.head]
   write : WriteRes { norm σ with plan := [] } post new
-  changed : new ≠ σ.known.2
+  changed : new ≠ σ.known.head
 
 structure WritePoll (d : Nat → Nat → Prop) (σ post : NS) (new : Nat) : Prop where
   active : σ.act = true
   go : Go (lctx d σ) σ
   atMostOneHead : σ.heads.length < 2
-  knownLocal : σ.loc σ.known.2
+  knownLocal : σ.loc σ.known.head
   covers : ∃ y ∈ σ.heads, Desc σ y
   noAnnouncement : (norm σ).annc = none
   noDifference : ¬ Differ σ
   pending : σ.pending ≠ []
   write : WriteRes { norm σ with plan := [] } post new
-  restored : new = σ.known.2
+  restored : new = σ.known.head
 
 end Issue
 
@@ -338,7 +338,7 @@ theorem Issue.start_iff_inactive {d : Nat → Nat → Prop} {σ post : NS} {kind
 /-- A push the hub accepted while records were changing: the node learns the new head, which
 stands for operations it has, and notes the new records; its op heads and graph stay. -/
 structure AccLearn (c : Ctx) (post σ' : NS) : Prop where
-  known : σ'.known = (c.S, c.H)
+  known : σ'.known = ⟨c.S, c.H⟩
   hubRecs : σ'.hubRecs = some c.R
   ap : σ'.ap = post.ap
   par : σ'.par = post.par
@@ -376,7 +376,7 @@ def Handle (c : Ctx) (σ : NS) : Kind → NS → List Ans → NS → Prop
 
 /-- The push a step builds, from its state after its write, in raw ids. -/
 def pkt (n gen : Nat) (post : NS) (emb : Nat → Nat) (new : Nat) : Pkt :=
-  ⟨n, gen, post.known.1, emb post.known.2, emb new, post.ap, post.pending.map emb⟩
+  ⟨n, gen, post.known.seq, emb post.known.head, emb new, post.ap, post.pending.map emb⟩
 
 /-- The requests a step sends. -/
 def Bodies (σ : NS) (k : Kind) (p : Pkt) (bs : List Body) : Prop :=
@@ -537,8 +537,8 @@ inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
   | notice {g g' : Sys} (n : Nat) (nt : Note) (c : Ctx) (σi posti σ' : NS) (embi : Nat → Nat)
       (hw : (g.node n).wait = none) (ha : (g.node n).ns.act = false)
       (hn : nt ∈ g.notes) (hnn : nt.node = n)
-      (hnew : (g.node n).ns.known.1 < nt.snap.seq ∨ (nt.snap.seq = (g.node n).ns.known.1 ∧
-        (g.node n).emb (g.node n).ns.known.2 = nt.snap.head))
+      (hnew : (g.node n).ns.known.seq < nt.snap.seq ∨ (nt.snap.seq = (g.node n).ns.known.seq ∧
+        (g.node n).emb (g.node n).ns.known.head = nt.snap.head))
       (hl : Learn g (g.node n).ns (g.node n).ns (g.node n).emb (some nt.snap.head) σi posti embi)
       (hc : c.drops = D n) (hf : Fits embi σi.next c (.head nt.snap))
       (hh : HeadRep c σi σ')
@@ -552,8 +552,8 @@ inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
   | ignore {g g' : Sys} (n : Nat) (nt : Note)
       (hw : (g.node n).wait = none) (ha : (g.node n).ns.act = false)
       (hn : nt ∈ g.notes) (hnn : nt.node = n)
-      (hold : nt.snap.seq < (g.node n).ns.known.1 ∨ (nt.snap.seq = (g.node n).ns.known.1 ∧
-        (g.node n).emb (g.node n).ns.known.2 ≠ nt.snap.head))
+      (hold : nt.snap.seq < (g.node n).ns.known.seq ∨ (nt.snap.seq = (g.node n).ns.known.seq ∧
+        (g.node n).emb (g.node n).ns.known.head ≠ nt.snap.head))
       (hnode : g'.node = g.node)
       (hnotes : g'.notes = g.notes.erase nt)
       (hrest : g'.hub = g.hub ∧ g'.reqs = g.reqs ∧ g'.reps = g.reps ∧ g'.slot = g.slot ∧
@@ -709,7 +709,7 @@ theorem idle_congr {σ σ' : NS} (h : Idle (lctx d σ) σ σ') (hd : c.drops = d
 of an accepted push that changed the records. -/
 theorem issue_busy {σ post σ' : NS} {k : Kind} {new : Nat} {as : List Ans}
     (hi : Issue d σ k post new) (hk : k ≠ .start) (hh : Handle c σ k post as σ')
-    (hd : c.drops = d) (hph : k = .push → σ.known ≠ (c.S, c.H))
+    (hd : c.drops = d) (hph : k = .push → σ.known ≠ ⟨c.S, c.H⟩)
     (hacc : k = .push → ¬ ((∃ s, .head s ∈ as) ∧ σ.ap ≠ c.R ∧ AccLearn c post σ')) :
     Busy c σ σ' := by
   cases k with
@@ -1090,7 +1090,7 @@ def labOf (n : Nat) (c : Ctx) (g : Sys) : Act → Lab
   | .core m .busy => if m = n then .busy else .frame
   | .core m .idle => if m = n then .idle else .frame
   | .core m .maint => if m = n then .maint else .frame
-  | .issue m k => if m = n ∧ k = .push ∧ (g.node n).ns.known = (c.S, c.H) then .emit
+  | .issue m k => if m = n ∧ k = .push ∧ (g.node n).ns.known = ⟨c.S, c.H⟩ then .emit
       else .frame
   | .handle m => if m = n then
       (match (g.node n).wait with
@@ -1113,7 +1113,7 @@ structure SimInv (law : HubLaw) (D : Nat → Nat → Nat → Prop) (n : Nat) (c 
   he : (g.node n).emb h = st.head
   sinv : NodeSettle.SInv c (g.node n).ns
   nopush : ∀ w, (g.node n).wait = some w → w.kind = .push →
-    (g.node n).ns.known ≠ (c.S, c.H)
+    (g.node n).ns.known ≠ ⟨c.S, c.H⟩
 
 /-- An event that leaves the node alone is a frame of its core. -/
 theorem frame_case {law : HubLaw} {D : Nat → Nat → Nat → Prop} {n t0 h : Nat} {st : Snap}
@@ -1364,7 +1364,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
       have hn' : g'.node m = ⟨(g.node m).ns, (g.node m).emb,
           (g.node m).gen + (post.next - (g.node m).ns.next),
           some ⟨k, rq.map Req.slot, post, new, emb1⟩⟩ := by rw [hnode, upd_same]
-      have hnotemit : ¬ (k = .push ∧ (g.node m).ns.known = (c.S, c.H)) := by
+      have hnotemit : ¬ (k = .push ∧ (g.node m).ns.known = ⟨c.S, c.H⟩) := by
         intro hk
         apply hne
         simp [labOf, hk.1, hk.2]
@@ -1661,7 +1661,7 @@ theorem emit_of_lab {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} 
 
 /-- The `emit` label is exactly node `n` issuing a push while it knows the context's pair. -/
 theorem lab_emit {n : Nat} {c : Ctx} {g : Sys} {a : Act} :
-    labOf n c g a = .emit ↔ a = .issue n .push ∧ (g.node n).ns.known = (c.S, c.H) := by
+    labOf n c g a = .emit ↔ a = .issue n .push ∧ (g.node n).ns.known = ⟨c.S, c.H⟩ := by
   constructor
   · intro he
     cases a with

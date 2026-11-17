@@ -7,7 +7,7 @@ model, so all safety invariants hold along policy runs. We prove:
 * termination: a lexicographic measure strictly decreases on every policy step, so there is
   no infinite policy run, under any scheduling of nodes and actions;
 * hence every maximal policy run ends in a converged state, where every node has
-  `heads = {hub.head}` and `known = (hub.seq, hub.head)` and every created operation is in
+  `heads = {hub.head}` and `known = ⟨hub.seq, hub.head⟩` and every created operation is in
   `anc*(hub.head)`; and converged states enable no policy step (no feedback).
 -/
 import Musubi.Safety
@@ -34,18 +34,18 @@ def pRealize (s : State) (n x : Nat) : State :=
 
 /-- Operations uploaded before pushing `h`: `anc*(h) \ anc*(known.head)`. -/
 def upOps (s : State) (n h : Nat) : OSet :=
-  fun y => Anc s.U.par y h ∧ ¬ Anc s.U.par y (s.node n).known.2
+  fun y => Anc s.U.par y h ∧ ¬ Anc s.U.par y (s.node n).known.head
 
 /-- Objects uploaded before pushing `h`: objects of `closure(h) \ closure(known.head)`. -/
 def upObjs (s : State) (n h : Nat) : OSet :=
   fun o => (∃ y, Anc s.U.par y h ∧ o ∈ s.U.objs y) ∧
-    ¬ ∃ z, Anc s.U.par z (s.node n).known.2 ∧ o ∈ s.U.objs z
+    ¬ ∃ z, Anc s.U.par z (s.node n).known.head ∧ o ∈ s.U.objs z
 
 /-- `Upload` (both `PutOps` and `PutObjects` exchanges), then send `Cas(known.head, h)`. -/
 def pUpload (s : State) (n h : Nat) : State :=
   ((((((s.send (.putOps n (s.upOps n h))).hubStoreOps (s.upOps n h)).send (.stored n)).send
     (.putObjs n (s.upObjs n h))).hubStoreObjs (s.upObjs n h)).send (.stored n)).send
-    (.cas n (s.node n).known.2 h)
+    (.cas n (s.node n).known.head h)
 
 /-- Upload, `Cas` accepted, node learns `Accepted`. -/
 def pPushAccept (s : State) (n h : Nat) : State :=
@@ -67,26 +67,26 @@ end State
 arbitrary (the policy's priority order is one particular schedule). There is no `UserOp`:
 environment activity has stopped. `Merge` is a policy action (musubi triggers jj's merge). -/
 inductive PStep (N : Nat) : State → State → Prop
-  | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known.1 < s.hub.seq) :
+  | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known.seq < s.hub.seq) :
       PStep N s (s.pLearn n)
-  | realize (s : State) (n x : Nat) (hn : n < N) (hx : Anc s.U.par x (s.node n).known.2)
+  | realize (s : State) (n x : Nat) (hn : n < N) (hx : Anc s.U.par x (s.node n).known.head)
       (hnl : ¬ (s.node n).lops x) (hp : ∀ p ∈ s.U.par x, (s.node n).lops p) :
       PStep N s (s.pRealize n x)
-  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.2)
-      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.head)
+      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
       PStep N s (s.advance n)
   | merge (s : State) (n : Nat) (L O : List Nat) (hn : n < N)
       (hL : ∀ x, x ∈ L ↔ (s.node n).heads x) (h2 : ∃ a b, a ∈ L ∧ b ∈ L ∧ a ≠ b) :
       PStep N s (s.mergeOp n L O)
   | pushAccept (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
-      (hacc : s.hub.head = (s.node n).known.2) : PStep N s (s.pPushAccept n h)
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
+      (hacc : s.hub.head = (s.node n).known.head) : PStep N s (s.pPushAccept n h)
   | pushIdem (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
       (hidem : s.hub.head = h) : PStep N s (s.pPushIdem n h)
   | pushReject (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
-      (hrej : s.hub.head ≠ (s.node n).known.2) (hrej' : s.hub.head ≠ h) :
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
+      (hrej : s.hub.head ≠ (s.node n).known.head) (hrej' : s.hub.head ≠ h) :
       PStep N s (s.pPushReject n h)
 
 /-- Reflexive-transitive closure of `PStep`. -/
@@ -97,24 +97,24 @@ inductive PSteps (N : Nat) : State → State → Prop
 /-- Converged: every node's heads are exactly `{hub.head}` and it knows the current head. -/
 def Converged (N : Nat) (s : State) : Prop :=
   ∀ n, n < N → (∀ y, (s.node n).heads y ↔ y = s.hub.head) ∧
-    (s.node n).known = (s.hub.seq, s.hub.head)
+    (s.node n).known = ⟨s.hub.seq, s.hub.head⟩
 
 /-! ## Policy steps are runs of the asynchronous model -/
 
 /-- Uploading what `h` adds to `known.head` closes `h` at the hub, when the hub holds
 `closure(known.head)`. -/
 theorem pUpload_closed_of {s : State} {n h : Nat} (hc : ClosedAt s s.hub.head)
-    (hk : Anc s.U.par (s.node n).known.2 s.hub.head) : ClosedAt (s.pUpload n h) h := by
+    (hk : Anc s.U.par (s.node n).known.head s.hub.head) : ClosedAt (s.pUpload n h) h := by
   intro y hy
   have hy' : Anc s.U.par y h := hy
   constructor
   · show (s.hub.ops y ∨ s.upOps n h y)
-    by_cases hyk : Anc s.U.par y (s.node n).known.2
+    by_cases hyk : Anc s.U.par y (s.node n).known.head
     · exact Or.inl (hc y (hyk.trans hk)).1
     · exact Or.inr ⟨hy', hyk⟩
   · intro o ho
     show s.hub.objs o ∨ s.upObjs n h o
-    by_cases hz : ∃ z, Anc s.U.par z (s.node n).known.2 ∧ o ∈ s.U.objs z
+    by_cases hz : ∃ z, Anc s.U.par z (s.node n).known.head ∧ o ∈ s.U.objs z
     · obtain ⟨z, hz, hoz⟩ := hz
       exact Or.inl ((hc z (hz.trans hk)).2 o hoz)
     · exact Or.inr ⟨⟨y, hy', ho⟩, hz⟩
@@ -139,7 +139,7 @@ theorem pUpload_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N s 
       obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
       exact hobj y o (lopsAnc hy) hoy))
   have r4 := hP r3 (SyncStep.hubPutObjs _ n (s.upObjs n hd) (Or.inr rfl))
-  exact hP r4 (SyncStep.push _ n (s.node n).known.2 hd hn hl)
+  exact hP r4 (SyncStep.push _ n (s.node n).known.head hd hn hl)
 
 /-- The merged `Push` of what `Upload` would send, to `hd` from the node's `known` head, is a
 sync step, in any set of states that sync steps keep, from a state where node `n`'s operations
@@ -149,10 +149,10 @@ theorem pushUpload_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N
     (hpar : ∀ x p, (s.node n).lops x → p ∈ s.U.par x → (s.node n).lops p)
     (hobj : ∀ x o, (s.node n).lops x → o ∈ s.U.objs x → (s.node n).lobj o)
     (hl : (s.node n).lops hd) :
-    P (s.send (.push n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.2 hd)) := by
+    P (s.send (.push n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.head hd)) := by
   have lopsAnc : ∀ {a}, Anc s.U.par a hd → (s.node n).lops a := fun ha =>
     Anc.closed (S := (s.node n).lops) (fun y p hy hp => hpar y p hy hp) ha hl
-  refine hP h (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.2 hd hn
+  refine hP h (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd) (s.node n).known.head hd hn
     (fun x hx => lopsAnc hx.1) (fun o ho => ?_) hl)
   obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
   exact hobj y o (lopsAnc hy) hoy
@@ -160,7 +160,7 @@ theorem pushUpload_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N
 /-- `pRealize` is a run of sync steps, in any set of states that sync steps keep, when the
 hub holds `x` and its objects and node `n` has its parents. -/
 theorem pRealize_run {P : State → Prop} (hP : ∀ {s s'}, P s → SyncStep N s s' → P s')
-    {s : State} (h : P s) {n x : Nat} (hn : n < N) (hx : Anc s.U.par x (s.node n).known.2)
+    {s : State} (h : P s) {n x : Nat} (hn : n < N) (hx : Anc s.U.par x (s.node n).known.head)
     (hc : HubHas s x) (hp : ∀ p ∈ s.U.par x, (s.node n).lops p) : P (s.pRealize n x) := by
   have r1 := hP h (SyncStep.fetchOps s n (· = x) hn (fun y hy => hy ▸ hx))
   have r2 := hP r1 (SyncStep.hubGetOps _ n (· = x) (Or.inr rfl))
@@ -197,21 +197,21 @@ theorem pstep_reachable {s s' : State} (h : Reachable N s) (hp : PStep N s s') :
   | merge n L O hn hL h2 => exact h.step (Or.inl (EnvStep.merge s n L O hn hL h2))
   | pushAccept n hd hn hh hne hk hacc =>
     have r := pUpload_reachable h hn ((hh hd).2 rfl)
-    have r' := r.step (Or.inr (SyncStep.casAccept _ n (s.node n).known.2 hd (Or.inr rfl)
+    have r' := r.step (Or.inr (SyncStep.casAccept _ n (s.node n).known.head hd (Or.inr rfl)
       (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
       (pUpload_closed hI)))
     exact r'.step (Or.inr (SyncStep.learn _ n .accepted (s.hub.seq + 1) hd hn
       (Or.inl (Or.inr rfl)) (Nat.lt_succ_of_le (hI.known n).1)))
   | pushIdem n hd hn hh hne hk hidem =>
-    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
+    have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
     have r := pUpload_reachable h hn ((hh hd).2 rfl)
-    have r' := r.step (Or.inr (SyncStep.casIdem _ n (s.node n).known.2 hd (Or.inr rfl) hidem))
+    have r' := r.step (Or.inr (SyncStep.casIdem _ n (s.node n).known.head hd (Or.inr rfl) hidem))
     exact r'.step (Or.inr (SyncStep.learn _ n .accepted s.hub.seq s.hub.head hn
       (Or.inr rfl) hlt))
   | pushReject n hd hn hh hne hk hrej hrej' =>
-    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
+    have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt hrej
     have r := pUpload_reachable h hn ((hh hd).2 rfl)
-    have r' := r.step (Or.inr (SyncStep.casReject _ n (s.node n).known.2 hd (Or.inr rfl)
+    have r' := r.step (Or.inr (SyncStep.casReject _ n (s.node n).known.head hd (Or.inr rfl)
       hrej' (fun ⟨e, _, _⟩ => hrej e)))
     exact r'.step (Or.inr (SyncStep.learn _ n .rejected s.hub.seq s.hub.head hn
       (Or.inr rfl) hlt))
@@ -229,14 +229,14 @@ def dirty (s : State) (n : Nat) : Prop := ∃ h, (s.node n).heads h ∧ ¬ Anc s
 
 noncomputable def mDirty (N : Nat) (s : State) : Nat := cnt N (dirty s)
 
-def mStale (s : State) (n : Nat) : Nat := s.hub.seq - (s.node n).known.1
+def mStale (s : State) (n : Nat) : Nat := s.hub.seq - (s.node n).known.seq
 
 noncomputable def mMiss (s : State) (n : Nat) : Nat :=
   cnt (s.hub.head + 1) (fun x => Anc s.U.par x s.hub.head ∧ ¬ (s.node n).lops x)
 
 open Classical in
 noncomputable def mAdv (s : State) (n : Nat) : Nat :=
-  if ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h then 0 else 1
+  if ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h then 0 else 1
 
 open Classical in
 noncomputable def mMulti (s : State) (n : Nat) : Nat :=
@@ -324,10 +324,10 @@ end Frame
 /-! ### Each policy step decreases the measure -/
 
 theorem measure_learn {s : State} {n : Nat} (hn : n < N)
-    (hs : (s.node n).known.1 < s.hub.seq) : Lex5 (measure N (s.pLearn n)) (measure N s) := by
+    (hs : (s.node n).known.seq < s.hub.seq) : Lex5 (measure N (s.pLearn n)) (measure N s) := by
   have f : Frame s (s.pLearn n) n :=
     ⟨rfl, rfl, rfl, fun i hi => by simp [State.pLearn, State.learn, setNode_ne hi]⟩
-  have hnode : (s.pLearn n).node n = { s.node n with known := (s.hub.seq, s.hub.head) } := by
+  have hnode : (s.pLearn n).node n = { s.node n with known := ⟨s.hub.seq, s.hub.head⟩ } := by
     simp [State.pLearn, State.learn]
   apply lex5_of
   right; refine ⟨f.dirty_eq (by rw [hnode]), Or.inl ?_⟩
@@ -335,7 +335,7 @@ theorem measure_learn {s : State} {n : Nat} (hn : n < N)
   unfold mStale; rw [hnode, f.seq]; simp; omega
 
 theorem measure_realize {s : State} (hI : Inv N s) {n x : Nat} (hn : n < N)
-    (hx : Anc s.U.par x (s.node n).known.2) (hnl : ¬ (s.node n).lops x) :
+    (hx : Anc s.U.par x (s.node n).known.head) (hnl : ¬ (s.node n).lops x) :
     Lex5 (measure N (s.pRealize n x)) (measure N s) := by
   have f : Frame s (s.pRealize n x) n :=
     ⟨rfl, rfl, rfl, fun i hi => by
@@ -356,13 +356,13 @@ theorem measure_realize {s : State} (hI : Inv N s) {n x : Nat} (hn : n < N)
     · exact ⟨x, Nat.lt_succ_of_le (hxa.le hI.parLt), ⟨hxa, hnl⟩, fun ⟨_, h⟩ => h (Or.inr rfl)⟩
 
 theorem measure_advance {s : State} (hI : Inv N s) {n : Nat} (hn : n < N)
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
     Lex5 (measure N (s.advance n)) (measure N s) := by
   have f : Frame s (s.advance n) n :=
     ⟨rfl, rfl, rfl, fun i hi => by simp [State.advance, setNode_ne hi]⟩
   have H := fun y => advance_heads_iff (y := y) hI hna
   have hheads : ((s.advance n).node n).heads =
-      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) := by
+      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) := by
     simp [State.advance]
   have hknown : ((s.advance n).node n).known = (s.node n).known := by simp [State.advance]
   have hlops : ((s.advance n).node n).lops = (s.node n).lops := by simp [State.advance]
@@ -389,8 +389,8 @@ theorem measure_advance {s : State} (hI : Inv N s) {n : Nat} (hn : n < N)
     unfold mMiss; rw [hlops, f.U, f.head]
   · apply f.sum_lt hn (fun i hi => f.adv_ne hi)
     unfold mAdv; rw [hheads, hknown, f.U]
-    have h1 : ∃ h, maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) h ∧
-        Anc s.U.par (s.node n).known.2 h := ⟨_, (H _).2 (Or.inl rfl), Anc.refl⟩
+    have h1 : ∃ h, maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) h ∧
+        Anc s.U.par (s.node n).known.head h := ⟨_, (H _).2 (Or.inl rfl), Anc.refl⟩
     simp only [h1, hna, ↓reduceIte]
     omega
 
@@ -401,7 +401,7 @@ merge left to do. -/
 theorem merge_tail {s : State} {n : Nat} {L O : List Nat} (hn : n < N)
     (hlt : ParLt s.U.par) (hhead : s.hub.head < s.U.next)
     (hheadsLt : ∀ i x, (s.node i).heads x → x < s.U.next)
-    (hk : ∀ i, (s.node i).known.2 < s.U.next)
+    (hk : ∀ i, (s.node i).known.head < s.U.next)
     (hL : ∀ x, x ∈ L ↔ (s.node n).heads x) (h2 : ∃ a b, a ∈ L ∧ b ∈ L ∧ a ≠ b) :
     sumN N (mMiss (s.mergeOp n L O)) = sumN N (mMiss s) ∧
       sumN N (mAdv (s.mergeOp n L O)) = sumN N (mAdv s) ∧
@@ -435,8 +435,8 @@ theorem merge_tail {s : State} {n : Nat} {L O : List Nat} (hn : n < N)
     by_cases hi : i = n
     · subst hi
       rw [hheads, hknown]
-      have : (∃ h, h = s.U.next ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.2 h) ↔
-          (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.2 h) := by
+      have : (∃ h, h = s.U.next ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.head h) ↔
+          (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.head h) := by
         constructor
         · rintro ⟨h, rfl, hA⟩
           rcases Tnew.1 hA with e | ⟨p, hp, hA'⟩
@@ -446,8 +446,8 @@ theorem merge_tail {s : State} {n : Nat} {L O : List Nat} (hn : n < N)
           exact ⟨s.U.next, rfl, Tnew.2 (Or.inr ⟨h, (hL h).2 hh, hA⟩)⟩
       exact ite_iff this
     · rw [hother i hi]
-      have : (∃ h, (s.node i).heads h ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.2 h) ↔
-          (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.2 h) := by
+      have : (∃ h, (s.node i).heads h ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.head h) ↔
+          (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.head h) := by
         constructor
         · rintro ⟨h, hh, hA⟩; exact ⟨h, hh, (T (hheadsLt _ _ hh)).1 hA⟩
         · rintro ⟨h, hh, hA⟩; exact ⟨h, hh, (T (hheadsLt _ _ hh)).2 hA⟩
@@ -500,7 +500,7 @@ theorem measure_merge {s : State} (hI : Inv N s) {n : Nat} {L O : List Nat} (hn 
       constructor
       · rintro ⟨h, hh, hna⟩; exact ⟨h, hh, fun hA => hna ((T hI.headLt).2 hA)⟩
       · rintro ⟨h, hh, hna⟩; exact ⟨h, hh, fun hA => hna ((T hI.headLt).1 hA)⟩
-  have hk : ∀ i, (s.node i).known.2 < s.U.next := fun i => hI.knownLt i
+  have hk : ∀ i, (s.node i).known.head < s.U.next := fun i => hI.knownLt i
   apply lex5_of
   right
   obtain ⟨t1, t2, t3⟩ := merge_tail (O := O) hn hI.parLt hI.headLt (fun _ _ h => hI.headsLt h)
@@ -519,8 +519,8 @@ theorem measure_merge {s : State} (hI : Inv N s) {n : Nat} {L O : List Nat} (hn 
 @[simp] theorem pUpload_seq {s : State} {n h : Nat} : (s.pUpload n h).hub.seq = s.hub.seq := rfl
 
 theorem measure_pushAccept {s : State} (hI : Inv N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
-    (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.head)
+    (hk : Anc s.U.par (s.node n).known.head hd) (hacc : s.hub.head = (s.node n).known.head) :
     Lex5 (measure N (s.pPushAccept n hd)) (measure N s) := by
   have hU : (s.pPushAccept n hd).U = s.U := rfl
   have hhead : (s.pPushAccept n hd).hub.head = hd := rfl
@@ -547,8 +547,8 @@ theorem measure_pushAccept {s : State} (hI : Inv N s) {n hd : Nat} (hn : n < N)
 /-- `Idem` and `Reject` both just teach node `n` the current head. -/
 theorem measure_pushLearn {s : State} {n : Nat} (hn : n < N) {s' : State}
     (f : Frame s s' n) (hheads : (s'.node n).heads = (s.node n).heads)
-    (hknown : (s'.node n).known = (s.hub.seq, s.hub.head))
-    (hs : (s.node n).known.1 < s.hub.seq) : Lex5 (measure N s') (measure N s) := by
+    (hknown : (s'.node n).known = ⟨s.hub.seq, s.hub.head⟩)
+    (hs : (s.node n).known.seq < s.hub.seq) : Lex5 (measure N s') (measure N s) := by
   apply lex5_of
   right; refine ⟨f.dirty_eq hheads, Or.inl ?_⟩
   apply f.sum_lt hn (fun i hi => f.stale_ne hi)
@@ -564,13 +564,13 @@ theorem measure_decreases {s s' : State} (h : Reachable N s) (hp : PStep N s s')
   | merge n L O hn hL h2 => exact measure_merge hI hn hL h2
   | pushAccept n hd hn hh hne hk hacc => exact measure_pushAccept hI hn hh hne hk hacc
   | pushIdem n hd hn hh hne hk hidem =>
-    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
+    have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
     refine measure_pushLearn hn ⟨rfl, rfl, rfl, fun i hi => ?_⟩ ?_ ?_ hlt
     · simp [State.pPushIdem, State.learn, setNode_ne hi]
     · simp [State.pPushIdem, State.learn]
     · simp [State.pPushIdem, State.learn]
   | pushReject n hd hn hh hne hk hrej hrej' =>
-    have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
+    have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt hrej
     refine measure_pushLearn hn ⟨rfl, rfl, rfl, fun i hi => ?_⟩ ?_ ?_ hlt
     · simp [State.pPushReject, State.learn, setNode_ne hi]
     · simp [State.pPushReject, State.learn]
@@ -618,23 +618,23 @@ theorem progress {s : State} (h : Reachable N s) (hc : ¬ Converged N s) :
     exact ⟨_, PStep.merge s n (headsList s n) [] hn (fun x => mem_headsList hI)
       ⟨a, b, (mem_headsList hI).2 ha, (mem_headsList hI).2 hb, hab⟩⟩
   -- 2. learn
-  by_cases hstale : (s.node n).known.1 < s.hub.seq
+  by_cases hstale : (s.node n).known.seq < s.hub.seq
   · exact ⟨_, PStep.learn s n hn hstale⟩
-  have hk1 : (s.node n).known.1 = s.hub.seq := by have := (hI.known n).1; omega
-  have hk2 : (s.node n).known.2 = s.hub.head := by
+  have hk1 : (s.node n).known.seq = s.hub.seq := by have := (hI.known n).1; omega
+  have hk2 : (s.node n).known.head = s.hub.head := by
     rw [← (hI.known n).2, hk1, hI.histHead]
   -- 3. fetch and realize
-  by_cases hnloc : ¬ (s.node n).lops (s.node n).known.2
+  by_cases hnloc : ¬ (s.node n).lops (s.node n).known.head
   · have hloc := hnloc
     obtain ⟨x, ⟨hxa, hxl⟩, hmin⟩ := exists_min
-      (fun x => Anc s.U.par x (s.node n).known.2 ∧ ¬ (s.node n).lops x)
-      (a := (s.node n).known.2) ⟨Anc.refl, hloc⟩
+      (fun x => Anc s.U.par x (s.node n).known.head ∧ ¬ (s.node n).lops x)
+      (a := (s.node n).known.head) ⟨Anc.refl, hloc⟩
     refine ⟨_, PStep.realize s n x hn hxa hxl (fun p hp => ?_)⟩
     refine Classical.byContradiction fun hpl => ?_
     exact hmin p (hI.parLt x p hp) ⟨(Anc.parent hp).trans hxa, hpl⟩
   have hloc := Classical.not_not.1 hnloc
   -- 4. advance
-  by_cases hnadv : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g
+  by_cases hnadv : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.head g
   · exact ⟨_, PStep.advance s n hn hloc hnadv⟩
   have hadv := Classical.not_not.1 hnadv
   -- 5. push
@@ -646,7 +646,7 @@ theorem progress {s : State} (h : Reachable N s) (hc : ¬ Converged N s) :
       refine Classical.byContradiction fun hne => ?_
       exact hmulti ⟨y, g, hy, hg, hne⟩
     · rintro rfl; exact hg
-  have hne : g ≠ (s.node n).known.2 := by
+  have hne : g ≠ (s.node n).known.head := by
     intro e
     apply hc
     refine ⟨fun y => ?_, ?_⟩
@@ -668,13 +668,13 @@ include hc hn
 theorem lops_below {x : Nat}
     (hpar : ∀ x p, (s.node n).lops x → p ∈ s.U.par x → (s.node n).lops p)
     (hhl : ∀ x, (s.node n).heads x → (s.node n).lops x)
-    (hx : Anc s.U.par x (s.node n).known.2) : (s.node n).lops x := by
+    (hx : Anc s.U.par x (s.node n).known.head) : (s.node n).lops x := by
   rw [(hc n hn).2] at hx
   exact Anc.closed (S := (s.node n).lops) (fun y p hy hp => hpar y p hy hp) hx
     (hhl _ (((hc n hn).1 _).2 rfl))
 
 /-- `known.head` is a head, so there is nothing to advance to. -/
-theorem known_in_heads : ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h := by
+theorem known_in_heads : ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h := by
   rw [(hc n hn).2]; exact ⟨_, ((hc n hn).1 _).2 rfl, Anc.refl⟩
 
 /-- There is one head, so nothing to merge. -/
@@ -683,7 +683,7 @@ theorem heads_eq {a b : Nat} (ha : (s.node n).heads a) (hb : (s.node n).heads b)
 
 /-- The one head is `known.head`, so there is nothing to push. -/
 theorem head_known {h : Nat} (hh : ∀ y, (s.node n).heads y ↔ y = h) :
-    h = (s.node n).known.2 := by
+    h = (s.node n).known.head := by
   rw [(hc n hn).2]; exact ((hc n hn).1 h).1 ((hh h).2 rfl)
 
 end Converged

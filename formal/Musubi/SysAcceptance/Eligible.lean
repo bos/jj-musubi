@@ -117,8 +117,8 @@ theorem FineAt.converges {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
     {E : Nat → Prop} [DecidablePred E] {run : Nat → Sys} {acts : Nat → Act} {k w : Nat}
     {initial : Nat → Nat} (F : FineAt N D law E run acts k w initial)
     (hknown : ∀ n, E n →
-      Recovery.HubNodeSteps.HonestSnap w initial (run k) ⟨(known (run k) n).1,
-        (known (run k) n).2, (run k).hub.recs⟩)
+      Recovery.HubNodeSteps.HonestSnap w initial (run k) ⟨(known (run k) n).seq,
+        (known (run k) n).head, (run k).hub.recs⟩)
     (hN : ∀ n, E n → n < N) :
     Converges D E run := by
   obtain ⟨hρ, hk0, hb0, hi0, hkn0, hl0, -⟩ :=

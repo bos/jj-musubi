@@ -50,7 +50,7 @@ def OldGone {ρ α : Type} (N : Nat) (O : HiveObs ρ α) (c k : Nat) : Prop :=
 
 /-- Node `n`'s known pair at `i` is one the hub had at a hive time from `k` on, by `i`. -/
 def KnownTrue {ρ α : Type} (run : Nat → Sys) (O : HiveObs ρ α) (k n i : Nat) : Prop :=
-  ∃ a, k ≤ a ∧ a ≤ i ∧ (O.seq n i, O.known n i) = ((run a).hub.seq, (run a).hub.head)
+  ∃ a, k ≤ a ∧ a ≤ i ∧ (⟨O.seq n i, O.known n i⟩ : Known) = ⟨(run a).hub.seq, (run a).hub.head⟩
 
 /-- Moving a record/control cut forward preserves its guarantees. The frozen snapshot is
 rebased to the later cut. -/

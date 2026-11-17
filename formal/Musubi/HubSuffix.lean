@@ -67,7 +67,7 @@ def Packet.current (g : GState) (p : Packet) : Prop := p.tag = some (g.bk p.node
 
 /-- The fresh packet node `n` sends with its single head `d`. -/
 def sent (g : GState) (n d : Nat) : Packet :=
-  ⟨n, some (g.bk n), (g.s.node n).known.1, (g.s.node n).known.2, d⟩
+  ⟨n, some (g.bk n), (g.s.node n).known.seq, (g.s.node n).known.head, d⟩
 
 /-- One step of the suffix. Eligible nodes learn any honest reply from the window, newer than
 what they know or not, advance and merge as the policy does, write maintenance operations (each
@@ -87,14 +87,14 @@ inductive Step (E : Nat → Prop) (w : Nat) : GState → GState → Prop
       (hU : USame g.s g'.s) (hh : HubSame g.s g'.s)
       (hn : ∀ m, E m → m ≠ n → NodeSame g.s g'.s m)
       (hheads : (g'.s.node n).heads = (g.s.node n).heads)
-      (hknown : (g'.s.node n).known = (sq, g.s.hub.hist sq))
+      (hknown : (g'.s.node n).known = ⟨sq, g.s.hub.hist sq⟩)
       (hbk : g'.bk = g.bk) (hpk : g'.pk = g.pk) : Step E w g g'
   | advance {g g' : GState} (n : Nat) (hE : E n)
-      (hna : ¬ ∃ h, (g.s.node n).heads h ∧ Anc g.s.U.par (g.s.node n).known.2 h)
+      (hna : ¬ ∃ h, (g.s.node n).heads h ∧ Anc g.s.U.par (g.s.node n).known.head h)
       (hU : USame g.s g'.s) (hh : HubSame g.s g'.s)
       (hn : ∀ m, E m → m ≠ n → NodeSame g.s g'.s m)
       (hheads : (g'.s.node n).heads =
-        maxSet g.s.U.par (fun y => (g.s.node n).heads y ∨ y = (g.s.node n).known.2))
+        maxSet g.s.U.par (fun y => (g.s.node n).heads y ∨ y = (g.s.node n).known.head))
       (hknown : (g'.s.node n).known = (g.s.node n).known)
       (hbk : g'.bk = g.bk) (hpk : g'.pk = g.pk) : Step E w g g'
   | merge {g g' : GState} (n : Nat) (hE : E n)
@@ -150,8 +150,8 @@ structure Inv (E : Nat → Prop) (w : Nat) (g : GState) : Prop where
   chain : ∀ i j, w ≤ i → i ≤ j → j ≤ g.s.hub.seq →
     Anc g.s.U.par (g.s.hub.hist i) (g.s.hub.hist j)
   strict : ∀ i j, w ≤ i → i < j → j ≤ g.s.hub.seq → g.s.hub.hist i < g.s.hub.hist j
-  known : ∀ n, E n → w ≤ (g.s.node n).known.1 ∧ (g.s.node n).known.1 ≤ g.s.hub.seq ∧
-    g.s.hub.hist (g.s.node n).known.1 = (g.s.node n).known.2
+  known : ∀ n, E n → w ≤ (g.s.node n).known.seq ∧ (g.s.node n).known.seq ≤ g.s.hub.seq ∧
+    g.s.hub.hist (g.s.node n).known.seq = (g.s.node n).known.head
   headsLt : ∀ n, E n → ∀ y, (g.s.node n).heads y → y < g.s.U.next
   pkLt : ∀ p ∈ g.pk, p.new < g.s.U.next
   tagLe : ∀ p ∈ g.pk, ∀ k, p.tag = some k → k ≤ g.bk p.node
@@ -167,7 +167,7 @@ and its single head is at or below the hub's head and comparable with every head
 accepted in the window. The sender of a current push the hub accepts was bad, and is good
 after it. -/
 def GoodW (w : Nat) (s : State) (n : Nat) : Prop :=
-  (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2 ∧
+  (s.node n).known.seq ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.seq = (s.node n).known.head ∧
     ∃ x, (∀ y, (s.node n).heads y ↔ y = x) ∧ Anc s.U.par x s.hub.head ∧
       ∀ i, w ≤ i → i ≤ s.hub.seq → Anc s.U.par x (s.hub.hist i) ∨ Anc s.U.par (s.hub.hist i) x
 
@@ -184,8 +184,8 @@ theorem inv_entry {E : Nat → Prop} {w : Nat} {g : GState} (hlt : ParLt g.s.U.p
     (hchain : ∀ i j, w ≤ i → i ≤ j → j ≤ g.s.hub.seq →
       Anc g.s.U.par (g.s.hub.hist i) (g.s.hub.hist j))
     (hstrict : ∀ i j, w ≤ i → i < j → j ≤ g.s.hub.seq → g.s.hub.hist i < g.s.hub.hist j)
-    (hknown : ∀ n, E n → w ≤ (g.s.node n).known.1 ∧ (g.s.node n).known.1 ≤ g.s.hub.seq ∧
-      g.s.hub.hist (g.s.node n).known.1 = (g.s.node n).known.2)
+    (hknown : ∀ n, E n → w ≤ (g.s.node n).known.seq ∧ (g.s.node n).known.seq ≤ g.s.hub.seq ∧
+      g.s.hub.hist (g.s.node n).known.seq = (g.s.node n).known.head)
     (hheads : ∀ n, E n → ∀ y, (g.s.node n).heads y → y < g.s.U.next)
     (hpk : ∀ p ∈ g.pk, p.new < g.s.U.next ∧ p.tag = none) : Inv E w g where
   parLt := hlt
@@ -235,7 +235,7 @@ theorem Inv.histLt (I : Inv E w g) {i : Nat} (hw : w ≤ i) (hi : i ≤ g.s.hub.
     g.s.hub.hist i < g.s.U.next := Nat.lt_of_le_of_lt (I.histLe hw hi) I.headLt
 
 theorem Inv.knownLt (I : Inv E w g) {n : Nat} (hE : E n) :
-    (g.s.node n).known.2 < g.s.U.next := by
+    (g.s.node n).known.head < g.s.U.next := by
   obtain ⟨hw, hle, hh⟩ := I.known n hE
   rw [← hh]; exact I.histLt hw hle
 
@@ -376,7 +376,7 @@ theorem inv_step {E : Nat → Prop} {w : Nat} {g g' : GState} (I : Inv E w g)
       · rw [hpn] at h1
         obtain ⟨hw, hle, hhk⟩ := I.known n hE
         have h3' : Anc g.s.U.par g.s.hub.head p.new := by rw [← he]; exact ha
-        have hk : Anc g.s.U.par (g.s.node n).known.2 p.new := by
+        have hk : Anc g.s.U.par (g.s.node n).known.head p.new := by
           rw [← hhk]; exact (I.histAnc hw hle).trans h3'
         exact absurd ⟨p.new, (h1 p.new).2 rfl, hk⟩ hna
       · rw [(nodeEq p.node hE' hpn).1]
@@ -648,12 +648,12 @@ theorem good_step {E : Nat → Prop} {w : Nat} {g g' : GState} (I : Inv E w g)
     · subst hmn
       obtain ⟨hk1, hk2, x, hx, -, hxc⟩ := h
       obtain ⟨hw, hle, hhk⟩ := I.known m hm
-      have hxk : Anc g.s.U.par x (g.s.node m).known.2 := by
+      have hxk : Anc g.s.U.par x (g.s.node m).known.head := by
         rcases hxc _ hw hle with h | h
         · rwa [hhk] at h
         · rw [hhk] at h
           exact absurd ⟨x, (hx x).2 rfl, h⟩ hna
-      have hmax : ∀ y, (g'.s.node m).heads y ↔ y = (g.s.node m).known.2 := by
+      have hmax : ∀ y, (g'.s.node m).heads y ↔ y = (g.s.node m).known.head := by
         intro y
         rw [hheads]
         constructor
@@ -675,7 +675,7 @@ theorem good_step {E : Nat → Prop} {w : Nat} {g g' : GState} (I : Inv E w g)
       · rw [← hhk]; exact I.histAnc hw hle
       · intro i hi his
         rw [← hhk]
-        by_cases hki : (g.s.node m).known.1 ≤ i
+        by_cases hki : (g.s.node m).known.seq ≤ i
         · exact Or.inl (I.chain _ _ hw hki his)
         · exact Or.inr (I.chain _ _ hi (by omega) hle)
     · exact goodW_same hU.1 hh (hn m hm hmn) h
@@ -704,7 +704,7 @@ theorem good_step {E : Nat → Prop} {w : Nat} {g g' : GState} (I : Inv E w g)
     obtain ⟨hhe, hkn⟩ := hn m hm
     unfold GoodW
     rw [hhe, hkn, hU.1, hhead, hseq, hhist,
-      upd_ne _ _ (by omega : (g.s.node m).known.1 ≠ g.s.hub.seq + 1)]
+      upd_ne _ _ (by omega : (g.s.node m).known.seq ≠ g.s.hub.seq + 1)]
     refine ⟨Nat.le_succ_of_le hk1, hk2, x, hx, hxh.trans hanc, ?_⟩
     intro i hi his
     by_cases hie : i = g.s.hub.seq + 1
@@ -796,7 +796,7 @@ theorem measure_step {N : Nat} {E : Nat → Prop} {w : Nat} {g g' : GState} (I :
           obtain ⟨-, hle, hhk⟩ := I.known p.node hE
           unfold GoodW
           rw [hhe, hkn, hU.1, hhead, hseq, hhist,
-            upd_ne _ _ (by omega : (g.s.node p.node).known.1 ≠ g.s.hub.seq + 1)]
+            upd_ne _ _ (by omega : (g.s.node p.node).known.seq ≠ g.s.hub.seq + 1)]
           refine ⟨Nat.le_succ_of_le hle, hhk, p.new, h1, Anc.refl, ?_⟩
           intro i hi his
           by_cases hie : i = g.s.hub.seq + 1

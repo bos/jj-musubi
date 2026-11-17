@@ -77,7 +77,7 @@ operations bounded by the universe, and without what relates nodes to the hub's 
 structure InvR (N : Nat) (s : State) : Prop extends Core N s where
   objsRoot : s.U.objs root = []
   hubOpsLt : ∀ x, s.hub.ops x → x < s.U.next
-  knownLt : ∀ n, (s.node n).known.2 < s.U.next
+  knownLt : ∀ n, (s.node n).known.head < s.U.next
   stagedLt : ∀ n x, (s.node n).sops x → x < s.U.next
   msgs : ∀ m, s.net m → MsgR s m
 
@@ -117,7 +117,7 @@ theorem InvR.send {s : State} {m : Msg} (hI : InvR N s) (hm : MsgR s m) :
 
 /-- The per-node part of `InvR`, for a candidate new state `nd` of node `n`. -/
 structure NodeR (s : State) (n : Nat) (nd : Node) : Prop extends CoreNode s n nd where
-  knownLt : nd.known.2 < s.U.next
+  knownLt : nd.known.head < s.U.next
   stagedLt : ∀ x, nd.sops x → x < s.U.next
 
 theorem InvR.nodeR {s : State} (hI : InvR N s) (n : Nat) : NodeR s n (s.node n) where
@@ -129,7 +129,7 @@ theorem invR_setNode {s : State} {n : Nat} {nd : Node} (hI : InvR N s) (h : Node
     InvR N (s.setNode n nd) :=
   { hI with
     toCore := hI.toCore.setNode h.toCoreNode
-    knownLt := forall_setNode (P := fun _ nd => nd.known.2 < s.U.next) hI.knownLt h.knownLt
+    knownLt := forall_setNode (P := fun _ nd => nd.known.head < s.U.next) hI.knownLt h.knownLt
     stagedLt := forall_setNode (P := fun _ nd => ∀ x, nd.sops x → x < s.U.next)
       hI.stagedLt h.stagedLt }
 
@@ -230,8 +230,8 @@ theorem invR_realize {s : State} (hI : InvR N s) {n x : Nat} (hx : (s.node n).so
     · exact Or.inr ho
 
 theorem invR_advance {s : State} (hI : InvR N s) {n : Nat}
-    (hk : (s.node n).lops (s.node n).known.2)
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+    (hk : (s.node n).lops (s.node n).known.head)
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
     InvR N (s.advance n) := by
   have H := fun y => advance_heads_iff_of (y := y) (hI.headsAnti n) hna
   refine invR_setNode hI
@@ -246,7 +246,7 @@ theorem invR_advance {s : State} (hI : InvR N s) {n : Nat}
   · exact ⟨_, (H _).2 (Or.inl rfl)⟩
   · intro x hx hc
     obtain ⟨h, hh, hA⟩ := hI.ownInHeads n x hx hc
-    by_cases hhk : Anc s.U.par h (s.node n).known.2
+    by_cases hhk : Anc s.U.par h (s.node n).known.head
     · exact ⟨_, (H _).2 (Or.inl rfl), hA.trans hhk⟩
     · exact ⟨h, (H h).2 (Or.inr ⟨hh, hhk⟩), hA⟩
 
@@ -470,7 +470,7 @@ has neither. -/
 def Good (s : State) (n : Nat) : Prop := Consistent s n ∧ Settled s n
 
 theorem InvR.consistentAnc {s : State} (hI : InvR N s) {n : Nat} (hc : Consistent s n) :
-    Anc s.U.par (s.node n).known.2 s.hub.head := by
+    Anc s.U.par (s.node n).known.head s.hub.head := by
   rw [← hc.2]; exact hI.histAnc hc.1
 
 /-- The policy, with a hub that may have gone back. It is `PStep` but for two steps. A node
@@ -480,27 +480,27 @@ learns it. And it realizes only below a head in the hub's current history: the R
 clears its realization plan whenever `handle` changes `known`, and every sync starts with a
 `Fetch` whose reply sets `known`. -/
 inductive PStepR (N : Nat) : State → State → Prop
-  | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known ≠ (s.hub.seq, s.hub.head)) :
+  | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known ≠ ⟨s.hub.seq, s.hub.head⟩) :
       PStepR N s (s.pLearn n)
   | realize (s : State) (n x : Nat) (hn : n < N) (hc : Consistent s n)
-      (hx : Anc s.U.par x (s.node n).known.2)
+      (hx : Anc s.U.par x (s.node n).known.head)
       (hnl : ¬ (s.node n).lops x) (hp : ∀ p ∈ s.U.par x, (s.node n).lops p) :
       PStepR N s (s.pRealize n x)
-  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.2)
-      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+  | advance (s : State) (n : Nat) (hn : n < N) (hk : (s.node n).lops (s.node n).known.head)
+      (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
       PStepR N s (s.advance n)
   | merge (s : State) (n : Nat) (L O : List Nat) (hn : n < N)
       (hL : ∀ x, x ∈ L ↔ (s.node n).heads x) (h2 : ∃ a b, a ∈ L ∧ b ∈ L ∧ a ≠ b) :
       PStepR N s (s.mergeOp n L O)
   | pushAccept (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
-      (hacc : s.hub.head = (s.node n).known.2) : PStepR N s (s.pPushAccept n h)
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
+      (hacc : s.hub.head = (s.node n).known.head) : PStepR N s (s.pPushAccept n h)
   | pushIdem (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
       (hidem : s.hub.head = h) : PStepR N s (s.pPushIdem n h)
   | pushReject (s : State) (n h : Nat) (hn : n < N) (hh : ∀ y, (s.node n).heads y ↔ y = h)
-      (hne : h ≠ (s.node n).known.2) (hk : Anc s.U.par (s.node n).known.2 h)
-      (hrej : s.hub.head ≠ (s.node n).known.2) (hrej' : s.hub.head ≠ h) :
+      (hne : h ≠ (s.node n).known.head) (hk : Anc s.U.par (s.node n).known.head h)
+      (hrej : s.hub.head ≠ (s.node n).known.head) (hrej' : s.hub.head ≠ h) :
       PStepR N s (s.pPushReject n h)
 
 /-- Reflexive-transitive closure of `PStepR`. -/
@@ -533,19 +533,19 @@ theorem pstepR_reachable {s s' : State} (h : RReachable N s) (hp : PStepR N s s'
   | merge n L O hn hL h2 => exact h.env (EnvStep.merge s n L O hn hL h2)
   | pushAccept n hd hn hh hne hk hacc =>
     have r := pUpload_rreachable h hn ((hh hd).2 rfl)
-    have r' := r.sync (SyncStep.casAccept _ n (s.node n).known.2 hd (Or.inr rfl)
+    have r' := r.sync (SyncStep.casAccept _ n (s.node n).known.head hd (Or.inr rfl)
       (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
       (pUpload_closed_of hI.hubClosed (by rw [hacc]; exact Anc.refl)))
     exact r'.sync (SyncStep.learnUnfiltered _ n .accepted (s.hub.seq + 1) hd hn
       (Or.inl (Or.inr rfl)))
   | pushIdem n hd hn hh hne hk hidem =>
     have r := pUpload_rreachable h hn ((hh hd).2 rfl)
-    have r' := r.sync (SyncStep.casIdem _ n (s.node n).known.2 hd (Or.inr rfl) hidem)
+    have r' := r.sync (SyncStep.casIdem _ n (s.node n).known.head hd (Or.inr rfl) hidem)
     exact r'.sync (SyncStep.learnUnfiltered _ n .accepted s.hub.seq s.hub.head hn
       (Or.inr rfl))
   | pushReject n hd hn hh hne hk hrej hrej' =>
     have r := pUpload_rreachable h hn ((hh hd).2 rfl)
-    have r' := r.sync (SyncStep.casReject _ n (s.node n).known.2 hd (Or.inr rfl)
+    have r' := r.sync (SyncStep.casReject _ n (s.node n).known.head hd (Or.inr rfl)
       hrej' (fun ⟨e, _, _⟩ => hrej e))
     exact r'.sync (SyncStep.learnUnfiltered _ n .rejected s.hub.seq s.hub.head hn
       (Or.inr rfl))
@@ -566,7 +566,7 @@ open Classical in
 /-- How far behind the hub a consistent node is; nothing for an inconsistent one, which
 `mIncons` counts. -/
 noncomputable def mStaleR (s : State) (n : Nat) : Nat :=
-  if Consistent s n then s.hub.seq - (s.node n).known.1 else 0
+  if Consistent s n then s.hub.seq - (s.node n).known.seq else 0
 
 /-- The lexicographic measure: (nodes not good, then `measure`'s last four components with
 inconsistency first and staleness counted only for consistent nodes). -/
@@ -669,8 +669,8 @@ end RFrame
 to `pushIdem` and `pushReject`. -/
 theorem measureR_learn {s s' : State} (hI : InvR N s) {n : Nat} (hn : n < N)
     (f : RFrame s s' n) (hheads : (s'.node n).heads = (s.node n).heads)
-    (hknown : (s'.node n).known = (s.hub.seq, s.hub.head))
-    (hne : (s.node n).known ≠ (s.hub.seq, s.hub.head)) :
+    (hknown : (s'.node n).known = ⟨s.hub.seq, s.hub.head⟩)
+    (hne : (s.node n).known ≠ ⟨s.hub.seq, s.hub.head⟩) :
     Lex6 (rmeasure N s') (rmeasure N s) := by
   have hcons' : Consistent s' n := by
     unfold Consistent; rw [hknown, f.seq, f.hist]; exact ⟨Nat.le_refl _, hI.histHead⟩
@@ -684,12 +684,12 @@ theorem measureR_learn {s s' : State} (hI : InvR N s) {n : Nat} (hn : n < N)
   · intro _
     apply lex5_of
     by_cases hc : Consistent s n
-    · have hlt : (s.node n).known.1 < s.hub.seq := by
+    · have hlt : (s.node n).known.seq < s.hub.seq := by
         rcases Nat.lt_or_eq_of_le hc.1 with h | h
         · exact h
         · exfalso; apply hne
-          refine Prod.ext h ?_
-          show (s.node n).known.2 = s.hub.head
+          refine Known.ext h ?_
+          show (s.node n).known.head = s.hub.head
           rw [← hc.2, h, hI.histHead]
       right; refine ⟨?_, Or.inl ?_⟩
       · apply cnt_congr; intro i _
@@ -708,7 +708,7 @@ theorem measureR_learn {s s' : State} (hI : InvR N s) {n : Nat} (hn : n < N)
       · exact ⟨n, hn, hc, fun h => h hcons'⟩
 
 theorem measureR_realize {s : State} (hI : InvR N s) {n x : Nat} (hn : n < N)
-    (hc : Consistent s n) (hx : Anc s.U.par x (s.node n).known.2)
+    (hc : Consistent s n) (hx : Anc s.U.par x (s.node n).known.head)
     (hnl : ¬ (s.node n).lops x) :
     Lex6 (rmeasure N (s.pRealize n x)) (rmeasure N s) := by
   have f : RFrame s (s.pRealize n x) n :=
@@ -731,13 +731,13 @@ theorem measureR_realize {s : State} (hI : InvR N s) {n x : Nat} (hn : n < N)
   · exact ⟨x, Nat.lt_succ_of_le (hxa.le hI.parLt), ⟨hxa, hnl⟩, fun ⟨_, h⟩ => h (Or.inr rfl)⟩
 
 theorem measureR_advance {s : State} (hI : InvR N s) {n : Nat} (hn : n < N)
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
     Lex6 (rmeasure N (s.advance n)) (rmeasure N s) := by
   have f : RFrame s (s.advance n) n :=
     ⟨rfl, rfl, rfl, rfl, fun i hi => by simp [State.advance, setNode_ne hi]⟩
   have H := fun y => advance_heads_iff_of (y := y) (hI.headsAnti n) hna
   have hheads : ((s.advance n).node n).heads =
-      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) := by
+      maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) := by
     simp [State.advance]
   have hknown : ((s.advance n).node n).known = (s.node n).known := by simp [State.advance]
   have hlops : ((s.advance n).node n).lops = (s.node n).lops := by simp [State.advance]
@@ -746,11 +746,11 @@ theorem measureR_advance {s : State} (hI : InvR N s) {n : Nat} (hn : n < N)
   -- a good node advances to `known.head`, and stays good
   have hgood : Good s n → Good (s.advance n) n := by
     rintro ⟨hc, x, hx, hxa, hcmp⟩
-    have hxk : Anc s.U.par x (s.node n).known.2 := by
+    have hxk : Anc s.U.par x (s.node n).known.head := by
       rcases hcmp _ hc.1 with h | h
       · rw [hc.2] at h; exact h
       · rw [hc.2] at h; exact absurd ⟨x, (hx x).2 rfl, h⟩ hna
-    refine ⟨hcons.2 hc, (s.node n).known.2, fun y => ?_, ?_, ?_⟩
+    refine ⟨hcons.2 hc, (s.node n).known.head, fun y => ?_, ?_, ?_⟩
     · rw [hheads, H y]
       constructor
       · rintro (h | ⟨h1, h2⟩)
@@ -760,7 +760,7 @@ theorem measureR_advance {s : State} (hI : InvR N s) {n : Nat} (hn : n < N)
     · exact hI.consistentAnc hc
     · intro i hi
       rw [← hc.2]
-      rcases Nat.le_total (s.node n).known.1 i with h | h
+      rcases Nat.le_total (s.node n).known.seq i with h | h
       · exact Or.inl (hI.chain h hi)
       · exact Or.inr (hI.chain h hc.1)
   apply lex6_of
@@ -785,8 +785,8 @@ theorem measureR_advance {s : State} (hI : InvR N s) {n : Nat} (hn : n < N)
       unfold mMiss; rw [hlops, f.U, f.head]
     · apply f.frame.sum_lt hn (fun i hi => f.frame.adv_ne hi)
       unfold mAdv; rw [hheads, hknown, f.U]
-      have h1 : ∃ h, maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) h ∧
-          Anc s.U.par (s.node n).known.2 h := ⟨_, (H _).2 (Or.inl rfl), Anc.refl⟩
+      have h1 : ∃ h, maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) h ∧
+          Anc s.U.par (s.node n).known.head h := ⟨_, (H _).2 (Or.inl rfl), Anc.refl⟩
       simp only [h1, hna, ↓reduceIte]
       omega
 
@@ -809,7 +809,7 @@ theorem measureR_merge {s : State} (hI : InvR N s) {n : Nat} {L O : List Nat} (h
     by_cases hi : i = n
     · subst hi; exact consistent_congr (by rw [hhub]) (by rw [hhub]) hknown
     · exact consistent_congr (by rw [hhub]) (by rw [hhub]) (by rw [hother i hi])
-  have hk : ∀ i, (s.node i).known.2 < s.U.next := fun i => hI.knownLt i
+  have hk : ∀ i, (s.node i).known.head < s.U.next := fun i => hI.knownLt i
   apply lex6_of
   · -- a node with two heads is not good; the others stay as they were
     apply cnt_le
@@ -842,8 +842,8 @@ theorem measureR_merge {s : State} (hI : InvR N s) {n : Nat} {L O : List Nat} (h
 
 /-- An accepted push makes its node good. It was not good: its head is new to the hub. -/
 theorem measureR_pushAccept {s : State} (hI : InvR N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
-    (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.head)
+    (hk : Anc s.U.par (s.node n).known.head hd) (hacc : s.hub.head = (s.node n).known.head) :
     Lex6 (rmeasure N (s.pPushAccept n hd)) (rmeasure N s) := by
   have hU : (s.pPushAccept n hd).U = s.U := rfl
   have hhead : (s.pPushAccept n hd).hub.head = hd := rfl
@@ -854,7 +854,7 @@ theorem measureR_pushAccept {s : State} (hI : InvR N s) {n hd : Nat} (hn : n < N
     by_cases hi : i = n
     · subst hi; simp [State.pPushAccept, State.learn]
     · simp [State.pPushAccept, State.learn, setNode_ne hi]
-  have hknown : ((s.pPushAccept n hd).node n).known = (s.hub.seq + 1, hd) := by
+  have hknown : ((s.pPushAccept n hd).node n).known = ⟨s.hub.seq + 1, hd⟩ := by
     simp [State.pPushAccept, State.learn]
   have hother : ∀ i, i ≠ n → (s.pPushAccept n hd).node i = s.node i := by
     intro i hi; simp [State.pPushAccept, State.learn, setNode_ne hi]
@@ -957,24 +957,24 @@ theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
     exact ⟨_, PStepR.merge s n (headsList s n) [] hn hmem
       ⟨a, b, (hmem a).2 ha, (hmem b).2 hb, hab⟩⟩
   -- 2. learn
-  by_cases hk : (s.node n).known ≠ (s.hub.seq, s.hub.head)
+  by_cases hk : (s.node n).known ≠ ⟨s.hub.seq, s.hub.head⟩
   · exact ⟨_, PStepR.learn s n hn hk⟩
   have hk := Classical.not_not.1 hk
-  have hk2 : (s.node n).known.2 = s.hub.head := by rw [hk]
+  have hk2 : (s.node n).known.head = s.hub.head := by rw [hk]
   have hcons : Consistent s n := by
     unfold Consistent; rw [hk]; exact ⟨Nat.le_refl _, hI.histHead⟩
   -- 3. fetch and realize
-  by_cases hnloc : ¬ (s.node n).lops (s.node n).known.2
+  by_cases hnloc : ¬ (s.node n).lops (s.node n).known.head
   · have hloc := hnloc
     obtain ⟨x, ⟨hxa, hxl⟩, hmin⟩ := exists_min
-      (fun x => Anc s.U.par x (s.node n).known.2 ∧ ¬ (s.node n).lops x)
-      (a := (s.node n).known.2) ⟨Anc.refl, hloc⟩
+      (fun x => Anc s.U.par x (s.node n).known.head ∧ ¬ (s.node n).lops x)
+      (a := (s.node n).known.head) ⟨Anc.refl, hloc⟩
     refine ⟨_, PStepR.realize s n x hn hcons hxa hxl (fun p hp => ?_)⟩
     refine Classical.byContradiction fun hpl => ?_
     exact hmin p (hI.parLt x p hp) ⟨(Anc.parent hp).trans hxa, hpl⟩
   have hloc := Classical.not_not.1 hnloc
   -- 4. advance
-  by_cases hnadv : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g
+  by_cases hnadv : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.head g
   · exact ⟨_, PStepR.advance s n hn hloc hnadv⟩
   have hadv := Classical.not_not.1 hnadv
   -- 5. push
@@ -986,7 +986,7 @@ theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
       refine Classical.byContradiction fun hne => ?_
       exact hmulti ⟨y, g, hy, hg, hne⟩
     · rintro rfl; exact hg
-  have hne : g ≠ (s.node n).known.2 := by
+  have hne : g ≠ (s.node n).known.head := by
     intro e
     apply hc
     refine ⟨fun y => ?_, hk⟩

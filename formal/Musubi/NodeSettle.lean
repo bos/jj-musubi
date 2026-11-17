@@ -161,7 +161,7 @@ known head (`to_node`), the operation graph, and which operations are local, sta
 their objects; and whether the cached fix-up is written (`fixup_written`). `act` is whether a
 `sync` round is running. -/
 structure NS where
-  known : Nat × Nat
+  known : Known
   plan : List Nat
   hubRecs : Option Nat
   annc : Option Nat
@@ -232,7 +232,7 @@ def Differ (σ : NS) : Prop :=
 /-- What `survey` walks: down from the known head through staged operations that are not
 local. -/
 inductive Walk (σ : NS) : Nat → Prop
-  | top : Walk σ σ.known.2
+  | top : Walk σ σ.known.head
   | up {x p : Nat} : Walk σ x → ¬ σ.loc x → σ.stg x → p ∈ σ.par x → Walk σ p
 
 /-- The front of `survey`'s plan: staged, objects here, parents local. -/
@@ -243,14 +243,14 @@ def MissOps (σ : NS) : Prop := ∃ x, Walk σ x ∧ ¬ σ.loc x ∧ ¬ σ.stg x
 
 def MissObjs (σ : NS) : Prop := ∃ x, Walk σ x ∧ ¬ σ.loc x ∧ σ.stg x ∧ ¬ σ.obj x
 
-theorem Walk.anc {σ : NS} {x : Nat} (h : Walk σ x) : Anc σ.par x σ.known.2 := by
+theorem Walk.anc {σ : NS} {x : Nat} (h : Walk σ x) : Anc σ.par x σ.known.head := by
   induction h with
   | top => exact Anc.refl
   | up _ _ _ hp ih => exact (Anc.parent hp).trans ih
 
 /-- Survey completeness: a known head that is not local has a ready operation, or lacks an
 operation or some objects, which a request fetches. -/
-theorem survey_complete {σ : NS} (hlt : ParLt σ.par) (hl : ¬ σ.loc σ.known.2) :
+theorem survey_complete {σ : NS} (hlt : ParLt σ.par) (hl : ¬ σ.loc σ.known.head) :
     (∃ x, Ready σ x) ∨ MissOps σ ∨ MissObjs σ := by
   apply Classical.byContradiction
   intro hn
@@ -275,14 +275,14 @@ theorem survey_complete {σ : NS} (hlt : ParLt σ.par) (hl : ¬ σ.loc σ.known.
 
 structure SInv (c : Ctx) (σ : NS) : Prop where
   parLt : ParLt σ.par
-  knownLt : σ.known.2 < σ.next
+  knownLt : σ.known.head < σ.next
   hLt : c.H < σ.next
   headsNe : σ.heads ≠ []
   headsLt : ∀ y ∈ σ.heads, y < σ.next
   imgNe : σ.img ≠ []
   imgLt : ∀ i ∈ σ.img, i < σ.next
   /-- Learning the hub's head is always followed by noting its records. -/
-  recs : σ.known = (c.S, c.H) → σ.hubRecs = some c.R
+  recs : σ.known = ⟨c.S, c.H⟩ → σ.hubRecs = some c.R
 
 /-! ## Contracts: replies and adapter calls -/
 
@@ -292,10 +292,10 @@ contract: the announced records are `R`, or none when they are the applied ones)
 every operation below `H` that is neither local nor staged (the transfer contract for this
 `H`), and changed nothing else. -/
 structure FetchedRep (c : Ctx) (σ σ' : NS) : Prop where
-  known : σ'.known = (c.S, c.H)
+  known : σ'.known = ⟨c.S, c.H⟩
   hubRecs : σ'.hubRecs = some c.R
   annc : σ'.annc = some c.R ∨ (σ'.annc = none ∧ c.R = σ.ap)
-  same : σ.known = (c.S, c.H) → σ'.plan = σ.plan ∧ σ'.img = σ.img
+  same : σ.known = ⟨c.S, c.H⟩ → σ'.plan = σ.plan ∧ σ'.img = σ.img
   imgNe : σ'.img ≠ []
   imgLt : ∀ i ∈ σ'.img, i < σ.next
   stg : ∀ x, σ.stg x → σ'.stg x
@@ -313,10 +313,10 @@ structure FetchedRep (c : Ctx) (σ σ' : NS) : Prop where
 /-- A `Head` reply, a notification or a push's rejection: the node knows `(S, H)` and has
 noted the records, and nothing else changed. -/
 structure HeadRep (c : Ctx) (σ σ' : NS) : Prop where
-  known : σ'.known = (c.S, c.H)
+  known : σ'.known = ⟨c.S, c.H⟩
   hubRecs : σ'.hubRecs = some c.R
   annc : σ'.annc = σ.annc
-  same : σ.known = (c.S, c.H) → σ'.plan = σ.plan ∧ σ'.img = σ.img
+  same : σ.known = ⟨c.S, c.H⟩ → σ'.plan = σ.plan ∧ σ'.img = σ.img
   imgNe : σ'.img ≠ []
   imgLt : ∀ i ∈ σ'.img, i < σ.next
   stg : σ'.stg = σ.stg
@@ -379,7 +379,7 @@ structure Adv (σ σ' : NS) : Prop where
 restoring fix-up is written, and whether its single op head is the known head, as the core
 compares them (`publish_from`). -/
 def pubOf (σ : NS) : Retry.Publication :=
-  ⟨⟨σ.pending, σ.written, true⟩, decide (σ.heads = [σ.known.2])⟩
+  ⟨⟨σ.pending, σ.written, true⟩, decide (σ.heads = [σ.known.head])⟩
 
 /-- A write that publishes: a chain on the single head `y`, whose last operation `new` is the
 only op head after, with the cache as `Publication.write` leaves it. The chain is new, or the
@@ -410,8 +410,8 @@ excluded, `Publication.write` writing whenever there are pending drops and the h
 head; a new chain has new labels above the known head's; and a neutral tip is written only on
 the known head, above which its new head is. So the cache was not written, and the write sets
 it. -/
-theorem write_known {σ σ1 : NS} {new : Nat} (hk : σ.known.2 < σ.next) (hp : σ.pending ≠ [])
-    (W : WriteRes σ σ1 new) (he : new = σ.known.2) :
+theorem write_known {σ σ1 : NS} {new : Nat} (hk : σ.known.head < σ.next) (hp : σ.pending ≠ [])
+    (W : WriteRes σ σ1 new) (he : new = σ.known.head) :
     σ.written = false ∧ σ1.written = true ∧ σ1.pending = σ.pending := by
   obtain ⟨y, hy, (⟨hwr, F⟩ | ⟨hno, -, rfl⟩)⟩ := W
   · rcases F.fresh with hf | ⟨-, -⟩
@@ -432,8 +432,8 @@ theorem write_known {σ σ1 : NS} {new : Nat} (hk : σ.known.2 < σ.next) (hp : 
       have hhk : (pubOf σ).headKnown = true := by
         revert hwr
         simp [pubOf, Retry.Publication.write, Retry.Fixup.write, hpendNotEmpty, hwr']
-      have hyk : y = σ.known.2 := by
-        have h' : σ.heads = [σ.known.2] := by simpa [pubOf] using hhk
+      have hyk : y = σ.known.head := by
+        have h' : σ.heads = [σ.known.head] := by simpa [pubOf] using hhk
         rw [hy] at h'
         exact List.cons.inj h' |>.1
       exact F.proper (he.trans hyk.symm)
@@ -462,13 +462,13 @@ inductive Busy (c : Ctx) : NS → NS → Prop
   | prune {σ σ' : NS} (x : Nat) (hg : Go c σ) (h2 : 2 ≤ σ.heads.length) (hM : Keeps σ [x])
       (he : σ' = pruneTo (norm σ) x) : Busy c σ σ'
   | realizePlan {σ σ' : NS} (x : Nat) (rest : List Nat) (hg : Go c σ)
-      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2) (hp : σ.plan = x :: rest)
+      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.head) (hp : σ.plan = x :: rest)
       (he : σ' = realize (norm σ) x rest) : Busy c σ σ'
   | realizeSurvey {σ σ' : NS} (x : Nat) (L : List Nat) (hg : Go c σ)
-      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2) (hp : σ.plan = [])
+      (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.head) (hp : σ.plan = [])
       (hr : Ready σ x) (he : σ' = realize (norm σ) x L) : Busy c σ σ'
   | fetch {σ σ' : NS} (σ1 : NS) (hg : Go c σ) (h1 : σ.heads.length < 2)
-      (hl : ¬ σ.loc σ.known.2) (hp : σ.plan = []) (hr : ¬ ∃ x, Ready σ x)
+      (hl : ¬ σ.loc σ.known.head) (hp : σ.plan = []) (hr : ¬ ∃ x, Ready σ x)
       (hm : MissOps σ ∨ MissObjs σ)
       (hf : (MissOps σ ∧ FetchedRep c (norm σ) σ1) ∨ (¬ MissOps σ ∧ σ1 = norm σ))
       (ho : (MissObjs σ ∧
@@ -477,51 +477,51 @@ inductive Busy (c : Ctx) : NS → NS → Prop
   /-- Records announced and prepared that drop an op head (`records_drop_head`), the known
   head local: advancing takes them, whether or not a head descends from the known one. -/
   | advanceTake {σ σ' : NS} (A : Nat) (hg : Go c σ) (h1 : σ.heads.length < 2)
-      (hl : σ.loc σ.known.2) (ha : (norm σ).annc = some A)
+      (hl : σ.loc σ.known.head) (ha : (norm σ).annc = some A)
       (ht : Take c { norm σ with plan := [] } σ' A) : Busy c σ σ'
-  | advance {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
+  | advance {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.head)
       (hd : ¬ ∃ y ∈ σ.heads, Desc σ y) (ha : (norm σ).annc = none) (hv : Adv (norm σ) σ') :
       Busy c σ σ'
-  | differPoll {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
+  | differPoll {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.head)
       (hd : ∃ y ∈ σ.heads, Desc σ y) (hf : Differ σ) (ha : (norm σ).annc = none)
       (hr : FetchedRep c { norm σ with plan := [] } σ') : Busy c σ σ'
   /-- A push before the node knows the hub's head: the stable hub refuses it, its records
   not being the hub's, or rejects it with its head, which the node learns. -/
   | pushStale {σ σ' : NS} (σ1 : NS) (new : Nat) (hg : Go c σ) (h1 : σ.heads.length < 2)
-      (hl : σ.loc σ.known.2) (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none)
-      (hf : ¬ Differ σ) (hw : σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.2])
-      (hk : σ.known ≠ (c.S, c.H)) (hw' : WriteRes { norm σ with plan := [] } σ1 new)
-      (hnew : new ≠ σ.known.2)
+      (hl : σ.loc σ.known.head) (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none)
+      (hf : ¬ Differ σ) (hw : σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.head])
+      (hk : σ.known ≠ ⟨c.S, c.H⟩) (hw' : WriteRes { norm σ with plan := [] } σ1 new)
+      (hnew : new ≠ σ.known.head)
       (hr : (σ.ap ≠ c.R ∧ σ' = { σ1 with hubRecs := some c.R }) ∨
         (σ.ap = c.R ∧ HeadRep c σ1 σ')) : Busy c σ σ'
   /-- The branch that polls when the write leaves the known head as the new one: the write then
   reuses the known head, the restoring fix-up identical to it, and writes the cache
   (`write_known`), which the rank counts (`unwrittenFixup`). -/
   | writePoll {σ σ' : NS} (σ1 : NS) (new : Nat) (hg : Go c σ) (h1 : σ.heads.length < 2)
-      (hl : σ.loc σ.known.2) (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none)
+      (hl : σ.loc σ.known.head) (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none)
       (hf : ¬ Differ σ) (hw : σ.pending ≠ [])
-      (hw' : WriteRes { norm σ with plan := [] } σ1 new) (hnew : new = σ.known.2)
+      (hw' : WriteRes { norm σ with plan := [] } σ1 new) (hnew : new = σ.known.head)
       (hr : FetchedRep c σ1 σ') : Busy c σ σ'
 
 /-- A step that returns `Idle`, ending the round. -/
 inductive Idle (c : Ctx) : NS → NS → Prop
-  | fetchIdle {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2)
+  | fetchIdle {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.head)
       (hp : σ.plan = []) (hr : ¬ ∃ x, Ready σ x) (ho : ¬ MissOps σ) (hb : ¬ MissObjs σ)
       (he : σ' = { norm σ with act := false }) : Idle c σ σ'
-  | goal {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
+  | goal {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.head)
       (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none) (hf : ¬ Differ σ)
       (hp : σ.pending = [])
-      (hh : σ.heads = [σ.known.2]) (he : σ' = { norm σ with plan := [], act := false }) :
+      (hh : σ.heads = [σ.known.head]) (he : σ' = { norm σ with plan := [], act := false }) :
       Idle c σ σ'
 
 /-- A step that sends a push once the node knows the hub's head: from it, with the hub's records,
 its pending drops, and the new head `write_fixup` leaves (`WriteRes`), which is not `H`
 (`emit_packet`). The stable hub would accept such a push. -/
 def Emit (c : Ctx) (σ σ1 : NS) (new : Nat) : Prop :=
-  σ.act = true ∧ Go c σ ∧ σ.heads.length < 2 ∧ σ.loc σ.known.2 ∧
+  σ.act = true ∧ Go c σ ∧ σ.heads.length < 2 ∧ σ.loc σ.known.head ∧
     (∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none ∧ ¬ Differ σ ∧
-    (σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.2]) ∧ σ.known = (c.S, c.H) ∧
-    WriteRes { norm σ with plan := [] } σ1 new ∧ new ≠ σ.known.2
+    (σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.head]) ∧ σ.known = ⟨c.S, c.H⟩ ∧
+    WriteRes { norm σ with plan := [] } σ1 new ∧ new ≠ σ.known.head
 
 inductive Lab
   | busy
@@ -550,7 +550,7 @@ inductive Ev (c : Ctx) : Lab → NS → NS → Prop
 /-- The goal: the node knows the hub's head, has its records and no other drops, and its only op
 head is the hub's head. -/
 structure Settled (c : Ctx) (σ : NS) : Prop where
-  known : σ.known = (c.S, c.H)
+  known : σ.known = ⟨c.S, c.H⟩
   applied : σ.ap = c.R
   hubRecords : σ.hubRecs = some c.R
   pending : σ.pending = []
@@ -562,7 +562,7 @@ structure Settled (c : Ctx) (σ : NS) : Prop where
 /-! ## The rank -/
 
 /-- The node doesn't know the hub's head yet. -/
-noncomputable def unknownHead (c : Ctx) (σ : NS) : Nat := ind (σ.known ≠ (c.S, c.H))
+noncomputable def unknownHead (c : Ctx) (σ : NS) : Nat := ind (σ.known ≠ ⟨c.S, c.H⟩)
 
 /-- An announcement of older records, still to take. -/
 noncomputable def oldAnnouncement (c : Ctx) (σ : NS) : Nat := ind (∃ A, σ.annc = some A ∧ A ≠ c.R ∧ A ≠ σ.ap)
@@ -572,15 +572,15 @@ noncomputable def unappliedRecords (c : Ctx) (σ : NS) : Nat := ind (σ.ap ≠ c
 
 /-- Operations below the known head not yet local. -/
 noncomputable def missingOperations (σ : NS) : Nat :=
-  cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x)
+  cnt (σ.known.head + 1) (fun x => Anc σ.par x σ.known.head ∧ ¬ σ.loc x)
 
 /-- ... of which not staged. -/
 noncomputable def unstagedOperations (σ : NS) : Nat :=
-  cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x ∧ ¬ σ.stg x)
+  cnt (σ.known.head + 1) (fun x => Anc σ.par x σ.known.head ∧ ¬ σ.loc x ∧ ¬ σ.stg x)
 
 /-- ... of which staged without their objects. -/
 noncomputable def missingObjects (σ : NS) : Nat :=
-  cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x ∧ σ.stg x ∧ ¬ σ.obj x)
+  cnt (σ.known.head + 1) (fun x => Anc σ.par x σ.known.head ∧ ¬ σ.loc x ∧ σ.stg x ∧ ¬ σ.obj x)
 
 /-- Some operation standing for the known head is below no op head. -/
 noncomputable def uncoveredImages (σ : NS) : Nat := ind (¬ ∀ i ∈ σ.img, ∃ y ∈ σ.heads, Anc σ.par i y)
@@ -814,10 +814,10 @@ theorem counts_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : ∀ y ∈ M,
     missingOperations (fresh σ M) = missingOperations σ ∧
       unstagedOperations (fresh σ M) = unstagedOperations σ ∧
       missingObjects (fresh σ M) = missingObjects σ := by
-  have key : ∀ x, x < σ.known.2 + 1 →
-      (Anc (upd σ.par σ.next M) x σ.known.2 ↔ Anc σ.par x σ.known.2) :=
+  have key : ∀ x, x < σ.known.head + 1 →
+      (Anc (upd σ.par σ.next M) x σ.known.head ↔ Anc σ.par x σ.known.head) :=
     fun _ _ => anc_upd_iff I.parLt (fun y hy => I.headsLt y (hM y hy)) I.knownLt
-  have hl : ∀ x, x < σ.known.2 + 1 → ((σ.loc x ∨ x = σ.next) ↔ σ.loc x) := by
+  have hl : ∀ x, x < σ.known.head + 1 → ((σ.loc x ∨ x = σ.next) ↔ σ.loc x) := by
     intro x hx
     have := I.knownLt
     constructor
@@ -847,9 +847,9 @@ theorem uncoveredImages_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : Kee
 theorem counts_ext {σ σ' : NS} (I : SInv c σ) (E : Ext σ σ') :
     missingOperations σ' ≤ missingOperations σ ∧ unstagedOperations σ' ≤ unstagedOperations σ ∧
       missingObjects σ' ≤ missingObjects σ := by
-  have key : ∀ x, x < σ.known.2 + 1 → (Anc σ'.par x σ.known.2 ↔ Anc σ.par x σ.known.2) :=
+  have key : ∀ x, x < σ.known.head + 1 → (Anc σ'.par x σ.known.head ↔ Anc σ.par x σ.known.head) :=
     fun _ _ => anc_agree I.parLt E.parLt E.parOld I.knownLt
-  have hl : ∀ x, x < σ.known.2 + 1 → ¬ σ'.loc x → ¬ σ.loc x :=
+  have hl : ∀ x, x < σ.known.head + 1 → ¬ σ'.loc x → ¬ σ.loc x :=
     fun x hx h h' => h (E.locOld x (by have := I.knownLt; omega) h')
   unfold missingOperations unstagedOperations missingObjects
   rw [E.known, E.stg, E.obj]
@@ -898,13 +898,13 @@ theorem missingOperations_realize_le (σ : NS) (x : Nat) (L : List Nat) :
   exact cnt_le fun _ _ ⟨ha, hl⟩ => ⟨ha, fun h => hl (Or.inl h)⟩
 
 theorem missingOperations_realize_lt {σ : NS} {x : Nat} (L : List Nat) (hlt : ParLt σ.par)
-    (ha : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x) : missingOperations (realize σ x L) <
+    (ha : Anc σ.par x σ.known.head) (hl : ¬ σ.loc x) : missingOperations (realize σ x L) <
     missingOperations σ := by
   unfold missingOperations
   exact cnt_lt (fun _ _ ⟨h1, h2⟩ => ⟨h1, fun h => h2 (Or.inl h)⟩)
     ⟨x, Nat.lt_succ_of_le (ha.le hlt), ⟨ha, hl⟩, fun ⟨_, h⟩ => h (Or.inr rfl)⟩
 
-theorem unknownHead_drop {σ σ' : NS} (hk : σ.known ≠ (c.S, c.H)) (hk' : σ'.known = (c.S, c.H)) :
+theorem unknownHead_drop {σ σ' : NS} (hk : σ.known ≠ ⟨c.S, c.H⟩) (hk' : σ'.known = ⟨c.S, c.H⟩) :
     unknownHead c σ' < unknownHead c σ := by
   unfold unknownHead
   rw [ind_pos hk, ind_neg (fun h => h hk')]
@@ -925,7 +925,7 @@ structure FetchedRankEffect (c : Ctx) (σ σ' : NS) : Prop where
   noted : unnotedRecords c σ' = 0
 
 /-- What a `Fetched` reply does to the rank once the node knows the hub's head. -/
-theorem fetched_cmp {σ σ' : NS} (F : FetchedRep c σ σ') (hk : σ.known = (c.S, c.H)) :
+theorem fetched_cmp {σ σ' : NS} (F : FetchedRep c σ σ') (hk : σ.known = ⟨c.S, c.H⟩) :
     FetchedRankEffect c σ σ' := by
   have hK : σ'.known = σ.known := F.known.trans hk.symm
   refine ⟨?_, ?_, ?_, ?_, (F.same hk).1, ?_, ?_, ?_, ?_, ?_⟩
@@ -961,7 +961,7 @@ theorem fetched_cmp {σ σ' : NS} (F : FetchedRep c σ σ') (hk : σ.known = (c.
     rw [ind_neg this]
 
 theorem fetched_lt {σ σ' : NS} {x : Nat} (I : SInv c σ) (F : FetchedRep c σ σ')
-    (hk : σ.known = (c.S, c.H)) (hw : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x)
+    (hk : σ.known = ⟨c.S, c.H⟩) (hw : Anc σ.par x σ.known.head) (hl : ¬ σ.loc x)
     (hs : ¬ σ.stg x) : unstagedOperations σ' < unstagedOperations σ := by
   have hK : σ'.known = σ.known := F.known.trans hk.symm
   have hst : σ'.stg x := F.stages x (by rw [hk] at hw; exact hw) hl
@@ -996,7 +996,7 @@ theorem ObjectRankEffect.refl (c : Ctx) (σ : NS) : ObjectRankEffect c σ σ :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl, Nat.le_refl _, rfl, rfl, rfl⟩
 
 theorem obj_lt {σ σ' : NS} {M : Nat → Prop} {x : Nat} (O : ObjRep σ σ' M) (hlt : ParLt σ.par)
-    (hw : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x) (hs : σ.stg x) (hb : ¬ σ.obj x) (hM : M x) :
+    (hw : Anc σ.par x σ.known.head) (hl : ¬ σ.loc x) (hs : σ.stg x) (hb : ¬ σ.obj x) (hM : M x) :
     missingObjects σ' < missingObjects σ := by
   have ho := O.obj
   rw [O.rest] at ho ⊢
@@ -1146,7 +1146,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     subst he
     rw [← rank_norm c σ]
     unfold rank
-    have ha : Anc σ.par x σ.known.2 := Walk.anc hr.1
+    have ha : Anc σ.par x σ.known.head := Walk.anc hr.1
     exact lt_cons_eq rfl (lt_cons_eq rfl (lt_cons_eq rfl
       (lt_hd (missingOperations_realize_lt (σ := norm σ) L I.parLt ha hr.2.1))))
   | fetch σ1 _ _ _ _ _ hm hf ho =>
@@ -1157,10 +1157,10 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
       · subst he; exact ObjectRankEffect.refl c _
     by_cases hmo : MissOps σ
     · obtain ⟨-, F⟩ := hf.resolve_right fun h => h.1 hmo
-      by_cases hk : σ.known = (c.S, c.H)
+      by_cases hk : σ.known = ⟨c.S, c.H⟩
       · have fetched := fetched_cmp F hk
         obtain ⟨x, hw, hlx, hsx⟩ := hmo
-        have ha : Anc σ.par x σ.known.2 := Walk.anc hw
+        have ha : Anc σ.par x σ.known.head := Walk.anc hw
         have hlt1 : unstagedOperations σ1 < unstagedOperations (norm σ) := fetched_lt I.norm F hk ha hlx hsx
         unfold rank
         refine lt_cons_eq (objects.known.trans fetched.known) ?_
@@ -1177,7 +1177,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
       have hmb : MissObjs σ := hm.resolve_left hmo
       obtain ⟨-, O⟩ := ho.resolve_right fun h => h.1 hmb
       obtain ⟨x, hw, hlx, hs, hb⟩ := hmb
-      have ha : Anc σ.par x σ.known.2 := Walk.anc hw
+      have ha : Anc σ.par x σ.known.head := Walk.anc hw
       have hlt2 : missingObjects σ' < missingObjects (norm σ) :=
         obj_lt O I.parLt ha hlx hs hb ⟨hw, hlx, hs, hb⟩
       unfold rank
@@ -1195,8 +1195,8 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     rw [← rank_norm c σ]
     obtain ⟨hw0, hw1, hp1⟩ := write_known (σ := { norm σ with plan := [] }) I.knownLt hw hw' hnew
     have written := write_cmp (I.norm.plan []) rfl h1 hw'
-    by_cases hk : σ.known = (c.S, c.H)
-    · have hk1 : σ1.known = (c.S, c.H) := written.known.trans hk
+    by_cases hk : σ.known = ⟨c.S, c.H⟩
+    · have hk1 : σ1.known = ⟨c.S, c.H⟩ := written.known.trans hk
       have fetched := fetched_cmp hr hk1
       have hch0 : extraHeads (norm σ) = 0 := extraHeads_zero h1 I.headsNe
       have hcw : unwrittenFixup σ' < unwrittenFixup (norm σ) := by
@@ -1242,7 +1242,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     exact lt_hd (by rw [hz, hone]; exact Nat.zero_lt_one)
   | differPoll _ _ _ _ hf ha hr =>
     rw [← rank_norm c σ]
-    by_cases hk : σ.known = (c.S, c.H)
+    by_cases hk : σ.known = ⟨c.S, c.H⟩
     · have fetched := fetched_cmp hr hk
       have hrec := I.recs hk
       have hne : c.R ≠ σ.ap := by simp only [Differ, hrec] at hf; exact hf
@@ -1312,7 +1312,7 @@ theorem rank_idle {σ σ' : NS} (h : Idle c σ σ') : LexLe (rank c σ') (rank c
 theorem rank_start {σ σ1 : NS} (F : FetchedRep c σ σ1) :
     LexLe (rank c { σ1 with act := true }) (rank c σ) := by
   rw [show rank c { σ1 with act := true } = rank c σ1 from rfl]
-  by_cases hk : σ.known = (c.S, c.H)
+  by_cases hk : σ.known = ⟨c.S, c.H⟩
   · have fetched := fetched_cmp F hk
     unfold rank
     refine le_cons_eq fetched.known ?_
@@ -1331,7 +1331,7 @@ theorem rank_start {σ σ1 : NS} (F : FetchedRep c σ σ1) :
 
 theorem rank_notify {σ σ' : NS} (I : SInv c σ) (F : HeadRep c σ σ') :
     LexLe (rank c σ') (rank c σ) := by
-  by_cases hk : σ.known = (c.S, c.H)
+  by_cases hk : σ.known = ⟨c.S, c.H⟩
   · have hK : σ'.known = σ.known := F.known.trans hk.symm
     obtain ⟨hp, hi⟩ := F.same hk
     refine Or.inr ?_
@@ -1387,7 +1387,7 @@ variable {c : Ctx}
 /-- The node knows the hub's head and holds no older announcement: true after any round's
 first reply. -/
 def Good (c : Ctx) (σ : NS) : Prop :=
-  σ.known = (c.S, c.H) ∧ (σ.annc = none ∨ σ.annc = some c.R)
+  σ.known = ⟨c.S, c.H⟩ ∧ (σ.annc = none ∨ σ.annc = some c.R)
 
 theorem good_norm {σ : NS} (hg : Good c σ) (L : List Nat) (b : Bool) :
     Good c { norm σ with plan := L, act := b } := by
@@ -1465,13 +1465,13 @@ says. -/
 theorem settled_ev {σ σ' : NS} {l : Lab} (hs : Settled c σ) (h : Ev c l σ σ')
     (hm : l ≠ .maint) : Settled c σ' := by
   obtain ⟨hk, hap, hrec, hp, hh, hl, hd, hann⟩ := hs
-  have hK : σ.known.2 = c.H := by rw [hk]
+  have hK : σ.known.head = c.H := by rw [hk]
   have notDiffer : ¬ Differ σ := by
     simp only [Differ, hrec]
     exact fun h => h hap.symm
   have hdesc : ∃ y ∈ σ.heads, Desc σ y :=
     ⟨c.H, by rw [hh]; exact List.mem_singleton.2 rfl, hd⟩
-  have hloc : σ.loc σ.known.2 := by rw [hK]; exact hl
+  have hloc : σ.loc σ.known.head := by rw [hK]; exact hl
   have hnoadopt : ∀ A, σ.annc = some A → A ≠ σ.ap → False := by
     intro A hA hne
     rcases hann with h | h <;> rw [h] at hA <;> cases hA
@@ -1533,7 +1533,7 @@ theorem settled_ev {σ σ' : NS} {l : Lab} (hs : Settled c σ) (h : Ev c l σ σ
 /-- What an emitted push is: from the hub's head, with the hub's records and the node's pending
 drops, and a new head that is not the hub's, which `write_fixup` left. -/
 theorem emit_packet {σ σ1 : NS} {new : Nat} (I : SInv c σ) (h : Emit c σ σ1 new) :
-    σ.known = (c.S, c.H) ∧ σ.ap = c.R ∧ σ.hubRecs = some c.R ∧ new ≠ c.H ∧
+    σ.known = ⟨c.S, c.H⟩ ∧ σ.ap = c.R ∧ σ.hubRecs = some c.R ∧ new ≠ c.H ∧
       WriteRes { norm σ with plan := [] } σ1 new := by
   obtain ⟨-, -, -, -, -, -, hf, -, hk, hw', hnew⟩ := h
   have hrec := I.recs hk

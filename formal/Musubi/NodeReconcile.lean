@@ -61,7 +61,7 @@ theorem contracted_heads_survive {N : Nat} {s t : SEState}
     by_cases hn : n = m
     · subst n
       have hx' : x ∈ advanceImages s.es.parF (s.nodeDF m).contains
-          (s.es.nodeOf m).heads (s.es.nodeOf m).known.2 := by
+          (s.es.nodeOf m).heads (s.es.nodeOf m).known.head := by
         simpa [SEState.imageAdvance, EState.setNode, EState.nodeOf, nodeAt_setN] using hx
       have hd := advanceImages_survives hpar (fun y hy => by
         have hn := h m y hy

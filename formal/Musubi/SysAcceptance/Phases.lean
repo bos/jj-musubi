@@ -128,8 +128,9 @@ theorem known_after
         cases hn' : O.note n (u + 1 + d) with
         | some a' =>
           obtain ⟨ha', h2⟩ := C.noteHead n _ a' hn hrt hn'
-          rcases Retry.Serial.handleHead_notice_or O.root (O.seq n (u + 1 + d), O.known n (u + 1 + d))
-            ((run a').hub.seq, (run a').hub.head) with h | h
+          rcases Retry.Serial.handleHead_notice_or O.root
+            ⟨O.seq n (u + 1 + d), O.known n (u + 1 + d)⟩
+            ⟨(run a').hub.seq, (run a').hub.head⟩ with h | h
           · obtain ⟨b, hb, hbi, he⟩ := ih
             exact ⟨b, hb, by omega, by rw [h2, h, he]⟩
           · exact ⟨a', hTt.2 a' hn', by omega, by rw [h2, h]⟩
@@ -175,7 +176,7 @@ theorem knows_stable_head
   obtain ⟨tk, hknown⟩ := known_after C hcut hq hnr cut n hn
   refine ⟨tk, fun t ht => ?_⟩
   obtain ⟨a, ha, _, pair⟩ := hknown t ht
-  exact (congrArg Prod.snd pair).trans (congrArg Snap.head (hhub a ha))
+  exact (congrArg Known.head pair).trans (congrArg Snap.head (hhub a ha))
 
 
 /-! ## Records and environmental recovery stop -/
@@ -367,7 +368,7 @@ theorem honest_latched_known
     (truthful : ∀ n, n < N → KnownTrue run O recordCut n (O.latch n cut)) :
     ∀ n, EligibleAt N recs recordCut n →
       Recovery.HubNodeSteps.HonestSnap (run recordCut).hub.seq O.hist (run cut)
-        ⟨(Recovery.HubSys.known (run cut) n).1, (Recovery.HubSys.known (run cut) n).2,
+        ⟨(Recovery.HubSys.known (run cut) n).seq, (Recovery.HubSys.known (run cut) n).head,
           (run cut).hub.recs⟩ := by
   intro n eligible
   obtain ⟨observed, afterRecord, beforeLatch, pair⟩ := truthful n eligible.1

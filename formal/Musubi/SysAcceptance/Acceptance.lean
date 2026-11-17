@@ -164,7 +164,7 @@ theorem no_accepting_emit (ρ : Nat → Sys) (acts : Nat → Act) (n k i h M : N
     have hhubJ' := hstable (j + 1) (by omega)
     have hexpected : (pkt n (((ρ i).node n).gen + (post.next - ((ρ i).node n).ns.next))
         post emb1 new).expected = st.head := by
-      show emb1 post.known.2 = st.head
+      show emb1 post.known.head = st.head
       rw [hpostKnown, hknown]
       exact hheadRaw
     have hrecs : (pkt n (((ρ i).node n).gen + (post.next - ((ρ i).node n).ns.next))
@@ -266,7 +266,7 @@ theorem eligible_system_converges {N : Nat} {D : Nat → Nat → Nat → Prop} {
     (hb : Recovery.HubSys.RequestBounds (ρ 0))
     (hi : Recovery.HistoryWindow w (Recovery.HubSys.state (ρ 0) initial))
     (hknown : ∀ n, E n → Recovery.HubNodeSteps.HonestSnap w initial (ρ 0)
-      ⟨(Recovery.HubSys.known (ρ 0) n).1, (Recovery.HubSys.known (ρ 0) n).2, (ρ 0).hub.recs⟩)
+      ⟨(Recovery.HubSys.known (ρ 0) n).seq, (Recovery.HubSys.known (ρ 0) n).head, (ρ 0).hub.recs⟩)
     (hl : ∀ i, Recovery.HubSys.SuffixStepLaws E D law (ρ 0).reqs w
       (Recovery.HubSys.histories ρ initial i) (acts i) (ρ i) (ρ (i + 1)))
     (hN : ∀ n, E n → n < N) (kb : Nat)

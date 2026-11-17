@@ -25,8 +25,8 @@ def parents (g : Sys) (x : Nat) : List Nat := if x < g.next then g.par x else []
 def heads (g : Sys) (n x : Nat) : Prop :=
   ∃ y ∈ (g.node n).repo.heads, (g.node n).repoEmb y = x
 
-def known (g : Sys) (n : Nat) : Nat × Nat :=
-  ((g.node n).repo.known.1, (g.node n).repoEmb (g.node n).repo.known.2)
+def known (g : Sys) (n : Nat) : Known :=
+  ⟨(g.node n).repo.known.seq, (g.node n).repoEmb (g.node n).repo.known.head⟩
 
 def state (g : Sys) (hist : Nat → Nat) : Musubi.State :=
   { init with
@@ -81,7 +81,7 @@ already contain a fix-up, so that simplification would be false without this pre
 theorem state_repo_agrees {D : Nat → Nat → Nat → Prop} {g : Sys} {n : Nat}
     (hi : NodeSys.NodeOK D n g) (hp : (g.node n).ns.pending = []) :
     (∀ x, heads g n x ↔ ∃ y ∈ (g.node n).ns.heads, (g.node n).emb y = x) ∧
-      known g n = ((g.node n).ns.known.1, (g.node n).emb (g.node n).ns.known.2) := by
+      known g n = ⟨(g.node n).ns.known.seq, (g.node n).emb (g.node n).ns.known.head⟩ := by
   obtain ⟨hh, hk, he⟩ := repo_agrees hi hp
   constructor
   · intro x

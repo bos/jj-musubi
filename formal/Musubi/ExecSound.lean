@@ -500,7 +500,7 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
   | advance n =>
     unstep [execCore] h with h1 h2 h3
     have e : abs (es.setNode n { es.nodeOf n with
-        heads := maxL es.parF ((es.nodeOf n).heads ++ [(es.nodeOf n).known.2]) }) =
+        heads := maxL es.parF ((es.nodeOf n).heads ++ [(es.nodeOf n).known.head]) }) =
         (abs es).advance n := by
       rw [abs_setNode]; unfold State.advance; congr 1
       simp only [ENode.abs]
@@ -548,8 +548,8 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     exact Or.inr (SyncStep.loseKnown _ n (of_decide_eq_true h1))
   | loseVolatile n =>
     unstep [execCore] h with h1
-    have e : abs (es.setNode n { es.nodeOf n with known := (0, root), sops := [], sobj := [] }) =
-        (abs es).setNode n { (abs es).node n with known := (0, root), sops := fun _ => False,
+    have e : abs (es.setNode n { es.nodeOf n with known := ⟨0, root⟩, sops := [], sobj := [] }) =
+        (abs es).setNode n { (abs es).node n with known := ⟨0, root⟩, sops := fun _ => False,
                                                   sobj := fun _ => False } := by
       rw [abs_setNode]; congr 1
       apply node_eq <;> intros <;> simp [ENode.abs, setP, abs]

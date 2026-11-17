@@ -271,7 +271,7 @@ def recsJson (R : List Rec) : Json := Json.arr (R.map nats).toArray
 
 def encodeNode (nd : ENode) (dropped : List Nat) (applied : List Rec) : Json :=
   Json.mkObj [("lops", nats nd.lops), ("lobj", nats nd.lobj), ("heads", nats nd.heads),
-    ("known", toJson #[nd.known.1, nd.known.2]), ("sops", nats nd.sops),
+    ("known", toJson #[nd.known.seq, nd.known.head]), ("sops", nats nd.sops),
     ("sobj", nats nd.sobj), ("dropped", nats dropped), ("applied", recsJson applied)]
 
 /-- The supersedes and announcements in flight, as wire messages. -/
@@ -759,9 +759,16 @@ def hubReadReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true),
     ("matches", toJson (SysAcceptance.checkAnswer body observed))])
 
+instance : Lean.ToJson Known := ⟨fun k => toJson #[k.seq, k.head]⟩
+
+instance : Lean.FromJson Known :=
+  ⟨fun j => do
+    let (seq, head) ← Lean.fromJson? (α := Nat × Nat) j
+    pure ⟨seq, head⟩⟩
+
 def headControlReply (j : Json) : Except String Json := do
-  let known ← j.getObjValAs? (Nat × Nat) "known"
-  let incoming ← j.getObjValAs? (Nat × Nat) "incoming"
+  let known ← j.getObjValAs? Known "known"
+  let incoming ← j.getObjValAs? Known "incoming"
   let root ← getNat j "root"
   let own ← j.getObjValAs? Bool "own"
   let notify ← j.getObjValAs? Bool "notify"

@@ -5,6 +5,12 @@ over `Nat` ranges (used by the liveness measure), and termination of runs.
 
 namespace Musubi
 
+/-- What a node knows of the hub: the sequence number and the head accepted at it. -/
+@[ext] structure Known where
+  seq : Nat
+  head : Nat
+  deriving DecidableEq, Repr
+
 /-- Sets of identifiers (operation ids, object ids) are predicates. -/
 abbrev OSet := Nat → Prop
 

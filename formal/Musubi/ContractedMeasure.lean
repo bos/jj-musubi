@@ -34,15 +34,15 @@ theorem uncoveredImages_singleton_zero (hlt : ParLt par) :
 
 def SEState.advCE (ses : SEState) (n : Nat) : Nat :=
   uncoveredImages ses.es.parF (ses.nodeDF n).contains
-    (ses.es.nodeOf n).heads (ses.es.nodeOf n).known.2
+    (ses.es.nodeOf n).heads (ses.es.nodeOf n).known.head
 
 def SEState.settledCE (ses : SEState) (n : Nat) : Bool :=
   match (ses.es.nodeOf n).heads with
   | [] => false
   | x :: _ =>
     (ses.es.nodeOf n).heads.all (· == x) && ancB ses.es.parF x ses.es.hub.head &&
-      (!(ses.nodeDF n).contains (ses.es.nodeOf n).known.2 ||
-        belowB ses.es.parF (ses.nodeDF n).contains (ses.es.nodeOf n).known.2 x) &&
+      (!(ses.nodeDF n).contains (ses.es.nodeOf n).known.head ||
+        belowB ses.es.parF (ses.nodeDF n).contains (ses.es.nodeOf n).known.head x) &&
       (List.range (ses.es.hub.seq + 1)).all fun i =>
         (exp ses.es.parF (ses.nodeDF n).contains (ses.es.hub.histF i)).all fun p =>
           ancB ses.es.parF x p || ancB ses.es.parF p x
@@ -75,7 +75,7 @@ theorem rmeasureCE_without_drops {ses : SEState} {N : Nat} (hlt : ParLt ses.es.p
     unfold SEState.advCE uncoveredImages
     rw [exp_eq hlt, hD]
     unfold EState.advE
-    cases he : (ses.es.nodeOf n).heads.any (ancB ses.es.parF (ses.es.nodeOf n).known.2)
+    cases he : (ses.es.nodeOf n).heads.any (ancB ses.es.parF (ses.es.nodeOf n).known.head)
       <;> simp [he]
   have he : ∀ n x, exp ses.es.parF (ses.nodeDF n).contains x = [x] := by
     intro n x

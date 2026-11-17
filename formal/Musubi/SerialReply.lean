@@ -11,58 +11,56 @@ import Musubi.RetryControl
 
 namespace Musubi.Retry.Serial
 
-abbrev Head := Nat × Nat
+def wentBack (known reply : Known) : Bool :=
+  decide (reply.seq < known.seq ∨ (reply.seq = known.seq ∧ reply.head ≠ known.head))
 
-def wentBack (known reply : Head) : Bool :=
-  decide (reply.1 < known.1 ∨ (reply.1 = known.1 ∧ reply.2 ≠ known.2))
-
-def filteredLearn (known reply : Head) : Head :=
-  if known.1 < reply.1 then reply else known
+def filteredLearn (known reply : Known) : Known :=
+  if known.seq < reply.seq then reply else known
 
 /-- `handle_reply` restarts on an older or changed own reply, then uses the same filtered
 learn as `handle`. Notifications are never interpreted as answers to a call. -/
-def handleHead (root : Nat) (own notify : Bool) (known reply : Head) : Head :=
-  let before := if own && !notify && wentBack known reply then (0, root) else known
+def handleHead (root : Nat) (own notify : Bool) (known reply : Known) : Known :=
+  let before := if own && !notify && wentBack known reply then ⟨0, root⟩ else known
   filteredLearn before reply
 
 /-- The first fresh own response repairs even a pre-window or obsolete known pair. The
 zero-sequence reply is the actual root; a positive sequence is learned after any reset. -/
-theorem own_reply_learns (root : Nat) (known reply : Head)
-    (hroot : reply.1 = 0 → reply.2 = root) :
+theorem own_reply_learns (root : Nat) (known reply : Known)
+    (hroot : reply.seq = 0 → reply.head = root) :
     handleHead root true false known reply = reply := by
-  by_cases hb : reply.1 < known.1 ∨ (reply.1 = known.1 ∧ reply.2 ≠ known.2)
+  by_cases hb : reply.seq < known.seq ∨ (reply.seq = known.seq ∧ reply.head ≠ known.head)
   · simp only [handleHead, Bool.not_false, Bool.true_and, wentBack, hb, decide_true,
       ↓reduceIte, filteredLearn]
-    by_cases hp : 0 < reply.1
+    by_cases hp : 0 < reply.seq
     · simp [hp]
-    · have hz : reply.1 = 0 := by omega
+    · have hz : reply.seq = 0 := by omega
       have hr := hroot hz
       simp only [hp, ↓reduceIte]
-      exact (Prod.ext hz hr : reply = (0, root)).symm
+      exact (Known.ext hz hr : reply = ⟨0, root⟩).symm
   · simp only [handleHead, Bool.not_false, Bool.true_and, wentBack, hb, decide_false,
       Bool.false_eq_true, ↓reduceIte, filteredLearn]
-    by_cases hp : known.1 < reply.1
+    by_cases hp : known.seq < reply.seq
     · simp [hp]
-    · have hs : known.1 = reply.1 := by omega
-      have hh : known.2 = reply.2 := by
+    · have hs : known.seq = reply.seq := by omega
+      have hh : known.head = reply.head := by
         apply Classical.byContradiction
         intro hn
         exact hb (.inr ⟨hs.symm, Ne.symm hn⟩)
       simp only [hp, ↓reduceIte]
-      exact Prod.ext hs hh
+      exact Known.ext hs hh
 
 /-- An own reply naming the pair the node knows leaves it. -/
-theorem handleHead_same (r : Nat) (P : Head) :
+theorem handleHead_same (r : Nat) (P : Known) :
     handleHead r true false P P = P := by
   simp [handleHead, wentBack, filteredLearn]
 
 /-- A notice of a sequence no later than the one the node knows leaves it. -/
-theorem handleHead_notice_le (r : Nat) (P q : Head) (h : q.1 ≤ P.1) :
+theorem handleHead_notice_le (r : Nat) (P q : Known) (h : q.seq ≤ P.seq) :
     handleHead r false true P q = P := by
   simp [handleHead, filteredLearn, Nat.not_lt.2 h]
 
 /-- A notice leaves the known pair, or makes it the notice's. -/
-theorem handleHead_notice_or (r : Nat) (P q : Head) :
+theorem handleHead_notice_or (r : Nat) (P q : Known) :
     handleHead r false true P q = P ∨
       handleHead r false true P q = q := by
   simp only [handleHead, Bool.false_and, Bool.false_eq_true, ↓reduceIte,
@@ -73,12 +71,12 @@ theorem handleHead_notice_or (r : Nat) (P q : Head) :
 
 structure Call where
   id : Nat
-  before : Head
+  before : Known
   beforeRecords : List (List Nat)
 
 structure State where
   root : Nat
-  known : Head
+  known : Known
   applied : List (List Nat)
   next : Nat
   active : Option Call
@@ -103,7 +101,7 @@ def State.takeRecords (s : State) (records : List (List Nat)) : Option State :=
   | none => some { s with applied := records }
 
 /-- A timeout has no reply; an unmatched response changes neither knowledge nor the call. -/
-def State.finish (s : State) (id : Nat) (reply : Option Head) : State × Bool :=
+def State.finish (s : State) (id : Nat) (reply : Option Known) : State × Bool :=
   match s.active with
   | none => (s, false)
   | some call =>
@@ -114,7 +112,7 @@ def State.finish (s : State) (id : Nat) (reply : Option Head) : State × Bool :=
             | some head => handleHead s.root true false s.known head }, true)
     else (s, false)
 
-def State.notice (s : State) (reply : Head) : Option State :=
+def State.notice (s : State) (reply : Known) : Option State :=
   match s.active with
   | some _ => none
   | none => some { s with known := handleHead s.root false true s.known reply }
@@ -126,7 +124,7 @@ def Inv (s : State) : Prop :=
   ∀ call, s.active = some call →
     call.before = s.known ∧ call.beforeRecords = s.applied ∧ call.id < s.next
 
-theorem finish_inbox (s : State) (id : Nat) (reply : Option Head) :
+theorem finish_inbox (s : State) (id : Nat) (reply : Option Known) :
     (s.finish id reply).1.inbox = (s.inbox.finish id).1 ∧
       (s.finish id reply).2 = (s.inbox.finish id).2 := by
   cases h : s.active with
@@ -145,7 +143,7 @@ theorem start_inbox {s t : State} {id : Nat} (h : s.start = some (t, id)) :
     rcases h with ⟨rfl, rfl⟩
     simp [State.inbox, Inbox.start, hc]
 
-theorem notice_inbox {s t : State} {reply : Head} (h : s.notice reply = some t) :
+theorem notice_inbox {s t : State} {reply : Known} (h : s.notice reply = some t) :
     t.inbox = s.inbox := by
   cases hc : s.active with
   | some call => simp [State.notice, hc] at h
@@ -168,9 +166,9 @@ inductive Step (cut : Nat) : State → State → Bool → Prop
   | reserve (s : State) : Step cut s s.reserve false
   | takeRecords {s t : State} (records : List (List Nat))
       (h : s.takeRecords records = some t) : Step cut s t false
-  | finish (s : State) (id : Nat) (reply : Option Head) :
+  | finish (s : State) (id : Nat) (reply : Option Known) :
       Step cut s (s.finish id reply).1 ((s.finish id reply).2 && decide (id < cut))
-  | notice {s t : State} (reply : Head) (h : s.notice reply = some t) : Step cut s t false
+  | notice {s t : State} (reply : Known) (h : s.notice reply = some t) : Step cut s t false
   | disconnect (s : State) : Step cut s s.disconnect false
   | wait (s : State) : Step cut s s false
 
@@ -245,11 +243,11 @@ theorem old_call_effects_stop (cut : Nat) (run : Nat → State) (old : Nat → B
 /-- An honest response processed after a call was sent cannot look like rollback once
 the hub's sequence is monotone and its history is stable. Its send-time snapshot is still
 current at receipt by `Inv`; intervening hub acceptances remain allowed. -/
-theorem fresh_reply_no_restart {s : State} {call : Call} {reply : Head}
+theorem fresh_reply_no_restart {s : State} {call : Call} {reply : Known}
     (hi : Inv s) (hc : s.active = some call) (hist : Nat → Nat) (sentSeq : Nat)
-    (hknown : hist call.before.1 = call.before.2)
-    (hsent : call.before.1 ≤ sentSeq) (hhandled : sentSeq ≤ reply.1)
-    (hreply : hist reply.1 = reply.2) : wentBack s.known reply = false := by
+    (hknown : hist call.before.seq = call.before.head)
+    (hsent : call.before.seq ≤ sentSeq) (hhandled : sentSeq ≤ reply.seq)
+    (hreply : hist reply.seq = reply.head) : wentBack s.known reply = false := by
   have he := (hi call hc).1
   rw [← he]
   simp only [wentBack, decide_eq_false_iff_not]
@@ -278,10 +276,10 @@ inductive RoundStep (cut : Nat) : RoundState → RoundState → Bool → Prop
   | repository {s : RoundState} {t : State} (hr : s.running = true)
       (records : List (List Nat)) (h : s.calls.takeRecords records = some t) :
       RoundStep cut s { s with calls := t } false
-  | finish (s : RoundState) (id : Nat) (reply : Option Head) :
+  | finish (s : RoundState) (id : Nat) (reply : Option Known) :
       RoundStep cut s { s with calls := (s.calls.finish id reply).1 }
         ((s.calls.finish id reply).2 && decide (id < cut))
-  | notice {s : RoundState} {t : State} (hr : s.running = false) (reply : Head)
+  | notice {s : RoundState} {t : State} (hr : s.running = false) (reply : Known)
       (h : s.calls.notice reply = some t) :
       RoundStep cut s { s with calls := t } false
   | endRound (s : RoundState) (ha : s.calls.active = none) :

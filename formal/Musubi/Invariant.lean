@@ -21,7 +21,7 @@ def MsgOK (s : State) : Msg → Prop
 
 /-- Node `n`'s `known` is a head in the hub's current history, at its sequence number. -/
 def Consistent (s : State) (n : Nat) : Prop :=
-  (s.node n).known.1 ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.1 = (s.node n).known.2
+  (s.node n).known.seq ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.seq = (s.node n).known.head
 
 /-- What every state of the model satisfies, whether or not the hub can go back to an earlier
 head: the universe is a DAG rooted at `root`; the hub's history is a chain of heads ending in
@@ -136,16 +136,16 @@ namespace Inv
 variable {N : Nat} {s : State}
 
 theorem knownAnc (hI : Inv N s) (n : Nat) :
-    Anc s.U.par (s.node n).known.2 s.hub.head := by
+    Anc s.U.par (s.node n).known.head s.hub.head := by
   have := hI.histAnc (hI.known n).1
   rwa [(hI.known n).2] at this
 
-theorem knownLt (hI : Inv N s) (n : Nat) : (s.node n).known.2 < s.U.next :=
+theorem knownLt (hI : Inv N s) (n : Nat) : (s.node n).known.head < s.U.next :=
   Nat.lt_of_le_of_lt ((hI.knownAnc n).le hI.parLt) hI.headLt
 
 /-- A node whose `known` head is not the hub's head knows a sequence number below the hub's. -/
-theorem knownSeqLt (hI : Inv N s) {n : Nat} (h : s.hub.head ≠ (s.node n).known.2) :
-    (s.node n).known.1 < s.hub.seq := by
+theorem knownSeqLt (hI : Inv N s) {n : Nat} (h : s.hub.head ≠ (s.node n).known.head) :
+    (s.node n).known.seq < s.hub.seq := by
   rcases Nat.lt_or_eq_of_le (hI.known n).1 with h1 | h1
   · exact h1
   · exfalso; apply h; rw [← hI.histHead, ← h1, (hI.known n).2]

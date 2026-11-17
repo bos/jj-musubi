@@ -37,8 +37,8 @@ theorem measure_agree {s t : State} (h : AgreeUpToStaging s t) : measure N s = m
   unfold measure mDirty mStale mMiss mAdv mMulti
   have e1 : cnt N (dirty s) = cnt N (dirty t) := by
     apply cnt_congr; intro i _; unfold dirty; rw [hU, hhub, (hn i).2.2.1]
-  have e2 : sumN N (fun i => s.hub.seq - (s.node i).known.1) =
-      sumN N (fun i => t.hub.seq - (t.node i).known.1) := by
+  have e2 : sumN N (fun i => s.hub.seq - (s.node i).known.seq) =
+      sumN N (fun i => t.hub.seq - (t.node i).known.seq) := by
     apply sumN_congr; intro i _; rw [hhub, (hn i).2.2.2]
   have e3 : sumN N (mMiss s) = sumN N (mMiss t) := by
     apply sumN_congr; intro i _; unfold mMiss; rw [hU, hhub, (hn i).1]
@@ -60,14 +60,14 @@ theorem converged_agree {s t : State} (h : AgreeUpToStaging s t) :
 /-- A `push` of what `Upload` would send, accepted, then `Accepted` learned: the effect of
 `PStep.pushAccept`. -/
 theorem pushAccept_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
-    (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.head)
+    (hk : Anc s.U.par (s.node n).known.head hd) (hacc : s.hub.head = (s.node n).known.head) :
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushAccept n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
   have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushAccept _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl)
+    (s.node n).known.head hd (Or.inr rfl)
     (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
     (pUpload_closed hI)))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .accepted (s.hub.seq + 1) hd hn
@@ -76,30 +76,30 @@ theorem pushAccept_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n <
 
 /-- The effect of `PStep.pushIdem`. -/
 theorem pushIdem_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.head)
     (hidem : s.hub.head = hd) :
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushIdem n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
+  have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt (by rw [hidem]; exact hne)
   have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushIdem _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl) hidem))
+    (s.node n).known.head hd (Or.inr rfl) hidem))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .accepted s.hub.seq s.hub.head hn
     (Or.inr rfl) hlt))
   exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
 
 /-- The effect of `PStep.pushReject`. -/
 theorem pushReject_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hrej : s.hub.head ≠ (s.node n).known.2)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hrej : s.hub.head ≠ (s.node n).known.head)
     (hrej' : s.hub.head ≠ hd) :
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pPushReject n hd) := by
   have hI := inv_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
-  have hlt : (s.node n).known.1 < s.hub.seq := hI.knownSeqLt hrej
+  have hlt : (s.node n).known.seq < s.hub.seq := hI.knownSeqLt hrej
   have r1 := pushUpload_run (fun h st => h.step (Or.inr st)) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.step (Or.inr (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej)))
+    (s.node n).known.head hd (Or.inr rfl) hrej' (Or.inl hrej)))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .rejected s.hub.seq s.hub.head hn
     (Or.inr rfl) hlt))
   exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
@@ -110,7 +110,7 @@ theorem pushReject_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n <
 effect of `PStep.learn`, and afterwards every operation the node lacks below the head it
 learned is staged with its objects at hand, so that `Realize` can take each in turn. -/
 theorem fetch_merged {s : State} (h : Reachable N s) {n b : Nat} {H : OSet} (hn : n < N)
-    (hs : (s.node n).known.1 < s.hub.seq) (hb : (s.node n).lops b)
+    (hs : (s.node n).known.seq < s.hub.seq) (hb : (s.node n).lops b)
     (hH : ∀ o, H o → (s.node n).lobj o) :
     ∃ s', Reachable N s' ∧ AgreeUpToStaging s' (s.pLearn n) ∧
       ∀ x, Anc s.U.par x s.hub.head → ¬ (s.node n).lops x →
@@ -182,14 +182,14 @@ theorem rmeasure_agree {s t : State} (h : AgreeUpToStaging s t) :
 
 /-- The effect of `PStepR.pushAccept`. -/
 theorem pushAcceptR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
-    (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.head)
+    (hk : Anc s.U.par (s.node n).known.head hd) (hacc : s.hub.head = (s.node n).known.head) :
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushAccept n hd) := by
   have hI := invR_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
   have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushAccept _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl)
+    (s.node n).known.head hd (Or.inr rfl)
     (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
     (pUpload_closed_of hI.hubClosed (by rw [hacc]; exact Anc.refl)))
   have r3 := r2.sync (SyncStep.learnUnfiltered _ n .accepted (s.hub.seq + 1) hd hn
@@ -204,21 +204,21 @@ theorem pushIdemR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n <
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
   have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushIdem _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl) hidem)
+    (s.node n).known.head hd (Or.inr rfl) hidem)
   have r3 := r2.sync (SyncStep.learnUnfiltered _ n .accepted s.hub.seq s.hub.head hn
     (Or.inr rfl))
   exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
 
 /-- The effect of `PStepR.pushReject`. -/
 theorem pushRejectR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
-    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hrej : s.hub.head ≠ (s.node n).known.2)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hrej : s.hub.head ≠ (s.node n).known.head)
     (hrej' : s.hub.head ≠ hd) :
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushReject n hd) := by
   have hI := invR_reachable h
   have hl := hI.headsLocal n hd ((hh hd).2 rfl)
   have r1 := pushUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n) hl
   have r2 := r1.sync (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej))
+    (s.node n).known.head hd (Or.inr rfl) hrej' (Or.inl hrej))
   have r3 := r2.sync (SyncStep.learnUnfiltered _ n .rejected s.hub.seq s.hub.head hn
     (Or.inr rfl))
   exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
@@ -262,7 +262,7 @@ corresponds to it: it ends agreeing with the state before it, and stages what th
 below the head as `fetchR_merged` does. -/
 theorem fetchR_current {s : State} (h : RReachable N s) {n b : Nat} {H : OSet} (hn : n < N)
     (hb : (s.node n).lops b) (hH : ∀ o, H o → (s.node n).lobj o)
-    (hk : (s.node n).known = (s.hub.seq, s.hub.head)) :
+    (hk : (s.node n).known = ⟨s.hub.seq, s.hub.head⟩) :
     ∃ s', RReachable N s' ∧ AgreeUpToStaging s' s ∧
       ∀ x, Anc s.U.par x s.hub.head → ¬ (s.node n).lops x →
         (s'.node n).sops x ∧ ∀ o ∈ s.U.objs x, (s'.node n).lobj o ∨ (s'.node n).sobj o := by

@@ -57,7 +57,8 @@ structure CoreNode (s : State) (n : Nat) (nd : Node) : Prop where
 
 /-- The per-node part of the invariant, for a candidate new state `nd` of node `n`. -/
 structure NodeOK (N : Nat) (s : State) (n : Nat) (nd : Node) : Prop extends CoreNode s n nd where
-  known : nd.known.1 ≤ s.hub.seq ∧ s.hub.hist nd.known.1 = nd.known.2
+  /-- `Consistent` for the candidate node. -/
+  known : nd.known.seq ≤ s.hub.seq ∧ s.hub.hist nd.known.seq = nd.known.head
   locality : ∀ x, nd.lops x → s.U.creator x = some n ∨ Anc s.U.par x s.hub.head
   staged : ∀ x, nd.sops x → Anc s.U.par x s.hub.head
   accHeads : ∀ x y, nd.heads x → nd.heads y →
@@ -125,7 +126,7 @@ theorem inv_setNode {s : State} {n : Nat} {nd : Node} (hI : Inv N s) (h : NodeOK
     { hI with
       toCore := hI.toCore.setNode h.toCoreNode
       known := forall_setNode
-        (P := fun _ nd => nd.known.1 ≤ s.hub.seq ∧ s.hub.hist nd.known.1 = nd.known.2)
+        (P := fun _ nd => nd.known.seq ≤ s.hub.seq ∧ s.hub.hist nd.known.seq = nd.known.head)
         hI.known h.known
       locality := forall_setNode
         (P := fun i nd => ∀ x, nd.lops x → s.U.creator x = some i ∨ Anc s.U.par x s.hub.head)
@@ -204,13 +205,13 @@ theorem inv_realize {s : State} (hI : Inv N s) {n x : Nat} (hx : (s.node n).sops
 antichain. -/
 theorem advance_heads_iff_of {s : State} {n : Nat}
     (hAnti : ∀ x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y)
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) {y : Nat} :
-    maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) y ↔
-      y = (s.node n).known.2 ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.2) := by
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) {y : Nat} :
+    maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) y ↔
+      y = (s.node n).known.head ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.head) := by
   constructor
   · rintro ⟨hy, hmax⟩
     rcases hy with hy | hy
-    · by_cases hk : y = (s.node n).known.2
+    · by_cases hk : y = (s.node n).known.head
       · exact Or.inl hk
       · exact Or.inr ⟨hy, fun hA => hk (hmax _ (Or.inr rfl) hA)⟩
     · exact Or.inl hy
@@ -226,19 +227,19 @@ theorem advance_heads_iff_of {s : State} {n : Nat}
 
 /-- Characterization of `max(heads ∪ {k})` when `k ∉ anc*(heads)`. -/
 theorem advance_heads_iff {s : State} (hI : Inv N s) {n : Nat}
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) {y : Nat} :
-    maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) y ↔
-      y = (s.node n).known.2 ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.2) :=
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) {y : Nat} :
+    maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.head) y ↔
+      y = (s.node n).known.head ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.head) :=
   advance_heads_iff_of (hI.headsAnti n) hna
 
 theorem inv_advance {s : State} (hI : Inv N s) {n : Nat}
-    (hk : (s.node n).lops (s.node n).known.2)
-    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) :
+    (hk : (s.node n).lops (s.node n).known.head)
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.head h) :
     Inv N (s.advance n) := by
   have H := fun y => advance_heads_iff (y := y) hI hna
   have hka := hI.knownAnc n
   -- an accepted old head that survives is impossible
-  have oldAcc : ∀ y, (s.node n).heads y → ¬ Anc s.U.par y (s.node n).known.2 →
+  have oldAcc : ∀ y, (s.node n).heads y → ¬ Anc s.U.par y (s.node n).known.head →
       ¬ Anc s.U.par y s.hub.head := by
     intro y hy hnk hya
     rcases hI.comparable n y _ hy hya (hI.known n).1 with h | h
@@ -257,15 +258,15 @@ theorem inv_advance {s : State} (hI : Inv N s) {n : Nat}
   · exact ⟨_, (H _).2 (Or.inl rfl)⟩
   · intro x hx hc
     obtain ⟨h, hh, hA⟩ := hI.ownInHeads n x hx hc
-    by_cases hhk : Anc s.U.par h (s.node n).known.2
+    by_cases hhk : Anc s.U.par h (s.node n).known.head
     · exact ⟨_, (H _).2 (Or.inl rfl), hA.trans hhk⟩
     · exact ⟨h, (H h).2 (Or.inr ⟨hh, hhk⟩), hA⟩
   · intro x y hx hy hxa hya
-    have hx' : x = (s.node n).known.2 := by
+    have hx' : x = (s.node n).known.head := by
       rcases (H x).1 hx with h | ⟨h1, h2⟩
       · exact h
       · exact absurd hxa (oldAcc x h1 h2)
-    have hy' : y = (s.node n).known.2 := by
+    have hy' : y = (s.node n).known.head := by
       rcases (H y).1 hy with h | ⟨h1, h2⟩
       · exact h
       · exact absurd hya (oldAcc y h1 h2)
@@ -273,12 +274,12 @@ theorem inv_advance {s : State} (hI : Inv N s) {n : Nat}
   · intro x i hx hxa hi
     rcases (H x).1 hx with rfl | ⟨h1, h2⟩
     · rw [← (hI.known n).2]
-      rcases Nat.le_total (s.node n).known.1 i with h | h
+      rcases Nat.le_total (s.node n).known.seq i with h | h
       · exact Or.inl (hI.chain h hi)
       · exact Or.inr (hI.chain h (hI.known n).1)
     · exact absurd hxa (oldAcc x h1 h2)
   · intro d h hh hA
-    by_cases hhk : Anc s.U.par h (s.node n).known.2
+    by_cases hhk : Anc s.U.par h (s.node n).known.head
     · exact ⟨_, (H _).2 (Or.inl rfl), hA.trans hhk⟩
     · exact ⟨h, (H h).2 (Or.inr ⟨hh, hhk⟩), hA⟩
 
@@ -383,8 +384,8 @@ theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
     · rw [histOld (by omega)]
       exact hI.histStep i (by omega)
   · intro n
-    show (s.node n).known.1 ≤ s.hub.seq + 1 ∧
-      upd s.hub.hist (s.hub.seq + 1) d (s.node n).known.1 = (s.node n).known.2
+    show (s.node n).known.seq ≤ s.hub.seq + 1 ∧
+      upd s.hub.hist (s.hub.seq + 1) d (s.node n).known.seq = (s.node n).known.head
     rw [histOld (hI.known n).1]
     exact ⟨Nat.le_succ_of_le (hI.known n).1, (hI.known n).2⟩
   · intro n x hx

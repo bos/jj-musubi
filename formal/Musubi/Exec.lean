@@ -28,12 +28,12 @@ structure ENode where
   lops : List Nat
   lobj : List Nat
   heads : List Nat
-  known : Nat × Nat
+  known : Known
   sops : List Nat
   sobj : List Nat
   deriving Repr
 
-def ENode.init : ENode := ⟨[root], [], [root], (0, root), [], []⟩
+def ENode.init : ENode := ⟨[root], [], [root], ⟨0, root⟩, [], []⟩
 
 structure EHub where
   ops : List Nat
@@ -373,13 +373,13 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     req (decide (n < N)) (fun _ => s!"learn: node {n} out of range") fun _ =>
     req (es.inNet (.head n k sq h))
       (fun _ => s!"learn: head message ({sq}, {h}) for node {n} not in net") fun _ =>
-    req (decide ((es.nodeOf n).known.1 < sq))
-      (fun _ => s!"learn: seq {sq} not greater than known.seq {(es.nodeOf n).known.1}") fun _ =>
-    .ok (es.setNode n { es.nodeOf n with known := (sq, h) })
+    req (decide ((es.nodeOf n).known.seq < sq))
+      (fun _ => s!"learn: seq {sq} not greater than known.seq {(es.nodeOf n).known.seq}") fun _ =>
+    .ok (es.setNode n { es.nodeOf n with known := ⟨sq, h⟩ })
   | .fetchOps n S =>
     req (decide (n < N)) (fun _ => s!"fetchOps: node {n} out of range") fun _ =>
-    req (S.all (fun x => ancB es.parF x (es.nodeOf n).known.2))
-      (fun _ => s!"fetchOps: {showL S} not all in anc*(known.head = {(es.nodeOf n).known.2})")
+    req (S.all (fun x => ancB es.parF x (es.nodeOf n).known.head))
+      (fun _ => s!"fetchOps: {showL S} not all in anc*(known.head = {(es.nodeOf n).known.head})")
       fun _ =>
     .ok (es.send (.getOps n S))
   | .fetchObjs n S =>
@@ -408,12 +408,12 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
       lobj := union (es.nodeOf n).lobj (es.objsF x) })
   | .advance n =>
     req (decide (n < N)) (fun _ => s!"advance: node {n} out of range") fun _ =>
-    req ((es.nodeOf n).lops.contains (es.nodeOf n).known.2)
-      (fun _ => s!"advance: known.head {(es.nodeOf n).known.2} not local") fun _ =>
-    req (!((es.nodeOf n).heads.any (fun h => ancB es.parF (es.nodeOf n).known.2 h)))
-      (fun _ => s!"advance: known.head {(es.nodeOf n).known.2} already in anc*(heads)") fun _ =>
+    req ((es.nodeOf n).lops.contains (es.nodeOf n).known.head)
+      (fun _ => s!"advance: known.head {(es.nodeOf n).known.head} not local") fun _ =>
+    req (!((es.nodeOf n).heads.any (fun h => ancB es.parF (es.nodeOf n).known.head h)))
+      (fun _ => s!"advance: known.head {(es.nodeOf n).known.head} already in anc*(heads)") fun _ =>
     .ok (es.setNode n { es.nodeOf n with
-      heads := maxL es.parF ((es.nodeOf n).heads ++ [(es.nodeOf n).known.2]) })
+      heads := maxL es.parF ((es.nodeOf n).heads ++ [(es.nodeOf n).known.head]) })
   | .uploadOps n S =>
     req (decide (n < N)) (fun _ => s!"uploadOps: node {n} out of range") fun _ =>
     req (S.all ((es.nodeOf n).lops.contains ·))
@@ -445,10 +445,10 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     req (decide (n < N)) (fun _ => s!"crashNode: node {n} out of range") fun _ => .ok es
   | .loseKnown n =>
     req (decide (n < N)) (fun _ => s!"loseKnown: node {n} out of range") fun _ =>
-    .ok (es.setNode n { es.nodeOf n with known := (0, root) })
+    .ok (es.setNode n { es.nodeOf n with known := ⟨0, root⟩ })
   | .loseVolatile n =>
     req (decide (n < N)) (fun _ => s!"loseVolatile: node {n} out of range") fun _ =>
-    .ok (es.setNode n { es.nodeOf n with known := (0, root), sops := [], sobj := [] })
+    .ok (es.setNode n { es.nodeOf n with known := ⟨0, root⟩, sops := [], sobj := [] })
   | .hubGetHead n =>
     req (es.inNet (.getHead n)) (fun _ => s!"hubGetHead: getHead from node {n} not in net")
       fun _ =>
@@ -588,7 +588,7 @@ def dirtyE (es : EState) (n : Nat) : Bool :=
   (es.nodeOf n).heads.any fun h => !ancB es.parF h es.hub.head
 
 /-- `mStale`. -/
-def staleE (es : EState) (n : Nat) : Nat := es.hub.seq - (es.nodeOf n).known.1
+def staleE (es : EState) (n : Nat) : Nat := es.hub.seq - (es.nodeOf n).known.seq
 
 /-- `mMiss`: the accepted operations node `n` lacks. -/
 def missE (es : EState) (n : Nat) : Nat :=
@@ -597,7 +597,7 @@ def missE (es : EState) (n : Nat) : Nat :=
 
 /-- `mAdv`: whether node `n` has yet to advance to `known.head`. -/
 def advE (es : EState) (n : Nat) : Nat :=
-  if (es.nodeOf n).heads.any (ancB es.parF (es.nodeOf n).known.2) then 0 else 1
+  if (es.nodeOf n).heads.any (ancB es.parF (es.nodeOf n).known.head) then 0 else 1
 
 /-- `mMulti`: whether node `n` has two heads to merge. -/
 def multiE (es : EState) (n : Nat) : Nat :=
@@ -611,12 +611,12 @@ def measureE (N : Nat) (es : EState) : Nat × Nat × Nat × Nat × Nat :=
 def convergedE (N : Nat) (es : EState) : Bool :=
   (List.range N).all fun n =>
     (es.nodeOf n).heads.contains es.hub.head && (es.nodeOf n).heads.all (· == es.hub.head) &&
-      (es.nodeOf n).known == (es.hub.seq, es.hub.head)
+      (es.nodeOf n).known == ⟨es.hub.seq, es.hub.head⟩
 
 /-- `Consistent`: node `n`'s `known` is in the hub's current history. -/
 def consistentE (es : EState) (n : Nat) : Bool :=
-  decide ((es.nodeOf n).known.1 ≤ es.hub.seq) &&
-    es.hub.histF (es.nodeOf n).known.1 == (es.nodeOf n).known.2
+  decide ((es.nodeOf n).known.seq ≤ es.hub.seq) &&
+    es.hub.histF (es.nodeOf n).known.seq == (es.nodeOf n).known.head
 
 /-- `Settled`: node `n` has one head, accepted and comparable with every head in the hub's
 history. -/
@@ -630,7 +630,7 @@ def settledE (es : EState) (n : Nat) : Bool :=
 
 /-- `mStaleR`. -/
 def staleRE (es : EState) (n : Nat) : Nat :=
-  if es.consistentE n then es.hub.seq - (es.nodeOf n).known.1 else 0
+  if es.consistentE n then es.hub.seq - (es.nodeOf n).known.seq else 0
 
 /-- `rmeasure`, the measure of `Regress.lean`, for a hub that may have gone back. -/
 def rmeasureE (N : Nat) (es : EState) : Nat × Nat × Nat × Nat × Nat × Nat :=
@@ -639,11 +639,11 @@ def rmeasureE (N : Nat) (es : EState) : Nat × Nat × Nat × Nat × Nat × Nat :
 
 /-- `upOps`: what node `n` uploads to push `h`, `anc*(h) \ anc*(known.head)`. -/
 def upOpsL (es : EState) (n h : Nat) : List Nat :=
-  (ancL es.parF h).filter fun y => !ancB es.parF y (es.nodeOf n).known.2
+  (ancL es.parF h).filter fun y => !ancB es.parF y (es.nodeOf n).known.head
 
 /-- `upObjs`: the objects of `closure(h) \ closure(known.head)`. -/
 def upObjsL (es : EState) (n h : Nat) : List Nat :=
-  let below := (ancL es.parF (es.nodeOf n).known.2).flatMap es.objsF
+  let below := (ancL es.parF (es.nodeOf n).known.head).flatMap es.objsF
   ((ancL es.parF h).flatMap es.objsF).filter fun o => !below.contains o
 
 end EState

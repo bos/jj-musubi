@@ -1,10 +1,10 @@
-/target
-.DS_Store
-/formal/.lake
-.hegel/
-/bench/work
 __pycache__/
-/mutants.out*
-# What insta leaves when a snapshot fails, for `cargo insta review`.
+.DS_Store
+.hegel/
 *.pending-snap
 *.snap.new
+/bench/work
+/formal/.lake
+/mutants.out*
+/target
+.claude/

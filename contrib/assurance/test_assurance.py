@@ -109,10 +109,13 @@ class GraphTests(unittest.TestCase):
 class EvidenceTests(unittest.TestCase):
     def test_catalog_covers_every_oracle_operation(self):
         catalog = build.load_catalog()
-        handler = (ROOT / "formal/Musubi/ExecJson.lean").read_text().split(
-            "def handle (", 1
-        )[1]
-        operations = set(re.findall(r'\| \.ok "([A-Za-z]+)" =>', handler))
+        # The ops are the entries of the dispatch tables, which run from `badRequestOps` to
+        # `handle`, and the `op == "..."` cases of `handleOp`, which replace the session.
+        dispatch = (ROOT / "formal/Musubi/ExecJson.lean").read_text().split(
+            "def badRequestOps", 1
+        )[1].split("def handle (", 1)[0]
+        operations = set(re.findall(r'\("([A-Za-z]+)", ', dispatch))
+        operations |= set(re.findall(r'op == "([A-Za-z]+)"', dispatch))
         self.assertTrue(operations)
         self.assertEqual(operations, set(catalog["oracleModels"]))
         for models in catalog["oracleModels"].values():

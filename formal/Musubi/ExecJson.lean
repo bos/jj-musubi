@@ -309,6 +309,9 @@ def okReply (N : Nat) (ses : SEState) : Json :=
 def errReply (e : String) : Json :=
   Json.mkObj [("ok", Json.bool false), ("error", Json.str e)]
 
+/-- The message for a request that is not well formed. -/
+def badRequest (e : String) : String := s!"bad request: {e}"
+
 /-! ## Presence (`PresenceExec.lean`) -/
 
 def decodeEOp (j : Json) : Except String Presence.EOp := do
@@ -319,13 +322,22 @@ def decodeEOp (j : Json) : Except String Presence.EOp := do
 
 /-- For each operation, the copies present there, each with its latest work that no forget
 saw, both in order. -/
-def presenceReply (ops : List Presence.EOp) : Json :=
+def encodePresence (ops : List Presence.EOp) : Json :=
   let copies := sortNats (Presence.EHist.copies ops)
   let atOp (x : Nat) : Json :=
     Json.arr ((copies.filter (Presence.EHist.presentB ops x)).map fun k =>
       Json.mkObj [("copy", toJson k), ("latest", nats (Presence.EHist.latestB ops x k))]).toArray
   Json.mkObj [("ok", Json.bool true),
     ("presence", Json.arr ((List.range ops.length).map atOp).toArray)]
+
+/-- Unlike other requests' replies, this one's errors are whole messages: a history that is out
+of order is not a `bad request`. -/
+def presenceReply (j : Json) : Except String Json :=
+  match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
+  | .error e => throw (badRequest e)
+  | .ok ops =>
+    if Presence.EHist.orderedB ops then pure (encodePresence ops)
+    else throw "presence: an operation's parents must come before it"
 
 /-! ## Copies (`Copies.lean`) -/
 
@@ -379,7 +391,7 @@ def standingStr : Copies.Standing → String
 
 /-- For each case, the repository's standing given the entry, that standing `refine`d, and, if
 there is an entry, whether the repository passes its check. -/
-def copiesReply (cases : List CopiesCase) : Json :=
+def encodeCopies (cases : List CopiesCase) : Json :=
   let answer (c : CopiesCase) : Json :=
     let st := Copies.standing c.repo c.entry
     let standings := [("standing", Json.str (standingStr st)),
@@ -388,6 +400,11 @@ def copiesReply (cases : List CopiesCase) : Json :=
     | none => Json.mkObj standings
     | some e => Json.mkObj (standings ++ [("check", Json.bool (Copies.check e c.repo))])
   Json.mkObj [("ok", Json.bool true), ("copies", Json.arr (cases.map answer).toArray)]
+
+/-- Decode a `copies` request and answer it with `encodeCopies`. -/
+def copiesReply (j : Json) : Except String Json := do
+  let cases ← (← j.getObjValAs? (Array Json) "cases").toList.mapM decodeCase
+  pure (encodeCopies cases)
 
 /-! ## Chunked blobs (`Chunks.lean`) -/
 
@@ -424,7 +441,7 @@ def sweepReceiver (s : Chunks.PState) (pre stored : Bool) : Chunks.PState :=
 /-- The prefix receiver's state after each step from `initP`: its reply to a chunk
 (`Chunks.receive`; a number for `Received::Prefix`, null for `Received::Complete`), the
 prefix it has, and whether it has stored the blob. -/
-def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
+def encodeChunks (b : List Nat) (steps : List ChunkStep) : Json :=
   let rec go (s : Chunks.PState) : List ChunkStep → List Json
     | [] => []
     | .chunk c total :: rest =>
@@ -434,6 +451,19 @@ def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
       let s' := sweepReceiver s pre stored
       receiverState s' [] :: go s' rest
   Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP steps).toArray)]
+
+/-- Decode a `chunks` request and answer it with `encodeChunks`. -/
+def chunksReply (j : Json) : Except String Json := do
+  let blob ← getNats j "blob"
+  let steps ← (← j.getObjValAs? (Array Json) "steps").toList.mapM decodeChunkStep
+  pure (encodeChunks blob steps)
+
+/-- Each age after a renewal of `renew` (`Chunks.refresh`). -/
+def refreshReply (j : Json) : Except String Json := do
+  let renew ← getNat j "renew"
+  let ages ← getNats j "ages"
+  pure (Json.mkObj [("ok", Json.bool true),
+    ("ages", toJson (ages.map (Chunks.refresh renew)).toArray)])
 
 /-- A step of a transfer by attempts (`Chunks.lean`, "Attempts under a deadline"): an attempt
 whose window has `w` chunks, of which the receiver takes the first `m` and the sender hears of
@@ -463,7 +493,7 @@ prefix, being the receiver (`Chunks.ARun.reread`). After each attempt: the offse
 window, the receiver's replies to the chunks it took, the prefix it has, whether it has stored
 the blob, and where the sender goes on from (null once it has heard that the receiver has the
 blob). -/
-def attemptsReply (b : List Nat) (limit : Nat) (download : Bool) (steps : List AttemptStep) :
+def encodeAttempts (b : List Nat) (limit : Nat) (download : Bool) (steps : List AttemptStep) :
     Json :=
   let rec go (s : Chunks.PState) (o : Nat) : List AttemptStep → List Json
     | [] => []
@@ -480,6 +510,18 @@ def attemptsReply (b : List Nat) (limit : Nat) (download : Bool) (steps : List A
     | .restart :: rest => receiverState s [] :: go s 0 rest
   Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP 0 steps).toArray)]
 
+/-- Decode an `attempts` request from an `upload` or `download` sender and answer it with
+`encodeAttempts`. -/
+def attemptsReply (j : Json) : Except String Json := do
+  let blob ← getNats j "blob"
+  let limit ← getNat j "limit"
+  let sender ← j.getObjValAs? String "sender"
+  let steps ← (← j.getObjValAs? (Array Json) "steps").toList.mapM decodeAttemptStep
+  if limit = 0 then throw "chunks hold a byte at least"
+  else if sender = "upload" then pure (encodeAttempts blob limit false steps)
+  else if sender = "download" then pure (encodeAttempts blob limit true steps)
+  else throw s!"no sender {sender}"
+
 /-! ## Workspace names (`Names.lean`) -/
 
 def decodeKey (j : Json) : Except String Names.Key := do
@@ -488,7 +530,7 @@ def decodeKey (j : Json) : Except String Names.Key := do
 /-- Each machine's prefix (`Names.assign`), in the order given, among the machines given and
 the names of this machine's own, `me`; and the name here of each workspace given, the
 `workspace` of the machine at index `machine` (`Names.localName`). -/
-def namesReply (machines : List Names.Key) (own : List String) (me : Names.Key)
+def encodeNames (machines : List Names.Key) (own : List String) (me : Names.Key)
     (workspaces : List (Nat × String)) : Json :=
   let assigned := Names.assign machines (own.map String.toList)
   let name (w : Nat × String) : Json :=
@@ -501,6 +543,14 @@ def namesReply (machines : List Names.Key) (own : List String) (me : Names.Key)
 
 def decodeWorkspace (j : Json) : Except String (Nat × String) := do
   pure (← getNat j "machine", ← j.getObjValAs? String "workspace")
+
+/-- Decode a `names` request and answer it with `encodeNames`. -/
+def namesReply (j : Json) : Except String Json := do
+  let machines ← (← j.getObjValAs? (Array Json) "machines").toList.mapM decodeKey
+  let own ← j.getObjValAs? (Array String) "own"
+  let me ← j.getObjVal? "me" >>= decodeKey
+  let workspaces ← (← j.getObjValAs? (Array Json) "workspaces").toList.mapM decodeWorkspace
+  pure (encodeNames machines own.toList me workspaces)
 
 /-! ## Per-machine refs (`RefsExec.lean`) -/
 
@@ -546,7 +596,7 @@ def decodeCall (j : Json) : Except String Refs.Exec.Call := do
 def encodeSlot (s : Refs.TSlot Nat) : Json :=
   Json.mkObj [("L", toJson s.L), ("R", toJson s.R), ("K", toJson s.K), ("tr", Json.bool s.tr)]
 
-def refsReply : Refs.Exec.Answer → Json
+def encodeRefs : Refs.Exec.Answer → Json
   | .slot s none => Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s)]
   | .slot s (some g) =>
     Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("g", toJson g)]
@@ -558,6 +608,11 @@ def refsReply : Refs.Exec.Answer → Json
       ("parents", toJson parents), ("contracted", toJson contracted), ("bases", toJson bases),
       ("valid", Json.bool valid)]
 
+/-- Decode a `refs` request, run it against its table and answer with `encodeRefs`. -/
+def refsReply (j : Json) : Except String Json := do
+  let table ← j.getObjVal? "table" >>= decodeTable
+  pure (encodeRefs (Refs.Exec.run table (← decodeCall j)))
+
 /-! ## Expected values from operation history (`Expected.lean`) -/
 
 /-- `[]` means no checkpoint; `[null]` means a checkpoint with no expected value. -/
@@ -568,6 +623,8 @@ def decodeCheckpoint (j : Json) (key : String) : Except String (Option (Option N
   | [value] => pure (some (some (← Lean.fromJson? value)))
   | _ => throw s!"{key} must have at most one value"
 
+/-- Decode an `expected` request, a history of nodes' checks, and reply with the value it
+ends in, or an error if the history is invalid or unfinished. -/
 def expectedReply (j : Json) : Except String Json := do
   let nodes ← (← j.getObjValAs? (Array Json) "nodes").toList.mapM fun n => do
     let target ← getNat n "target"
@@ -590,6 +647,8 @@ def expectedReply (j : Json) : Except String Json := do
 Ancestry through dropped operations (`Contract`), survivor advance, the retry-control state
 machines (`Retry`), and the session's liveness measures (`Exec.lean`, "The liveness measure"). -/
 
+/-- Decode a `contractedAncestry` request and reply with whether `head` descends from
+`expected` once the dropped operations are contracted, its original ancestry, and the images. -/
 def contractedAncestryReply (j : Json) : Except String Json := do
   let parents ← j.getObjValAs? (Array (List Nat)) "parents"
   let dropped ← getNats j "dropped"
@@ -606,6 +665,8 @@ def contractedAncestryReply (j : Json) : Except String Json := do
     ("original", toJson (ancB par expected head)),
     ("images", toJson (Contract.exp par D expected))])
 
+/-- Decode a `survivorAdvance` request and reply with the images of the heads, the heads
+after the advance, and whether they merge. -/
 def survivorAdvanceReply (j : Json) : Except String Json := do
   let parents ← j.getObjValAs? (Array (List Nat)) "parents"
   let dropped ← getNats j "dropped"
@@ -625,6 +686,8 @@ def survivorAdvanceReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true), ("images", toJson images),
     ("heads", toJson next), ("merge", toJson (decide (next.length > 1)))])
 
+/-- Decode a `retryFixup` request and reply with the fix-up machine after its `write` or
+`adopt`, and whether it emitted a write. -/
 def retryFixupReply (j : Json) : Except String Json := do
   let s : Retry.Fixup := {
     pending := ← getNats j "pending",
@@ -641,6 +704,8 @@ def retryFixupReply (j : Json) : Except String Json := do
     ("written", toJson t.written), ("aligned", toJson t.aligned),
     ("emitted", toJson emitted), ("credit", toJson t.credit)])
 
+/-- Decode a `retryInbox` request and reply with the inbox after its `start`, `finish` or
+`disconnect`, and whether a finish matched. -/
 def retryInboxReply (j : Json) : Except String Json := do
   let s : Retry.Inbox := { next := ← getNat j "next", pending := ← getNats j "pending" }
   let cut ← getNat j "cut"
@@ -667,6 +732,8 @@ def retryPublicationReply (j : Json) : Except String Json := do
     ("written", toJson t.cache.written), ("aligned", toJson t.cache.aligned),
     ("headKnown", toJson t.headKnown), ("restoring", toJson restoring), ("tip", toJson tip)])
 
+/-- Decode a `recordEpoch` request and reply with the record-control state after one
+action, and whether it adopted or failed. -/
 def recordEpochReply (j : Json) : Except String Json := do
   let R ← getNat j "current"
   let s : Retry.Records.State := {
@@ -714,6 +781,8 @@ def uploadReply (es : EState) (n new : Nat) : Json :=
 
 Raw pushes, hub reads, node growth, head control and local bursts. -/
 
+/-- Decode a `pushSnapshot` request and reply with whether the push packet matches the
+session's state, and the operations it drops. -/
 def pushSnapshotReply (N : Nat) (s : SEState) (j : Json) : Except String Json := do
   let p : PushPacket := {
     node := ← getNat j "node"
@@ -737,6 +806,8 @@ def decodeGrowObs (j : Json) : Except String NodeSys.Exec.GrowObs := do
   pure ⟨raw.size, labels.size, fun x => raw[x]?.getD [], fun x => labels[x]?.getD [],
     fun x => emb[x]?.getD 0⟩
 
+/-- Decode a `nodeGrow` request and reply with whether the observations `after` are scoped
+and grow those `before`. -/
 def nodeGrowReply (j : Json) : Except String Json := do
   let before ← decodeGrowObs (← j.getObjVal? "before")
   let after ← decodeGrowObs (← j.getObjVal? "after")
@@ -782,6 +853,8 @@ instance : Lean.FromJson Known :=
     let (seq, head) ← Lean.fromJson? (α := Nat × Nat) j
     pure ⟨seq, head⟩⟩
 
+/-- Decode a `headControl` request and reply with whether the node restarts and the head it
+knows afterwards. -/
 def headControlReply (j : Json) : Except String Json := do
   let known ← j.getObjValAs? Known "known"
   let incoming ← j.getObjValAs? Known "incoming"
@@ -810,12 +883,16 @@ def burstWith (raw images : List Nat) (anc : Nat → Nat → Bool) (j : Json) :
     ("before", toJson (EarlyEntry.Burst.rank raw images anc before)),
     ("after", toJson (EarlyEntry.Burst.rank raw images anc after))])
 
+/-- Decode a `localBurst` request against the session's state and reply with whether the
+burst step takes `before` to `after`, and the rank of each. -/
 def burstReply (s : SEState) (j : Json) : Except String Json := do
   let n ← getNat j "node"
   let known ← getNat j "known"
   burstWith (ancL s.es.parF known) (Contract.exp s.es.parF (s.nodeDF n).contains known)
     (ancB s.es.parF) j
 
+/-- Decode a `rawBurst` request, which gives its parents directly, and reply as
+`burstReply` does. -/
 def rawBurstReply (j : Json) : Except String Json := do
   let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
   let parents := rows.toList.map Array.toList
@@ -971,156 +1048,80 @@ def publicationReply (j : Json) : Except String Json := do
 /-- The oracle's session: the node count and current state, once `reset`. -/
 abbrev Session := Option (Nat × SEState)
 
+/-- Requests that need no session, by `op`, whose errors are bad requests: the decoding failing,
+or the model refusing what was decoded. -/
+def badRequestOps : List (String × (Json → Except String Json)) :=
+  [("publication", publicationReply), ("headControl", headControlReply),
+    ("hubRead", hubReadReply), ("nodeGrow", nodeGrowReply),
+    ("rawBurst", rawBurstReply), ("rawPush", rawPushReply),
+    ("rawControl", rawControlReply), ("chunks", chunksReply), ("refresh", refreshReply),
+    ("attempts", attemptsReply), ("names", namesReply), ("copies", copiesReply),
+    ("expected", expectedReply), ("retryFixup", retryFixupReply),
+    ("contractedAncestry", contractedAncestryReply), ("retryInbox", retryInboxReply),
+    ("retryPublication", retryPublicationReply), ("recordEpoch", recordEpochReply),
+    ("survivorAdvance", survivorAdvanceReply), ("refs", refsReply)]
+
+/-- Requests that need no session, by `op`, whose errors are whole messages, not bad requests. -/
+def wholeMessageOps : List (String × (Json → Except String Json)) :=
+  [("presence", presenceReply),
+    ("nativeLifecycle", fun j =>
+      (NativeLifecycle.Json.reply j).mapError ("native lifecycle interpretation gap: " ++ ·))]
+
+/-- Every request that needs no session, by `op`. An error is the message of the reply. -/
+def statelessOps : List (String × (Json → Except String Json)) :=
+  badRequestOps.map (fun (op, f) => (op, fun j => (f j).mapError badRequest)) ++ wholeMessageOps
+
+/-- A request that reads the session and leaves it as it is, by its `op`, given the node count
+and state. Before `reset`, it fails as `bad request: OP before reset`. -/
+def sessionOps : List (String × (Nat × SEState → Json → Except String Json)) :=
+  [("measure", fun (N, es) _ => pure (measureReply N es)),
+    ("upload", fun (_, ses) j => return uploadReply ses.es (← getNat j "node") (← getNat j "new")),
+    ("pushSnapshot", fun (N, s) j => pushSnapshotReply N s j),
+    ("localBurst", fun (_, s) j => burstReply s j)]
+
+/-- A `step`: the action's refusal by the model is reported as it is, not as a bad request. -/
+def handleStep (N : Nat) (es : SEState) (j : Json) : Json × Session :=
+  match j.getObjVal? "action" >>= decodeCAction with
+  | .error e => (errReply (badRequest e), some (N, es))
+  | .ok a =>
+    match cexecAction N es a with
+    | .error e => (errReply e, some (N, es))
+    | .ok es' => (okReply N es', some (N, es'))
+
+/-- Handle the request `j` of kind `op`. A new op goes in `badRequestOps` or `wholeMessageOps` if
+it needs no session, or in `sessionOps` if it reads one. `reset` and `step` are handled here
+because they replace the session; every other op leaves it as it is. -/
+def handleOp (sess : Session) (j : Json) (op : String) : Json × Session :=
+  let reply (r : Except String Json) : Json × Session :=
+    match r with
+    | .error e => (errReply e, sess)
+    | .ok v => (v, sess)
+  if op == "reset" then
+    match getNat j "nodes" with
+    | .error e => (errReply (badRequest e), sess)
+    | .ok N => (okReply N initSE, some (N, initSE))
+  else if op == "step" then
+    match sess with
+    | none => (errReply (badRequest "step before reset"), sess)
+    | some (N, es) => handleStep N es j
+  else
+    match statelessOps.lookup op with
+    | some f => reply (f j)
+    | none =>
+      match sessionOps.lookup op with
+      | none => (errReply (badRequest s!"unknown op {op}"), sess)
+      | some f =>
+        match sess with
+        | none => (errReply (badRequest s!"{op} before reset"), sess)
+        | some st => reply ((f st j).mapError badRequest)
+
 /-- Handle one request line. A rejected or malformed request leaves the session unchanged. -/
 def handle (sess : Session) (line : String) : Json × Session :=
   match Json.parse line with
-  | .error e => (errReply s!"bad request: {e}", sess)
+  | .error e => (errReply (badRequest e), sess)
   | .ok j =>
     match j.getObjValAs? String "op" with
-    | .error e => (errReply s!"bad request: {e}", sess)
-    | .ok "reset" =>
-      match getNat j "nodes" with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok N => (okReply N initSE, some (N, initSE))
-    | .ok "publication" =>
-      match publicationReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "step" =>
-      match sess with
-      | none => (errReply "bad request: step before reset", sess)
-      | some (N, es) =>
-        match j.getObjVal? "action" >>= decodeCAction with
-        | .error e => (errReply s!"bad request: {e}", sess)
-        | .ok a =>
-          match cexecAction N es a with
-          | .error e => (errReply e, sess)
-          | .ok es' => (okReply N es', some (N, es'))
-    | .ok "measure" =>
-      match sess with
-      | none => (errReply "bad request: measure before reset", sess)
-      | some (N, es) => (measureReply N es, sess)
-    | .ok "upload" =>
-      match sess, getNat j "node", getNat j "new" with
-      | none, _, _ => (errReply "bad request: upload before reset", sess)
-      | _, .error e, _ | _, _, .error e => (errReply s!"bad request: {e}", sess)
-      | some (_, ses), .ok n, .ok new => (uploadReply ses.es n new, sess)
-    | .ok "pushSnapshot" =>
-      match sess with
-      | none => (errReply "bad request: pushSnapshot before reset", sess)
-      | some (N, s) =>
-        match pushSnapshotReply N s j with
-        | .error error => (errReply s!"bad request: {error}", sess)
-        | .ok reply => (reply, sess)
-    | .ok "headControl" =>
-      match headControlReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "hubRead" =>
-      match hubReadReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "nodeGrow" =>
-      match nodeGrowReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "localBurst" =>
-      match sess with
-      | none => (errReply "bad request: localBurst before reset", sess)
-      | some (_, s) =>
-        match burstReply s j with
-        | .error error => (errReply s!"bad request: {error}", sess)
-        | .ok reply => (reply, sess)
-    | .ok "rawBurst" =>
-      match rawBurstReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "rawPush" =>
-      match rawPushReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "rawControl" =>
-      match rawControlReply j with
-      | .error error => (errReply s!"bad request: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "presence" =>
-      match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok ops =>
-        if Presence.EHist.orderedB ops then (presenceReply ops, sess)
-        else (errReply "presence: an operation's parents must come before it", sess)
-    | .ok "chunks" =>
-      match getNats j "blob", j.getObjValAs? (Array Json) "steps" >>= fun ss =>
-          ss.toList.mapM decodeChunkStep with
-      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
-      | .ok b, .ok steps => (chunksReply b steps, sess)
-    | .ok "refresh" =>
-      match getNat j "renew", getNats j "ages" with
-      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
-      | .ok renew, .ok ages =>
-        (Json.mkObj [("ok", Json.bool true),
-          ("ages", toJson (ages.map (Chunks.refresh renew)).toArray)], sess)
-    | .ok "attempts" =>
-      let sender := j.getObjValAs? String "sender"
-      match getNats j "blob", getNat j "limit", sender, j.getObjValAs? (Array Json) "steps" >>=
-          fun ss => ss.toList.mapM decodeAttemptStep with
-      | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
-        (errReply s!"bad request: {e}", sess)
-      | .ok b, .ok limit, .ok sender, .ok steps =>
-        if limit = 0 then (errReply "bad request: chunks hold a byte at least", sess)
-        else if sender = "upload" then (attemptsReply b limit false steps, sess)
-        else if sender = "download" then (attemptsReply b limit true steps, sess)
-        else (errReply s!"bad request: no sender {sender}", sess)
-    | .ok "names" =>
-      let me := j.getObjVal? "me" >>= decodeKey
-      let workspaces := j.getObjValAs? (Array Json) "workspaces" >>= fun ws =>
-        ws.toList.mapM decodeWorkspace
-      match j.getObjValAs? (Array Json) "machines" >>= fun ms => ms.toList.mapM decodeKey,
-          j.getObjValAs? (Array String) "own", me, workspaces with
-      | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
-        (errReply s!"bad request: {e}", sess)
-      | .ok machines, .ok own, .ok me, .ok workspaces =>
-        (namesReply machines own.toList me workspaces, sess)
-    | .ok "copies" =>
-      match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok cases => (copiesReply cases, sess)
-    | .ok "expected" =>
-      match expectedReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "retryFixup" =>
-      match retryFixupReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "contractedAncestry" =>
-      match contractedAncestryReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "retryInbox" =>
-      match retryInboxReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "retryPublication" =>
-      match retryPublicationReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "recordEpoch" =>
-      match recordEpochReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "survivorAdvance" =>
-      match survivorAdvanceReply j with
-      | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok reply => (reply, sess)
-    | .ok "refs" =>
-      match j.getObjVal? "table" >>= decodeTable, decodeCall j with
-      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
-      | .ok tb, .ok call => (refsReply (Refs.Exec.run tb call), sess)
-    | .ok "nativeLifecycle" =>
-      match NativeLifecycle.Json.reply j with
-      | .error error => (errReply s!"native lifecycle interpretation gap: {error}", sess)
-      | .ok reply => (reply, sess)
-    | .ok op => (errReply s!"bad request: unknown op {op}", sess)
+    | .error e => (errReply (badRequest e), sess)
+    | .ok op => handleOp sess j op
 
 end Musubi.Exec.Json

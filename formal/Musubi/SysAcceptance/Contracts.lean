@@ -217,12 +217,11 @@ structure HubHandling (N : Nat) (run : Nat → Sys) (recs : Nat → Exec.SEState
   there, the raw graph only grows, and each step leaves the hub as it is or accepts, moving to
   the next sequence number and a different existing head that has the old head in its raw
   ancestry (`HubClimb`). Natively it holds when no new drop is taken, which `CutAt` ensures by
-  fixing the records and drops, and the hub's head at `k` survives the hub's records. The second
-  condition is not derived: a hub rollback may leave the head dropped by records the hub keeps,
-  and a push can then be accepted by contracted ancestry without a new drop, off raw ancestry.
-  It is what native checking must cover. The earlier `historyWindow` premise assumed the same
-  chain over the same interval, so the trust is no wider. The `RawGrow` clause rests on
-  `QuietAt.noLoss`. -/
+  fixing the records and drops, and the hub's head at `k` survives the hub's records. The native
+  hub keeps the second condition: it appends each head on one line with the record taken with
+  it, and refuses a push whose new head the records it remembers or the push's drops supersede
+  (after a prune, the push's records keep such a head out). An accept that drops the head brings
+  a new drop, so it falls before the cut. The `RawGrow` clause rests on `QuietAt.noLoss`. -/
   climbs : ∀ k, CutAt N recs adopts fails k → QuietAt N O k →
     (run k).hub.head < (run k).next ∧
     ∀ i, k ≤ i → RawGrow (run i) (run (i + 1)) ∧ HubClimb (run i) (run (i + 1))

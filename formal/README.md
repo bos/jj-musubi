@@ -177,12 +177,15 @@ Check these specially:
   from the other premises.
 * `HubHandling.answer` joins an eventual-handling assumption to a correspondence.
 * `HubHandling.climbs` holds natively when no new drop is taken, which `CutAt` ensures, and the
-  hub's head at the cut survives the hub's records. The second condition is not derived. The
-  shipping hub accepts a push that drops its head by contracted ancestry, which can move the
-  head off its raw ancestry ([below](#contracted-ancestry)), and a hub rollback may leave the
-  head dropped by records the hub keeps. An auditor checks, against the native hub, that this
-  cannot happen from the cut. The `historyWindow` premise it replaces assumed the same chain
-  over the same interval, so the trust is no wider.
+  hub's head at the cut survives the hub's records. The native hub keeps the second condition:
+  `HubStore::set_head` appends each accepted head on one line of its `heads` file together with
+  the record taken with it, and `Push::answer` refuses a push whose new head the records it
+  remembers or the push's own drops supersede (once it has pruned, the push's records keep such a
+  head out, as a node never pushes one a record it took drops), so no record the hub keeps drops
+  its head. A power cut leaves a prefix of the file, an older consistent state, or a torn line,
+  which the hub treats as corrupt and remakes. The shipping hub's accept by contracted ancestry
+  ([below](#contracted-ancestry)) brings a new drop of its head, so it falls before the cut. This
+  is an argument about the native code, not a Lean proof.
 
 ### Record effects (`Source.RecordEffects`)
 
@@ -262,7 +265,7 @@ Check these specially:
 | Field | Says | Tag | Why from the cut |
 | --- | --- | --- | --- |
 | `answer` | a push is handled at or after it is sent, and the hub then is `RawPublish.after` its packet and checks | **correspondence** and **progress/fairness** | a remade hub can drop a push before the cut |
-| `climbs` | from the record cut `k`, the hub's head exists; the raw graph only grows; and each step leaves the hub's sequence number and head as they are, or moves to the next sequence number and a different existing head with the old head among its raw ancestors (`HubClimb`); its `RawGrow` clause rests on `QuietAt.noLoss`: no remade hub, object loss or gc after the cut | **correspondence** | no new drop is taken, so an accept compares raw ancestry (`HubLaw.guards`), provided the hub's head at `k` survives the hub's records (not derived); otherwise an accept that drops the head compares contracted ancestry, which can jump the raw history |
+| `climbs` | from the record cut `k`, the hub's head exists; the raw graph only grows; and each step leaves the hub's sequence number and head as they are, or moves to the next sequence number and a different existing head with the old head among its raw ancestors (`HubClimb`); its `RawGrow` clause rests on `QuietAt.noLoss`: no remade hub, object loss or gc after the cut | **correspondence** | no new drop is taken, so an accept compares raw ancestry (`HubLaw.guards`), and the hub's head at `k` survives the hub's records, as the native hub keeps it (see above); an accept that drops the head brings a new drop and compares contracted ancestry, which can jump the raw history |
 
 ### The starting snapshot (`FineSnapshot`)
 
@@ -1148,11 +1151,11 @@ actual sampled daemon events and packet.
   idempotence or incomplete closure; upload coverage uses the actual base-image frontier once
   server-generated contraction bodies are present.
 - `Supersede.hub_moves_original`: once records stop changing, the hub moves strictly along
-  original ancestry, and from every reachable state each step the executable hub takes is a
-  step of `SRStep` (`Exec.sexec_sound`). `packet_sender_after_cut_aligned` (`PacketAcceptance.lean`): an accepted
-  packet's sender is eligible throughout the suffix, so other nodes' packets cannot move the
-  hub. The native counterpart works on the hub's raw graph, with no projection from canonical
-  versions to immutable originals.
+  original ancestry, and from every reachable state each step the executable hub takes is a step
+  of `SRStep` (`Exec.sexec_sound`). `packet_sender_after_cut_aligned` (`PacketAcceptance.lean`):
+  an accepted packet's sender is eligible throughout the suffix, so other nodes' packets cannot
+  move the hub. The native counterpart works on the hub's raw graph, with no projection from
+  canonical versions to immutable originals.
 - The joint system: `NodeSys` keeps each node's scoped embedding into one raw graph and retains
   immutable requests; `HubLedger`, `HubNodeSteps` and `HubAnswers` derive packet coverage, expand
   local events and use the actual accepted request; `SysFreshCuts` derives the cutoffs for
@@ -1249,7 +1252,8 @@ can mark a normal sent body.
 
 The shipping hub accepts a cached fix-up that drops its expected head, when the head's surviving
 images are below the fix-up (`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`, after
-an interrupted adoption and a hub rollback). `SStep.sup` accepts by that comparison, so this is
+an interrupted adoption and a hub rollback, with the hub holding no records: the push brings the
+drop). `SStep.sup` accepts by that comparison, so this is
 a step of the one relation, and `SInv` holds after it. The hub's history is then a chain only in
 the hub's own comparison (`SInv.histBelow`), and the liveness theorems, which need an original
 chain (`SChain`), say nothing of the states that follow. `FineAssembly.hive_converges_observed`

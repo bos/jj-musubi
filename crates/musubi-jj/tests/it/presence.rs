@@ -12,7 +12,6 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use hegel::Generator as _;
-use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use jj_lib::backend::CommitId;
@@ -142,9 +141,7 @@ fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize
         .collect()
 }
 
-// Each case asks the Lean oracle, a process of its own, which on a small machine running other
-// tests at once can slow generating cases past Hegel's health check.
-#[hegel::test(test_cases = cases(), suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "presence")]
 fn conformance(tc: TestCase) {
     // One oracle for every case: presence requests leave it as they found it.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
@@ -216,7 +213,7 @@ fn contracted(
 }
 
 // As `conformance`, with some operations dropped.
-#[hegel::test(test_cases = cases(), suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "presence")]
 fn contraction_keeps_presence(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
@@ -243,13 +240,4 @@ fn contraction_keeps_presence(tc: TestCase) {
             );
         }
     }
-}
-
-/// How many histories to try: `MUSUBI_CONFORMANCE_CASES`, as for the protocol's
-/// conformance test, or else enough to find each mistake the test is known to catch.
-fn cases() -> u64 {
-    std::env::var("MUSUBI_CONFORMANCE_CASES")
-        .ok()
-        .and_then(|cases| cases.parse().ok())
-        .unwrap_or(300)
 }

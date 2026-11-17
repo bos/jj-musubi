@@ -27,7 +27,9 @@ the checks [AGENTS.md](../../AGENTS.md#checks) requires.
   profile override to optimizing every test binary.
 - Hegel's `TooSlow` health check times the whole case, including setup and assertions. Oracle
   builds, fixture copies and model comparisons can trigger it even when drawing inputs is
-  cheap. Fix that work rather than suppressing the check or increasing a timeout.
+  cheap. Fix that work rather than suppressing the check or increasing a timeout. Only a test
+  whose every case must ask the Lean oracle or work on real repositories names `hegel.toml`'s
+  `slow-cases` profile, which suppresses the check.
 
 ## Keep tests off the disk
 
@@ -127,10 +129,11 @@ sync once pushed CI's daemon tests there past their timeout. A test that drives 
 - Start the longest test first. The conformance test, the longest by far, often started late
   on 4 cores and finished alone after everything else. Its nextest priority in
   `.config/nextest.toml` starts it first.
-- Let an environment variable set a property test's number of cases, and default to as few as
-  catch what the test is for. The conformance tests make 50 cases locally and 150 in CI
-  (`MUSUBI_CONFORMANCE_CASES`); `just mutants` sets 150, so that
-  mutation testing still catches what it caught. A search that takes minutes, like the
+- Default a property test's number of cases to as few as catch what the test is for. Give it a
+  profile in `hegel.toml` where a run should be able to raise it with `HEGEL_TEST_CASES`,
+  which a number in the test's attribute overrides. The protocol's conformance tests make 50
+  cases locally and 150 on CI; `just mutants` sets `HEGEL_TEST_CASES=150`, so that mutation
+  testing still catches what it caught. A search that takes minutes, like the
   generated end-to-end search, is opt-in (`just property`) and runs nightly in CI.
 
 ## Count build time

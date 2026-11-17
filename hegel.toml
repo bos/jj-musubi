@@ -1,0 +1,31 @@
+# Settings for the Hegel tests (docs/internals/testing.md, "Running the tests"). Hegel looks for
+# this file in a test's working directory, its crate's, and then in each directory above, so
+# this one serves every crate that has no hegel.toml of its own. It starts from its `ci` profile
+# on a CI server (derandomized, with no example database and too_slow suppressed) and from
+# `development` elsewhere. HEGEL_TEST_CASES sets the number of cases of every test that takes
+# that number from here rather than from its own attribute.
+
+# The number of cases of a test that names no profile: the protocol's conformance tests, which
+# would otherwise take most of `just test`'s time, and make more on CI.
+[profiles.development]
+test_cases = 50
+
+[profiles.ci]
+test_cases = 150
+
+# For tests whose every case asks the Lean oracle, a process of its own, or works on real
+# repositories: on a machine busy with other tests, that can take longer than Hegel's too_slow
+# health check allows.
+[profiles.slow-cases]
+suppress_health_check = ["too_slow"]
+
+# Each history takes the oracle about a millisecond; this many find each mistake the test is
+# known to catch.
+[profiles.presence]
+extends = "slow-cases"
+test_cases = 300
+
+# Each case takes a few tenths of a second of real jj, git and syncs.
+[profiles.refs]
+extends = "slow-cases"
+test_cases = 12

@@ -263,7 +263,6 @@ mod tests {
 
     use std::cell::Cell;
 
-    use hegel::HealthCheck;
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -317,9 +316,7 @@ mod tests {
     /// names"): each machine's prefix, and the name here of each machine's workspaces, this
     /// machine's own among them, from machines and names of this machine's own drawn from few,
     /// so that they clash. The model proves those names distinct (`localName_injective`).
-    // Each case asks the Lean oracle, a process of its own, which on a small machine running
-    // other tests at once can slow generating cases past Hegel's health check.
-    #[hegel::test(test_cases = 300, suppress_health_check = [HealthCheck::TooSlow])]
+    #[hegel::test(profile = "slow-cases", test_cases = 300)]
     fn names_conform(tc: TestCase) {
         const NAMES: [&str; 3] = ["mac", "mac-aaaa", "mac-aaaa1111"];
         const SUFFIXES: [&str; 4] = ["aaaa1111", "aaaa2222", "bbbb0000", "aaaa"];

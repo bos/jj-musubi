@@ -218,9 +218,10 @@ kani *args:
     wait "$run"
 
 # Mutation testing of the protocol core against its property and conformance tests. Each
-# mutant runs against the oracle built here, not one it builds for itself.
+# mutant runs against the oracle built here, not one it builds for itself, and the conformance
+# tests make as many cases as on CI.
 mutants: oracle
-    MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle MUSUBI_CONFORMANCE_CASES=150 \
+    MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle HEGEL_TEST_CASES=150 \
         cargo mutants --package musubi-core \
         --file crates/musubi-core/src/hub.rs --file crates/musubi-core/src/node.rs \
         --test-tool nextest --timeout 600

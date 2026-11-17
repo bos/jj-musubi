@@ -61,6 +61,18 @@ which makes the suite three times as fast; a bare `cargo nextest run` uses the d
 `MUSUBI_KEEP_TEST_DIRS` keeps the directories after a run, for inspecting a failure, and puts
 them on the disk.
 
+A Hegel test makes as many cases as its `#[hegel::test]` attribute says, or else as its
+profile in `hegel.toml` says. Hegel looks for that file from the test's working directory,
+which cargo and nextest make its crate's; to run a test binary from elsewhere, set
+`HEGEL_CONFIG` to the file's path. The protocol's conformance tests name no profile, and make
+50 cases locally and 150 on a CI server; the presence and refs conformance tests have profiles
+of their own. `HEGEL_TEST_CASES` sets the number of cases of those tests, which take it from
+`hegel.toml`, and leaves the others alone; `just mutants` sets it to 150. On a CI server Hegel
+starts from its `ci` profile: each test starts from the same seed on every run, keeps no
+example database, and runs without the `too_slow` health check. The `slow-cases` profile
+drops that check everywhere, for tests whose every case asks the Lean oracle or works on real
+repositories.
+
 `clone_preflight_keeps_the_resolved_hive` creates a hive whose name equals another hive's
 id, then keeps the id returned for the requested name through preflight. Reinterpreting that
 id as a name switches hives and fails the test. `the_daemon_picks_up_new_repositories` also
@@ -279,11 +291,12 @@ schedule of concurrent work, fetching, missing-object recovery, pruning and held
 adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine
 complete-effect error boundaries and four proper import-prefix boundaries; none needs a real
 repository fixture.
-The sweep takes about a second on macOS. Both generated oracle tests use
-`MUSUBI_CONFORMANCE_CASES`. The oracle checks prefixes it can represent; partial
-merged uploads or partial bundle receipt explicitly retire it for that case while the Rust
-checks continue. [Conformance and limits](conformance.md#storage-errors) lists the adapter
-assumptions, recovery projection and error effects this abstraction cannot represent.
+The sweep takes about a second on macOS. `storage_failures_preserve_operations` makes as many
+cases as `conformance` ([Running the tests](#running-the-tests)). The oracle checks prefixes
+it can represent; partial merged uploads or partial bundle receipt explicitly retire it for
+that case while the Rust checks continue. [Conformance and limits](conformance.md#storage-errors)
+lists the adapter assumptions, recovery projection and error effects this abstraction cannot
+represent.
 
 After every rule the test checks the model's safety invariants ([protocol.md,
 "Properties"](protocol.md#properties)): HubClosed, HubMonotone, NodeClosed, Locality,

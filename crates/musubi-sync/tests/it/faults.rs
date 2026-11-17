@@ -24,7 +24,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use jj_lib::backend::CommitId;
@@ -82,7 +81,7 @@ const RUNAWAY: usize = 2000;
 /// The hub answers every request without panicking, with a reply that fits the transport,
 /// its head only ever moves forward to an operation whose closure it has, and afterwards it
 /// still answers a fetch from the root, which reads everything up to its head.
-#[hegel::test(test_cases = 50, suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "slow-cases", test_cases = 50)]
 fn hub_survives_malformed_requests(tc: TestCase) {
     let session = session();
     let dir = musubi_testutil::tempdir();
@@ -140,7 +139,7 @@ fn hub_survives_malformed_requests(tc: TestCase) {
 /// Each case is one call of the session: a push and its uploads, or a fetch and its
 /// downloads, from the hub's state just before it. A malformed push can still be a valid
 /// one, though, and move the head; then the call need only succeed.
-#[hegel::test(test_cases = 50, suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "slow-cases", test_cases = 50)]
 fn calls_finish_once_the_link_is_back(tc: TestCase) {
     let session = session();
     let call = pick(&tc, &session.calls);
@@ -193,7 +192,7 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
 /// replies left in the node's blob store stands in its way. Each case is one call of the
 /// session, from the hub's state just before it, as in
 /// [`calls_finish_once_the_link_is_back`].
-#[hegel::test(test_cases = 50, suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "slow-cases", test_cases = 50)]
 fn calls_survive_malformed_replies(tc: TestCase) {
     let session = session();
     let call = pick(&tc, &session.calls);
@@ -244,7 +243,7 @@ fn calls_survive_malformed_replies(tc: TestCase) {
 /// is back, as the daemon retries, while the hub hears malformed requests and another
 /// machine syncs. Slow, so fewer cases: [`calls_finish_once_the_link_is_back`] explores the
 /// faults.
-#[hegel::test(test_cases = 6, suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "slow-cases", test_cases = 6)]
 fn node_recovers_when_its_link_fails_partway(tc: TestCase) {
     run_local(async {
         let env = TestEnv::new();

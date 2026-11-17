@@ -329,7 +329,6 @@ mod tests {
 
     use std::cell::Cell;
 
-    use hegel::HealthCheck;
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -538,9 +537,7 @@ mod tests {
     /// prefix it was last told finishes within the resends that `prefix_finishes`'s measure
     /// comes to: to the end of a corrupt prefix, and from the start again; and one more for a
     /// sweep it wasn't told of.
-    // Each case asks the Lean oracle, a process of its own, which on a small machine running
-    // other tests at once can slow generating cases past Hegel's health check.
-    #[hegel::test(test_cases = 200, suppress_health_check = [HealthCheck::TooSlow])]
+    #[hegel::test(profile = "slow-cases", test_cases = 200)]
     fn receive_follows_the_prefix_model(tc: TestCase) {
         let dir = musubi_testutil::tempdir();
         let store = BlobStore::open(dir.path()).unwrap();

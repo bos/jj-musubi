@@ -680,8 +680,8 @@ as CI does with the one it has just built. `formal/test/run_smoke.sh` replays a 
 two-node run through it.
 
 The test makes 150 cases on CI and 50 elsewhere, where it would otherwise take most of
-`just test`'s time. `MUSUBI_CONFORMANCE_CASES` sets the
-number; `just mutants` sets 150.
+`just test`'s time (`hegel.toml`). `HEGEL_TEST_CASES` sets the number; `just mutants` sets
+150.
 
 ## Evidence that the check has teeth
 
@@ -1222,7 +1222,7 @@ forget saw. A presence request leaves the oracle's session as it was.
 cargo nextest run -p musubi-jj -E 'test(/^presence::/)'
 ```
 
-`MUSUBI_CONFORMANCE_CASES` sets the number of histories, 300 by default: each takes the
+`HEGEL_TEST_CASES` sets the number of histories, 300 by default: each takes the
 oracle about a millisecond. Dropping the check that a parent whose history has a copy's work
 keeps it, which lets a forget's merge bring the copy back, fails within a few histories.
 
@@ -1644,7 +1644,7 @@ cargo nextest run -p musubi-sync -E 'test(/^refs::/)'
 ```
 
 The state machine makes 12 cases of up to 10 actions, about 4 seconds on 32 cores;
-`MUSUBI_CONFORMANCE_CASES` sets the number. Each case runs real `jj`, `git` and syncs, so
+`HEGEL_TEST_CASES` sets the number. Each case runs real `jj`, `git` and syncs, so
 shrinking a failure takes minutes; `.config/nextest.toml` gives the test time for it, and
 starts it early, as the longest test after the protocol's conformance test.
 

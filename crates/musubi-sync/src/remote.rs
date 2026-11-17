@@ -940,7 +940,6 @@ mod tests {
     use std::task::Context;
     use std::task::Poll;
 
-    use hegel::HealthCheck;
     use hegel::TestCase;
     use hegel::generators as gs;
     use musubi_jj::objects::Backend;
@@ -1192,7 +1191,7 @@ mod tests {
     /// sender has heard so. Each window has as many chunks as came back in time from the last
     /// cut short, or one, and one more after each [`GROW_AFTER`] in a row that all came back,
     /// up to [`WINDOW`], short of the blob's end.
-    #[hegel::test(test_cases = 100, suppress_health_check = [HealthCheck::TooSlow])]
+    #[hegel::test(profile = "slow-cases", test_cases = 100)]
     fn transfers_follow_the_attempt_model(tc: TestCase) {
         let upload = tc.draw(gs::booleans());
         let len = tc.draw(gs::integers::<usize>().min_value(1).max_value(4000));

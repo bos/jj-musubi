@@ -649,12 +649,8 @@ mod tests {
     /// the damage is sure to; no view takes more than `KEYFRAME - 1` deltas to rebuild; and
     /// the next append cuts the damage off, so that it, and what read before it, reads from
     /// the log and from the log opened afresh.
-    /// Few enough on Windows, where every write to the disk is slow, to finish in time.
-    fn cases() -> u64 {
-        if cfg!(windows) { 50 } else { 200 }
-    }
-
-    #[hegel::test(test_cases = cases())]
+    // Few enough cases on Windows, where every write to the disk is slow, to finish in time.
+    #[hegel::test(test_cases = if cfg!(windows) { 50 } else { 200 })]
     fn damage_loses_only_what_follows_it(tc: TestCase) {
         let dir = musubi_testutil::tempdir();
         let log = Log::open(dir.path()).unwrap();

@@ -9,7 +9,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_core::message::HeadKind;
@@ -43,7 +42,7 @@ const BETA: usize = 1;
 /// alpha has a commit of its own to push, and beta's to fetch, which come in a fetch of
 /// several operations with their objects: the wrong replies are made of those, of the
 /// replies before, of the operations and bundles alpha sent, and of its own head.
-#[hegel::test(test_cases = 30, suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "slow-cases", test_cases = 30)]
 fn nodes_recover_from_wrong_replies(tc: TestCase) {
     let (_env, repos, mut hive) = fixture();
     let mut lies = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));

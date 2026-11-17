@@ -92,7 +92,7 @@ def tests(directory, seed=42, jobs=4, profile="default", cases=50, toolchain="st
         ASSURANCE_RUN=str(directory),
         ASSURANCE_APP_BINARY=str(Path(target) / "debug/musubi"),
         ASSURANCE_REAL_ORACLE=str(ROOT / "formal/.lake/build/bin/oracle"),
-        MUSUBI_CONFORMANCE_CASES=str(cases),
+        HEGEL_TEST_CASES=str(cases),
         RUSTC_WORKSPACE_WRAPPER=str(HERE / "instrument.py"),
         LLVM_PROFILE_FILE=str(directory / "list-%m-%p.profraw"),
         HEGEL_SEED=str(seed),
@@ -299,7 +299,7 @@ def mutation(directory, jobs=4, toolchain="stable", shard=None):
     env = dict(
         os.environ,
         MUSUBI_ORACLE=str(ROOT / "formal/.lake/build/bin/oracle"),
-        MUSUBI_CONFORMANCE_CASES="150",
+        HEGEL_TEST_CASES="150",
         HEGEL_SEED="42",
         HEGEL_DATABASE="disabled",
     )

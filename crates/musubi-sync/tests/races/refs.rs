@@ -34,7 +34,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use jj_lib::backend::CommitId;
@@ -1439,7 +1438,7 @@ impl Refs {
     }
 }
 
-#[hegel::test(test_cases = refs_cases(), suppress_health_check = [HealthCheck::TooSlow])]
+#[hegel::test(profile = "refs")]
 fn bookmarks_conform_to_refs_model(tc: TestCase) {
     hegel::stateful::machine(Refs::new()).steps(10).run(tc);
 }
@@ -2065,15 +2064,6 @@ impl OriginalGraph {
             .collect();
         assert_eq!(after.difference(&self.stored).collect::<Vec<_>>(), [merged]);
     }
-}
-
-/// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,
-/// or 12, each a few tenths of a second of real `jj`, `git` and syncs.
-fn refs_cases() -> u64 {
-    std::env::var("MUSUBI_CONFORMANCE_CASES")
-        .ok()
-        .and_then(|cases| cases.parse().ok())
-        .unwrap_or(12)
 }
 
 /// jj exports a bookmark selected by the native merge even when physical refs match the

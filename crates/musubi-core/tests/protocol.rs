@@ -515,7 +515,8 @@ fn nodes_recover_from_false_replies(tc: TestCase) {
     run(tc, None, Environment::FalseReplies);
 }
 
-#[hegel::test(test_cases = conformance_cases())]
+// This and the other two conformance tests below make hegel.toml's default number of cases.
+#[hegel::test]
 fn conformance(tc: TestCase) {
     // One oracle for each case after one that passed, reset by `World::new`: starting one
     // took longer than most cases. One whose case failed goes, in whatever state it was.
@@ -567,7 +568,7 @@ fn going_back_past_an_acceptance_through_survivors_remakes_the_hub() {
 /// hub then goes back to that head. Each case here starts there, generated, and goes on as
 /// `conformance` does, so that advancing to what survives, the hub accepting a push through
 /// it, and switching to prepared records are checked against the Lean model with the rest.
-#[hegel::test(test_cases = conformance_cases())]
+#[hegel::test]
 fn survivor_advance_conformance(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
@@ -619,7 +620,7 @@ fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
 /// applied. The oracle checks representable prefixes; a partial merged upload or received
 /// bundle explicitly retires it for that case. Rust safety, retention and convergence
 /// checks continue through every fault and recovery.
-#[hegel::test(test_cases = conformance_cases())]
+#[hegel::test]
 fn storage_failures_preserve_operations(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
@@ -628,23 +629,6 @@ fn storage_failures_preserve_operations(tc: TestCase) {
 
 #[path = "protocol/storage_boundaries.rs"]
 mod storage_boundaries;
-
-/// How many cases the conformance test makes: 150 on CI, where it runs as a job of its own,
-/// and 50 elsewhere, where it would otherwise take most of `just test`'s time.
-/// `MUSUBI_CONFORMANCE_CASES` sets it, as `just mutants` does.
-fn conformance_cases() -> u64 {
-    if let Some(cases) = std::env::var("MUSUBI_CONFORMANCE_CASES")
-        .ok()
-        .and_then(|cases| cases.parse().ok())
-    {
-        return cases;
-    }
-    if std::env::var_os("CI").is_some() {
-        150
-    } else {
-        50
-    }
-}
 
 /// A hub may drop uploads it stored but never accepted (the model's `hubForget`), such as
 /// those of a push it rejected. The node must upload them again with its next push.

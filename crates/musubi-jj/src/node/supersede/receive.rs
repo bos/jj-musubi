@@ -1,10 +1,14 @@
 //! Preparing and adopting the hub's records, including interrupted adoption.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
+use jj_lib::ref_name::WorkspaceNameBuf;
 use pollster::FutureExt as _;
 
 use super::Earlier;
@@ -23,6 +27,36 @@ use crate::records::HubOp;
 use crate::records::Record;
 use crate::records::RecordDigest;
 use crate::records::RecordPrefix;
+
+/// The history at the op heads that taking records renames.
+struct Captured {
+    /// The op heads.
+    heads: Vec<LocalOp>,
+    /// This copy's private bindings at them, qualified.
+    own: BTreeMap<WorkspaceNameBuf, CommitId>,
+    /// The local operations below them that canonical ones stand for, with those.
+    mapped: Vec<(LocalOp, CanonicalOp)>,
+    /// The rest of the local operations below them, read, parents first.
+    unmapped: Vec<(LocalOp, StoreOperation)>,
+}
+
+/// What a renaming drops of this node's own.
+struct Drops {
+    /// What this node dropped, as the history names it so far.
+    mine: Vec<CanonicalOp>,
+    /// The node names of what the renaming drops here.
+    to_drop: Vec<CanonicalOp>,
+}
+
+/// What going forward through the records this node hasn't taken leaves.
+struct Forward {
+    /// What this node dropped, as they name it, and the node names of what they drop.
+    drops: Drops,
+    /// The base, as they name it.
+    base: Option<CanonicalOp>,
+    /// How each renames the hub's history below the base, new name to old.
+    renamings: Vec<HashMap<CanonicalOp, CanonicalOp>>,
+}
 
 impl NodeRepo {
     /// Gets ready to take `records`, the hub's, after the first ones `prefix` stands for:
@@ -147,14 +181,75 @@ impl NodeRepo {
         prefix: &RecordPrefix,
         records: &[Record],
     ) -> Result<Taking, NodeError> {
+        self.check_prefix_takeable(prefix)?;
+        let applied = self.records.applied.clone();
+        let common = self.common_with_applied(prefix, &applied, records);
+        // Before anything below, or anything named as they name the history, writes a local
+        // operation.
+        self.keep_custody(prefix, records, common)?;
+        self.check_abandon()?;
+        let Captured {
+            heads,
+            own,
+            mapped,
+            unmapped,
+        } = self.capture_history()?;
+        let lost_custody = self.lost_custody(prefix, records);
+        let local_versions = self.local_versions(&records[common..], &lost_custody, mapped)?;
+        let drops = self.own_drops(&applied, common, &lost_custody, &local_versions)?;
+        let base = self.base_before_records(&applied, common);
+        let Forward {
+            drops: Drops { mine, to_drop },
+            base,
+            renamings,
+        } = self.rename_through_records(&records[common..], &local_versions, drops, base)?;
+        let lost_custody: HashSet<RecordDigest> = lost_custody
+            .into_iter()
+            .map(|custody| custody.digest.clone())
+            .collect();
+        let mut contraction =
+            Contraction::new(&self.canonical, to_drop)?.sharing(self.presences.clone());
+        let locals =
+            self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped, None)?;
+        let mut heads = heads;
+        heads.sort();
+        Ok(Taking {
+            prefix: prefix.clone(),
+            records: records.to_vec(),
+            common,
+            hub_renamings: renamings,
+            dropped: contraction.dropped().clone(),
+            switched: false,
+            own,
+            renaming: contraction.into_images(),
+            pending: Record::new(mine.into_iter().map(HubOp)),
+            locals,
+            heads,
+            base: base.map(HubOp),
+            lost_custody,
+        })
+    }
+
+    /// Fails unless this node may take records after those `prefix` stands for.
+    fn check_prefix_takeable(&self, prefix: &RecordPrefix) -> Result<(), NodeError> {
         // Only a node with nothing of the hive's takes records it knows only by their count
         // and digest: it has nothing they drop. Any node may take records all whole in place
         // of those it knew so: whichever of them drops what it has, it drops by name.
         if *prefix != self.records.prefix && prefix.count > 0 && !self.is_fresh() {
             return Err(NodeError::PrunedRecords);
         }
-        let applied = self.records.applied.clone();
-        let common = if *prefix == self.records.prefix {
+        Ok(())
+    }
+
+    /// How many of `records`, after those `prefix` stands for, are the first of `applied`,
+    /// the records this node took.
+    fn common_with_applied(
+        &self,
+        prefix: &RecordPrefix,
+        applied: &[Record],
+        records: &[Record],
+    ) -> usize {
+        if *prefix == self.records.prefix {
             applied
                 .iter()
                 .zip(records)
@@ -162,32 +257,51 @@ impl NodeRepo {
                 .count()
         } else {
             0
-        };
-        // Before anything below, or anything named as they name the history, writes a local
-        // operation.
-        self.keep_custody(prefix, records, common)?;
-        self.check_abandon()?;
+        }
+    }
+
+    /// The history at the op heads, as the renaming starts from it.
+    fn capture_history(&mut self) -> Result<Captured, NodeError> {
         let heads = self.local_heads()?;
         // Qualify the exact captured history before contracting away its namespace.
         let own = self.own_at_heads(&heads)?;
-        let store = &self.canonical;
         let (mapped, unmapped) = self.local_walk(&heads)?;
-        // Records in custody that these lack: the hub lost them, and this node publishes what
-        // they drop, as of records it took that the hub lost. It never took them, so its
-        // history may still have what they drop, which it drops now too.
+        Ok(Captured {
+            heads,
+            own,
+            mapped,
+            unmapped,
+        })
+    }
+
+    /// Records in custody that `records`, after those `prefix` stands for, lack: the hub
+    /// lost them, and this node publishes what they drop, as of records it took that the hub
+    /// lost. It never took them, so its history may still have what they drop, which it
+    /// drops now too.
+    fn lost_custody(&self, prefix: &RecordPrefix, records: &[Record]) -> Vec<&Earlier> {
         let incoming: HashSet<RecordDigest> =
             digests(&prefix.digest, records).into_iter().collect();
-        let lost_custody: Vec<&Earlier> = self
-            .records
+        self.records
             .custody
             .iter()
             .filter(|custody| !incoming.contains(&custody.digest))
-            .collect();
+            .collect()
+    }
+
+    /// The versions here, below the canonical operations `mapped` has, of each original that
+    /// `new`, the records this node hasn't taken, or `lost_custody` drop, by original.
+    fn local_versions(
+        &self,
+        new: &[Record],
+        lost_custody: &[&Earlier],
+        mapped: Vec<(LocalOp, CanonicalOp)>,
+    ) -> Result<HashMap<OperationId, Vec<CanonicalOp>>, NodeError> {
+        let store = &self.canonical;
         // Another raw version of a dropped original may be here without the record that
         // renamed it. Match physical history, not old bodies in the canonical cache.
         let mut local_versions: HashMap<OperationId, Vec<CanonicalOp>> = HashMap::new();
-        if common < records.len() || !lost_custody.is_empty() {
-            let wanted: HashSet<OperationId> = records[common..]
+        if !new.is_empty() || !lost_custody.is_empty() {
+            let wanted: HashSet<OperationId> = new
                 .iter()
                 .chain(lost_custody.iter().map(|custody| &custody.record))
                 .flat_map(Record::ops)
@@ -202,6 +316,20 @@ impl NodeRepo {
                 }
             }
         }
+        Ok(local_versions)
+    }
+
+    /// What this node dropped beyond the first `common` of `applied`, the records it took,
+    /// that the hub shares, as the history named them after those; and, of what it drops for
+    /// `lost_custody`, the versions `local_versions` has.
+    fn own_drops(
+        &self,
+        applied: &[Record],
+        common: usize,
+        lost_custody: &[&Earlier],
+        local_versions: &HashMap<OperationId, Vec<CanonicalOp>>,
+    ) -> Result<Drops, NodeError> {
+        let store = &self.canonical;
         // A hub name from after the `from`th record this node took, as the history named the
         // operation after the records the hub and this node share: back through how each
         // record since renamed the hub's history. An operation made since has no such name,
@@ -237,7 +365,7 @@ impl NodeRepo {
                 shared_originals.insert(store.original_id(&op.0)?);
             }
         }
-        for custody in &lost_custody {
+        for custody in lost_custody {
             for op in custody.record.ops() {
                 if store.has_operation(&op.0)
                     && shared_originals.contains(&store.original_id(&op.0)?)
@@ -252,22 +380,39 @@ impl NodeRepo {
                 }
             }
         }
-        let lost_custody: HashSet<RecordDigest> = lost_custody
-            .into_iter()
-            .map(|custody| custody.digest.clone())
-            .collect();
+        Ok(Drops { mine, to_drop })
+    }
+
+    /// The base, before the records this node hasn't taken rename it, of the first `common`
+    /// of `applied`, the records it took, that the hub shares.
+    fn base_before_records(&self, applied: &[Record], common: usize) -> Option<CanonicalOp> {
         // Where the hub lost records this machine took, it may have lost the base too: the
         // root is accepted wherever the hub went back to, at the cost of fetching everything.
-        let mut base = if common < applied.len() {
-            Some(store.root_operation_id().clone())
+        if common < applied.len() {
+            Some(self.canonical.root_operation_id().clone())
         } else {
             self.stored_base().map(|base| base.0)
-        };
-        // Then forward through the hub's records, one at a time, keeping how each renames
-        // the hub's history below the base; and the node names of what they drop, but what
-        // this node dropped already, whose node names are what is left below it.
+        }
+    }
+
+    /// Goes forward through `new`, the hub's records this node hasn't taken, one at a time,
+    /// keeping how each renames the hub's history below the base; and the node names of what
+    /// they drop, but what this node dropped already, whose node names are what is left
+    /// below it.
+    fn rename_through_records(
+        &self,
+        new: &[Record],
+        local_versions: &HashMap<OperationId, Vec<CanonicalOp>>,
+        drops: Drops,
+        mut base: Option<CanonicalOp>,
+    ) -> Result<Forward, NodeError> {
+        let store = &self.canonical;
+        let Drops {
+            mut mine,
+            mut to_drop,
+        } = drops;
         let mut renamings: Vec<HashMap<CanonicalOp, CanonicalOp>> = vec![];
-        for record in &records[common..] {
+        for record in new {
             let names: Vec<CanonicalOp> = record.ops().iter().map(|op| op.0.clone()).collect();
             let dropped_here: HashSet<CanonicalOp> = mine.iter().cloned().collect();
             for op in &names {
@@ -346,25 +491,10 @@ impl NodeRepo {
                     .collect(),
             );
         }
-        let mut contraction = Contraction::new(store, to_drop)?.sharing(self.presences.clone());
-        let locals =
-            self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped, None)?;
-        let mut heads = heads;
-        heads.sort();
-        Ok(Taking {
-            prefix: prefix.clone(),
-            records: records.to_vec(),
-            common,
-            hub_renamings: renamings,
-            dropped: contraction.dropped().clone(),
-            switched: false,
-            own,
-            renaming: contraction.into_images(),
-            pending: Record::new(mine.into_iter().map(HubOp)),
-            locals,
-            heads,
-            base: base.map(HubOp),
-            lost_custody,
+        Ok(Forward {
+            drops: Drops { mine, to_drop },
+            base,
+            renamings,
         })
     }
 

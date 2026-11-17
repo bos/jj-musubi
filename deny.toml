@@ -3,6 +3,13 @@ all-features = false
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # humantime is marked unmaintained, with no maintained release to move to, because chrono
+    # is. musubi parses `musubi.forget-after` durations with it and tarpc depends on it, so
+    # neither can drop it yet; a maintenance notice, not a vulnerability. Revisit when tarpc
+    # does.
+    { id = "RUSTSEC-2026-0542", reason = "unmaintained, no upgrade; used by musubi and tarpc" },
+]
 
 [licenses]
 confidence-threshold = 0.9

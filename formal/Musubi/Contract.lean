@@ -102,6 +102,21 @@ theorem ddAux_seen {s l : List Nat} (h : ∀ a ∈ l, a ∈ s) : ddAux s l = [] 
     simp only [ddAux, h a (List.mem_cons_self), ite_true]
     exact ih (fun b hb => h b (List.mem_cons_of_mem a hb))
 
+/-- Where no element repeats and none is already seen, nothing is removed. -/
+theorem ddAux_eq_of_nodup {s l : List Nat} (hl : l.Nodup)
+    (hs : ∀ a ∈ l, a ∉ s) : ddAux s l = l := by
+  induction l generalizing s with
+  | nil => rfl
+  | cons a l ih =>
+    have ha : a ∉ s := hs a List.mem_cons_self
+    simp only [ddAux, ha, ite_false, List.cons.injEq, true_and]
+    obtain ⟨hal, hl'⟩ := List.nodup_cons.1 hl
+    apply ih hl'
+    intro b hb hbs
+    rcases List.mem_cons.1 hbs with rfl | hbs
+    · exact hal hb
+    · exact hs b (List.mem_cons_of_mem a hb) hbs
+
 theorem ddAux_ddAux (s t l : List Nat) : ddAux s (ddAux t l) = ddAux (s ++ t) l := by
   induction l generalizing s t with
   | nil => rfl

@@ -148,19 +148,6 @@ theorem sid_comm (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
 /-- Nothing gone. -/
 def none' : Nat → Bool := fun _ => false
 
-theorem ddAux_nodup {s l : List Nat} (hl : l.Nodup) (hs : ∀ a ∈ l, a ∉ s) : ddAux s l = l := by
-  induction l generalizing s with
-  | nil => rfl
-  | cons a l ih =>
-    have ha : a ∉ s := hs a List.mem_cons_self
-    simp only [ddAux, ha, ite_false, List.cons.injEq, true_and]
-    obtain ⟨hal, hl'⟩ := List.nodup_cons.1 hl
-    apply ih hl'
-    intro b hb hbs
-    rcases List.mem_cons.1 hbs with rfl | hbs
-    · exact hal hb
-    · exact hs b (List.mem_cons_of_mem a hb) hbs
-
 /-- With nothing dropped, the parents are as they were, where no operation lists a parent
 twice. -/
 theorem cpar_none (hlt : ParLt par) (hnd : ∀ x, (par x).Nodup) (x : Nat) :
@@ -169,7 +156,7 @@ theorem cpar_none (hlt : ParLt par) (hnd : ∀ x, (par x).Nodup) (x : Nat) :
   have hfm : (par x).flatMap (exp par none') = par x := by rw [hexp]; simp
   unfold cpar dd
   rw [hfm]
-  exact ddAux_nodup (hnd x) (fun _ _ h => by simp at h)
+  exact ddAux_eq_of_nodup (hnd x) (fun _ _ h => by simp at h)
 
 /-- Where presence is what working it out on the history gives, a history nothing was dropped
 from has no stamps. -/

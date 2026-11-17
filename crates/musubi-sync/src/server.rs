@@ -374,9 +374,7 @@ fn spawn_worker(
                 .unwrap_or_else(PoisonError::into_inner)
                 .joins(&id)
                 .unwrap_or_default();
-            let mut service = None;
-            // What the hub knew of the hive's machines when it last let go of the service.
-            let mut machines = None;
+            let mut slot = Slot::Closed(None);
             while let Ok(message) = receiver.recv() {
                 #[cfg(test)]
                 if let Some(hold) = &hold {
@@ -409,20 +407,13 @@ fn spawn_worker(
                     hooks: hooks.as_deref(),
                 };
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    serve_one(
-                        &hive,
-                        &mut service,
-                        &mut machines,
-                        &message,
-                        limit,
-                        &mut counted,
-                    )
+                    serve_one(&hive, &mut slot, &message, limit, &mut counted)
                 }));
                 let reply = served.unwrap_or_else(|panic| {
                     // jj-lib and jj-core panic on some malformed input, as a peer could send
                     // it. The hive's service may be left half-changed: the next request opens
                     // it afresh.
-                    let_go(&mut service, &mut machines);
+                    slot.let_go();
                     Err(anyhow::anyhow!(
                         "the hub failed: {}",
                         panic_message(panic.as_ref())
@@ -467,8 +458,7 @@ fn spawn_worker(
                 // until the reply has gone.
                 if let Ok(Some(since)) = done {
                     let summarized = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        service
-                            .as_ref()
+                        slot.service()
                             .map(|service| summarize(service.hub().store(), &since))
                     }));
                     match summarized {
@@ -480,7 +470,7 @@ fn spawn_worker(
                         }
                         Ok(None) => {}
                         Err(panic) => {
-                            let_go(&mut service, &mut machines);
+                            slot.let_go();
                             tracing::warn!(
                                 "could not summarize the new head: {}",
                                 panic_message(panic.as_ref())
@@ -523,69 +513,109 @@ struct Hive<'a> {
     hooks: Option<&'a tests::WorkerHooks>,
 }
 
-/// Drops a hive's service, which a panic may have left half-changed, keeping what it knew of the
-/// hive's machines for the service that opens the store next: forgetting that, the hub would
-/// wait for machines that may be joining as after a restart, and a peer whose requests panic
-/// it could keep it from pruning for good.
-fn let_go(service: &mut Option<HubService>, machines: &mut Option<Machines>) {
-    if let Some(service) = service.take() {
-        *machines = Some(service.into_machines());
+/// A hive's service, as its thread holds it between requests.
+enum Slot {
+    /// Not open, with what the hub knew of the hive's machines when it last let go of the
+    /// service, if it did.
+    Closed(Option<Machines>),
+    Open(Box<HubService>),
+}
+
+impl Slot {
+    fn service(&self) -> Option<&HubService> {
+        match self {
+            Self::Closed(_) => None,
+            Self::Open(service) => Some(service),
+        }
+    }
+
+    /// The hive's service, opening its store first if need be.
+    fn open(&mut self, hive: &Hive<'_>) -> anyhow::Result<&mut HubService> {
+        let machines = match self {
+            Self::Open(service) => return Ok(service),
+            // Taken only once the service is open: failing, the next request opens it with them.
+            Self::Closed(machines) => {
+                let service = open_service(hive)?;
+                let machines = machines.take();
+                *self = Self::Open(Box::new(service));
+                machines
+            }
+        };
+        let Self::Open(service) = self else {
+            unreachable!("opened above")
+        };
+        // In the slot already, so that a panic from here on lets go of what it recalled.
+        if let Some(machines) = machines {
+            service.recall(machines);
+        }
+        #[cfg(test)]
+        if let Some(hooks) = hive.hooks {
+            hooks.opened(service);
+        }
+        Ok(service)
+    }
+
+    /// Drops the service, which a panic may have left half-changed, keeping what it knew of the
+    /// hive's machines for the service that opens the store next: forgetting that, the hub would
+    /// wait for machines that may be joining as after a restart, and a peer whose requests panic
+    /// it could keep it from pruning for good.
+    fn let_go(&mut self) {
+        if let Self::Open(_) = self
+            && let Self::Open(service) = std::mem::replace(self, Self::Closed(None))
+        {
+            *self = Self::Closed(Some(service.into_machines()));
+        }
     }
 }
 
-/// Answers one request for a hive, opening its store first if need be, with what the hub knew of
-/// its `machines` when it let go of the service before, and updates the hive's index when a new
-/// head is accepted. Counts the request in the hub's activity once it is handled, and says so in
-/// `counted`.
+/// Opens a hive's store, outside the lock, since opening reads every accepted operation, and
+/// makes it again under the lock, if damaged.
+fn open_service(hive: &Hive<'_>) -> anyhow::Result<HubService> {
+    let Hive {
+        id,
+        dir,
+        hubs,
+        activity,
+        ..
+    } = *hive;
+    let store = match open_whole(dir)? {
+        Opened::Whole(store) => *store,
+        Opened::Damaged(why) => {
+            lock_activity(activity).troubled(
+                id,
+                &format!("its store was damaged, so the hub made it again: {why}"),
+                Instant::now(),
+            );
+            hubs.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remake(id, &why)?;
+            HubStore::open(dir)?
+        }
+    };
+    tracing::info!("opened");
+    HubService::new(HubAdapter::new(store, dir)?, dir)
+}
+
+/// Answers one request for a hive, opening its store first if need be, and updates the hive's
+/// index when a new head is accepted. Counts the request in the hub's activity once it is
+/// handled, and says so in `counted`, which outlives a panic.
 fn serve_one(
     hive: &Hive<'_>,
-    service: &mut Option<HubService>,
-    machines: &mut Option<Machines>,
+    slot: &mut Slot,
     message: &Message,
     max_payload: usize,
     counted: &mut bool,
 ) -> anyhow::Result<Served> {
     let Hive {
         id,
-        dir,
         joins,
         hubs,
         activity,
         #[cfg(test)]
         hooks,
+        ..
     } = *hive;
-    let service = match service {
-        Some(service) => service,
-        None => {
-            // Opened outside the lock, since opening reads every accepted operation, and made
-            // again under it, if damaged.
-            let store = match open_whole(dir)? {
-                Opened::Whole(store) => *store,
-                Opened::Damaged(why) => {
-                    lock_activity(activity).troubled(
-                        id,
-                        &format!("its store was damaged, so the hub made it again: {why}"),
-                        Instant::now(),
-                    );
-                    hubs.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remake(id, &why)?;
-                    HubStore::open(dir)?
-                }
-            };
-            tracing::info!("opened");
-            let opened = service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?);
-            // Only once the service is open: failing, the next request opens it with them.
-            if let Some(machines) = machines.take() {
-                opened.recall(machines);
-            }
-            #[cfg(test)]
-            if let Some(hooks) = hooks {
-                hooks.opened(opened);
-            }
-            opened
-        }
-    };
+    let service = slot.open(hive)?;
     // The machines that asked the hub to join the hive since its last request, which it then
     // waits for before pruning, until their first push lands.
     for machine in &joins.take() {

@@ -169,8 +169,7 @@ theorem busy_fine {c : Ctx} {σ σ' : NS} (hap : σ.ap = c.R)
       σ1.ap = c.R ∧ σ1.annc = none := by
     intro σ1 new W
     obtain ⟨y, -, (⟨-, F⟩ | ⟨-, he, -⟩)⟩ := W
-    · obtain ⟨-, fa, fap, -, -, -, -, -, -⟩ := F.ext.fields
-      exact ⟨fap.trans hap, fa.trans hn⟩
+    · exact ⟨F.ext.ap.trans hap, F.ext.annc.trans hn⟩
     · subst he; exact ⟨hap, hn⟩
   cases h with
   | adopt A ha hne _ _ => exact (nota A ha hne).elim
@@ -191,8 +190,7 @@ theorem busy_fine {c : Ctx} {σ σ' : NS} (hap : σ.ap = c.R)
     obtain ⟨h1, h2⟩ := normA_some ha
     exact (nota A h1 h2).elim
   | advance _ _ _ _ _ hv =>
-    obtain ⟨-, fa, fap, -, -, -, -, -, -⟩ := hv.ext.fields
-    exact ⟨fap.trans hap, Or.inl (fa.trans hn)⟩
+    exact ⟨hv.ext.ap.trans hap, Or.inl (hv.ext.annc.trans hn)⟩
   | differPoll _ _ _ _ _ _ hr => exact fetched hr hap
   | pushStale σ1 _ _ _ _ _ _ _ _ _ hw' _ hr =>
     have h1 := written hw'
@@ -205,13 +203,11 @@ theorem idle_fields {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') :
     σ'.ap = σ.ap ∧ σ'.known = σ.known ∧ σ'.annc = normA σ.annc σ.ap ∧ σ'.act = false := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl, rfl⟩
-  | differIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl, rfl⟩
   | goal _ _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl, rfl⟩
 
 theorem idle_go {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') : Go c σ := by
   cases h with
   | fetchIdle hg _ _ _ _ _ _ _ => exact hg
-  | differIdle hg _ _ _ _ _ _ _ => exact hg
   | goal hg _ _ _ _ _ _ _ _ => exact hg
 
 /-- With the hub's records announced, not applied, and dropping no op head, a step must adopt
@@ -237,11 +233,10 @@ theorem LInv.act {σ : NS} (I : LInv σ) (b : Bool) : LInv { σ with act := b } 
   ⟨I.parLt, I.knownLt, I.headsNe, I.headsLt, I.imgNe, I.imgLt⟩
 
 theorem LInv.ext {σ σ' : NS} (I : LInv σ) (E : Ext σ σ') : LInv σ' := by
-  obtain ⟨fk, -, -, -, fi, -, -, -, -⟩ := E.fields
   refine ⟨E.parLt, ?_, E.headsNe, E.headsLt, ?_, ?_⟩
-  · rw [fk]; exact Nat.lt_of_lt_of_le I.knownLt E.grows
-  · rw [fi]; exact I.imgNe
-  · rw [fi]; exact fun i hi => Nat.lt_of_lt_of_le (I.imgLt i hi) E.grows
+  · rw [E.known]; exact Nat.lt_of_lt_of_le I.knownLt E.grows
+  · rw [E.img]; exact I.imgNe
+  · rw [E.img]; exact fun i hi => Nat.lt_of_lt_of_le (I.imgLt i hi) E.grows
 
 section Run
 
@@ -278,10 +273,9 @@ theorem entry_ev {σ σ' : NS} {l : ELab} (he : Entry R w σ) (h : EEv R w drops
     exact ⟨F.ap.trans hap, F.known, Or.inl (F.annc.trans (normA_fine hap hann))⟩
   | maint _ h hx =>
     obtain ⟨a, k, n, -⟩ := idle_fields h
-    obtain ⟨fk, fa, fap, -, -, -, -, -, -⟩ := hx.fields
-    have hk' : σ'.known = σ.known := fk.trans k
-    exact ⟨fap.trans (a.trans hap), by rw [hk']; exact hw,
-      Or.inl (fa.trans (n.trans (normA_fine hap hann)))⟩
+    have hk' : σ'.known = σ.known := hx.known.trans k
+    exact ⟨hx.ap.trans (a.trans hap), by rw [hk']; exact hw,
+      Or.inl (hx.annc.trans (n.trans (normA_fine hap hann)))⟩
   | start _ F he =>
     subst he
     refine ⟨F.ap.trans hap, F.known, ?_⟩

@@ -89,13 +89,21 @@ lake env lean --stdin <<'LEAN'
 import Musubi.FineAssembly
 #check Musubi.FineAssembly.hive_converges_observed
 #print Musubi.SysAcceptance.HiveContracts
+#print Musubi.SysAcceptance.Source.Environment
+#print Musubi.SysAcceptance.Source.Scheduling
+#print Musubi.SysAcceptance.FineStart
 #print Musubi.FineAssembly.FineSource
 #print axioms Musubi.FineAssembly.hive_converges_observed
 LEAN
 ```
 
 Add new main results to `Musubi/Axioms.lean` and the build's imports. The axiom list and the
-expanded premises answer different questions.
+expanded premises answer different questions. `HiveContracts` inherits its source groups;
+inspect the relevant groups as well as the assembly. `FineStart` owns the starting snapshot
+shared by `FineAt` and `FineSource`. `SysAcceptance.Phases` derives the named phase boundaries;
+`SysAcceptance.Convergence` composes them. `HiveFilter.lean` owns the eligible-run projection.
+The formal guide's
+[reading path](../../formal/README.md#reading-the-integration-proofs) locates these interfaces.
 
 For contraction proofs, simplify Boolean branches and list constructors before rewriting.
 `Contract.flatMap_congr_mem` needs agreement only on list members. Generalize changing

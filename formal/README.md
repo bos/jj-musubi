@@ -65,6 +65,33 @@ tests in `Musubi/ExecTest.lean` and `Musubi/SupersedeExecTest.lean`.
 `test/smoke.jsonl` through it and diffs the output against `test/smoke.expected`. The binary
 is `formal/.lake/build/bin/oracle`.
 
+## Reading the integration proofs
+
+Start with `Musubi/SysAcceptance.lean` for the convergence argument's phases. Then follow the
+interfaces in this order:
+
+1. `SysAcceptance/Observations.lean` groups the readings of one actual hive run by
+   responsibility. Its sampled views use those same readings for entry, fetch and pending runs.
+2. `SysAcceptance/Cuts.lean` names record stabilization, quiet suffixes and old-effect cutoffs.
+3. `SysAcceptance/Contracts.lean` groups source effects, environment, transport, knowledge,
+   entry, scheduling and system bindings. Completion and fairness obligations stay explicit.
+4. `SysAcceptance/Phases.lean` derives quiet records, persistent entry, a completed active sample
+   and final eligibility. `Convergence.lean` composes those results. `Eligible.lean` owns
+   `FineStart` (the initial snapshot) and `FineAt` (the run after the fine cut).
+5. `FineAssembly.lean` builds `FineAt` from the event replay and `FineSource`. Both interfaces
+   share `FineStart`; `FineAssembly/Honesty.lean` proves the snapshot invariant used by assembly.
+
+`Pending/Contracts.lean` separates the abstract round's control and publication laws from
+survival facts derived from native naming. `known_after` in `Phases.lean` supplies the shared
+knowledge-tail argument, including the stable-head corollary. The two `SysStep` effect interfaces
+hide constructor bookkeeping from the honesty invariant.
+
+For local control, `NodeSettle.Settled` names the final state's properties and `NodeSettle.rank`
+orders the remaining work by priority. `NodeSys.SysStep.nonanswer_effect` describes the unchanged hub
+and shrinking traffic of a step outside hub answering. `Schedule.lean` owns the shared bounds
+on event order and batch completion. `HiveFilter.lean` owns the eligible-system observation
+and projection used by native-event replay.
+
 ## Files
 
 | File | Contents |
@@ -126,19 +153,26 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/RecoveryBridge.lean` | Compose hub and local stabilization, with packet-specific handling and later response cuts. |
 | `Musubi/CallBatch.lean` | Sequential finite call batches and injective virtual/wire-id correlation. |
 | `Musubi/Expansion.lean` | Expand each actual event to a positive finite path and transfer stabilization back. |
-| `Musubi/NodeSys.lean` | One joint graph, node controls, immutable calls, replies and notifications; scoped local embeddings. |
+| `Musubi/NodeSys.lean` | Joint graph/control model, named request guards and hub-answer law, invariants and shared scheduling facts. |
 | `Musubi/NodeSysExec.lean` | Check structural writes with canonical id reuse. |
 | `Musubi/NativeEvents.lean` | Replay event data and derive its eligible system run. |
-| `Musubi/FineAssembly.lean` | Assemble the fine system from event replay and source bindings. |
+| `Musubi/FineAssembly.lean` | Assemble the fine system from event replay, a shared starting snapshot and source bindings. |
+| `Musubi/FineAssembly/Honesty.lean` | Preserve honest replies and notifications along the actual replay. |
+| `Musubi/Schedule.lean` | Shared bounds on event indices, sampling order and batch completion. |
 | `Musubi/NodeSysEntry.lean` | Derive node entry and preserve the joint control invariants under individual-call fairness. |
+| `Musubi/HiveFilter.lean` | Observe eligible-node events, project the hive run and preserve its initial invariants. |
 | `Musubi/SysFreshCuts.lean` | Derive cutoffs for consumed old replies and processed old notifications without draining queues. |
-| `Musubi/SysAcceptance.lean` | Convergence API: imports all six layers below. |
+| `Musubi/SysAcceptance.lean` | Convergence API: imports all nine layers below. |
 | `Musubi/SysAcceptance/Acceptance.lean` | Actual request decisions and stable-hub acceptance. |
-| `Musubi/SysAcceptance/Pending.lean` | The raw-control contradiction for a node that stays pending. |
-| `Musubi/SysAcceptance/Eligible.lean` | Filtering and convergence of eligible nodes. |
+| `Musubi/SysAcceptance/Pending.lean` | The control/publication contradiction for a node that stays pending. |
+| `Musubi/SysAcceptance/Pending/Contracts.lean` | Shared round, control and publication interfaces; native naming laws derive survival. |
+| `Musubi/SysAcceptance/Eligible.lean` | Filtering and convergence of eligible nodes, with the shared starting snapshot and fine-run interface. |
 | `Musubi/SysAcceptance/Events.lean` | Individual hub and node observations projected into system steps. |
-| `Musubi/SysAcceptance/Contracts.lean` | Observations, record cuts, source laws and completion/fairness assumptions. |
-| `Musubi/SysAcceptance/Convergence.lean` | Derived old-effect/knowledge cuts and final hive convergence. |
+| `Musubi/SysAcceptance/Observations.lean` | Grouped hive observations and their sampled entry, fetch and pending views. |
+| `Musubi/SysAcceptance/Cuts.lean` | Named phase boundaries and quiet-suffix conditions. |
+| `Musubi/SysAcceptance/Contracts.lean` | Source laws grouped by responsibility, with completion and fairness assumptions. |
+| `Musubi/SysAcceptance/Phases.lean` | Derive old-effect, recovery, entry and fine cuts, truthful knowledge and final eligibility. |
+| `Musubi/SysAcceptance/Convergence.lean` | Compose the derived phases into hive convergence. |
 | `Musubi/HubSys.lean` | Read raw hub and node policy fields from that same joint system. |
 | `Musubi/HubLedger.lean` | Retain actual send-time packet fields and prove coverage of outstanding eligible requests. |
 | `Musubi/RawExpansion.lean`, `Musubi/RawMaintenance.lean` | Expand finite raw write batches, counting actual maintenance operations. |
@@ -939,7 +973,7 @@ The filter preserves the action label as well as the eligible slots. `hive_filte
 its initial invariants with inactive root dummy slots for noneligible nodes; those machines
 need no single raw embedding. It also derives the packet-owner alternative: an answered
 packet is from an eligible node or was already in flight at entry. `hub_stabilizes_hive` and
-`eligible_hive_converges` carry hub stability and eligible physical-head convergence back to
+`FineAt.converges` carry hub stability and eligible physical-head convergence back to
 the coarse observation, transferring actual scheduling, push completion and packet decisions.
 
 `raw_noneligible_answer_frame` derives the fresh noneligible answer's frame from native

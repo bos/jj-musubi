@@ -339,8 +339,7 @@ end Steps
 theorem push_quiet {d : Nat → Nat → Prop} {σ post : NS} {new : Nat}
     (hi : Issue d σ .push post new) (hp : σ.pending = []) :
     post = { norm σ with plan := [] } ∧ σ.heads = [new] := by
-  obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi
-  obtain ⟨y, hy, (⟨hwr, -⟩ | ⟨-, he, rfl⟩)⟩ := hw'
+  obtain ⟨y, hy, (⟨hwr, -⟩ | ⟨-, he, rfl⟩)⟩ := hi.write
   · exfalso
     have hp' : (norm σ).pending = [] := hp
     simp [pubOf, Retry.Publication.write, Retry.Fixup.write, hp'] at hwr
@@ -350,7 +349,6 @@ theorem idle_same {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') :
     σ'.heads = σ.heads ∧ σ'.known = σ.known := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl⟩
-  | differIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl⟩
   | goal _ _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl⟩
 
 /-- Replies leave the op heads of the step's state after its writes. -/
@@ -361,22 +359,22 @@ theorem handle_heads {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ'
   | start =>
     obtain ⟨σ1, F, rfl⟩ := hh
     show σ1.heads = post.heads
-    rw [F.heads, hci, hi.2]
+    rw [F.heads, hci, hi.unchanged]
   | fetchPoll =>
     obtain ⟨σ1, F, ho⟩ := hh
     have h1 : σ1.heads = σi.heads := F.heads
     rcases ho with ⟨-, O⟩ | ⟨-, rfl⟩
     · have h2 : σ'.heads = σ1.heads := by have h := congrArg NS.heads O.rest; exact h
-      rw [h2, h1, hci, hi.2.2.2.2.2.2.2]
-    · rw [h1, hci, hi.2.2.2.2.2.2.2]
+      rw [h2, h1, hci, hi.unchanged]
+    · rw [h1, hci, hi.unchanged]
   | fetchObjs =>
     have O : ObjRep (norm σi) σ'
         (fun x => Walk σi x ∧ ¬ σi.loc x ∧ σi.stg x ∧ ¬ σi.obj x) := hh
     have h2 : σ'.heads = σi.heads := by have h := congrArg NS.heads O.rest; exact h
-    rw [h2, hci, hi.2.2.2.2.2.2.2.2]
+    rw [h2, hci, hi.unchanged]
   | differPoll =>
     have h2 : σ'.heads = σi.heads := hh.heads
-    rw [h2, hci, hi.2.2.2.2.2.2.2]
+    rw [h2, hci, hi.unchanged]
   | push =>
     rcases hh with ⟨-, -, rfl⟩ | ⟨-, -, F⟩ | ⟨-, -, A⟩
     · exact hcp
@@ -406,7 +404,7 @@ theorem handle_known {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ'
     have O : ObjRep (norm σi) σ'
         (fun x => Walk σi x ∧ ¬ σi.loc x ∧ σi.stg x ∧ ¬ σi.obj x) := hh
     have h : σ'.known = σi.known := by have h := congrArg NS.known O.rest; exact h
-    rw [h, hck, hi.2.2.2.2.2.2.2.2]
+    rw [h, hck, hi.unchanged]
   | differPoll => exact Or.inr ⟨hh.known, by decide, fun h => by cases h⟩
   | push =>
     rcases hh with ⟨-, -, rfl⟩ | ⟨hs, -, F⟩ | ⟨hs, -, A⟩
@@ -940,8 +938,8 @@ theorem issue_post_heads {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {n
     · exact Or.inr F.heads
     · subst he; exact Or.inl rfl
   cases k with
-  | push => obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi; exact write hw'
-  | writePoll => obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi; exact write hw'
+  | push => exact write hi.write
+  | writePoll => exact write hi.write
   | start => exact Or.inl (by rw [post_same hi (by decide) (by decide)])
   | fetchPoll => exact Or.inl (by rw [post_same hi (by decide) (by decide)])
   | fetchObjs => exact Or.inl (by rw [post_same hi (by decide) (by decide)])

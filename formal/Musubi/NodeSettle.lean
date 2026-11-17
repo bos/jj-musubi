@@ -11,8 +11,8 @@ Ids are raw hub-space ones, as the core compares them; nothing projects versions
 What the adapter and the replies do is stated as algebraic contracts, scoped to the head the
 node knows and the records the hub announces: `FetchedRep`, `HeadRep`, `ObjRep`, `Take`, `Ext`
 (with `Adv` and `FreshOn`), and `WriteRes`, which follows RetryControl's `Publication.write`.
-The last section lists them, and what each must be tied to. The core is the repaired one:
-once the known head is local, it advances when `prepare_records` said the records drop an op
+The last section lists them, and what each must be tied to. Once the known head is local,
+the core advances when `prepare_records` said the records drop an op
 head, as well as when no head descends from the known one, so no invariant of the hub's
 dropped operations is needed.
 -/
@@ -494,7 +494,7 @@ inductive Busy (c : Ctx) : NS → NS → Prop
         (σ.ap = c.R ∧ HeadRep c σ1 σ')) : Busy c σ σ'
   /-- The branch that polls when the write leaves the known head as the new one: the write then
   reuses the known head, the restoring fix-up identical to it, and writes the cache
-  (`write_known`), which the rank counts (`cw`). -/
+  (`write_known`), which the rank counts (`unwrittenFixup`). -/
   | writePoll {σ σ' : NS} (σ1 : NS) (new : Nat) (hg : Go c σ) (h1 : σ.heads.length < 2)
       (hl : σ.loc σ.known.2) (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none)
       (hf : ¬ Differ σ) (hw : σ.pending ≠ [])
@@ -506,10 +506,6 @@ inductive Idle (c : Ctx) : NS → NS → Prop
   | fetchIdle {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : ¬ σ.loc σ.known.2)
       (hp : σ.plan = []) (hr : ¬ ∃ x, Ready σ x) (ho : ¬ MissOps σ) (hb : ¬ MissObjs σ)
       (he : σ' = { norm σ with act := false }) : Idle c σ σ'
-  | differIdle {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
-      (hd : ∃ y ∈ σ.heads, Desc σ y) (hf : Differ σ) (hnr : (norm σ).annc = none)
-      (ha : (norm σ).annc ≠ none)
-      (he : σ' = { norm σ with plan := [], act := false }) : Idle c σ σ'
   | goal {σ σ' : NS} (hg : Go c σ) (h1 : σ.heads.length < 2) (hl : σ.loc σ.known.2)
       (hd : ∃ y ∈ σ.heads, Desc σ y) (hnr : (norm σ).annc = none) (hf : ¬ Differ σ)
       (hp : σ.pending = [])
@@ -540,7 +536,7 @@ inductive Ev (c : Ctx) : Lab → NS → NS → Prop
   | busy {σ σ' : NS} (ha : σ.act = true) (h : Busy c σ σ') : Ev c .busy σ σ'
   | idle {σ σ' : NS} (ha : σ.act = true) (h : Idle c σ σ') : Ev c .idle σ σ'
   /-- The core idled, but the daemon's housekeeping (`when_idle`) wrote something, so the
-  round goes on: fresh operations on top, nothing else changed. -/
+  round goes on: local writes on top, possibly reusing already-held operations. -/
   | maint {σ σ' σ1 : NS} (ha : σ.act = true) (h : Idle c σ σ1)
       (hw : Ext { σ1 with act := true } σ') : Ev c .maint σ σ'
   | emit {σ σ' : NS} (σ1 : NS) (new : Nat) (h : Emit c σ σ1 new) : Ev c .emit σ σ'
@@ -551,56 +547,70 @@ inductive Ev (c : Ctx) : Lab → NS → NS → Prop
 
 /-- The goal: the node knows the hub's head, has its records and no other drops, and its only op
 head is the hub's head. -/
-def Settled (c : Ctx) (σ : NS) : Prop :=
-  σ.known = (c.S, c.H) ∧ σ.ap = c.R ∧ σ.hubRecs = some c.R ∧ σ.pending = [] ∧
-    σ.heads = [c.H] ∧ σ.loc c.H ∧ Desc σ c.H ∧ (σ.annc = none ∨ σ.annc = some c.R)
+structure Settled (c : Ctx) (σ : NS) : Prop where
+  known : σ.known = (c.S, c.H)
+  applied : σ.ap = c.R
+  hubRecords : σ.hubRecs = some c.R
+  pending : σ.pending = []
+  heads : σ.heads = [c.H]
+  localHead : σ.loc c.H
+  imagesBelow : Desc σ c.H
+  announcement : σ.annc = none ∨ σ.annc = some c.R
 
 /-! ## The rank -/
 
 /-- The node doesn't know the hub's head yet. -/
-noncomputable def ck (c : Ctx) (σ : NS) : Nat := ind (σ.known ≠ (c.S, c.H))
+noncomputable def unknownHead (c : Ctx) (σ : NS) : Nat := ind (σ.known ≠ (c.S, c.H))
 
 /-- An announcement of older records, still to take. -/
-noncomputable def cz (c : Ctx) (σ : NS) : Nat := ind (∃ A, σ.annc = some A ∧ A ≠ c.R ∧ A ≠ σ.ap)
+noncomputable def oldAnnouncement (c : Ctx) (σ : NS) : Nat := ind (∃ A, σ.annc = some A ∧ A ≠ c.R ∧ A ≠ σ.ap)
 
 /-- The hub's records are not applied. -/
-noncomputable def cr (c : Ctx) (σ : NS) : Nat := ind (σ.ap ≠ c.R)
+noncomputable def unappliedRecords (c : Ctx) (σ : NS) : Nat := ind (σ.ap ≠ c.R)
 
 /-- Operations below the known head not yet local. -/
-noncomputable def cm (σ : NS) : Nat :=
+noncomputable def missingOperations (σ : NS) : Nat :=
   cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x)
 
 /-- ... of which not staged. -/
-noncomputable def cs1 (σ : NS) : Nat :=
+noncomputable def unstagedOperations (σ : NS) : Nat :=
   cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x ∧ ¬ σ.stg x)
 
 /-- ... of which staged without their objects. -/
-noncomputable def cs2 (σ : NS) : Nat :=
+noncomputable def missingObjects (σ : NS) : Nat :=
   cnt (σ.known.2 + 1) (fun x => Anc σ.par x σ.known.2 ∧ ¬ σ.loc x ∧ σ.stg x ∧ ¬ σ.obj x)
 
 /-- Some operation standing for the known head is below no op head. -/
-noncomputable def ca (σ : NS) : Nat := ind (¬ ∀ i ∈ σ.img, ∃ y ∈ σ.heads, Anc σ.par i y)
+noncomputable def uncoveredImages (σ : NS) : Nat := ind (¬ ∀ i ∈ σ.img, ∃ y ∈ σ.heads, Anc σ.par i y)
 
 /-- Op heads beyond one. -/
-def ch (σ : NS) : Nat := σ.heads.length - 1
+def extraHeads (σ : NS) : Nat := σ.heads.length - 1
 
 /-- The hub's records are not noted, or not applied nor announced. -/
-noncomputable def cd (c : Ctx) (σ : NS) : Nat :=
+noncomputable def unnotedRecords (c : Ctx) (σ : NS) : Nat :=
   ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ σ.annc ≠ some c.R)
 
 /-- Pending drops whose restoring fix-up is not written (`Fixup.credit`). Natively,
 `repair_received_work` can clear the cache before a write; the model takes no such step (the
 obligation under `WriteRes` in the last section). -/
-noncomputable def cw (σ : NS) : Nat := ind (σ.written = false ∧ σ.pending ≠ [])
+noncomputable def unwrittenFixup (σ : NS) : Nat := ind (σ.written = false ∧ σ.pending ≠ [])
 
+/-- Priority order of the remaining work. Knowledge and record changes come first because
+lower-priority work is measured in their context. Fetching and realization precede frontier
+advancement and merging; recording the hub's records and writing the restoring fix-up finish
+settlement. Outside emitted pushes and maintenance writes, events decrease this list
+lexicographically or leave it unchanged. A later coordinate may grow only when an earlier one
+decreases. -/
 noncomputable def rank (c : Ctx) (σ : NS) : List Nat :=
-  [ck c σ, cz c σ, cr c σ, cm σ, σ.plan.length, cs1 σ, cs2 σ, ca σ, ch σ, cd c σ, cw σ]
+  [unknownHead c σ, oldAnnouncement c σ, unappliedRecords c σ,
+    missingOperations σ, σ.plan.length, unstagedOperations σ, missingObjects σ,
+    uncoveredImages σ, extraHeads σ, unnotedRecords c σ, unwrittenFixup σ]
 
 theorem rank_length (c : Ctx) (σ : NS) : (rank c σ).length = 11 := rfl
 
-theorem cw_congr {σ σ' : NS} (hw : σ'.written = σ.written) (hp : σ'.pending = σ.pending) :
-    cw σ' = cw σ := by
-  unfold cw; rw [hw, hp]
+theorem unwrittenFixup_congr {σ σ' : NS} (hw : σ'.written = σ.written) (hp : σ'.pending = σ.pending) :
+    unwrittenFixup σ' = unwrittenFixup σ := by
+  unfold unwrittenFixup; rw [hw, hp]
 
 theorem lt_cons_eq {a b : Nat} {as bs : List Nat} (h : a = b) (t : LexLt as bs) :
     LexLt (a :: as) (b :: bs) := Or.inr ⟨h, t⟩
@@ -630,7 +640,7 @@ theorem normA_none {o : Option Nat} {ap : Nat} (h : normA o ap = none) :
     · subst hb; exact Or.inr rfl
     · rw [normA_ne hb] at h; cases h
 
-theorem cz_norm (c : Ctx) (σ : NS) : cz c (norm σ) = cz c σ := by
+theorem oldAnnouncement_norm (c : Ctx) (σ : NS) : oldAnnouncement c (norm σ) = oldAnnouncement c σ := by
   show ind (∃ A, normA σ.annc σ.ap = some A ∧ A ≠ c.R ∧ A ≠ σ.ap) =
     ind (∃ A, σ.annc = some A ∧ A ≠ c.R ∧ A ≠ σ.ap)
   apply ind_congr
@@ -640,7 +650,7 @@ theorem cz_norm (c : Ctx) (σ : NS) : cz c (norm σ) = cz c σ := by
   · rintro ⟨A, hA, h1, h2⟩
     exact ⟨A, by rw [hA]; exact normA_ne h2, h1, h2⟩
 
-theorem cd_norm (c : Ctx) (σ : NS) : cd c (norm σ) = cd c σ := by
+theorem unnotedRecords_norm (c : Ctx) (σ : NS) : unnotedRecords c (norm σ) = unnotedRecords c σ := by
   show ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ normA σ.annc σ.ap ≠ some c.R) =
     ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ σ.annc ≠ some c.R)
   congr 1
@@ -653,7 +663,7 @@ theorem cd_norm (c : Ctx) (σ : NS) : cd c (norm σ) = cd c σ := by
     exact ⟨h1, fun h => h2 (normA_some h).1⟩
 
 theorem rank_norm (c : Ctx) (σ : NS) : rank c (norm σ) = rank c σ := by
-  unfold rank; rw [cz_norm, cd_norm]; rfl
+  unfold rank; rw [oldAnnouncement_norm, unnotedRecords_norm]; rfl
 
 theorem single_of {l : List Nat} (h1 : l.length < 2) (hne : l ≠ []) : ∃ y, l = [y] := by
   match l, h1, hne with
@@ -661,9 +671,9 @@ theorem single_of {l : List Nat} (h1 : l.length < 2) (hne : l ≠ []) : ∃ y, l
   | [], _, hne => exact absurd rfl hne
   | _ :: _ :: _, h1, _ => exact absurd h1 (by simp only [List.length_cons]; omega)
 
-theorem ch_zero {σ : NS} (h1 : σ.heads.length < 2) (hne : σ.heads ≠ []) : ch σ = 0 := by
+theorem extraHeads_zero {σ : NS} (h1 : σ.heads.length < 2) (hne : σ.heads ≠ []) : extraHeads σ = 0 := by
   obtain ⟨y, hy⟩ := single_of h1 hne
-  unfold ch; rw [hy]; rfl
+  unfold extraHeads; rw [hy]; rfl
 
 /-- Ancestry below `n` is unchanged by operations added at or above it. -/
 theorem anc_agree {par par' : Nat → List Nat} {n : Nat} (hlt : ParLt par) (hlt' : ParLt par')
@@ -750,19 +760,12 @@ theorem SInv.obj {σ σ' : NS} {M : Nat → Prop} (I : SInv c σ) (O : ObjRep σ
   rw [O.rest]
   exact ⟨I.parLt, I.knownLt, I.hLt, I.headsNe, I.headsLt, I.imgNe, I.imgLt, I.recs⟩
 
-theorem Ext.fields {σ σ' : NS} (E : Ext σ σ') :
-    σ'.known = σ.known ∧ σ'.annc = σ.annc ∧ σ'.ap = σ.ap ∧ σ'.hubRecs = σ.hubRecs ∧
-      σ'.img = σ.img ∧ σ'.stg = σ.stg ∧ σ'.obj = σ.obj ∧ σ'.pending = σ.pending ∧
-      σ'.act = σ.act :=
-  ⟨E.known, E.annc, E.ap, E.hubRecs, E.img, E.stg, E.obj, E.pending, E.act⟩
-
 theorem SInv.ext {σ σ' : NS} (I : SInv c σ) (E : Ext σ σ') : SInv c σ' := by
-  obtain ⟨fk, -, -, fh, fi, -, -, -, -⟩ := E.fields
   refine ⟨E.parLt, ?_, Nat.lt_of_lt_of_le I.hLt E.grows, E.headsNe, E.headsLt, ?_, ?_, ?_⟩
-  · rw [fk]; exact Nat.lt_of_lt_of_le I.knownLt E.grows
-  · rw [fi]; exact I.imgNe
-  · rw [fi]; exact fun i hi => Nat.lt_of_lt_of_le (I.imgLt i hi) E.grows
-  · rw [fk, fh]; exact I.recs
+  · rw [E.known]; exact Nat.lt_of_lt_of_le I.knownLt E.grows
+  · rw [E.img]; exact I.imgNe
+  · rw [E.img]; exact fun i hi => Nat.lt_of_lt_of_le (I.imgLt i hi) E.grows
+  · rw [E.known, E.hubRecs]; exact I.recs
 
 theorem SInv.adv {σ σ' : NS} (I : SInv c σ) (A : Adv σ σ') : SInv c σ' := I.ext A.ext
 
@@ -804,7 +807,6 @@ theorem inv_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') : SInv c σ' 
 theorem inv_idle {σ σ' : NS} (I : SInv c σ) (h : Idle c σ σ') : SInv c σ' := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact I.norm.act false
-  | differIdle _ _ _ _ _ _ _ he => subst he; exact (I.norm.plan []).act false
   | goal _ _ _ _ _ _ _ _ he => subst he; exact (I.norm.plan []).act false
 
 end Inv
@@ -816,7 +818,9 @@ section Rank
 variable {c : Ctx}
 
 theorem counts_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : ∀ y ∈ M, y ∈ σ.heads) :
-    cm (fresh σ M) = cm σ ∧ cs1 (fresh σ M) = cs1 σ ∧ cs2 (fresh σ M) = cs2 σ := by
+    missingOperations (fresh σ M) = missingOperations σ ∧
+      unstagedOperations (fresh σ M) = unstagedOperations σ ∧
+      missingObjects (fresh σ M) = missingObjects σ := by
   have key : ∀ x, x < σ.known.2 + 1 →
       (Anc (upd σ.par σ.next M) x σ.known.2 ↔ Anc σ.par x σ.known.2) :=
     fun _ _ => anc_upd_iff I.parLt (fun y hy => I.headsLt y (hM y hy)) I.knownLt
@@ -831,9 +835,9 @@ theorem counts_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : ∀ y ∈ M,
   refine ⟨cnt_congr fun x hx => ?_, cnt_congr fun x hx => ?_, cnt_congr fun x hx => ?_⟩ <;>
     simp only [fresh, key x hx, hl x hx]
 
-theorem ca_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : Keeps σ M) :
-    ca (fresh σ M) ≤ ca σ := by
-  unfold ca
+theorem uncoveredImages_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : Keeps σ M) :
+    uncoveredImages (fresh σ M) ≤ uncoveredImages σ := by
+  unfold uncoveredImages
   apply ind_mono
   intro hn hall
   apply hn
@@ -848,45 +852,45 @@ theorem ca_fresh {σ : NS} (I : SInv c σ) {M : List Nat} (hM : Keeps σ M) :
 
 /-- A write leaves no more operations below the known head missing: locality only grows. -/
 theorem counts_ext {σ σ' : NS} (I : SInv c σ) (E : Ext σ σ') :
-    cm σ' ≤ cm σ ∧ cs1 σ' ≤ cs1 σ ∧ cs2 σ' ≤ cs2 σ := by
-  obtain ⟨fk, -, -, -, -, fs, fobj, -, -⟩ := E.fields
+    missingOperations σ' ≤ missingOperations σ ∧ unstagedOperations σ' ≤ unstagedOperations σ ∧
+      missingObjects σ' ≤ missingObjects σ := by
   have key : ∀ x, x < σ.known.2 + 1 → (Anc σ'.par x σ.known.2 ↔ Anc σ.par x σ.known.2) :=
     fun _ _ => anc_agree I.parLt E.parLt E.parOld I.knownLt
   have hl : ∀ x, x < σ.known.2 + 1 → ¬ σ'.loc x → ¬ σ.loc x :=
     fun x hx h h' => h (E.locOld x (by have := I.knownLt; omega) h')
-  unfold cm cs1 cs2
-  rw [fk, fs, fobj]
+  unfold missingOperations unstagedOperations missingObjects
+  rw [E.known, E.stg, E.obj]
   refine ⟨cnt_le fun x hx ⟨ha, hn⟩ => ⟨(key x hx).1 ha, hl x hx hn⟩,
     cnt_le fun x hx ⟨ha, hn, hs⟩ => ⟨(key x hx).1 ha, hl x hx hn, hs⟩,
     cnt_le fun x hx ⟨ha, hn, hs, ho⟩ => ⟨(key x hx).1 ha, hl x hx hn, hs, ho⟩⟩
 
-theorem ca_ext_le {σ σ' : NS} (I : SInv c σ) (E : Ext σ σ')
-    (hc : ∀ y ∈ σ.heads, ∃ y' ∈ σ'.heads, Anc σ'.par y y') : ca σ' ≤ ca σ := by
-  obtain ⟨-, -, -, -, fi, -, -, -, -⟩ := E.fields
-  unfold ca
+theorem uncoveredImages_ext_le {σ σ' : NS} (I : SInv c σ) (E : Ext σ σ')
+    (hc : ∀ y ∈ σ.heads, ∃ y' ∈ σ'.heads, Anc σ'.par y y') : uncoveredImages σ' ≤ uncoveredImages σ := by
+  unfold uncoveredImages
   apply ind_mono
   intro hn hall
   apply hn
   intro i hi
-  rw [fi] at hi
+  rw [E.img] at hi
   obtain ⟨y, hy, ha⟩ := hall i hi
   obtain ⟨y', hy', ha'⟩ := hc y hy
   exact ⟨y', hy', ((anc_agree I.parLt E.parLt E.parOld (I.headsLt y hy)).2 ha).trans ha'⟩
 
-theorem ck_congr {σ σ' : NS} (h : σ'.known = σ.known) : ck c σ' = ck c σ := by
-  unfold ck; rw [h]
+theorem unknownHead_congr {σ σ' : NS} (h : σ'.known = σ.known) : unknownHead c σ' = unknownHead c σ := by
+  unfold unknownHead; rw [h]
 
-theorem cz_congr {σ σ' : NS} (ha : σ'.annc = σ.annc) (hap : σ'.ap = σ.ap) :
-    cz c σ' = cz c σ := by
-  unfold cz; rw [ha, hap]
+theorem oldAnnouncement_congr {σ σ' : NS} (ha : σ'.annc = σ.annc) (hap : σ'.ap = σ.ap) :
+    oldAnnouncement c σ' = oldAnnouncement c σ := by
+  unfold oldAnnouncement; rw [ha, hap]
 
-theorem cr_congr {σ σ' : NS} (hap : σ'.ap = σ.ap) : cr c σ' = cr c σ := by
-  unfold cr; rw [hap]
+theorem unappliedRecords_congr {σ σ' : NS} (hap : σ'.ap = σ.ap) :
+    unappliedRecords c σ' = unappliedRecords c σ := by
+  unfold unappliedRecords; rw [hap]
 
-theorem ca_one {σ : NS} (h1 : σ.heads.length < 2) (hne : σ.heads ≠ [])
-    (hd : ¬ ∃ y ∈ σ.heads, Desc σ y) : ca σ = 1 := by
+theorem uncoveredImages_one {σ : NS} (h1 : σ.heads.length < 2) (hne : σ.heads ≠ [])
+    (hd : ¬ ∃ y ∈ σ.heads, Desc σ y) : uncoveredImages σ = 1 := by
   obtain ⟨y, hy⟩ := single_of h1 hne
-  unfold ca
+  unfold uncoveredImages
   apply ind_pos
   intro hall
   apply hd
@@ -895,52 +899,66 @@ theorem ca_one {σ : NS} (h1 : σ.heads.length < 2) (hne : σ.heads ≠ [])
   rw [hy, List.mem_singleton] at hy'
   rw [← hy']; exact ha
 
-theorem cm_realize_le (σ : NS) (x : Nat) (L : List Nat) : cm (realize σ x L) ≤ cm σ := by
-  unfold cm
+theorem missingOperations_realize_le (σ : NS) (x : Nat) (L : List Nat) :
+    missingOperations (realize σ x L) ≤ missingOperations σ := by
+  unfold missingOperations
   exact cnt_le fun _ _ ⟨ha, hl⟩ => ⟨ha, fun h => hl (Or.inl h)⟩
 
-theorem cm_realize_lt {σ : NS} {x : Nat} (L : List Nat) (hlt : ParLt σ.par)
-    (ha : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x) : cm (realize σ x L) < cm σ := by
-  unfold cm
+theorem missingOperations_realize_lt {σ : NS} {x : Nat} (L : List Nat) (hlt : ParLt σ.par)
+    (ha : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x) : missingOperations (realize σ x L) <
+    missingOperations σ := by
+  unfold missingOperations
   exact cnt_lt (fun _ _ ⟨h1, h2⟩ => ⟨h1, fun h => h2 (Or.inl h)⟩)
     ⟨x, Nat.lt_succ_of_le (ha.le hlt), ⟨ha, hl⟩, fun ⟨_, h⟩ => h (Or.inr rfl)⟩
 
-theorem ck_drop {σ σ' : NS} (hk : σ.known ≠ (c.S, c.H)) (hk' : σ'.known = (c.S, c.H)) :
-    ck c σ' < ck c σ := by
-  unfold ck
+theorem unknownHead_drop {σ σ' : NS} (hk : σ.known ≠ (c.S, c.H)) (hk' : σ'.known = (c.S, c.H)) :
+    unknownHead c σ' < unknownHead c σ := by
+  unfold unknownHead
   rw [ind_pos hk, ind_neg (fun h => h hk')]
   exact Nat.zero_lt_one
 
+/-- A fetch to the known hub clears stale announcements and record-noting debt. Staging can
+improve; missing objects cannot grow when the staging coordinate is unchanged. -/
+structure FetchedRankEffect (c : Ctx) (σ σ' : NS) : Prop where
+  known : unknownHead c σ' = unknownHead c σ
+  announcement : oldAnnouncement c σ' = 0
+  records : unappliedRecords c σ' = unappliedRecords c σ
+  operations : missingOperations σ' = missingOperations σ
+  plan : σ'.plan = σ.plan
+  staged : unstagedOperations σ' ≤ unstagedOperations σ
+  objects : unstagedOperations σ' = unstagedOperations σ → missingObjects σ' ≤ missingObjects σ
+  images : uncoveredImages σ' = uncoveredImages σ
+  heads : extraHeads σ' = extraHeads σ
+  noted : unnotedRecords c σ' = 0
+
 /-- What a `Fetched` reply does to the rank once the node knows the hub's head. -/
 theorem fetched_cmp {σ σ' : NS} (F : FetchedRep c σ σ') (hk : σ.known = (c.S, c.H)) :
-    ck c σ' = ck c σ ∧ cz c σ' = 0 ∧ cr c σ' = cr c σ ∧ cm σ' = cm σ ∧ σ'.plan = σ.plan ∧
-      cs1 σ' ≤ cs1 σ ∧ (cs1 σ' = cs1 σ → cs2 σ' ≤ cs2 σ) ∧ ca σ' = ca σ ∧ ch σ' = ch σ ∧
-      cd c σ' = 0 := by
+    FetchedRankEffect c σ σ' := by
   have hK : σ'.known = σ.known := F.known.trans hk.symm
   refine ⟨?_, ?_, ?_, ?_, (F.same hk).1, ?_, ?_, ?_, ?_, ?_⟩
-  · unfold ck; rw [hK]
-  · unfold cz
+  · unfold unknownHead; rw [hK]
+  · unfold oldAnnouncement
     apply ind_neg
     rintro ⟨A, hA, hR, -⟩
     rcases F.annc with h | ⟨h, -⟩
     · rw [h] at hA; cases hA; exact hR rfl
     · rw [h] at hA; cases hA
-  · unfold cr; rw [F.ap]
-  · unfold cm; rw [hK, F.par, F.loc]
-  · unfold cs1; rw [hK, F.par, F.loc]
+  · unfold unappliedRecords; rw [F.ap]
+  · unfold missingOperations; rw [hK, F.par, F.loc]
+  · unfold unstagedOperations; rw [hK, F.par, F.loc]
     exact cnt_le fun x _ ⟨h1, h2, h3⟩ => ⟨h1, h2, fun h => h3 (F.stg x h)⟩
   · intro he
-    unfold cs1 at he
-    unfold cs2
+    unfold unstagedOperations at he
+    unfold missingObjects
     rw [hK, F.par, F.loc] at he ⊢
     have pt := cnt_pt_of_eq (fun x _ ⟨h1, h2, h3⟩ => ⟨h1, h2, fun h => h3 (F.stg x h)⟩) he
     refine cnt_le fun x hx ⟨h1, h2, h3, h4⟩ => ⟨h1, h2, ?_, fun h => h4 (F.obj x h)⟩
     apply Classical.byContradiction
     intro hs
     exact (pt x hx ⟨h1, h2, hs⟩).2.2 h3
-  · unfold ca; rw [(F.same hk).2, F.heads, F.par]
-  · unfold ch; rw [F.heads]
-  · unfold cd
+  · unfold uncoveredImages; rw [(F.same hk).2, F.heads, F.par]
+  · unfold extraHeads; rw [F.heads]
+  · unfold unnotedRecords
     rw [ind_neg (fun h => h F.hubRecs)]
     have : ¬ (σ'.ap ≠ c.R ∧ σ'.annc ≠ some c.R) := by
       rintro ⟨hap, hne⟩
@@ -951,31 +969,45 @@ theorem fetched_cmp {σ σ' : NS} (F : FetchedRep c σ σ') (hk : σ.known = (c.
 
 theorem fetched_lt {σ σ' : NS} {x : Nat} (I : SInv c σ) (F : FetchedRep c σ σ')
     (hk : σ.known = (c.S, c.H)) (hw : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x)
-    (hs : ¬ σ.stg x) : cs1 σ' < cs1 σ := by
+    (hs : ¬ σ.stg x) : unstagedOperations σ' < unstagedOperations σ := by
   have hK : σ'.known = σ.known := F.known.trans hk.symm
   have hst : σ'.stg x := F.stages x (by rw [hk] at hw; exact hw) hl
-  unfold cs1
+  unfold unstagedOperations
   rw [hK, F.par, F.loc]
   exact cnt_lt (fun y _ ⟨h1, h2, h3⟩ => ⟨h1, h2, fun h => h3 (F.stg y h)⟩)
     ⟨x, Nat.lt_succ_of_le (hw.le I.parLt), ⟨hw, hl, hs⟩, fun ⟨_, _, h⟩ => h hst⟩
 
+/-- An object reply changes only the missing-object coordinate among these rank readings. -/
+structure ObjectRankEffect (c : Ctx) (σ σ' : NS) : Prop where
+  known : unknownHead c σ' = unknownHead c σ
+  announcement : oldAnnouncement c σ' = oldAnnouncement c σ
+  records : unappliedRecords c σ' = unappliedRecords c σ
+  operations : missingOperations σ' = missingOperations σ
+  plan : σ'.plan = σ.plan
+  staged : unstagedOperations σ' = unstagedOperations σ
+  objects : missingObjects σ' ≤ missingObjects σ
+  images : uncoveredImages σ' = uncoveredImages σ
+  heads : extraHeads σ' = extraHeads σ
+  noted : unnotedRecords c σ' = unnotedRecords c σ
+
 /-- An `Objects` reply leaves every part of the rank but the missing objects. -/
 theorem obj_cmp {σ σ' : NS} {M : Nat → Prop} (O : ObjRep σ σ' M) :
-    ck c σ' = ck c σ ∧ cz c σ' = cz c σ ∧ cr c σ' = cr c σ ∧ cm σ' = cm σ ∧
-      σ'.plan = σ.plan ∧ cs1 σ' = cs1 σ ∧ cs2 σ' ≤ cs2 σ ∧ ca σ' = ca σ ∧ ch σ' = ch σ ∧
-      cd c σ' = cd c σ := by
+    ObjectRankEffect c σ σ' := by
   have ho := O.obj
   rw [O.rest] at ho ⊢
   refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, ?_, rfl, rfl, rfl⟩
-  unfold cs2
+  unfold missingObjects
   exact cnt_le fun x _ ⟨h1, h2, h3, h4⟩ => ⟨h1, h2, h3, fun h => h4 (ho x (Or.inl h))⟩
+
+theorem ObjectRankEffect.refl (c : Ctx) (σ : NS) : ObjectRankEffect c σ σ :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, Nat.le_refl _, rfl, rfl, rfl⟩
 
 theorem obj_lt {σ σ' : NS} {M : Nat → Prop} {x : Nat} (O : ObjRep σ σ' M) (hlt : ParLt σ.par)
     (hw : Anc σ.par x σ.known.2) (hl : ¬ σ.loc x) (hs : σ.stg x) (hb : ¬ σ.obj x) (hM : M x) :
-    cs2 σ' < cs2 σ := by
+    missingObjects σ' < missingObjects σ := by
   have ho := O.obj
   rw [O.rest] at ho ⊢
-  unfold cs2
+  unfold missingObjects
   exact cnt_lt (fun y _ ⟨h1, h2, h3, h4⟩ => ⟨h1, h2, h3, fun h => h4 (ho y (Or.inl h))⟩)
     ⟨x, Nat.lt_succ_of_le (hw.le hlt), ⟨hw, hl, hs, hb⟩,
       fun ⟨_, _, _, h⟩ => h (ho x (Or.inr hM))⟩
@@ -984,44 +1016,56 @@ theorem obj_lt {σ σ' : NS} {M : Nat → Prop} {x : Nat} (O : ObjRep σ σ' M) 
 theorem rank_take {σ σ' : NS} {A : Nat} (ha : σ.annc = some A) (hne : A ≠ σ.ap)
     (tk : σ'.known = σ.known) (tap : σ'.ap = A) (tann : σ'.annc = none ∨ σ'.annc = σ.annc) :
     LexLt (rank c σ') (rank c σ) := by
-  have hz' : cz c σ' = 0 := by
-    unfold cz
+  have hz' : oldAnnouncement c σ' = 0 := by
+    unfold oldAnnouncement
     apply ind_neg
     rintro ⟨B, hB, -, hB'⟩
     rw [tap] at hB'
     rcases tann with h | h
     · rw [h] at hB; cases hB
     · rw [h, ha] at hB; cases hB; exact hB' rfl
-  have hk : ck c σ' = ck c σ := by unfold ck; rw [tk]
+  have hk : unknownHead c σ' = unknownHead c σ := by unfold unknownHead; rw [tk]
   unfold rank
   refine lt_cons (Nat.le_of_eq hk) fun _ => ?_
   by_cases hA : A = c.R
   · refine lt_cons (by rw [hz']; exact Nat.zero_le _) fun _ => lt_hd ?_
-    have h1 : cr c σ = 1 := ind_pos fun h => hne (hA.trans h.symm)
-    have h2 : cr c σ' = 0 := ind_neg fun h => h (tap.trans hA)
+    have h1 : unappliedRecords c σ = 1 := ind_pos fun h => hne (hA.trans h.symm)
+    have h2 : unappliedRecords c σ' = 0 := ind_neg fun h => h (tap.trans hA)
     rw [h1, h2]; exact Nat.zero_lt_one
   · apply lt_hd
-    have h1 : cz c σ = 1 := ind_pos ⟨A, ha, hA, hne⟩
+    have h1 : oldAnnouncement c σ = 1 := ind_pos ⟨A, ha, hA, hne⟩
     rw [h1, hz']; exact Nat.zero_lt_one
 
-/-- A supersede's local write leaves the rank but for fewer heads to cover. -/
+/-- A publishing write preserves knowledge and records, clears the plan and leaves no extra
+heads. It never increases the transfer or frontier-coverage coordinates. -/
+structure WriteRankEffect (σ σ' : NS) : Prop where
+  known : σ'.known = σ.known
+  announcement : σ'.annc = σ.annc
+  applied : σ'.ap = σ.ap
+  hubRecords : σ'.hubRecs = σ.hubRecs
+  operations : missingOperations σ' ≤ missingOperations σ
+  plan : σ'.plan = []
+  staged : unstagedOperations σ' ≤ unstagedOperations σ
+  objects : missingObjects σ' ≤ missingObjects σ
+  images : uncoveredImages σ' ≤ uncoveredImages σ
+  heads : extraHeads σ' = 0
+
+/-- A publishing write has the bounded rank effects recorded above. -/
 theorem write_cmp {σ σ1 : NS} {new : Nat} (I : SInv c σ) (hp : σ.plan = [])
     (h1 : σ.heads.length < 2) (W : WriteRes σ σ1 new) :
-    σ1.known = σ.known ∧ σ1.annc = σ.annc ∧ σ1.ap = σ.ap ∧ σ1.hubRecs = σ.hubRecs ∧
-      cm σ1 ≤ cm σ ∧ σ1.plan = [] ∧ cs1 σ1 ≤ cs1 σ ∧ cs2 σ1 ≤ cs2 σ ∧ ca σ1 ≤ ca σ ∧
-      ch σ1 = 0 := by
+    WriteRankEffect σ σ1 := by
   obtain ⟨y, hy, (⟨-, F⟩ | ⟨-, he, -⟩)⟩ := W
-  · obtain ⟨fk, fa, fap, fh, -, -, -, -, -⟩ := F.ext.fields
-    obtain ⟨e1, e2, e3⟩ := counts_ext I F.ext
-    refine ⟨fk, fa, fap, fh, e1, F.plan.trans hp, e2, e3, ca_ext_le I F.ext ?_, ?_⟩
+  · obtain ⟨e1, e2, e3⟩ := counts_ext I F.ext
+    refine ⟨F.ext.known, F.ext.annc, F.ext.ap, F.ext.hubRecs, e1, F.plan.trans hp, e2, e3,
+      uncoveredImages_ext_le I F.ext ?_, ?_⟩
     · intro y' hy'
       rw [hy, List.mem_singleton] at hy'
       subst hy'
       exact ⟨new, by rw [F.heads]; exact List.mem_singleton.2 rfl, F.covers⟩
-    · unfold ch; rw [F.heads]; rfl
+    · unfold extraHeads; rw [F.heads]; rfl
   · subst he
     exact ⟨rfl, rfl, rfl, rfl, Nat.le_refl _, hp, Nat.le_refl _, Nat.le_refl _, Nat.le_refl _,
-      ch_zero h1 I.headsNe⟩
+      extraHeads_zero h1 I.headsNe⟩
 
 end Rank
 
@@ -1047,8 +1091,8 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     subst he
     rw [← rank_norm c σ]
     obtain ⟨e1, e2, e3⟩ := counts_fresh I.norm hM.sub
-    have hca := ca_fresh I.norm hM.norm
-    have hch : ch (fresh (norm σ) M) < ch (norm σ) := by
+    have hca := uncoveredImages_fresh I.norm hM.norm
+    have hch : extraHeads (fresh (norm σ) M) < extraHeads (norm σ) := by
       show 0 < σ.heads.length - 1; omega
     unfold rank
     exact lt_cons_eq rfl (lt_cons_eq rfl (lt_cons_eq rfl (lt_cons_eq e1 (lt_cons_eq rfl
@@ -1056,14 +1100,14 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
   | mergeExisting M m _ h2 hM _ hpar he =>
     subst he
     rw [← rank_norm c σ]
-    have hcm : cm (mergeTo (norm σ) m) ≤ cm (norm σ) :=
+    have hcm : missingOperations (mergeTo (norm σ) m) ≤ missingOperations (norm σ) :=
       cnt_le fun _ _ ⟨ha, hl⟩ => ⟨ha, fun h => hl (Or.inl h)⟩
-    have hcs1 : cs1 (mergeTo (norm σ) m) ≤ cs1 (norm σ) :=
+    have hcs1 : unstagedOperations (mergeTo (norm σ) m) ≤ unstagedOperations (norm σ) :=
       cnt_le fun _ _ ⟨ha, hl, hs⟩ => ⟨ha, fun h => hl (Or.inl h), hs⟩
-    have hcs2 : cs2 (mergeTo (norm σ) m) ≤ cs2 (norm σ) :=
+    have hcs2 : missingObjects (mergeTo (norm σ) m) ≤ missingObjects (norm σ) :=
       cnt_le fun _ _ ⟨ha, hl, hs, ho⟩ => ⟨ha, fun h => hl (Or.inl h), hs, ho⟩
-    have hca : ca (mergeTo (norm σ) m) ≤ ca (norm σ) := by
-      unfold ca
+    have hca : uncoveredImages (mergeTo (norm σ) m) ≤ uncoveredImages (norm σ) := by
+      unfold uncoveredImages
       apply ind_mono
       intro hn hall
       apply hn
@@ -1071,7 +1115,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
       obtain ⟨y, hy, ha⟩ := hall i hi
       obtain ⟨z, hz, hyz⟩ := hM.cover y hy
       exact ⟨m, List.mem_singleton.2 rfl, Anc.step ((hpar z).2 hz) (ha.trans hyz)⟩
-    have hch : ch (mergeTo (norm σ) m) < ch (norm σ) := by
+    have hch : extraHeads (mergeTo (norm σ) m) < extraHeads (norm σ) := by
       show [m].length - 1 < σ.heads.length - 1
       simp only [List.length_singleton]
       omega
@@ -1081,8 +1125,8 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
   | prune x _ h2 hM he =>
     subst he
     rw [← rank_norm c σ]
-    have hca : ca (pruneTo (norm σ) x) ≤ ca (norm σ) := by
-      unfold ca
+    have hca : uncoveredImages (pruneTo (norm σ) x) ≤ uncoveredImages (norm σ) := by
+      unfold uncoveredImages
       apply ind_mono
       intro hn hall
       apply hn
@@ -1090,7 +1134,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
       obtain ⟨y, hy, hiy⟩ := hall i hi
       obtain ⟨z, hz, hyz⟩ := hM.cover y hy
       exact ⟨z, hz, hiy.trans hyz⟩
-    have hch : ch (pruneTo (norm σ) x) < ch (norm σ) := by
+    have hch : extraHeads (pruneTo (norm σ) x) < extraHeads (norm σ) := by
       show [x].length - 1 < σ.heads.length - 1
       simp only [List.length_singleton]
       omega
@@ -1102,7 +1146,7 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     rw [← rank_norm c σ]
     unfold rank
     refine lt_cons_eq rfl (lt_cons_eq rfl (lt_cons_eq rfl
-      (lt_cons (cm_realize_le _ _ _) fun _ => lt_hd ?_)))
+      (lt_cons (missingOperations_realize_le _ _ _) fun _ => lt_hd ?_)))
     show rest.length < σ.plan.length
     rw [hp]; exact Nat.lt_succ_self _
   | realizeSurvey x L _ _ _ _ hr he =>
@@ -1111,40 +1155,45 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     unfold rank
     have ha : Anc σ.par x σ.known.2 := Walk.anc hr.1
     exact lt_cons_eq rfl (lt_cons_eq rfl (lt_cons_eq rfl
-      (lt_hd (cm_realize_lt (σ := norm σ) L I.parLt ha hr.2.1))))
+      (lt_hd (missingOperations_realize_lt (σ := norm σ) L I.parLt ha hr.2.1))))
   | fetch σ1 _ _ _ _ _ hm hf ho =>
     rw [← rank_norm c σ]
-    have hO : ck c σ' = ck c σ1 ∧ cz c σ' = cz c σ1 ∧ cr c σ' = cr c σ1 ∧ cm σ' = cm σ1 ∧
-        σ'.plan = σ1.plan ∧ cs1 σ' = cs1 σ1 ∧ cs2 σ' ≤ cs2 σ1 ∧ ca σ' = ca σ1 ∧
-        ch σ' = ch σ1 ∧ cd c σ' = cd c σ1 := by
+    have objects : ObjectRankEffect c σ1 σ' := by
       rcases ho with ⟨-, O⟩ | ⟨-, he⟩
       · exact obj_cmp O
-      · subst he; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, Nat.le_refl _, rfl, rfl, rfl⟩
-    obtain ⟨k2, z2, r2, m2, p2, s2, -, -, -, -⟩ := hO
+      · subst he; exact ObjectRankEffect.refl c _
     by_cases hmo : MissOps σ
     · obtain ⟨-, F⟩ := hf.resolve_right fun h => h.1 hmo
       by_cases hk : σ.known = (c.S, c.H)
-      · obtain ⟨k1, z1, r1, m1, p1, -, -, -, -, -⟩ := fetched_cmp F hk
+      · have fetched := fetched_cmp F hk
         obtain ⟨x, hw, hlx, hsx⟩ := hmo
         have ha : Anc σ.par x σ.known.2 := Walk.anc hw
-        have hlt1 : cs1 σ1 < cs1 (norm σ) := fetched_lt I.norm F hk ha hlx hsx
+        have hlt1 : unstagedOperations σ1 < unstagedOperations (norm σ) := fetched_lt I.norm F hk ha hlx hsx
         unfold rank
-        exact lt_cons_eq (k2.trans k1) (lt_cons (by rw [z2, z1]; exact Nat.zero_le _)
-          fun _ => lt_cons_eq (r2.trans r1) (lt_cons_eq (m2.trans m1)
-            (lt_cons_eq (by rw [p2, p1]) (lt_hd (by rw [s2]; exact hlt1)))))
+        refine lt_cons_eq (objects.known.trans fetched.known) ?_
+        refine lt_cons (by rw [objects.announcement, fetched.announcement]; exact Nat.zero_le _)
+          fun _ => ?_
+        refine lt_cons_eq (objects.records.trans fetched.records) ?_
+        refine lt_cons_eq (objects.operations.trans fetched.operations) ?_
+        refine lt_cons_eq (by rw [objects.plan, fetched.plan]) ?_
+        exact lt_hd (by rw [objects.staged]; exact hlt1)
       · unfold rank
-        exact lt_hd (by rw [k2]; exact ck_drop hk F.known)
+        exact lt_hd (by rw [objects.known]; exact unknownHead_drop hk F.known)
     · have he1 : σ1 = norm σ := (hf.resolve_left fun h => hmo h.1).2
       subst he1
       have hmb : MissObjs σ := hm.resolve_left hmo
       obtain ⟨-, O⟩ := ho.resolve_right fun h => h.1 hmb
       obtain ⟨x, hw, hlx, hs, hb⟩ := hmb
       have ha : Anc σ.par x σ.known.2 := Walk.anc hw
-      have hlt2 : cs2 σ' < cs2 (norm σ) :=
+      have hlt2 : missingObjects σ' < missingObjects (norm σ) :=
         obj_lt O I.parLt ha hlx hs hb ⟨hw, hlx, hs, hb⟩
       unfold rank
-      exact lt_cons_eq k2 (lt_cons_eq z2 (lt_cons_eq r2 (lt_cons_eq m2
-        (lt_cons_eq (by rw [p2]) (lt_cons_eq s2 (lt_hd hlt2))))))
+      refine lt_cons_eq objects.known ?_
+      refine lt_cons_eq objects.announcement ?_
+      refine lt_cons_eq objects.records ?_
+      refine lt_cons_eq objects.operations ?_
+      refine lt_cons_eq (by rw [objects.plan]) ?_
+      exact lt_cons_eq objects.staged (lt_hd hlt2)
   | advanceTake A _ _ _ ha ht =>
     rw [← rank_norm c σ]
     exact rank_take (σ := norm σ) ha (normA_some ha).2 ht.known ht.ap ht.annc
@@ -1152,110 +1201,115 @@ theorem rank_busy {σ σ' : NS} (I : SInv c σ) (h : Busy c σ σ') :
     -- the write reuses the known head: restoring, the cache written
     rw [← rank_norm c σ]
     obtain ⟨hw0, hw1, hp1⟩ := write_known (σ := { norm σ with plan := [] }) I.knownLt hw hw' hnew
-    obtain ⟨wk, wa, wap, wh, wm, wp, ws1, ws2, wca, wch⟩ :=
-      write_cmp (I.norm.plan []) rfl h1 hw'
+    have written := write_cmp (I.norm.plan []) rfl h1 hw'
     by_cases hk : σ.known = (c.S, c.H)
-    · have hk1 : σ1.known = (c.S, c.H) := wk.trans hk
-      obtain ⟨k1, z1, r1, m1, p1, s1, s2, a1, h1', d1⟩ := fetched_cmp hr hk1
-      have hch0 : ch (norm σ) = 0 := ch_zero h1 I.headsNe
-      have hcw : cw σ' < cw (norm σ) := by
+    · have hk1 : σ1.known = (c.S, c.H) := written.known.trans hk
+      have fetched := fetched_cmp hr hk1
+      have hch0 : extraHeads (norm σ) = 0 := extraHeads_zero h1 I.headsNe
+      have hcw : unwrittenFixup σ' < unwrittenFixup (norm σ) := by
         show ind (σ'.written = false ∧ σ'.pending ≠ []) < ind (σ.written = false ∧ σ.pending ≠ [])
         rw [hr.written, hw1, ind_neg (fun h => by cases h.1), ind_pos ⟨hw0, hw⟩]
         exact Nat.zero_lt_one
       unfold rank
-      exact lt_cons_eq (k1.trans (by show ind (σ1.known ≠ _) = ind (σ.known ≠ _); rw [wk]; rfl))
-        (lt_cons (by rw [z1]; exact Nat.zero_le _) fun _ =>
-        lt_cons_eq (r1.trans (by show ind (σ1.ap ≠ c.R) = ind (σ.ap ≠ c.R); rw [wap]; rfl))
-        (lt_cons (by rw [m1]; exact wm) fun _ => lt_cons (by rw [p1, wp]; exact Nat.zero_le _)
-        fun _ => lt_cons (Nat.le_trans s1 ws1) fun he =>
-        lt_cons (Nat.le_trans (s2 (by
-          have h2 : cs1 σ1 ≤ cs1 (norm σ) := ws1
-          have := s1; omega)) ws2) fun _ =>
-        lt_cons (by rw [a1]; exact wca) fun _ =>
-        lt_cons_eq (h1'.trans (by rw [wch, hch0])) (lt_cons (by rw [d1]; exact Nat.zero_le _)
-          fun _ => lt_hd hcw)))
+      refine lt_cons_eq (fetched.known.trans (by
+        show ind (σ1.known ≠ _) = ind (σ.known ≠ _); rw [written.known]; rfl)) ?_
+      refine lt_cons (by rw [fetched.announcement]; exact Nat.zero_le _) fun _ => ?_
+      refine lt_cons_eq (fetched.records.trans (by
+        show ind (σ1.ap ≠ c.R) = ind (σ.ap ≠ c.R); rw [written.applied]; rfl)) ?_
+      refine lt_cons (by rw [fetched.operations]; exact written.operations) fun _ => ?_
+      refine lt_cons (by rw [fetched.plan, written.plan]; exact Nat.zero_le _) fun _ => ?_
+      refine lt_cons (Nat.le_trans fetched.staged written.staged) fun sameStaged => ?_
+      refine lt_cons (Nat.le_trans (fetched.objects (by
+        have stagedBefore : unstagedOperations σ1 ≤ unstagedOperations (norm σ) := written.staged
+        have := fetched.staged; omega)) written.objects) fun _ => ?_
+      refine lt_cons (by rw [fetched.images]; exact written.images) fun _ => ?_
+      refine lt_cons_eq (fetched.heads.trans (by rw [written.heads, hch0])) ?_
+      exact lt_cons (by rw [fetched.noted]; exact Nat.zero_le _) fun _ => lt_hd hcw
     · unfold rank
-      exact lt_hd (ck_drop hk hr.known)
+      exact lt_hd (unknownHead_drop hk hr.known)
   | advance _ h1 _ hd _ hv =>
     rw [← rank_norm c σ]
-    obtain ⟨fk, fa, fap, -, fi, -, -, -, -⟩ := hv.ext.fields
     obtain ⟨e1, e2, e3⟩ := counts_ext I.norm hv.ext
-    have hz : ca σ' = 0 := by
-      unfold ca
+    have hz : uncoveredImages σ' = 0 := by
+      unfold uncoveredImages
       apply ind_neg
       intro hn
       apply hn
-      rw [fi]
+      rw [hv.ext.img]
       exact hv.covers
-    have hone : ca (norm σ) = 1 := ca_one h1 I.headsNe hd
+    have hone : uncoveredImages (norm σ) = 1 := uncoveredImages_one h1 I.headsNe hd
     unfold rank
-    exact lt_cons_eq (ck_congr fk) (lt_cons_eq (cz_congr fa fap) (lt_cons_eq (cr_congr fap)
-      (lt_cons e1 fun _ => lt_cons (by rw [hv.plan]; exact Nat.zero_le _) fun _ =>
-        lt_cons e2 fun _ => lt_cons e3 fun _ =>
-          lt_hd (by rw [hz, hone]; exact Nat.zero_lt_one))))
+    refine lt_cons_eq (unknownHead_congr hv.ext.known) ?_
+    refine lt_cons_eq (oldAnnouncement_congr hv.ext.annc hv.ext.ap) ?_
+    refine lt_cons_eq (unappliedRecords_congr hv.ext.ap) ?_
+    refine lt_cons e1 fun _ => ?_
+    refine lt_cons (by rw [hv.plan]; exact Nat.zero_le _) fun _ => ?_
+    refine lt_cons e2 fun _ => ?_
+    refine lt_cons e3 fun _ => ?_
+    exact lt_hd (by rw [hz, hone]; exact Nat.zero_lt_one)
   | differPoll _ _ _ _ hf ha hr =>
     rw [← rank_norm c σ]
     by_cases hk : σ.known = (c.S, c.H)
-    · obtain ⟨k1, z1, r1, m1, p1, s1, s2, a1, h1', d1⟩ := fetched_cmp hr hk
+    · have fetched := fetched_cmp hr hk
       have hrec := I.recs hk
       have hne : c.R ≠ σ.ap := by simp only [Differ, hrec] at hf; exact hf
       have e1 : ind (σ.hubRecs ≠ some c.R) = 0 := ind_neg fun h => h hrec
       have e2 : ind (σ.ap ≠ c.R ∧ (norm σ).annc ≠ some c.R) = 1 :=
         ind_pos ⟨fun e => hne e.symm, by rw [ha]; intro h; cases h⟩
-      have hd0 : cd c (norm σ) = 1 := by
+      have hd0 : unnotedRecords c (norm σ) = 1 := by
         show ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ (norm σ).annc ≠ some c.R) = 1
         rw [e1, e2]
       unfold rank
-      exact lt_cons_eq k1 (lt_cons (by rw [z1]; exact Nat.zero_le _) fun _ =>
-        lt_cons_eq r1 (lt_cons_eq m1 (lt_cons (by rw [p1]; exact Nat.zero_le _) fun _ =>
-          lt_cons s1 fun he => lt_cons (s2 he) fun _ => lt_cons_eq a1 (lt_cons_eq h1'
-            (lt_hd (by rw [d1, hd0]; exact Nat.zero_lt_one))))))
+      refine lt_cons_eq fetched.known ?_
+      refine lt_cons (by rw [fetched.announcement]; exact Nat.zero_le _) fun _ => ?_
+      refine lt_cons_eq fetched.records ?_
+      refine lt_cons_eq fetched.operations ?_
+      refine lt_cons (by rw [fetched.plan]; exact Nat.zero_le _) fun _ => ?_
+      refine lt_cons fetched.staged fun sameStaged => ?_
+      refine lt_cons (fetched.objects sameStaged) fun _ => ?_
+      refine lt_cons_eq fetched.images ?_
+      refine lt_cons_eq fetched.heads ?_
+      exact lt_hd (by rw [fetched.noted, hd0]; exact Nat.zero_lt_one)
     · unfold rank
-      exact lt_hd (ck_drop hk hr.known)
+      exact lt_hd (unknownHead_drop hk hr.known)
   | pushStale σ1 _ _ h1 _ _ _ hf _ hk hw' _ hr =>
     rw [← rank_norm c σ]
     rcases hr with ⟨hap, he⟩ | ⟨-, F⟩
     · subst he
-      obtain ⟨wk, wa, wap, wh, wm, wp, ws1, ws2, wca, wch⟩ :=
-        write_cmp (I.norm.plan []) rfl h1 hw'
+      have written := write_cmp (I.norm.plan []) rfl h1 hw'
       have hub0 : σ.hubRecs ≠ some c.R := by
         intro h
         apply hf
         simp only [Differ, h]
         exact fun e => hap e.symm
-      have k' : ck c { σ1 with hubRecs := some c.R } = ck c (norm σ) := by
-        show ind (σ1.known ≠ _) = ind (σ.known ≠ _); rw [wk]; rfl
-      have z' : cz c { σ1 with hubRecs := some c.R } = cz c (norm σ) := by
+      have k' : unknownHead c { σ1 with hubRecs := some c.R } = unknownHead c (norm σ) := by
+        show ind (σ1.known ≠ _) = ind (σ.known ≠ _); rw [written.known]; rfl
+      have z' : oldAnnouncement c { σ1 with hubRecs := some c.R } = oldAnnouncement c (norm σ) := by
         show ind (∃ A, σ1.annc = some A ∧ A ≠ c.R ∧ A ≠ σ1.ap) =
           ind (∃ A, (norm σ).annc = some A ∧ A ≠ c.R ∧ A ≠ σ.ap)
-        rw [wa, wap]; rfl
-      have r' : cr c { σ1 with hubRecs := some c.R } = cr c (norm σ) := by
-        show ind (σ1.ap ≠ c.R) = ind (σ.ap ≠ c.R); rw [wap]; rfl
-      have hch0 : ch (norm σ) = 0 := ch_zero h1 I.headsNe
-      have d' : cd c { σ1 with hubRecs := some c.R } < cd c (norm σ) := by
+        rw [written.announcement, written.applied]; rfl
+      have r' : unappliedRecords c { σ1 with hubRecs := some c.R } = unappliedRecords c (norm σ) := by
+        show ind (σ1.ap ≠ c.R) = ind (σ.ap ≠ c.R); rw [written.applied]; rfl
+      have hch0 : extraHeads (norm σ) = 0 := extraHeads_zero h1 I.headsNe
+      have d' : unnotedRecords c { σ1 with hubRecs := some c.R } < unnotedRecords c (norm σ) := by
         show ind (some c.R ≠ some c.R) + ind (σ1.ap ≠ c.R ∧ σ1.annc ≠ some c.R) <
           ind (σ.hubRecs ≠ some c.R) + ind (σ.ap ≠ c.R ∧ (norm σ).annc ≠ some c.R)
-        rw [wa, wap, ind_neg (fun h => h rfl), ind_pos hub0]
+        rw [written.announcement, written.applied, ind_neg (fun h => h rfl), ind_pos hub0]
         show 0 + ind (σ.ap ≠ c.R ∧ (norm σ).annc ≠ some c.R) <
           1 + ind (σ.ap ≠ c.R ∧ (norm σ).annc ≠ some c.R)
         omega
       unfold rank
-      exact lt_cons_eq k' (lt_cons_eq z' (lt_cons_eq r' (lt_cons wm fun _ =>
-        lt_cons (by show σ1.plan.length ≤ _; rw [wp]; exact Nat.zero_le _) fun _ =>
-          lt_cons ws1 fun _ => lt_cons ws2 fun _ => lt_cons wca fun _ =>
-            lt_cons_eq (by show ch σ1 = ch (norm σ); rw [wch, hch0]) (lt_hd d'))))
+      exact lt_cons_eq k' (lt_cons_eq z' (lt_cons_eq r' (lt_cons written.operations fun _ =>
+        lt_cons (by show σ1.plan.length ≤ _; rw [written.plan]; exact Nat.zero_le _) fun _ =>
+          lt_cons written.staged fun _ => lt_cons written.objects fun _ => lt_cons written.images fun _ =>
+            lt_cons_eq (by show extraHeads σ1 = extraHeads (norm σ); rw [written.heads, hch0]) (lt_hd d'))))
     · unfold rank
-      exact lt_hd (ck_drop hk F.known)
+      exact lt_hd (unknownHead_drop hk F.known)
 
 theorem rank_idle {σ σ' : NS} (h : Idle c σ σ') : LexLe (rank c σ') (rank c σ) := by
   rw [← rank_norm c σ]
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact Or.inr rfl
-  | differIdle _ _ _ _ _ _ _ he =>
-    subst he
-    unfold rank
-    exact le_cons_eq rfl (le_cons_eq rfl (le_cons_eq rfl (le_cons_eq rfl
-      (le_cons (Nat.zero_le _) fun _ => Or.inr rfl))))
   | goal _ _ _ _ _ _ _ _ he =>
     subst he
     unfold rank
@@ -1266,15 +1320,21 @@ theorem rank_start {σ σ1 : NS} (F : FetchedRep c σ σ1) :
     LexLe (rank c { σ1 with act := true }) (rank c σ) := by
   rw [show rank c { σ1 with act := true } = rank c σ1 from rfl]
   by_cases hk : σ.known = (c.S, c.H)
-  · obtain ⟨k1, z1, r1, m1, p1, s1, s2, a1, h1, d1⟩ := fetched_cmp F hk
+  · have fetched := fetched_cmp F hk
     unfold rank
-    exact le_cons_eq k1 (le_cons (by rw [z1]; exact Nat.zero_le _) fun _ =>
-      le_cons_eq r1 (le_cons_eq m1 (le_cons_eq (by rw [p1])
-        (le_cons s1 fun he => le_cons (s2 he) fun _ => le_cons_eq a1 (le_cons_eq h1
-          (le_cons (by rw [d1]; exact Nat.zero_le _) fun _ =>
-            Or.inr (by rw [cw_congr F.written F.pending])))))))
+    refine le_cons_eq fetched.known ?_
+    refine le_cons (by rw [fetched.announcement]; exact Nat.zero_le _) fun _ => ?_
+    refine le_cons_eq fetched.records ?_
+    refine le_cons_eq fetched.operations ?_
+    refine le_cons_eq (by rw [fetched.plan]) ?_
+    refine le_cons fetched.staged fun sameStaged => ?_
+    refine le_cons (fetched.objects sameStaged) fun _ => ?_
+    refine le_cons_eq fetched.images ?_
+    refine le_cons_eq fetched.heads ?_
+    exact le_cons (by rw [fetched.noted]; exact Nat.zero_le _) fun _ =>
+      Or.inr (by rw [unwrittenFixup_congr F.written F.pending])
   · unfold rank
-    exact LexLt.le (lt_hd (ck_drop hk F.known))
+    exact LexLt.le (lt_hd (unknownHead_drop hk F.known))
 
 theorem rank_notify {σ σ' : NS} (I : SInv c σ) (F : HeadRep c σ σ') :
     LexLe (rank c σ') (rank c σ) := by
@@ -1282,20 +1342,20 @@ theorem rank_notify {σ σ' : NS} (I : SInv c σ) (F : HeadRep c σ σ') :
   · have hK : σ'.known = σ.known := F.known.trans hk.symm
     obtain ⟨hp, hi⟩ := F.same hk
     refine Or.inr ?_
-    unfold rank ck cz cr cm cs1 cs2 ca ch cd cw
+    unfold rank unknownHead oldAnnouncement unappliedRecords missingOperations unstagedOperations
+      missingObjects uncoveredImages extraHeads unnotedRecords unwrittenFixup
     rw [hK, F.annc, F.ap, F.par, F.loc, F.stg, F.obj, hp, hi, F.heads, F.hubRecs, I.recs hk,
       F.written, F.pending]
   · unfold rank
-    exact LexLt.le (lt_hd (ck_drop hk F.known))
+    exact LexLt.le (lt_hd (unknownHead_drop hk F.known))
 
 theorem idle_act {σ σ' : NS} (h : Idle c σ σ') : σ'.act = false := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; rfl
-  | differIdle _ _ _ _ _ _ _ he => subst he; rfl
   | goal _ _ _ _ _ _ _ _ he => subst he; rfl
 
-/-- Every event but an emitted push keeps the invariant and never raises the rank; a busy
-step lowers it. -/
+/-- Outside emitted pushes and maintenance writes, events keep the invariant and never
+raise the rank; a busy step lowers it. -/
 theorem ev_ok {σ σ' : NS} {l : Lab} (I : SInv c σ) (h : Ev c l σ σ') (hl : l ≠ .emit)
     (hm : l ≠ .maint) :
     SInv c σ' ∧ LexLe (rank c σ') (rank c σ) ∧
@@ -1347,7 +1407,6 @@ theorem good_norm {σ : NS} (hg : Good c σ) (L : List Nat) (b : Bool) :
 theorem good_idle {σ σ' : NS} (hg : Good c σ) (h : Idle c σ σ') : Good c σ' := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact good_norm hg σ.plan false
-  | differIdle _ _ _ _ _ _ _ he => subst he; exact good_norm hg [] false
   | goal _ _ _ _ _ _ _ _ he => subst he; exact good_norm hg [] false
 
 theorem good_ev {σ σ' : NS} {l : Lab} (hg : Good c σ) (h : Ev c l σ σ') (hb : l ≠ .busy)
@@ -1358,8 +1417,7 @@ theorem good_ev {σ σ' : NS} {l : Lab} (hg : Good c σ) (h : Ev c l σ σ') (hb
   | idle _ h => exact good_idle hg h
   | maint _ h hw =>
     have g1 := good_idle hg h
-    obtain ⟨fk, fa, -, -, -, -, -, -, -⟩ := hw.fields
-    exact ⟨fk.trans g1.1, by rw [fa]; exact g1.2⟩
+    exact ⟨hw.known.trans g1.1, by rw [hw.annc]; exact g1.2⟩
   | start _ F he =>
     subst he
     refine ⟨F.known, ?_⟩
@@ -1370,7 +1428,7 @@ theorem good_ev {σ σ' : NS} {l : Lab} (hg : Good c σ) (h : Ev c l σ σ') (hb
   | frame => exact hg
 
 /-- An `Idle` once the node knows the hub's head, with no older announcement, is the goal:
-survey completeness rules out idling with the known head not local, and the repaired advance
+survey completeness rules out idling with the known head not local, and the advance rule excludes
 idling while a prepared adoption is blocked. -/
 theorem idle_settled {σ σ' : NS} (I : SInv c σ) (hg : Good c σ) (h : Idle c σ σ') :
     Settled c σ' := by
@@ -1381,7 +1439,6 @@ theorem idle_settled {σ σ' : NS} (I : SInv c σ) (hg : Good c σ) (h : Idle c 
     · exact absurd h hr
     · exact absurd h ho
     · exact absurd h hb
-  | differIdle _ _ _ _ _ hnr ha _ => exact absurd hnr ha
   | goal _ _ hl hd _ hf hp hh he =>
     subst he
     have hrec := I.recs hk
@@ -1394,8 +1451,16 @@ theorem idle_settled {σ σ' : NS} (I : SInv c σ) (hg : Good c σ) (h : Idle c 
     obtain ⟨y, hy, hdes⟩ := hd
     rw [hh, List.mem_singleton] at hy
     subst hy
-    refine ⟨hk, hap, hrec, hp, by show σ.heads = [c.H]; rw [hh, hk], by rw [hk] at hl; exact hl,
-      by rw [hk] at hdes; exact hdes, ?_⟩
+    refine {
+      known := hk
+      applied := hap
+      hubRecords := hrec
+      pending := hp
+      heads := by show σ.heads = [c.H]; rw [hh, hk]
+      localHead := by rw [hk] at hl; exact hl
+      imagesBelow := by rw [hk] at hdes; exact hdes
+      announcement := ?_
+    }
     left
     show normA σ.annc σ.ap = none
     rcases hann with h | h <;> rw [h]
@@ -1439,7 +1504,6 @@ theorem settled_ev {σ σ' : NS} {l : Lab} (hs : Settled c σ) (h : Ev c l σ σ
   | idle _ h =>
     cases h with
     | fetchIdle _ _ hl' _ _ _ _ _ => exact absurd hloc hl'
-    | differIdle _ _ _ _ hf _ _ _ => exact absurd hf notDiffer
     | goal _ _ _ _ _ _ _ _ he =>
       subst he
       refine ⟨hk, hap, hrec, hp, hh, hl, hd, ?_⟩
@@ -1630,7 +1694,8 @@ theorem node_settles (c : Ctx) (run : Nat → NS) (lab : Nat → Lab) (k0 : Nat)
 - `hev`: every event is one of `Ev`'s. This is where the hub's stability enters: every reply
   carries `(S, H, R)` (HubSuffix and the record cut), the node's knowledge is truthful
   (`hub_went_back` never fires), and there are no user operations, abandonments, crashes or
-  maintenance writes.
+  arbitrary external writes. Maintenance remains an allowed `Ev.maint` event.
+- `hmaint`: maintenance writes eventually stop; they need not have stopped at `k0`.
 - `h0`: `SInv` at `k0`.
 - `hstart`, `hcore`: a round starts whenever none is running, and a running round's next step
   happens, its calls completing. Nothing says a round ends; that is derived.
@@ -1645,21 +1710,22 @@ records, not to a projection of versions onto originals:
 - `Take`: `adopt`, or `advance` while records are prepared, applies them.
 - `Take` also keeps the core's plan, as `adopt` does; it may forget staging and rename the rest.
 - `Ext`, `Adv`: `advance_to` makes the op heads cover what stands for the known head, adding
-  only fresh operations (a realization's merge with concurrent heads).
+  operations that are fresh or already held, preserving existing parents and locality.
 - `WriteRes`, `FreshOn`: `write_fixup(publish_from)` publishes what `Publication.write` says,
   as a chain on the single head: the restoring fix-up while it isn't written, else a neutral tip
   when the head is the known head (`write_drop_tip`, the same exact id, with no concurrent
   command), else nothing. The chain is new, or identical to operations the node holds already
   (no nonce), taking no new label. The new head is the known one only when the restoring fix-up
   is identical to it (`write_known`, from `publication_progress`): the branch that polls instead
-  (`writePoll`), whose write sets the cache, lowering the rank's last component (`cw`). A write
+  (`writePoll`), whose write sets the cache, lowering the rank's last component
+  (`unwrittenFixup`). A write
   only makes operations local (`Ext.locOld`), a reused chain included. OBLIGATION: before it
-  decides, `write_fixup_until` runs `repair_received_work` (supersede.rs), which, for received
-  work whose operations the pending records removed, may rewrite the fix-up and clear
+  decides, `write_fixup_until` runs `repair_received_work` (`node/supersede/fixup.rs`). For received
+  work whose operations the pending records removed, this may rewrite the fix-up and clear
   `fixup_written`, a new restoring obligation. `WriteRes` reads the cache as it was, taking no
   such repair: a correspondence obligation past the input cut (received work being finite
   input), vacuous with no pending drops (it returns at once), as in the fine tail. Before that,
-  a repair would raise `cw` with no other component falling.
+  a repair would raise `unwrittenFixup` with no other component falling.
 - `realize` makes a freshly surveyed ready operation local, and the front of a plan kept from
   before an adoption too, once failed calls have stopped. A failed call, a stale plan entry the
   records taken since rename or drop, ends `driver.sync` in an error, which reopens the node and
@@ -1670,8 +1736,10 @@ records, not to a projection of versions onto originals:
 
 Not given here: that the stable hub accepts what `Emit` sends, which root's packet coupling
 and the hub's guards give, and which contradicts its stability; so the composition takes the
-right disjunct. Nor that every node is eligible: the composition argues that a node not
-aligned with `R` must adopt it (`Take` drops `cr` or `cz`), which the common node cut forbids.
+right disjunct. Eligibility is a separate condition about dropped originals, rather than
+applied-record identity. Once the hub is stable, `SysAcceptance.all_eligible` uses the native
+pending-round laws: an ineligible node would force a push whose handling moves the stable hub,
+contradicting stability (`PendingLaws.absurd`).
 -/
 
 end Musubi.NodeSettle

@@ -85,23 +85,24 @@ open Musubi
 #print axioms Musubi.terminal_iff_of_progress
 
 #print axioms NativeEvents.nodeOK_of_filt
-#print axioms NativeEvents.BoundEvent.step
-#print axioms NativeEvents.Event.bound
+#print axioms NativeEvents.Event.step
 #print axioms NativeEvents.Event.removed_eligible_push
 #print axioms NativeEvents.observed_invariants
 #print axioms NativeEvents.observed_hs
 #print axioms NativeEvents.observed_decisions
+#print axioms NativeEvents.RecordView.mono
 #print axioms NativeEvents.RecordView.applied_current
 #print axioms NativeEvents.RecordView.pending_empty
 #print axioms NativeEvents.RecordView.applied_stays
+#print axioms FineAssembly.Honest.extend
 #print axioms FineAssembly.honest_step
 #print axioms FineAssembly.honest_run
 #print axioms FineAssembly.notice_mem
 #print axioms FineAssembly.FineSource.steps
 #print axioms FineAssembly.fineAt_of
-#print axioms FineAssembly.recordView_mono
-#print axioms FineAssembly.sched_le
-#print axioms FineAssembly.later_event
+#print axioms Schedule.index_le
+#print axioms Schedule.monotone
+#print axioms Schedule.before_of_done_before
 #print axioms FineAssembly.hive_converges_observed
 
 #print axioms Exec.cexec_sound
@@ -187,6 +188,7 @@ open Musubi
 #print axioms SysAcceptance.no_forever_pending
 #print axioms SysAcceptance.PendingLaws.absurd
 #print axioms SysAcceptance.old_effects_stop
+#print axioms SysAcceptance.known_after
 #print axioms SysAcceptance.known_truthful
 #print axioms SysAcceptance.knows_stable_head
 #print axioms SysAcceptance.hive_converges
@@ -205,12 +207,13 @@ open Musubi
 #print axioms Recovery.raw_pending_empty_of_fixed_records
 #print axioms Recovery.raw_noneligible_answer_frame
 #print axioms Exec.record_and_drop_sets_stabilize
+#print axioms NodeSys.SysStep.nonanswer_effect
+#print axioms NodeSys.SysStep.answer_effect
 #print axioms NodeSysEntry.filt_step
 #print axioms NodeSysEntry.filt_run_from
 #print axioms NodeSysEntry.runOK_filt_init
 #print axioms Recovery.HubSys.hive_filtered
 #print axioms Recovery.HubSys.hub_stabilizes_hive
-#print axioms SysAcceptance.eligible_hive_converges
 #print axioms Exec.current_pruned_reply_reconstructs
 #print axioms Exec.fresh_record_reply_completes
 #print axioms Exec.serialized_record_reply_completes
@@ -661,3 +664,20 @@ open Musubi
 #print axioms NativeLifecycle.preparationProbe_source_routes
 #print axioms Musubi.Exec.Json.encodeNet_eq_reference
 #print axioms Musubi.Exec.Json.encodeNet_compress_eq_reference
+
+-- Integration phase boundaries and request guards are derived without additional axioms.
+#print axioms Musubi.SysAcceptance.CutAt.mono
+#print axioms Musubi.SysAcceptance.record_control_stabilizes
+#print axioms Musubi.SysAcceptance.object_failures_stop
+#print axioms Musubi.SysAcceptance.recovering_reopens_stop
+#print axioms Musubi.SysAcceptance.entry_phase
+#print axioms Musubi.SysAcceptance.entered_phase
+#print axioms Musubi.SysAcceptance.fine_cut
+#print axioms Musubi.SysAcceptance.honest_latched_known
+#print axioms Musubi.SysAcceptance.all_eligible
+
+#print axioms Musubi.NodeSys.nodeOK_issue
+
+#print axioms Musubi.NodeSys.Issue.start_iff_inactive
+#print axioms Musubi.NodeSys.Fair.reaches_start
+#print axioms Musubi.NodeSys.Fair.reaches_core

@@ -51,113 +51,6 @@ def foreignAfter (g : Sys) (n : Nat) (node : NodeC) (next' : Nat) (par' : Nat �
     reqs := g.reqs ++ calls
     time := g.time + 1 }
 
-/-- One observed native event. Constructors bind the actual state after the event to its
-data; semantic decisions are per-call laws, not convergence or a decreasing-rank premise.
-Hub storage writes are exposed as their own structural event before the push decision. -/
-inductive BoundEvent (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw)
-    (E : Nat → Prop) (old : List Req) : Act → Sys → Sys → Prop
-  | issue {g : Sys} (e : NodeIssue) (next' slot' : Nat) (par' : Nat → List Nat)
-      (hE : E e.node) (B : e.Binds D law g next' par' slot') :
-      BoundEvent N D law E old (.issue e.node e.kind) g (e.apply g next' par' slot')
-  | handle {g : Sys} (e : NodeHandle) (w : Wait) (reps' : List Rep)
-      (hE : E e.node) (B : e.Binds D g w reps') :
-      BoundEvent N D law E old (.handle e.node) g (e.apply g reps')
-  | busy {g : Sys} (e : NodeCore) (next' : Nat) (par' : Nat → List Nat)
-      (hE : E e.node) (B : e.Binds D g next' par') :
-      BoundEvent N D law E old (.core e.node .busy) g (e.apply g next' par' (g.node e.node).gen)
-  | idle {g : Sys} (e : NodeCore) (hE : E e.node) (B : e.IdleBinds D g) :
-      BoundEvent N D law E old (.core e.node .idle) g
-        (e.apply g g.next g.par (g.node e.node).gen)
-  | maint {g : Sys} (e : NodeCore) (σ1 : NS) (next' : Nat) (par' : Nat → List Nat)
-      (hE : E e.node) (B : e.MaintBinds D g σ1 next' par') :
-      BoundEvent N D law E old (.core e.node .maint) g (e.apply g next' par'
-        ((g.node e.node).gen + (e.after.next - (g.node e.node).ns.next)))
-  | notice {g : Sys} (e : NodeNotice) (hE : E e.node) (B : e.Binds D g) :
-      BoundEvent N D law E old (.notice e.node e.note) g (e.apply g)
-  | ignore {g : Sys} (n : Nat) (nt : Note) (hE : E n)
-      (hw : (g.node n).wait = none) (ha : (g.node n).ns.act = false)
-      (hin : nt ∈ g.notes) (hown : nt.node = n)
-      (hold : nt.snap.seq < (g.node n).ns.known.1 ∨
-        (nt.snap.seq = (g.node n).ns.known.1 ∧
-          (g.node n).emb (g.node n).ns.known.2 ≠ nt.snap.head)) :
-      BoundEvent N D law E old (.ignore n) g
-        { g with notes := g.notes.erase nt, time := g.time + 1 }
-  | read {g g' : Sys} (e : HubAnswer) (ans : Ans)
-      (B : e.Binds g g' ans) (hkeep : E e.req.node ∨ e.req ∈ old)
-      (hread : (e.req.body = .fetch ∧ ans = .fetched e.snap) ∨
-        (e.req.body = .objs ∧ ans = .objects)) : BoundEvent N D law E old .answer g g'
-  | push {g : Sys} (r : Req) (p : Pkt) (c : RawPublish.Checks)
-      (hr : r ∈ g.reqs) (hb : r.body = .push p) (hkeep : E r.node ∨ r ∈ old)
-      (hrec : c.recordsMatch = true ↔ p.recs = g.hub.recs)
-      (hdrop : c.dropped = true ↔ law.dropped g.hub.recs p)
-      (hclosed : c.recordsMatch = true → c.dropped = false → p.new ≠ g.hub.head →
-        g.hub.head = p.expected → c.closed = true)
-      (hacc : RawPublish.answer ⟨g.hub.seq, g.hub.head⟩ ⟨p.expected, p.new, p.pending⟩ c =
-        .accepted ↔ law.accepts g.hub g.par p) :
-      BoundEvent N D law E old .answer g (pushAfter N law g r p
-        (RawPublish.answer ⟨g.hub.seq, g.hub.head⟩ ⟨p.expected, p.new, p.pending⟩ c))
-  | store {g : Sys} (next' : Nat) (par' : Nat → List Nat) (hn : g.next ≤ next')
-      (hpar : ∀ y, y < g.next → par' y = g.par y) :
-      BoundEvent N D law E old .env g (HubAnswer.stored g next' par')
-  | foreign {g : Sys} (n : Nat) (node : NodeC) (next' : Nat) (par' : Nat → List Nat)
-      (calls : List Req) (hn : ¬ E n)
-      (hgrow : NodeSys.Exec.growB
-        (NodeSys.Exec.observe g (g.node n).ns (g.node n).emb)
-        (NodeSys.Exec.observe (foreignAfter g n node next' par' calls) node.ns node.emb) = true)
-      (hcalls : ∀ q ∈ calls, q.node = n ∧ q ∉ old) :
-      BoundEvent N D law E old .env g (foreignAfter g n node next' par' calls)
-  | foreignAnswer {g : Sys} (r : Req) (rep : Rep) (after : Snap) (hr : r ∈ g.reqs)
-      (hn : ¬ E r.node) (hold : r ∉ old)
-      (hrep : rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body)
-      (hframe : after = g.hub) :
-      BoundEvent N D law E old .env g { g with
-        hub := after, reqs := g.reqs.erase r, reps := g.reps ++ [rep], time := g.time + 1 }
-
-/-- Every event gives its system step once the eligible nodes' current invariants are
-available. Those invariants are derived inductively by `run`, not supplied event by event. -/
-theorem BoundEvent.step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
-    {a : Act} {g g' : Sys} (e : BoundEvent N D law E old a g g')
-    (K : ∀ n, E n → NodeSys.NodeOK D n g) : HiveStep N D law E old a g g' := by
-  cases e with
-  | issue e nx sl par hE B => exact NodeIssue.hive_step hE B
-  | handle e w reps hE B => exact NodeHandle.hive_step hE (K e.node hE) B
-  | busy e nx par hE B => exact .node e.node hE rfl (NodeCore.busy_step B)
-  | idle e hE B => exact .node e.node hE rfl (NodeCore.idle_step B)
-  | maint e s nx par hE B => exact .node e.node hE rfl (NodeCore.maint_step B)
-  | notice e hE B => exact .node e.node hE rfl (NodeNotice.step (K e.node hE) B)
-  | ignore n nt hE hw ha hin hown hold =>
-    exact .node n hE rfl (NodeNotice.ignore_step hw ha hin hown hold)
-  | read e ans B hk hd =>
-    apply (HubAnswer.hive_step (B := B) ?_).1 hk
-    rcases hd with ⟨hb, rfl⟩ | ⟨hb, rfl⟩
-    · exact HubAnswer.fetch_step hb B
-    · exact HubAnswer.objects_step hb B
-  | push r p c hr hb hk hrec hdrop hclosed hacc =>
-    apply HiveStep.answer (HubAnswer.push_step hr hb hrec hdrop hclosed hacc).2
-    intro rep hrep
-    have he : rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body := by
-      unfold pushAfter at hrep
-      split at hrep
-      · have he := List.append_cancel_left (as := g.reps) hrep
-        simp only [List.cons.injEq, and_true] at he
-        subst he
-        exact ⟨rfl, rfl, rfl⟩
-      · split at hrep <;>
-          have he := List.append_cancel_left (as := g.reps) hrep <;>
-          simp only [List.cons.injEq, and_true] at he <;> subst he <;> exact ⟨rfl, rfl, rfl⟩
-    rcases hk with hk | hk
-    · exact Or.inl (he.1 ▸ hk)
-    · exact Or.inr (by simpa only [he.1, he.2.1, he.2.2] using hk)
-  | store nx par hn hp => exact .env (HubAnswer.store_step hn hp)
-  | foreign n node nx par calls hn hg hc =>
-    have G := NodeSys.Exec.growB_sound hg
-    refine .raw n hn calls ⟨G.rawGrows, G.parRaw⟩ ?_ rfl hc ⟨rfl, rfl, rfl, rfl⟩ rfl
-    intro m hm
-    exact upd_ne _ _ (fun h => hn (h ▸ hm))
-  | foreignAnswer r rep after hr hn hold hm hf =>
-    subst after
-    exact .answerRaw r hr hn hold rep hm rfl rfl rfl ⟨rfl, rfl, rfl, rfl, rfl⟩ rfl
-
 /-- Event data, independent of a proof that a native call obeys its boundary contract. -/
 inductive Event where
   | issue (data : NodeIssue) (next' slot' : Nat) (par' : Nat → List Nat)
@@ -238,30 +131,61 @@ def Event.Binds (e : Event) (N : Nat) (D : Nat → Nat → Nat → Prop) (law : 
   | .foreignAnswer r rep after => r ∈ g.reqs ∧ ¬ E r.node ∧ r ∉ old ∧
     (rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body) ∧ after = g.hub
 
-/-- These exact data bindings supply the corresponding per-call constructor. -/
-theorem Event.bound {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
-    {e : Event} {g : Sys} (B : e.Binds N D law E old g) :
-    BoundEvent N D law E old e.act g (e.apply N law g) := by
+/-- The event's exact bindings and the eligible nodes' current invariants give its system
+step. Replay derives those invariants inductively, rather than assuming them per event. -/
+theorem Event.step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
+    {e : Event} {g : Sys} (B : e.Binds N D law E old g)
+    (K : ∀ n, E n → NodeSys.NodeOK D n g) :
+    HiveStep N D law E old e.act g (e.apply N law g) := by
   cases e with
-  | issue data nx sl par => exact .issue data nx sl par B.1 B.2
+  | issue data nx sl par => exact NodeIssue.hive_step B.1 B.2
   | handle data rs =>
-    obtain ⟨hE, w, B⟩ := B
-    exact .handle data w rs hE B
-  | busy data nx par => exact .busy data nx par B.1 B.2
-  | idle data => exact .idle data B.1 B.2
+    obtain ⟨eligible, wait, binds⟩ := B
+    exact NodeHandle.hive_step eligible (K data.node eligible) binds
+  | busy data nx par => exact .node data.node B.1 rfl (NodeCore.busy_step B.2)
+  | idle data => exact .node data.node B.1 rfl (NodeCore.idle_step B.2)
   | maint data nx par =>
-    obtain ⟨hE, σ1, B⟩ := B
-    exact .maint data σ1 nx par hE B
-  | notice data => exact .notice data B.1 B.2
-  | ignore n nt => exact .ignore n nt B.1 B.2.1 B.2.2.1 B.2.2.2.1 B.2.2.2.2.1 B.2.2.2.2.2
-  | read data ans => exact .read data ans B.1 B.2.1 B.2.2
+    obtain ⟨eligible, intermediate, binds⟩ := B
+    exact .node data.node eligible rfl (NodeCore.maint_step binds)
+  | notice data => exact .node data.node B.1 rfl (NodeNotice.step (K data.node B.1) B.2)
+  | ignore n nt =>
+    obtain ⟨eligible, notWaiting, inactive, inFlight, own, stale⟩ := B
+    exact .node n eligible rfl (NodeNotice.ignore_step notWaiting inactive inFlight own stale)
+  | read data ans =>
+    apply (HubAnswer.hive_step (B := B.1) ?_).1 B.2.1
+    rcases B.2.2 with ⟨request, rfl⟩ | ⟨request, rfl⟩
+    · exact HubAnswer.fetch_step request B.1
+    · exact HubAnswer.objects_step request B.1
   | push r p c =>
-    obtain ⟨hr, hb, hk, hrec, hd, hc, ha⟩ := B
-    exact .push r p c hr hb hk hrec hd hc ha
-  | store nx par => exact .store nx par B.1 B.2
-  | foreign n node nx par calls => exact .foreign n node nx par calls B.1 B.2.1 B.2.2
+    obtain ⟨inFlight, packet, kept, records, dropped, closed, accepts⟩ := B
+    apply HiveStep.answer (HubAnswer.push_step inFlight packet records dropped closed accepts).2
+    intro rep appended
+    have corresponds : rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body := by
+      change (pushAfter N law g r p _).reps = g.reps ++ [rep] at appended
+      unfold pushAfter at appended
+      split at appended
+      · have same := List.append_cancel_left (as := g.reps) appended
+        simp only [List.cons.injEq, and_true] at same
+        subst same
+        exact ⟨rfl, rfl, rfl⟩
+      · split at appended <;>
+          have same := List.append_cancel_left (as := g.reps) appended <;>
+          simp only [List.cons.injEq, and_true] at same <;> subst same <;> exact ⟨rfl, rfl, rfl⟩
+    rcases kept with eligible | oldRequest
+    · exact Or.inl (corresponds.1 ▸ eligible)
+    · exact Or.inr (by simpa only [corresponds.1, corresponds.2.1, corresponds.2.2] using oldRequest)
+  | store nx par => exact .env (HubAnswer.store_step B.1 B.2)
+  | foreign n node nx par calls =>
+    obtain ⟨foreignNode, grows, callsOwn⟩ := B
+    have growth := NodeSys.Exec.growB_sound grows
+    refine .raw n foreignNode calls ⟨growth.rawGrows, growth.parRaw⟩ ?_ rfl callsOwn
+      ⟨rfl, rfl, rfl, rfl⟩ rfl
+    intro m eligible
+    exact upd_ne _ _ (fun same => foreignNode (same ▸ eligible))
   | foreignAnswer r rep after =>
-    exact .foreignAnswer r rep after B.1 B.2.1 B.2.2.1 B.2.2.2.1 B.2.2.2.2
+    obtain ⟨inFlight, foreignNode, fresh, corresponds, rfl⟩ := B
+    exact .answerRaw r inFlight foreignNode fresh rep corresponds rfl rfl rfl
+      ⟨rfl, rfl, rfl, rfl, rfl⟩ rfl
 
 /-- Removing a request by one list erasure identifies that exact request. -/
 theorem removed_by_erase {q r : Req} {requests : List Req} (hq : q ∈ requests)
@@ -330,7 +254,7 @@ theorem observed_invariants {N : Nat} {D : Nat → Nat → Nat → Prop} {law : 
   induction i with
   | zero => exact h0
   | succ i ih =>
-    have hs := BoundEvent.step (Event.bound (hb i))
+    have hs := Event.step (hb i)
       (fun n hn => nodeOK_of_filt hn (ih n).node)
     exact fun n => runOK_step (ih n) (filt_step hs)
 
@@ -343,7 +267,7 @@ theorem observed_hs {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     ∀ i, HiveStep N D law E old (events i).act (observedRun N law initial events i)
       (observedRun N law initial events (i + 1)) := by
   intro i
-  exact BoundEvent.step (Event.bound (hb i)) (fun n hn =>
+  exact Event.step (hb i) (fun n hn =>
     nodeOK_of_filt hn (observed_invariants initial events frozen h0 hb i n).node)
 
 omit [DecidablePred E] in
@@ -376,6 +300,16 @@ structure RecordView {ρ α : Type} (N k : Nat) (run : Nat → Sys)
   records : ∀ n i, n < N → k ≤ i → (recs i).appliedF n = decode ((run i).node n).ns.ap
   custody : ∀ n i, n < N → k ≤ i →
     Recovery.PendingOriginals (recs i) n ((run i).node n).ns (origin n i)
+
+/-- The record view's bindings hold from any later time too. -/
+theorem RecordView.mono {ρ α : Type} {N k k' : Nat} {run : Nat → Sys}
+    {recs : Nat → Exec.SEState} {O : HiveObs ρ α} {label : ρ → Nat}
+    {decode : Nat → List Exec.Rec} {origin : Nat → Nat → Nat → Nat}
+    (V : RecordView N k run recs O label decode origin) (h : k ≤ k') :
+    RecordView N k' run recs O label decode origin where
+  applied := fun n i hn hi => V.applied n i hn (by omega)
+  records := fun n i hn hi => V.records n i hn (by omega)
+  custody := fun n i hn hi => V.custody n i hn (by omega)
 
 /-- Raw entry fixes the fine node's applied identity too, through the shared native view. -/
 theorem RecordView.applied_current {ρ α : Type} {N k : Nat} {run : Nat → Sys}

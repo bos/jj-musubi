@@ -60,49 +60,20 @@ theorem timeOK_of (T : TimeOK g) (ht : g'.time = g.time + 1)
     · omega
 
 theorem timeOK_step (T : TimeOK g) (hs : SysStep N D law a g g') : TimeOK g' := by
-  cases hs with
-  | busy _ _ _ _ _ _ _ _ hq ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hq.reps] at h; exact h))
-      (fun x h => Or.inl (by rw [hq.notes] at h; exact h))
-  | idle _ _ _ _ _ _ _ hq ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hq.reps] at h; exact h))
-      (fun x h => Or.inl (by rw [hq.notes] at h; exact h))
-  | maint _ _ _ _ _ _ _ _ _ _ hq ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hq.reps] at h; exact h))
-      (fun x h => Or.inl (by rw [hq.notes] at h; exact h))
-  | issue _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest ht _ =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hrest.2.1] at h; exact h))
-      (fun x h => Or.inl (by rw [hrest.2.2] at h; exact h))
-  | answer r ans _ _ acc hans hreps _ ht =>
-    refine timeOK_of T ht (fun x h => ?_) (fun x h => ?_)
-    · rw [hreps, List.mem_append, List.mem_singleton] at h
-      rcases h with h | rfl
-      · exact Or.inl h
-      · exact Or.inr rfl
-    · have hn : g'.notes = g.notes ∨
-          g'.notes = g.notes ++ (List.range N).map (fun m => ⟨m, g.time, g'.hub⟩) := by
-        rcases hans with ⟨-, -, -, -, hn⟩ | ⟨-, -, -, -, hn⟩ |
-          ⟨p, -, ⟨-, -, -, -, hn⟩ | ⟨-, -, -, -, -, hn⟩ | ⟨-, -, -, -, -, hn⟩⟩
-        all_goals first | exact Or.inl hn | exact Or.inr hn
-      rcases hn with hn | hn <;> rw [hn] at h
-      · exact Or.inl h
-      · rw [List.mem_append] at h
-        rcases h with h | h
-        · exact Or.inl h
-        · obtain ⟨m, -, rfl⟩ := List.mem_map.1 h
-          exact Or.inr rfl
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hreps hrest ht =>
-    exact timeOK_of T ht (fun r h => Or.inl ((hreps r).1 h).1)
-      (fun x h => Or.inl (by rw [hrest.2.2.1] at h; exact h))
-  | notice _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hnotes hrest ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hrest.2.2.1] at h; exact h))
-      (fun x h => Or.inl ((by rw [hnotes] at h; exact List.mem_of_mem_erase h)))
-  | ignore _ _ _ _ _ _ _ _ hnotes hrest ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hrest.2.2.1] at h; exact h))
-      (fun x h => Or.inl ((by rw [hnotes] at h; exact List.mem_of_mem_erase h)))
-  | env _ _ hq ht =>
-    exact timeOK_of T ht (fun r h => Or.inl (by rw [hq.reps] at h; exact h))
-      (fun x h => Or.inl (by rw [hq.notes] at h; exact h))
+  by_cases ha : a = .answer
+  · subst a
+    cases hs.answer_effect with
+    | quiet hub replies notices time =>
+      exact timeOK_of T time
+        (fun r hr => (replies r hr).elim Or.inl (fun fresh => Or.inr fresh.1))
+        (fun nt hn => Or.inl (notices nt hn))
+    | accepted sequence replies notices time =>
+      exact timeOK_of T time
+        (fun r hr => (replies r hr).elim Or.inl (fun fresh => Or.inr fresh.1))
+        (fun nt hn => (notices nt hn).elim Or.inl (fun fresh => Or.inr fresh.1))
+  · have effect := hs.nonanswer_effect ha
+    exact timeOK_of T effect.time (fun r hr => Or.inl (effect.replies r hr))
+      (fun nt hn => Or.inl (effect.notices nt hn))
 
 theorem sysOK_step (S : SysOK law g) (hs : SysStep N D law a g g') : SysOK law g' := by
   cases hs with
@@ -123,21 +94,11 @@ theorem sysOK_step (S : SysOK law g) (hs : SysStep N D law a g g') : SysOK law g
 /-- Replies answered since `t0` stay the stable hub's while it stays stable. -/
 theorem stable_step {t0 : Nat} {st : Snap} (R : StableReps t0 st g) (hs : SysStep N D law a g g')
     (hhub : g.hub = st) (hhub' : g'.hub = st) : StableReps t0 st g' := by
-  cases hs with
-  | busy _ _ _ _ _ _ _ _ hq _ => exact stable_sub R (fun r h => by rw [hq.reps] at h; exact h)
-  | idle _ _ _ _ _ _ _ hq _ => exact stable_sub R (fun r h => by rw [hq.reps] at h; exact h)
-  | maint _ _ _ _ _ _ _ _ _ _ hq _ =>
-    exact stable_sub R (fun r h => by rw [hq.reps] at h; exact h)
-  | issue _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest _ _ =>
-    exact stable_sub R (fun r h => by rw [hrest.2.1] at h; exact h)
-  | answer r ans _ _ acc hans hreps _ _ => exact stable_answer R hhub hhub' hans hreps
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hreps _ _ =>
-    exact stable_sub R (fun r h => ((hreps r).1 h).1)
-  | notice _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest _ =>
-    exact stable_sub R (fun r h => by rw [hrest.2.2.1] at h; exact h)
-  | ignore _ _ _ _ _ _ _ _ _ hrest _ =>
-    exact stable_sub R (fun r h => by rw [hrest.2.2.1] at h; exact h)
-  | env _ _ hq _ => exact stable_sub R (fun r h => by rw [hq.reps] at h; exact h)
+  by_cases ha : a = .answer
+  · subst a
+    cases hs with
+    | answer r ans _ _ acc hans hreps _ _ => exact stable_answer R hhub hhub' hans hreps
+  · exact stable_sub R (hs.nonanswer_effect ha).replies
 
 /-- When the hub has settled, every reply there is older than it. -/
 theorem stable_init {st : Snap} (T : TimeOK g) : StableReps g.time st g :=
@@ -324,12 +285,12 @@ theorem linv_handle {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ' 
     LInv σ' := by
   cases k with
   | start =>
-    have e := hsame hi.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     obtain ⟨σ1, F, rfl⟩ := hh
     exact (linv_fetched I F (hH (by decide) (by decide))).act true
   | fetchPoll =>
-    have e := hsame hi.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     obtain ⟨σ1, F, ho⟩ := hh
     have I1 := linv_fetched (linv_norm I) F (hH (by decide) (by decide))
@@ -337,13 +298,13 @@ theorem linv_handle {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ' 
     · exact linv_obj I1 O
     · exact I1
   | fetchObjs =>
-    have e := hsame hi.2.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     have O : ObjRep (norm posti) σ'
         (fun x => Walk posti x ∧ ¬ posti.loc x ∧ posti.stg x ∧ ¬ posti.obj x) := hh
     exact linv_obj (linv_norm I) O
   | differPoll =>
-    have e := hsame hi.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     exact linv_fetched (linv_plan (linv_norm I) []) hh (hH (by decide) (by decide))
   | push =>
@@ -359,26 +320,26 @@ theorem handle_graph' {c : Ctx} {d : Nat → Nat → Prop} {σ post σi posti σ
     (hh : Handle c σi k posti as σ') : σ'.par = posti.par ∧ σ'.next = posti.next := by
   cases k with
   | start =>
-    have e := hsame hi.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     obtain ⟨σ1, F, rfl⟩ := hh
     exact ⟨F.par, F.next⟩
   | fetchPoll =>
-    have e := hsame hi.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     obtain ⟨σ1, F, ho⟩ := hh
     rcases ho with ⟨-, O⟩ | ⟨-, rfl⟩
     · exact ⟨(objRep_graph O).1.trans F.par, (objRep_graph O).2.trans F.next⟩
     · exact ⟨F.par, F.next⟩
   | fetchObjs =>
-    have e := hsame hi.2.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     have O : ObjRep (norm posti) σ'
         (fun x => Walk posti x ∧ ¬ posti.loc x ∧ posti.stg x ∧ ¬ posti.obj x) := hh
     have h := objRep_graph O
     exact h
   | differPoll =>
-    have e := hsame hi.2.2.2.2.2.2.2
+    have e := hsame hi.unchanged
     rw [← e] at hh
     exact ⟨hh.par, hh.next⟩
   | push =>
@@ -402,6 +363,7 @@ theorem nodeOK_frame (I : NodeSys.NodeOK D n g) (hn : g'.node n = g.node n) (hr 
 /-- Every step keeps node `n` well formed and scoped, its wait an `Issue` from its state. -/
 theorem nodeOK_step (I : NodeSys.NodeOK D n g) (S : SysOK law g) (hs : SysStep N D law a g g') :
     NodeSys.NodeOK D n g' := by
+  have currentStep := hs
   cases hs with
   | busy m σ' emb' hw ha hsl hg hnode hq ht =>
     by_cases hm : m = n
@@ -447,65 +409,7 @@ theorem nodeOK_step (I : NodeSys.NodeOK D n g) (S : SysOK law g) (hs : SysStep N
   | issue m k post new emb1 rq hw hissue hg hb hslot hnodup hnode hreqs hslot' hrest ht hnd =>
     by_cases hm : m = n
     · subst hm
-      have hn' : g'.node m = ⟨(g.node m).ns, (g.node m).emb,
-          (g.node m).gen + (post.next - (g.node m).ns.next),
-          some ⟨k, rq.map Req.slot, post, new, emb1⟩⟩ := by rw [hnode, upd_same]
-      have hfresh : ∀ x ∈ rq.map Req.slot, g.slot ≤ x := by
-        intro x hx
-        obtain ⟨q, hq, rfl⟩ := List.mem_map.1 hx
-        exact (hslot q hq).2.1
-      refine ⟨by rw [hn']; exact I.inv, by rw [hn']; exact scoped_raw I.scope hg.raw, ?_⟩
-      rw [hn']
-      intro w hw'
-      cases hw'
-      refine ⟨by rw [hn']; exact hissue, scoped_growR I.scope I.inv.parLt hg,
-        by rw [hn']; exact hg.next, by rw [hn']; exact hg.embOld, ?_, ?_, ?_⟩
-      · intro he
-        have := bodies_ne hb
-        rw [List.map_eq_nil_iff] at he
-        rw [he] at this
-        exact this rfl
-      · intro q hq' hqn hqs
-        rw [hreqs, List.mem_append] at hq'
-        rcases hq' with hq' | hq'
-        · have := S.reqs q hq'
-          have := hfresh _ hqs
-          omega
-        · refine ⟨fun hk => ?_, fun hh0 hk1 hk2 => ?_⟩
-          · subst hk
-            have hmem : q.body ∈ rq.map Req.body := List.mem_map_of_mem hq'
-            simp only [Bodies] at hb
-            rw [hb, List.mem_singleton] at hmem
-            exact ⟨_, hmem, rfl⟩
-          · have hne' : rq ≠ [] := List.ne_nil_of_mem hq'
-            obtain ⟨q0, rest, hq0⟩ := List.exists_cons_of_ne_nil hne'
-            subst hq0
-            simp only [List.map_cons, List.head?_cons, Option.some.injEq] at hh0
-            have hqq : q = q0 := by
-              rcases List.mem_cons.1 hq' with h' | h'
-              · exact h'
-              · exfalso
-                have hnd' := hnodup
-                simp only [List.map_cons, List.nodup_cons] at hnd'
-                exact hnd'.1 (by rw [hh0]; exact List.mem_map_of_mem h')
-            subst hqq
-            cases k with
-            | push => exact absurd rfl hk1
-            | fetchObjs => exact absurd rfl hk2
-            | start =>
-              simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-            | differPoll =>
-              simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-            | writePoll =>
-              simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-            | fetchPoll =>
-              simp only [Bodies, List.map_cons, List.cons.injEq] at hb
-              rcases hb with ⟨-, hb, -⟩ | ⟨-, hb, -⟩ <;> exact hb
-      · intro r hr' hrn hrs
-        rw [hrest.2.1] at hr'
-        have := S.reps r hr'
-        have := hfresh _ hrs
-        omega
+      exact NodeSys.nodeOK_issue I S currentStep
     · exact nodeOK_frame I (by rw [hnode, upd_ne _ _ (Ne.symm hm)]) hg.raw
         (fun q hq' hqn => by
           rw [hreqs, List.mem_append] at hq'
@@ -628,7 +532,6 @@ theorem loc_known {d : Nat → Nat → Prop} {σ σ' : NS} (h : Loc d σ σ') : 
 theorem idle_known {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') : σ'.known = σ.known := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; rfl
-  | differIdle _ _ _ _ _ _ _ he => subst he; rfl
   | goal _ _ _ _ _ _ _ _ he => subst he; rfl
 
 theorem writeRes_known {σ σ1 : NS} {new : Nat} (W : WriteRes σ σ1 new) : σ1.known = σ.known := by
@@ -796,7 +699,7 @@ theorem quiet_step {t0 : Nat} {st : Snap} (K : RunOK law D n g) (R : StableReps 
             (rs.map Rep.ans) σ' := Or.inl ⟨⟨x, hx⟩, hne, he⟩
         refine ⟨?_, fun _ => ?_, fun h => (by cases h), fun _ h _ _ => absurd rfl h⟩
         · rw [e, he]
-          have h := writeRes_known hi.2.2.2.2.2.2.2.2.1
+          have h := writeRes_known hi.write
           exact h
         · rw [e]
           refine issue_busy hi (by decide) hh' rfl (fun _ h => ?_) (fun _ hc' => ?_)
@@ -887,7 +790,7 @@ theorem obs_knows {t0 : Nat} {st : Snap} (K : RunOK law D n g) (R : StableReps t
           have hi := W.issue
           rw [hp] at hi
           have hpost : w.post.ap = (g.node n).ns.ap := by
-            have h := write_ap hi.2.2.2.2.2.2.2.2.1
+            have h := write_ap hi.write
             exact h
           have hσi : σi.ap = (g.node n).ns.ap := by
             have h := congrArg NS.ap hl.ctl.1
@@ -960,38 +863,15 @@ theorem observes (ρ : Nat → Sys) (acts : Nat → Act) (n k k1 : Nat) (st : Sn
       w.kind = .start → False := by
     intro j hj ha w hw hk
     exact hq j hj (Or.inr ⟨ha, w, hw, by rw [hk]; decide, fun h => by rw [hk] at h; cases h⟩)
-  have kind_start : ∀ i, k ≤ i → ∀ w, ((ρ i).node n).wait = some w →
-      ((ρ i).node n).ns.act = false → w.kind = .start := by
-    intro i hi w hw ha
-    have hiss := ((hK i hi).node.wait w hw).issue
-    cases hkk : w.kind
-    · rfl
-    all_goals (rw [hkk] at hiss; exact absurd (hiss.1.symm.trans ha) (by decide))
   have act_true : ∀ i, k1 ≤ i → ((ρ i).node n).ns.act = true := by
     intro i hi
     cases ha : ((ρ i).node n).ns.act with
     | true => rfl
     | false =>
       exfalso
-      cases hw : ((ρ i).node n).wait with
-      | some w =>
-        obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k1 hstep1 hfair.reply i hi
-          (by rw [hw]; exact Option.some_ne_none _)
-        have hwj : ((ρ j).node n).wait = some w := by rw [hsame]; exact hw
-        exact obs_start j (by omega) hh w hwj (kind_start i (by omega) w hw ha)
-      | none =>
-        obtain ⟨j0, hj0, hiss⟩ := hfair.start i hi hw ha
-        have h1 := hstep1 j0 (by omega)
-        rw [hiss] at h1
-        cases h1 with
-        | issue _ _ post new emb1 rq _ _ _ _ _ _ hnode =>
-          have hw1 : ((ρ (j0 + 1)).node n).wait =
-              some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by rw [hnode, upd_same]
-          obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k1 hstep1 hfair.reply (j0 + 1)
-            (by omega) (by rw [hw1]; exact Option.some_ne_none _)
-          have hwj : ((ρ j).node n).wait = some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by
-            rw [hsame]; exact hw1
-          exact obs_start j (by omega) hh _ hwj rfl
+      obtain ⟨j, later, w, handled, waiting, start⟩ := hfair.reaches_start hstep1
+        (fun i hi => (hK i (by omega)).node) i hi ha
+      exact obs_start j (by omega) handled w waiting start
   -- so every step lowers the rank, or leaves the node alone
   obtain ⟨kb, hkb⟩ := hmaint
   have hSI : ∀ i, k1 ≤ i → NodeSettle.SInv (bctx st.recs (D n) ((ρ k1).node n).ns.known)
@@ -1374,11 +1254,11 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
       | start =>
         rw [hk] at hi hh
         obtain ⟨hS, hR⟩ := hfetch (by rw [hk]; decide) (by rw [hk]; decide)
-        have e2 : posti = σi := hl.same hi.2
+        have e2 : posti = σi := hl.same hi.unchanged
         obtain ⟨σ1, F, he⟩ := hh
         have hl0 : elabOf m g (.handle m) g' = .start := by simp [elabOf, hw, hk, hlab]
         rw [hl0, e]
-        refine .start hi.1 (fetchAny_mk F.known hS hR ?_ (F.ap.trans hσi.1)
+        refine .start hi.inactive (fetchAny_mk F.known hS hR ?_ (F.ap.trans hσi.1)
           (F.act.trans hσi.2.2) ?_) he
         · rw [← hσi.1]; exact F.annc
         · rw [he] at I'
@@ -1398,7 +1278,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
           · exact ⟨rfl, rfl, rfl, rfl⟩
         have hl0 : elabOf m g (.handle m) g' = .poll := by simp [elabOf, hw, hk, hlab]
         rw [hl0, e]
-        refine .poll hi.1 (go_congr rfl hi.2.1)
+        refine .poll hi.active (go_congr rfl hi.go)
           (fetchAny_mk (hσ'.1.trans F.known) hS hR ?_ (hσ'.2.2.1.trans (F.ap.trans hσi.1))
             (hσ'.2.2.2.trans (F.act.trans hσi.2.2)) I')
         rw [hσ'.2.1, ← hσi.1]
@@ -1422,7 +1302,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
             ¬ (g.node m).ns.loc x ∧ (g.node m).ns.stg x ∧ ¬ (g.node m).ns.obj x) := hh
         have hl0 : elabOf m g (.handle m) g' = .step := by simp [elabOf, hw, hk, hlab]
         rw [hl0, e]
-        refine .step hi.1 (issue_busy (c := bctx R (D m) (g.node m).ns.known)
+        refine .step hi.active (issue_busy (c := bctx R (D m) (g.node m).ns.known)
           (as := rs.map Rep.ans) hi (by decide) hh rfl (fun h => by cases h)
           (fun h => by cases h)) ?_
         have h1 := congrArg NS.known O.rest
@@ -1432,13 +1312,13 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
         obtain ⟨hS, hR⟩ := hfetch (by rw [hk]; decide) (by rw [hk]; decide)
         have hl0 : elabOf m g (.handle m) g' = .poll := by simp [elabOf, hw, hk, hlab]
         rw [hl0, e]
-        exact .poll hi.1 (go_congr rfl hi.2.1) (fetchAny_mk hh.known hS hR
+        exact .poll hi.active (go_congr rfl hi.go) (fetchAny_mk hh.known hS hR
           (by rw [← hσi.1]; exact hh.annc) (hh.ap.trans hσi.1) (hh.act.trans hσi.2.2) I')
       | writePoll =>
         -- the write, then the poll: what is announced, applied and running is as it was
         rw [hk] at hi hh
         obtain ⟨hS, hR⟩ := hfetch (by rw [hk]; decide) (by rw [hk]; decide)
-        have hw' := hi.2.2.2.2.2.2.2.2.1
+        have hw' := hi.write
         have hpa : posti.ap = w.post.ap ∧ posti.act = w.post.act := by
           have h1 := congrArg NS.ap hl.ctl.2
           have h2 := congrArg NS.act hl.ctl.2
@@ -1449,7 +1329,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
           rw [hpa.2]; have h := writeRes_act hw'; exact h
         have hl0 : elabOf m g (.handle m) g' = .poll := by simp [elabOf, hw, hk, hlab]
         rw [hl0, e]
-        exact .poll hi.1 (go_congr rfl hi.2.1) (fetchAny_mk hh.known hS hR
+        exact .poll hi.active (go_congr rfl hi.go) (fetchAny_mk hh.known hS hR
           (by rw [← hap]; exact hh.annc) (hh.ap.trans hap) (hh.act.trans hact) I')
       | push =>
         rw [hk] at hi hh
@@ -1468,7 +1348,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
               have h2 := (hcut r hr).1
               rw [hs] at h2
               exact h1.trans h2.2
-          have hw' := hi.2.2.2.2.2.2.2.2.1
+          have hw' := hi.write
           have hpost : w.post.ap = (g.node m).ns.ap := by have h := write_ap hw'; exact h
           have hap : (g.node m).ns.ap = R := by rw [← hpost, ← hpr, hpR]
           have F : HeadRep c posti σ' := by
@@ -1483,7 +1363,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
             have h3 := congrArg NS.act hl.ctl.2
             exact ⟨h1, h2, h3⟩
           rw [hl0, e]
-          refine .push hi.1 (go_congr rfl hi.2.1) hap hi.2.2.2.2.2.1
+          refine .push hi.active (go_congr rfl hi.go) hap hi.noAnnouncement
             (headAny_mk F.known hS ?_ ?_ ?_ I')
           · rw [F.annc, hpa.1]; have h := writeRes_annc hw'; exact h
           · rw [F.ap, hpa.2.1]; have h := write_ap hw'; exact h
@@ -1519,7 +1399,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
           have hh' : Handle (bctx R (D m) (g.node m).ns.known) (g.node m).ns .push w.post
               (rs.map Rep.ans) σ' := Or.inl ⟨⟨x, hx⟩, hne, he⟩
           rw [hl0, e]
-          refine .step hi.1 (issue_busy hi (by decide) hh' rfl (fun _ h => ?_) (fun _ hc' => ?_)) ?_
+          refine .step hi.active (issue_busy hi (by decide) hh' rfl (fun _ h => ?_) (fun _ hc' => ?_)) ?_
           · have h1 := congrArg Prod.fst h
             simp only [bctx] at h1
             omega
@@ -1527,7 +1407,7 @@ theorem eev_step {R sq t : Nat} (K : RunOK law D n g) (K' : RunOK law D n g')
             obtain ⟨r', hr', hra'⟩ := List.mem_map.1 hs
             exact hno r' hr' ⟨s, hra'⟩
           · rw [he]
-            have h := writeRes_known hi.2.2.2.2.2.2.2.2.1
+            have h := writeRes_known hi.write
             exact h
     · have e : (g'.node n).ns = (g.node n).ns := by rw [hnode, upd_ne _ _ (Ne.symm hm)]
       have hl0 : elabOf n g (.handle m) g' = .frame := by simp [elabOf, hm]
@@ -1595,19 +1475,6 @@ theorem early_entry_sys (ρ : Nat → Sys) (acts : Nat → Act) (n k0 kr k1 R sq
       ((ρ i).node n).ns ((ρ (i + 1)).node n).ns := fun i hi =>
     eev_step (hK i (by omega)) (hK (i + 1) (by omega)) (hC i (by omega)) (hold i hi) (hnold i hi)
       (hstep i (by omega))
-  -- the kind of a step's wait follows from whether the round is running
-  have kind_of : ∀ i, k0 ≤ i → ∀ w, ((ρ i).node n).wait = some w →
-      (w.kind = .start ↔ ((ρ i).node n).ns.act = false) := by
-    intro i hi w hw
-    have hiss := ((hK i hi).node.wait w hw).issue
-    constructor
-    · intro hk
-      rw [hk] at hiss
-      exact hiss.1
-    · intro ha
-      cases hkk : w.kind
-      · rfl
-      all_goals (rw [hkk] at hiss; exact absurd (hiss.1.symm.trans ha) (by decide))
   have lab_handle : ∀ j, acts j = .handle n → ∀ w, ((ρ j).node n).wait = some w →
       elabOf n (ρ j) (acts j) (ρ (j + 1)) = hlab n (ρ j) (ρ (j + 1)) w.kind := by
     intro j hj w hw
@@ -1636,545 +1503,22 @@ theorem early_entry_sys (ρ : Nat → Sys) (acts : Nat → Act) (n k0 kr k1 R sq
     (fun i => elabOf n (ρ i) (acts i) (ρ (i + 1))) k1 hev (hK k1 (by omega)).node.inv ?_ hE ?_ ?_
   · obtain ⟨kb, hkb⟩ := hmaint
     exact ⟨kb, fun i hi h => hkb i hi (elab_maint h)⟩
-  · intro i hi ha
-    cases hw : ((ρ i).node n).wait with
-    | some w =>
-      obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k1 hstep1 hfair.reply i hi
-        (by rw [hw]; exact Option.some_ne_none _)
-      have hwj : ((ρ j).node n).wait = some w := by rw [hsame]; exact hw
-      have hk : w.kind = .start := (kind_of i (by omega) w hw).2 ha
-      refine ⟨j, hj, ?_⟩
-      show elabOf n (ρ j) (acts j) (ρ (j + 1)) = .start
-      rw [lab_handle j hh w hwj, hk]
-      rfl
-    | none =>
-      obtain ⟨j0, hj0, hiss⟩ := hfair.start i hi hw ha
-      have h1 := hstep1 j0 (by omega)
-      rw [hiss] at h1
-      cases h1 with
-      | issue _ _ post new emb1 rq _ _ _ _ _ _ hnode =>
-        have hw1 : ((ρ (j0 + 1)).node n).wait =
-            some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by rw [hnode, upd_same]
-        obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k1 hstep1 hfair.reply (j0 + 1)
-          (by omega) (by rw [hw1]; exact Option.some_ne_none _)
-        have hwj : ((ρ j).node n).wait = some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by
-          rw [hsame]; exact hw1
-        refine ⟨j, by omega, ?_⟩
-        show elabOf n (ρ j) (acts j) (ρ (j + 1)) = .start
-        rw [lab_handle j hh _ hwj]
-        rfl
-  · intro i hi ha
-    show ∃ j, i ≤ j ∧ (elabOf n (ρ j) (acts j) (ρ (j + 1)) = .step ∨
-      elabOf n (ρ j) (acts j) (ρ (j + 1)) = .idle ∨ elabOf n (ρ j) (acts j) (ρ (j + 1)) = .poll ∨
-      elabOf n (ρ j) (acts j) (ρ (j + 1)) = .push ∨ elabOf n (ρ j) (acts j) (ρ (j + 1)) = .maint)
-    have after : ∀ i', k1 ≤ i' → ((ρ i').node n).ns.act = true → ((ρ i').node n).wait ≠ none →
-        ∃ j, i' ≤ j ∧ (elabOf n (ρ j) (acts j) (ρ (j + 1)) = .step ∨
-          elabOf n (ρ j) (acts j) (ρ (j + 1)) = .idle ∨
-          elabOf n (ρ j) (acts j) (ρ (j + 1)) = .poll ∨
-          elabOf n (ρ j) (acts j) (ρ (j + 1)) = .push ∨
-          elabOf n (ρ j) (acts j) (ρ (j + 1)) = .maint) := by
-      intro i' hi' ha' hw'
-      obtain ⟨w, hw⟩ := Option.ne_none_iff_exists'.1 hw'
-      obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k1 hstep1 hfair.reply i' hi' hw'
-      have hwj : ((ρ j).node n).wait = some w := by rw [hsame]; exact hw
-      have hk : w.kind ≠ .start := fun hk => by
-        have := (kind_of i' (by omega) w hw).1 hk
-        rw [ha'] at this
-        cases this
-      exact ⟨j, hj, handle_core j hh w hwj hk⟩
-    cases hw : ((ρ i).node n).wait with
-    | some w => exact after i hi ha (by rw [hw]; exact Option.some_ne_none _)
-    | none =>
-      obtain ⟨j1, hj1, hc⟩ := hfair.core i hi hw ha
-      have hab1 : (acts j1).about n := by
-        rcases hc with ⟨ck, he⟩ | ⟨kk, he⟩ <;> simp [he, Act.about]
-      obtain ⟨j0, hj0, hab, hsame⟩ := reaches_own ρ acts k1 hstep1 i hi ⟨j1, hj1, hab1⟩
-      have hstp := hstep1 j0 (by omega)
-      cases ha0 : acts j0 with
-      | core m ck =>
-        rw [ha0] at hab
-        simp only [Act.about] at hab
-        subst hab
-        refine ⟨j0, hj0, ?_⟩
-        rw [ha0]
-        cases ck <;> simp [elabOf]
-      | issue m kk =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | issue _ _ post new emb1 rq _ _ _ _ _ _ hnode =>
-          have hw1 : ((ρ (j0 + 1)).node m).wait =
-              some ⟨kk, rq.map Req.slot, post, new, emb1⟩ := by rw [hnode, upd_same]
-          have ha1 : ((ρ (j0 + 1)).node m).ns.act = true := by
-            rw [hnode, upd_same]; show ((ρ j0).node m).ns.act = true; rw [hsame]; exact ha
-          obtain ⟨j, hj, hl⟩ := after (j0 + 1) (by omega) ha1
-            (by rw [hw1]; exact Option.some_ne_none _)
-          exact ⟨j, by omega, hl⟩
-      | handle m =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | handle _ _ _ _ _ _ _ _ _ hw' =>
-          rw [hsame, hw] at hw'
-          cases hw'
-      | notice m _ =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | notice _ _ _ _ _ _ _ _ ha' =>
-          rw [hsame, ha] at ha'
-          cases ha'
-      | ignore m =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | ignore _ _ _ ha' =>
-          rw [hsame, ha] at ha'
-          cases ha'
-      | answer => rw [ha0] at hab; exact hab.elim
-      | env => rw [ha0] at hab; exact hab.elim
+  · intro i hi inactive
+    obtain ⟨j, later, w, handled, waiting, start⟩ := hfair.reaches_start hstep1
+      (fun i hi => (hK i (by omega)).node) i hi inactive
+    refine ⟨j, later, ?_⟩
+    show elabOf n (ρ j) (acts j) (ρ (j + 1)) = .start
+    rw [lab_handle j handled w waiting, start]
+    rfl
+  · intro i hi active
+    obtain ⟨j, later, core | ⟨w, handled, waiting, running⟩⟩ := hfair.reaches_core hstep1
+      (fun i hi => (hK i (by omega)).node) i hi active
+    · obtain ⟨kind, event⟩ := core
+      refine ⟨j, later, ?_⟩
+      rw [event]
+      cases kind <;> simp [elabOf]
+    · exact ⟨j, later, handle_core j handled w waiting running⟩
 
 end EarlyRun
-
-/-! ## The eligible nodes' system, filtered from the hive's run
-
-The observation starts at the entry cut, not at the record cut: a finite cut after it by which
-every eligible node has handled a fresh head from after the record cut and taken the current
-records, so that its known head is named in the current records' namespace and its embedding
-is scoped. Before it, an eligible node may still know an old raw head whose node-space image
-the current drops have changed, and its steps are not claimed to be the fine system's. From the
-entry cut on, the hive's run is observed coarsely (`HiveStep`): an eligible node's events, the
-environment's, and the hub's answers to requests eligible nodes sent or that were in flight at
-the entry cut (`old`, finitely many, which may still move the hub) are steps of the fine
-system; a node that is not eligible is raw. What it writes only grows the raw graph; it may
-send requests, which take no virtual slot from the system's counter (the projection maps each
-call it actually sends injectively, apart from the system's); the replies and notifications
-it takes stay in the observation as ghosts, its state being unmodelled; and the hub answers its
-fresh requests without moving (`answerRaw`'s `hhub`). That is a law of the native run, from
-the records alone once they are fixed: an accepted push whose record effect leaves the records
-as they were has its sender's raw pending originals among what they drop, which its custody
-excludes (`Recovery.raw_pending_empty_of_fixed_records`, from
-`Recovery.PendingOriginals.unpublished`). It needs no original history and no embedding;
-`Recovery.pending_push_not_accepted_fixed` is the same fact for the executable model's own
-traces, not this law. So the observation is not every field of the native run: it is what the
-fine system reads of it.
-
-The eligible nodes' system is a function of that observation (`filt`): the other nodes' slots
-frozen, their fresh requests and the replies to them left out. Each observed step is a step of
-it (`filt_step`), so a run of the hive from the entry cut is a run of the fine system
-(`filt_run`, `filt_run_from`), with the hub, the raw graph and the eligible nodes as they are.
--/
-
-section Filter
-
-/-- One step of the hive from the entry cut, as the fine system observes it. An answer is the
-fine system's own step; the request it answers is the one its reply names, an eligible node's
-or one in flight at the entry cut. -/
-inductive HiveStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) (E : Nat → Prop)
-    (old : List Req) : Act → Sys → Sys → Prop
-  | node {a : Act} {g g' : Sys} (n : Nat) (hE : E n) (ha : a.about n)
-      (hs : SysStep N D law a g g') : HiveStep N D law E old a g g'
-  | env {g g' : Sys} (hs : SysStep N D law .env g g') : HiveStep N D law E old .env g g'
-  | answer {g g' : Sys} (hs : SysStep N D law .answer g g')
-      (hk : ∀ rep, g'.reps = g.reps ++ [rep] →
-        E rep.node ∨ (⟨rep.node, rep.slot, rep.req⟩ : Req) ∈ old) :
-      HiveStep N D law E old .answer g g'
-  | raw {g g' : Sys} (n : Nat) (hn : ¬ E n) (rq : List Req) (hr : RawGrow g g')
-      (hnode : ∀ m, E m → g'.node m = g.node m) (hreqs : g'.reqs = g.reqs ++ rq)
-      (hrq : ∀ q ∈ rq, q.node = n ∧ q ∉ old)
-      (hrest : g'.hub = g.hub ∧ g'.reps = g.reps ∧ g'.notes = g.notes ∧ g'.slot = g.slot)
-      (ht : g'.time = g.time + 1) : HiveStep N D law E old .env g g'
-  | answerRaw {g g' : Sys} (r : Req) (hr : r ∈ g.reqs) (hn : ¬ E r.node) (hold : r ∉ old)
-      (rep : Rep) (hrep : rep.node = r.node ∧ rep.slot = r.slot ∧ rep.req = r.body)
-      (hreqs : g'.reqs = g.reqs.erase r) (hreps : g'.reps = g.reps ++ [rep])
-      (hhub : g'.hub = g.hub)
-      (hrest : g'.node = g.node ∧ g'.notes = g.notes ∧ g'.slot = g.slot ∧
-        g'.next = g.next ∧ g'.par = g.par)
-      (ht : g'.time = g.time + 1) : HiveStep N D law E old .env g g'
-
-variable (E : Nat → Prop) [DecidablePred E] (frozen : Nat → NodeC) (old : List Req)
-
-def keepReq (q : Req) : Bool := decide (E q.node) || old.contains q
-
-def keepRep (r : Rep) : Bool := decide (E r.node) || old.contains ⟨r.node, r.slot, r.req⟩
-
-/-- The eligible nodes' system read off an observation: the other nodes' slots frozen, and
-only the requests eligible nodes sent or that were in flight at the entry cut, with their
-replies. -/
-def filt (g : Sys) : Sys :=
-  { g with
-    node := fun m => if E m then g.node m else frozen m
-    reqs := g.reqs.filter (keepReq E old)
-    reps := g.reps.filter (keepRep E old) }
-
-variable {E frozen old}
-
-theorem filter_erase_keep {α : Type} [DecidableEq α] {p : α → Bool} {a : α}
-    (h : p a = true) : ∀ l : List α, (l.erase a).filter p = (l.filter p).erase a
-  | [] => rfl
-  | b :: l => by
-    by_cases hb : b = a
-    · subst hb
-      simp [h]
-    · have ih := filter_erase_keep h l
-      have e1 : (b :: l).erase a = b :: l.erase a := by simp [hb]
-      rw [e1]
-      cases hp : p b
-      · simp [hp, ih]
-      · have e2 : (b :: List.filter p l).erase a = b :: (List.filter p l).erase a := by
-          simp [hb]
-        simp [hp, ih, e2]
-
-theorem filter_erase_drop {α : Type} [DecidableEq α] {p : α → Bool} {a : α}
-    (h : p a = false) : ∀ l : List α, (l.erase a).filter p = l.filter p
-  | [] => rfl
-  | b :: l => by
-    by_cases hb : b = a
-    · subst hb
-      simp [h]
-    · have e1 : (b :: l).erase a = b :: l.erase a := by simp [hb]
-      rw [e1]
-      simp only [List.filter_cons]
-      rw [filter_erase_drop h l]
-
-/-- What reads only the raw graph reads the eligible nodes' system as the hive. -/
-theorem scoped_congr {σ : NS} {emb : Nat → Nat} {g h : Sys} (S : Scoped σ emb g)
-    (hn : h.next = g.next) (hp : h.par = g.par) : Scoped σ emb h := by
-  obtain ⟨i, l, p⟩ := S
-  exact ⟨i, fun x hx => hn ▸ l x hx, fun x hx => hp ▸ p x hx⟩
-
-theorem grow_congr {g g' h h' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat}
-    (G : Grow g g' σ σ' emb emb') (hn : h.next = g.next) (hp : h.par = g.par)
-    (hn' : h'.next = g'.next) (hp' : h'.par = g'.par) : Grow h h' σ σ' emb emb' := by
-  obtain ⟨a, b, c, d, e, f, k⟩ := G
-  refine ⟨a, ?_, c, ?_, ?_, ?_, k⟩
-  · rw [hn', hn]; exact b
-  · intro x h1 h2; rw [d x h1 h2, hn]
-  · intro y hy; rw [hp', hp]; exact e y (hn ▸ hy)
-  · intro x h1 h2; rw [hp']; exact f x h1 h2
-
-theorem growR_congr {g g' h h' : Sys} {σ σ' : NS} {emb emb' : Nat → Nat}
-    (G : GrowR g g' σ σ' emb emb') (hn : h.next = g.next) (hp : h.par = g.par)
-    (hn' : h'.next = g'.next) (hp' : h'.par = g'.par) : GrowR h h' σ σ' emb emb' where
-  next := G.next
-  rawGrows := by rw [hn, hn']; exact G.rawGrows
-  embOld := G.embOld
-  parRaw := fun y hy => by rw [hp', hp]; exact G.parRaw y (hn ▸ hy)
-  parOld := G.parOld
-  bound := fun x h1 h2 => by rw [hn']; exact G.bound x h1 h2
-  parNew := fun x h1 h2 => by rw [hp']; exact G.parNew x h1 h2
-  reuse := fun x h1 h2 hr => G.reuse x h1 h2 (hn ▸ hr)
-  injNew := G.injNew
-  cover := fun y h1 h2 => G.cover y (hn ▸ h1) (hn' ▸ h2)
-
-theorem learn_congr {g h : Sys} {σ post : NS} {emb : Nat → Nat} {hd : Option Nat}
-    {σi posti : NS} {embi : Nat → Nat} (L : Learn g σ post emb hd σi posti embi)
-    (hn : h.next = g.next) (hp : h.par = g.par) : Learn h σ post emb hd σi posti embi := by
-  obtain ⟨a, b, c, d, e, f, k, l⟩ := L
-  refine ⟨fun hc => a fun x hx => ?_, scoped_congr b hn hp, c, d, e, f, k, l⟩
-  intro y hy
-  exact hc x hx y (hp ▸ hy)
-
-theorem filt_node_of {g : Sys} {n : Nat} (hE : E n) : (filt E frozen old g).node n = g.node n :=
-  by simp [filt, hE]
-
-theorem filt_node_upd {g g' : Sys} {n : Nat} {c : NodeC} (hE : E n)
-    (h : g'.node = upd g.node n c) :
-    (filt E frozen old g').node = upd (filt E frozen old g).node n c := by
-  funext m
-  by_cases hm : m = n
-  · subst hm; simp [filt, hE, h]
-  · simp [filt, h, hm]
-
-theorem filt_node_eq {g g' : Sys} (h : ∀ m, E m → g'.node m = g.node m) :
-    (filt E frozen old g').node = (filt E frozen old g).node := by
-  funext m
-  by_cases hm : E m <;> simp [filt, hm, h m]
-
-theorem filt_quiet {g g' : Sys} (h : Quiet g g') :
-    Quiet (filt E frozen old g) (filt E frozen old g') :=
-  ⟨h.hub, by simp [filt, h.reqs], by simp [filt, h.reps], h.notes, h.slot⟩
-
-theorem keepRep_of {r : Rep} (hE : E r.node) : keepRep E old r = true := by
-  simp [keepRep, hE]
-
-/-- Each observed step is a step of the eligible nodes' system. -/
-theorem filt_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {a : Act}
-    {g g' : Sys} (hs : HiveStep N D law E old a g g') :
-    SysStep N D law a (filt E frozen old g) (filt E frozen old g') := by
-  cases hs with
-  | node n hE ha hs =>
-    cases hs with
-    | busy m σ' emb' hw hac hl hg hnode hq ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .busy m σ' emb' ?_ ?_ ?_ ?_ ?_ (filt_quiet hq) ht
-      · rw [hf]; exact hw
-      · rw [hf]; exact hac
-      · rw [hf]; exact hl
-      · rw [hf]; exact growR_congr hg rfl rfl rfl rfl
-      · rw [hf]; exact filt_node_upd hE hnode
-    | idle m σ' hw hac hl hnode hr hq ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .idle m σ' ?_ ?_ ?_ ?_ hr (filt_quiet hq) ht
-      · rw [hf]; exact hw
-      · rw [hf]; exact hac
-      · rw [hf]; exact hl
-      · rw [hf]; exact filt_node_upd hE hnode
-    | maint m σ1 σ' emb' hw hac hl hx hg hnode hq ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .maint m σ1 σ' emb' ?_ ?_ ?_ hx ?_ ?_ (filt_quiet hq) ht
-      · rw [hf]; exact hw
-      · rw [hf]; exact hac
-      · rw [hf]; exact hl
-      · rw [hf]; exact growR_congr hg rfl rfl rfl rfl
-      · rw [hf]; exact filt_node_upd hE hnode
-    | issue m k post new emb1 rq hw hi hg hb hslot hnodup hnode hreqs hslot' hrest ht hnd =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      have hkeep : ∀ q ∈ rq, keepReq E old q = true := fun q hq => by
-        simp [keepReq, (hslot q hq).1, hE]
-      refine .issue m k post new emb1 rq ?_ ?_ ?_ ?_ hslot hnodup ?_ ?_ hslot' ⟨hrest.1, ?_,
-        hrest.2.2⟩ ht hnd
-      · rw [hf]; exact hw
-      · rw [hf]; exact hi
-      · rw [hf]; exact growR_congr hg rfl rfl rfl rfl
-      · rw [hf]; exact hb
-      · rw [hf]; exact filt_node_upd hE hnode
-      · simp only [filt, hreqs, List.filter_append]
-        rw [List.filter_eq_self.2 hkeep]
-      · simp [filt, hrest.2.1]
-    | handle m w rs hd c σi posti σ' embi hw hrs hcov hhd hhd' hl hc hf' hh hnode hreps hrest
-        ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .handle m w rs hd c σi posti σ' embi ?_ ?_ hcov hhd hhd' ?_ hc hf' hh ?_ ?_
-        ⟨hrest.1, ?_, hrest.2.2⟩ ht
-      · rw [hf]; exact hw
-      · intro r hr
-        obtain ⟨h1, h2, h3⟩ := hrs r hr
-        refine ⟨List.mem_filter.2 ⟨h1, ?_⟩, h2, h3⟩
-        exact keepRep_of (by rw [h2]; exact hE)
-      · rw [hf]; exact learn_congr hl rfl rfl
-      · rw [hf]; exact filt_node_upd hE hnode
-      · intro r
-        simp only [filt, List.mem_filter, hreps r]
-        constructor
-        · rintro ⟨⟨h1, h2⟩, h3⟩; exact ⟨⟨h1, h3⟩, h2⟩
-        · rintro ⟨⟨h1, h3⟩, h2⟩; exact ⟨⟨h1, h2⟩, h3⟩
-      · simp [filt, hrest.2.1]
-    | notice m nt c σi posti σ' embi hw hac hn hnn hnew hl hc hf' hh hnode hnotes hrest ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .notice m nt c σi posti σ' embi ?_ ?_ hn hnn ?_ ?_ hc hf' hh ?_ hnotes
-        ⟨hrest.1, ?_, ?_, hrest.2.2.2⟩ ht
-      · rw [hf]; exact hw
-      · rw [hf]; exact hac
-      · rw [hf]; exact hnew
-      · rw [hf]; exact learn_congr hl rfl rfl
-      · rw [hf]; exact filt_node_upd hE hnode
-      · simp [filt, hrest.2.1]
-      · simp [filt, hrest.2.2.1]
-    | ignore m nt hw hac hn hnn hold hnode hnotes hrest ht =>
-      simp only [Act.about] at ha; subst ha
-      have hf := filt_node_of (frozen := frozen) (old := old) (g := g) hE
-      refine .ignore m nt ?_ ?_ hn hnn ?_ ?_ hnotes ⟨hrest.1, ?_, ?_, hrest.2.2.2⟩ ht
-      · rw [hf]; exact hw
-      · rw [hf]; exact hac
-      · rw [hf]; exact hold
-      · exact filt_node_eq (fun m _ => by rw [hnode])
-      · simp [filt, hrest.2.1]
-      · simp [filt, hrest.2.2.1]
-    | answer => simp [Act.about] at ha
-    | env => simp [Act.about] at ha
-  | env hs =>
-    cases hs with
-    | env hr hnode hq ht =>
-      exact .env hr (filt_node_eq (fun m _ => by rw [hnode])) (filt_quiet hq) ht
-  | answer hs hk =>
-    cases hs with
-    | answer r ans hr hreqs acc hans hreps hrest ht =>
-      have hkr : keepReq E old r = true := by
-        rcases hk _ hreps with h | h
-        · simp [keepReq, h]
-        · cases r; simp [keepReq, h]
-      have hkrep : keepRep E old ⟨r.node, r.slot, g.time, r.body, acc, ans⟩ = true := by
-        rcases hk _ hreps with h | h
-        · exact keepRep_of h
-        · simp [keepRep, h]
-      refine .answer r ans (List.mem_filter.2 ⟨hr, hkr⟩) ?_ acc hans ?_
-        ⟨filt_node_eq (fun m _ => by rw [hrest.1]), hrest.2⟩ ht
-      · simp only [filt, hreqs]
-        exact filter_erase_keep hkr _
-      · simp only [filt, hreps, List.filter_append, List.filter_cons, hkrep, List.filter_nil,
-          ite_true]
-  | raw n hn rq hr hnode hreqs hrq hrest ht =>
-    refine .env hr (filt_node_eq hnode) ⟨hrest.1, ?_, ?_, hrest.2.2.1, hrest.2.2.2⟩ ht
-    · simp only [filt, hreqs, List.filter_append]
-      have : rq.filter (keepReq E old) = [] := by
-        apply List.filter_eq_nil_iff.2
-        intro q hq
-        obtain ⟨h1, h2⟩ := hrq q hq
-        simp [keepReq, h1, hn, h2]
-      rw [this, List.append_nil]
-    · simp [filt, hrest.2.1]
-  | answerRaw r hr hn hold rep hrep hreqs hreps hhub hrest ht =>
-    have hkr : keepReq E old r = false := by
-      have hc : old.contains r = false := by simpa using hold
-      unfold keepReq
-      rw [hc]
-      simp [hn]
-    have hkrep : keepRep E old rep = false := by
-      obtain ⟨h1, h2, h3⟩ := hrep
-      have he : (⟨rep.node, rep.slot, rep.req⟩ : Req) = r := by cases r; simp_all
-      have hc : old.contains ⟨rep.node, rep.slot, rep.req⟩ = false := by
-        rw [he]; simpa using hold
-      unfold keepRep
-      rw [hc, h1]
-      simp [hn]
-    refine .env ⟨Nat.le_of_eq hrest.2.2.2.1.symm, fun y _ => by
-      show g'.par y = g.par y; rw [hrest.2.2.2.2]⟩
-      (filt_node_eq (fun m _ => by rw [hrest.1])) ⟨hhub, ?_, ?_, hrest.2.1, hrest.2.2.1⟩ ht
-    · simp only [filt, hreqs]
-      exact filter_erase_drop hkr _
-    · simp only [filt, hreps, List.filter_append, List.filter_cons, hkrep, List.filter_nil]
-      simp
-
-/-- So a run of the hive from the entry cut is a run of the eligible nodes' system, with the
-same acts. -/
-theorem filt_run {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} (run : Nat → Sys)
-    (acts : Nat → Act) (hs : ∀ i, HiveStep N D law E old (acts i) (run i) (run (i + 1))) :
-    ∀ i, SysStep N D law (acts i) (filt E frozen old (run i)) (filt E frozen old (run (i + 1))) :=
-  fun i => filt_step (hs i)
-
-/-- The same, for a run observed from the entry cut `k` on, read from there: the steps before
-`k` are not claimed. -/
-theorem filt_run_from {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
-    (run : Nat → Sys) (acts : Nat → Act) (k : Nat)
-    (hs : ∀ i, k ≤ i → HiveStep N D law E old (acts i) (run i) (run (i + 1))) :
-    ∀ i, SysStep N D law (acts (k + i)) (filt E frozen old (run (k + i)))
-      (filt E frozen old (run (k + i + 1))) :=
-  fun i => filt_step (hs (k + i) (Nat.le_add_right _ _))
-
-/-! ### Where the eligible nodes' system starts
-
-A node that is not eligible stands in it as an inactive dummy on the raw root, waiting for
-nothing:
-none of its core steps ever runs, so its drop relation never matters, and the requests of it in
-flight at the entry cut, and their replies, are orphans that only the initial budget counts.
-What the system's run keeps (`RunOK`) holds of its start from what the observation has there:
-the eligible nodes' own invariants and the global ones of the requests, replies and
-notifications, which filtering only thins (`runOK_filt_init`). -/
-
-/-- The dummy's core state: one label, `0`, its known head and only op head, and inactive. -/
-def dummyNS : NS where
-  known := (0, 0)
-  plan := []
-  hubRecs := none
-  annc := none
-  ap := 0
-  pending := []
-  written := false
-  heads := [0]
-  img := [0]
-  par := fun _ => []
-  next := 1
-  loc := fun x => x = 0
-  stg := fun _ => False
-  obj := fun _ => False
-  act := false
-
-/-- A node that is not eligible, in the eligible nodes' system: the dummy, its one label (`0`)
-on the raw root `rawRoot`, waiting for nothing. -/
-def dummy (rawRoot : Nat) : NodeC := ⟨dummyNS, fun _ => rawRoot, 0, none⟩
-
-theorem linv_dummy : LInv dummyNS where
-  parLt := fun _ _ h => by cases h
-  knownLt := by decide
-  headsNe := by simp [dummyNS]
-  headsLt := by simp [dummyNS]
-  imgNe := by simp [dummyNS]
-  imgLt := by simp [dummyNS]
-
-theorem scoped_dummy {g : Sys} {rawRoot : Nat} (hroot : rawRoot < g.next)
-    (hpar : g.par rawRoot = []) : Scoped dummyNS (fun _ => rawRoot) g where
-  inj := fun x y hx hy _ => by
-    change x < 1 at hx; change y < 1 at hy; omega
-  lt := fun _ _ => hroot
-  par := fun _ _ => by simp [dummyNS, hpar]
-
-theorem waitOK_filt {D : Nat → Nat → Nat → Prop} {g : Sys} {n : Nat} {w : Wait} (hE : E n)
-    (W : WaitOK D n g w) : WaitOK D n (filt E frozen old g) w where
-  issue := by rw [filt_node_of hE]; exact W.issue
-  scope := scoped_congr W.scope rfl rfl
-  next := by rw [filt_node_of hE]; exact W.next
-  emb := by rw [filt_node_of hE]; exact W.emb
-  slots := W.slots
-  reqs := fun q hq => W.reqs q (List.mem_filter.1 hq).1
-  reps := fun r hr => W.reps r (List.mem_filter.1 hr).1
-
-theorem nodeOK_filt {D : Nat → Nat → Nat → Prop} {g : Sys} {n : Nat} (hE : E n)
-    (K : NodeSys.NodeOK D n g) : NodeSys.NodeOK D n (filt E frozen old g) where
-  inv := by rw [filt_node_of hE]; exact K.inv
-  scope := by rw [filt_node_of hE]; exact scoped_congr K.scope rfl rfl
-  wait := fun w hw => waitOK_filt hE (K.wait w (by rw [filt_node_of hE] at hw; exact hw))
-
-theorem objsOK_filt {g : Sys} {n : Nat} (hE : E n) (O : ObjsOK n g) :
-    ObjsOK n (filt E frozen old g) where
-  ans := fun r hr => O.ans r (List.mem_filter.1 hr).1
-  reqs := fun w hw hk q hq => O.reqs w (by rw [filt_node_of hE] at hw; exact hw) hk q
-    (List.mem_filter.1 hq).1
-  reps := fun w hw hk r hr => O.reps w (by rw [filt_node_of hE] at hw; exact hw) hk r
-    (List.mem_filter.1 hr).1
-
-theorem sysOK_filt {law : HubLaw} {g : Sys} (S : SysOK law g) :
-    SysOK law (filt E frozen old g) where
-  reqs := fun q hq => S.reqs q (List.mem_filter.1 hq).1
-  reps := fun r hr => S.reps r (List.mem_filter.1 hr).1
-  fetch := fun r hr => S.fetch r (List.mem_filter.1 hr).1
-  push := fun r hr => S.push r (List.mem_filter.1 hr).1
-  pushAns := fun r hr => S.pushAns r (List.mem_filter.1 hr).1
-  honest := fun q hq => S.honest q (List.mem_filter.1 hq).1
-
-theorem timeOK_filt {g : Sys} (T : TimeOK g) : TimeOK (filt E frozen old g) where
-  reps := fun r hr => T.reps r (List.mem_filter.1 hr).1
-  notes := T.notes
-
-/-- Where the eligible nodes' system starts, every node keeps what a run keeps: an eligible
-node from its own invariants in the observation, a dummy by construction, given the root, and
-the global invariants from the observation's. -/
-theorem runOK_filt_init {D : Nat → Nat → Nat → Prop} {law : HubLaw} {g : Sys}
-    (hE : ∀ n, E n → NodeSys.NodeOK D n g ∧ ObjsOK n g) (hs : SysOK law g) (ht : TimeOK g)
-    (hans : ∀ r ∈ g.reps, r.req = .objs → r.ans = .objects)
-    {rawRoot : Nat} (hroot : rawRoot < g.next) (hpar : g.par rawRoot = []) :
-    ∀ n, RunOK law D n (filt E (fun _ => dummy rawRoot) old g) := by
-  intro n
-  refine ⟨?_, sysOK_filt hs, timeOK_filt ht, ?_⟩
-  · by_cases he : E n
-    · exact nodeOK_filt he (hE n he).1
-    · have hd : (filt E (fun _ => dummy rawRoot) old g).node n = dummy rawRoot := by
-        simp [filt, he]
-      exact ⟨by rw [hd]; exact linv_dummy, by rw [hd]; exact scoped_dummy hroot hpar,
-        fun w hw => by (rw [hd] at hw; cases hw)⟩
-  · by_cases he : E n
-    · exact objsOK_filt he (hE n he).2
-    · have hd : (filt E (fun _ => dummy rawRoot) old g).node n = dummy rawRoot := by
-        simp [filt, he]
-      refine ⟨fun r hr => hans r (List.mem_filter.1 hr).1, fun w hw => ?_, fun w hw => ?_⟩
-      · rw [hd] at hw; cases hw
-      · rw [hd] at hw; cases hw
-
-/-- The eligible nodes' system has the hive's hub, raw graph and eligible nodes. -/
-theorem filt_hub (g : Sys) : (filt E frozen old g).hub = g.hub := rfl
-theorem filt_next (g : Sys) : (filt E frozen old g).next = g.next := rfl
-theorem filt_par (g : Sys) : (filt E frozen old g).par = g.par := rfl
-
-end Filter
 
 end Musubi.NodeSysEntry

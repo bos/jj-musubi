@@ -28,7 +28,7 @@ theorem step_seq_mono {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw
         · rw [hh]; exact Nat.le_succ _
         · rw [hh]; exact Nat.le_refl _
         · rw [hh]; exact Nat.le_refl _
-  · rw [step_hub_quiet hs ha]; exact Nat.le_refl _
+  · rw [(hs.nonanswer_effect ha).hub]; exact Nat.le_refl _
 
 theorem nextHistory_saved {g g' : Sys} {hist : Nat → Nat} {q : Nat}
     (hq : q ≤ g.hub.seq) : nextHistory g g' hist q = hist q := by
@@ -91,7 +91,7 @@ theorem history_window_sys_step {N : Nat} {D : Nat → Nat → Nat → Prop} {la
             (congrArg Snap.head hh) (congrArg Snap.seq hh) (nextHistory_accept hist hh))
         · exact quiet hh
         · exact quiet hh
-  · have hh := step_hub_quiet hs ha
+  · have hh := (hs.nonanswer_effect ha).hub
     have path := foreign_step_expansion (E := fun _ => False) (w := w) hs ha
       (fun _ hf => False.elim hf) hdag hist []
     obtain ⟨path⟩ := path

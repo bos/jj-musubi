@@ -3,6 +3,7 @@ Project individual hub and node observations into fine system steps.
 See `Musubi.SysAcceptance` for the layers of the complete convergence argument.
 -/
 import Musubi.SysFreshCuts
+import Musubi.HiveFilter
 import Musubi.PacketAcceptance
 import Musubi.NodeSysExec
 

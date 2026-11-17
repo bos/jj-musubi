@@ -121,20 +121,6 @@ theorem step_raw_grows {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeS
     exact ⟨Nat.le_of_eq hr.2.2.2.2.1.symm, fun x _ => congrFun hr.2.2.2.2.2 x⟩
   | env hr _ _ _ => exact hr
 
-theorem step_hub_quiet {N : Nat} {D : Nat → Nat → Nat → Prop} {law : NodeSys.HubLaw}
-    {act : Act} {g g' : Sys} (hs : SysStep N D law act g g') (ha : act ≠ .answer) :
-    g'.hub = g.hub := by
-  cases hs with
-  | busy _ _ _ _ _ _ _ _ hq _ => exact hq.hub
-  | idle _ _ _ _ _ _ _ hq _ => exact hq.hub
-  | maint _ _ _ _ _ _ _ _ _ _ hq _ => exact hq.hub
-  | env _ _ hq _ => exact hq.hub
-  | issue _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hr _ _ => exact hr.1
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hr _ => exact hr.1
-  | notice _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hr _ => exact hr.1
-  | ignore _ _ _ _ _ _ _ _ _ hr _ => exact hr.1
-  | answer => exact False.elim (ha rfl)
-
 theorem generations_same {E : Nat → Prop} {g g' : Sys}
     (h : ∀ n, E n → (g'.node n).gen = (g.node n).gen) :
     generations E g' = generations E g := by
@@ -177,7 +163,7 @@ theorem foreign_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop}
     change p ∈ parents g' x at hp
     simp only [parents, hx, ↓reduceIte] at hp
     exact hdag x hx p hp
-  · exact state_hub_same (step_hub_quiet hs ha) rfl
+  · exact state_hub_same (hs.nonanswer_effect ha).hub rfl
   · intro n hn; exact state_node_same (same n hn)
   · exact generations_same (fun n hn => congrArg NodeC.gen (same n hn))
   · rfl

@@ -130,6 +130,6 @@ theorem rawStep_of_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLa
             (congrArg Snap.head hh) (congrArg Snap.seq hh)
         · exact .quiet grow hh
         · exact .quiet grow hh
-  · exact .quiet grow (step_hub_quiet hs ha)
+  · exact .quiet grow (hs.nonanswer_effect ha).hub
 
 end Musubi.Recovery.HubSys

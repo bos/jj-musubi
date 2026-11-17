@@ -47,6 +47,26 @@ theorem own_reply_learns (root : Nat) (known reply : Head)
       simp only [hp, ↓reduceIte]
       exact Prod.ext hs hh
 
+/-- An own reply naming the pair the node knows leaves it. -/
+theorem handleHead_same (r : Nat) (P : Head) :
+    handleHead r true false P P = P := by
+  simp [handleHead, wentBack, filteredLearn]
+
+/-- A notice of a sequence no later than the one the node knows leaves it. -/
+theorem handleHead_notice_le (r : Nat) (P q : Head) (h : q.1 ≤ P.1) :
+    handleHead r false true P q = P := by
+  simp [handleHead, filteredLearn, Nat.not_lt.2 h]
+
+/-- A notice leaves the known pair, or makes it the notice's. -/
+theorem handleHead_notice_or (r : Nat) (P q : Head) :
+    handleHead r false true P q = P ∨
+      handleHead r false true P q = q := by
+  simp only [handleHead, Bool.false_and, Bool.false_eq_true, ↓reduceIte,
+    filteredLearn]
+  split
+  · exact Or.inr rfl
+  · exact Or.inl rfl
+
 structure Call where
   id : Nat
   before : Head

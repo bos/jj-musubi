@@ -4,6 +4,7 @@ The bound is derived from Issue, WriteRes and the scoped post-write graph, and i
 by all actual request-list changes. It is not an extra bound on future accepted packets.
 -/
 import Musubi.HistoryReplies
+import Musubi.HiveFilter
 
 namespace Musubi.Recovery.HubSys
 
@@ -43,8 +44,7 @@ theorem issued_push_bound {D : Nat → Nat → Nat → Prop}
   obtain ⟨rfl, rfl⟩ := bodies_push_packet hb hr hp
   have sp := scoped_growR hi.scope hi.inv.parLt hg
   have ip := post_inv hs (hi.inv.sinv 0 (D n))
-  obtain ⟨_, _, _, _, _, _, _, _, hw, _⟩ := hs
-  exact sp.lt new (ip.headsLt new (writeRes_head hw))
+  exact sp.lt new (ip.headsLt new (writeRes_head hs.write))
 
 theorem request_bounds_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
     {g g' : Sys} {act : Act} (hi : RequestBounds g)
@@ -146,7 +146,7 @@ theorem sys_step_expansion {N : Nat} {D : Nat → Nat → Nat → Prop} {law : H
     rcases hl.accepted rfl r hr her p hp ha hseq with he | hold
     · exact hc r hr p hp he
     · exact ho r hold p hp
-  · rw [nextHistory_quiet hist (step_hub_quiet hs ha)]
+  · rw [nextHistory_quiet hist (hs.nonanswer_effect ha).hub]
     by_cases own : ∃ n, E n ∧ act.about n
     · obtain ⟨n, hn, hab⟩ := own
       exact own_step_expansion hist pk hn hs hab (hk n hn) hd (hl.applied n hn)
@@ -266,15 +266,15 @@ theorem settled_raw_head {D : Nat → Nat → Nat → Prop} {E : Nat → Prop} {
     (hi : HubSuffix.Inv E w (view E g hist pk)) (hn : E n) (hk : NodeSys.NodeOK D n g)
     (hs : NodeSettle.Settled ⟨g.hub.seq, H, R, D n⟩ (g.node n).ns) :
     (g.node n).emb H = g.hub.head ∧ ∀ x, heads g n x ↔ x = g.hub.head := by
-  have agree := state_repo_agrees hk hs.2.2.2.1
+  have agree := state_repo_agrees hk hs.pending
   have knownEq : known g n = (g.hub.seq, (g.node n).emb H) := by
-    rw [agree.2, hs.1]
+    rw [agree.2, hs.known]
   have truthful := (hi.known n hn).2.2
   change hist (known g n).1 = (known g n).2 at truthful
   rw [knownEq] at truthful
   have raw : (g.node n).emb H = g.hub.head := truthful.symm.trans hi.histHead
   refine ⟨raw, fun x => ?_⟩
-  rw [agree.1 x, hs.2.2.2.2.1]
+  rw [agree.1 x, hs.heads]
   simp [raw, eq_comm]
 
 /-- Hub stabilization of the actual joint system, rather than a separately supplied

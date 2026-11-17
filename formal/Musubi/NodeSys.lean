@@ -244,25 +244,94 @@ inductive Loc (d : Nat → Nat → Prop) : NS → NS → Prop
       (hd : ¬ ∃ y ∈ σ.heads, Desc σ y) (ha : (norm σ).annc = none) (hv : Adv (norm σ) σ') :
       Loc d σ σ'
 
-/-- A step that sends requests: the round's first `Fetch`, or a core step that polls, asks for
-objects, or pushes, after its write (`WriteRes`), with the state after its write and the new
-head. -/
+/-! ### Request issuance
+
+Each branch names its guards and its write result. The field order follows `NodeCore::step`;
+consumers use the names rather than the position of a guard in that decision path. -/
+
+namespace Issue
+
+structure Start (σ post : NS) : Prop where
+  inactive : σ.act = false
+  unchanged : post = σ
+
+structure FetchPoll (d : Nat → Nat → Prop) (σ post : NS) : Prop where
+  active : σ.act = true
+  go : Go (lctx d σ) σ
+  atMostOneHead : σ.heads.length < 2
+  notLocal : ¬ σ.loc σ.known.2
+  planEmpty : σ.plan = []
+  noReady : ¬ ∃ x, Ready σ x
+  missingOps : MissOps σ
+  unchanged : post = σ
+
+structure FetchObjects (d : Nat → Nat → Prop) (σ post : NS) : Prop where
+  active : σ.act = true
+  go : Go (lctx d σ) σ
+  atMostOneHead : σ.heads.length < 2
+  notLocal : ¬ σ.loc σ.known.2
+  planEmpty : σ.plan = []
+  noReady : ¬ ∃ x, Ready σ x
+  noMissingOps : ¬ MissOps σ
+  missingObjects : MissObjs σ
+  unchanged : post = σ
+
+structure DifferPoll (d : Nat → Nat → Prop) (σ post : NS) : Prop where
+  active : σ.act = true
+  go : Go (lctx d σ) σ
+  atMostOneHead : σ.heads.length < 2
+  knownLocal : σ.loc σ.known.2
+  covers : ∃ y ∈ σ.heads, Desc σ y
+  different : Differ σ
+  noAnnouncement : (norm σ).annc = none
+  unchanged : post = σ
+
+structure Push (d : Nat → Nat → Prop) (σ post : NS) (new : Nat) : Prop where
+  active : σ.act = true
+  go : Go (lctx d σ) σ
+  atMostOneHead : σ.heads.length < 2
+  knownLocal : σ.loc σ.known.2
+  covers : ∃ y ∈ σ.heads, Desc σ y
+  noAnnouncement : (norm σ).annc = none
+  noDifference : ¬ Differ σ
+  work : σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.2]
+  write : WriteRes { norm σ with plan := [] } post new
+  changed : new ≠ σ.known.2
+
+structure WritePoll (d : Nat → Nat → Prop) (σ post : NS) (new : Nat) : Prop where
+  active : σ.act = true
+  go : Go (lctx d σ) σ
+  atMostOneHead : σ.heads.length < 2
+  knownLocal : σ.loc σ.known.2
+  covers : ∃ y ∈ σ.heads, Desc σ y
+  noAnnouncement : (norm σ).annc = none
+  noDifference : ¬ Differ σ
+  pending : σ.pending ≠ []
+  write : WriteRes { norm σ with plan := [] } post new
+  restored : new = σ.known.2
+
+end Issue
+
+/-- A step that sends requests: the round's first fetch, a poll, an objects call, or a push.
+The branch records expose its guards and the state after any write. -/
 def Issue (d : Nat → Nat → Prop) (σ : NS) : Kind → NS → Nat → Prop
-  | .start, post, _ => σ.act = false ∧ post = σ
-  | .fetchPoll, post, _ => σ.act = true ∧ Go (lctx d σ) σ ∧ σ.heads.length < 2 ∧
-      ¬ σ.loc σ.known.2 ∧ σ.plan = [] ∧ (¬ ∃ x, Ready σ x) ∧ MissOps σ ∧ post = σ
-  | .fetchObjs, post, _ => σ.act = true ∧ Go (lctx d σ) σ ∧ σ.heads.length < 2 ∧
-      ¬ σ.loc σ.known.2 ∧ σ.plan = [] ∧ (¬ ∃ x, Ready σ x) ∧ ¬ MissOps σ ∧ MissObjs σ ∧
-      post = σ
-  | .differPoll, post, _ => σ.act = true ∧ Go (lctx d σ) σ ∧ σ.heads.length < 2 ∧
-      σ.loc σ.known.2 ∧ (∃ y ∈ σ.heads, Desc σ y) ∧ Differ σ ∧ (norm σ).annc = none ∧ post = σ
-  | .push, post, new => σ.act = true ∧ Go (lctx d σ) σ ∧ σ.heads.length < 2 ∧
-      σ.loc σ.known.2 ∧ (∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none ∧ ¬ Differ σ ∧
-      (σ.pending ≠ [] ∨ σ.heads ≠ [σ.known.2]) ∧ WriteRes { norm σ with plan := [] } post new ∧
-      new ≠ σ.known.2
-  | .writePoll, post, new => σ.act = true ∧ Go (lctx d σ) σ ∧ σ.heads.length < 2 ∧
-      σ.loc σ.known.2 ∧ (∃ y ∈ σ.heads, Desc σ y) ∧ (norm σ).annc = none ∧ ¬ Differ σ ∧
-      σ.pending ≠ [] ∧ WriteRes { norm σ with plan := [] } post new ∧ new = σ.known.2
+  | .start, post, _ => Issue.Start σ post
+  | .fetchPoll, post, _ => Issue.FetchPoll d σ post
+  | .fetchObjs, post, _ => Issue.FetchObjects d σ post
+  | .differPoll, post, _ => Issue.DifferPoll d σ post
+  | .push, post, new => Issue.Push d σ post new
+  | .writePoll, post, new => Issue.WritePoll d σ post new
+
+/-- Only the first fetch of a round is issued while the core is inactive. -/
+theorem Issue.start_iff_inactive {d : Nat → Nat → Prop} {σ post : NS} {kind : Kind}
+    {new : Nat} (issued : Issue d σ kind post new) : kind = .start ↔ σ.act = false := by
+  cases kind with
+  | start => exact ⟨fun _ => issued.inactive, fun _ => rfl⟩
+  | fetchPoll | fetchObjs | differPoll | push | writePoll =>
+    constructor
+    · intro impossible; cases impossible
+    · intro inactive
+      exact False.elim (Bool.false_ne_true (inactive.symm.trans issued.active))
 
 /-- A push the hub accepted while records were changing: the node learns the new head, which
 stands for operations it has, and notes the new records; its op heads and graph stay. -/
@@ -364,6 +433,26 @@ structure Quiet (g g' : Sys) : Prop where
   notes : g'.notes = g.notes
   slot : g'.slot = g.slot
 
+/-- The hub's five answer cases: fetch, objects, accepted push, refused records/drops,
+and a head reply to a rejected push. This is the same law used by the transition and its
+invariant proofs; `AnswerEffect` later exposes only the snapshot facts they imply. -/
+def AnswerLaw (N : Nat) (law : HubLaw) (g g' : Sys) (body : Body) (acc : Bool)
+    (ans : Ans) : Prop :=
+  (body = .fetch ∧ acc = false ∧ ans = .fetched g.hub ∧
+    g'.hub = g.hub ∧ g'.notes = g.notes) ∨
+  (body = .objs ∧ acc = false ∧ ans = .objects ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
+  (∃ p, body = .push p ∧
+    ((law.accepts g.hub g.par p ∧ acc = true ∧
+        g'.hub = ⟨g.hub.seq + 1, p.new, law.recsAfter g.hub.recs p.pending⟩ ∧
+        ans = .head g'.hub ∧
+        g'.notes = g.notes ++ (List.range N).map (fun m => ⟨m, g.time, g'.hub⟩)) ∨
+      (¬ law.accepts g.hub g.par p ∧ acc = false ∧
+        (p.recs ≠ g.hub.recs ∨ law.dropped g.hub.recs p) ∧
+        ans = .refused g.hub.recs ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
+      (¬ law.accepts g.hub g.par p ∧ acc = false ∧
+        (p.recs = g.hub.recs ∧ ¬ law.dropped g.hub.recs p) ∧
+        ans = .head g.hub ∧ g'.hub = g.hub ∧ g'.notes = g.notes)))
+
 /-- One step of the hive, for `N` nodes with drops `D n` (record identity to dropped label). -/
 inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
     Act → Sys → Sys → Prop
@@ -418,20 +507,7 @@ inductive SysStep (N : Nat) (D : Nat → Nat → Nat → Prop) (law : HubLaw) :
   | answer {g g' : Sys} (r : Req) (ans : Ans)
       (hr : r ∈ g.reqs) (hreqs : g'.reqs = g.reqs.erase r)
       (acc : Bool)
-      (hans : (r.body = .fetch ∧ acc = false ∧ ans = .fetched g.hub ∧ g'.hub = g.hub ∧
-          g'.notes = g.notes) ∨
-        (r.body = .objs ∧ acc = false ∧ ans = .objects ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-        (∃ p, r.body = .push p ∧
-          ((law.accepts g.hub g.par p ∧ acc = true ∧
-              g'.hub = ⟨g.hub.seq + 1, p.new, law.recsAfter g.hub.recs p.pending⟩ ∧
-              ans = .head g'.hub ∧
-              g'.notes = g.notes ++ (List.range N).map (fun m => ⟨m, g.time, g'.hub⟩)) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs ≠ g.hub.recs ∨ law.dropped g.hub.recs p) ∧
-              ans = .refused g.hub.recs ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs = g.hub.recs ∧ ¬ law.dropped g.hub.recs p) ∧
-              ans = .head g.hub ∧ g'.hub = g.hub ∧ g'.notes = g.notes))))
+      (hans : AnswerLaw N law g g' r.body acc ans)
       (hreps : g'.reps = g.reps ++ [⟨r.node, r.slot, g.time, r.body, acc, ans⟩])
       (hrest : g'.node = g.node ∧ g'.next = g.next ∧ g'.par = g.par ∧ g'.slot = g.slot)
       (ht : g'.time = g.time + 1) : SysStep N D law .answer g g'
@@ -674,8 +750,6 @@ theorem loc_busy {σ σ' : NS} (h : Loc d σ σ') (I : NodeSettle.SInv c σ) (hd
 theorem idle_congr {σ σ' : NS} (h : Idle (lctx d σ) σ σ') (hd : c.drops = d) : Idle c σ σ' := by
   cases h with
   | fetchIdle hg h1 hl hp hr ho hb he => exact .fetchIdle (go_congr hd hg) h1 hl hp hr ho hb he
-  | differIdle hg h1 hl hdd hf hnr ha he =>
-    exact .differIdle (go_congr hd hg) h1 hl hdd hf hnr ha he
   | goal hg h1 hl hdd hnr hf hp hh he => exact .goal (go_congr hd hg) h1 hl hdd hnr hf hp hh he
 
 /-- A step that sent requests, with the replies, is NodeSettle's step, but for the push branch
@@ -688,26 +762,26 @@ theorem issue_busy {σ post σ' : NS} {k : Kind} {new : Nat} {as : List Ans}
   cases k with
   | start => exact absurd rfl hk
   | fetchPoll =>
-    obtain ⟨_, hg, h1, hl, hp, hr, hmo, hpost⟩ := hi
-    obtain ⟨σ1, F, ho⟩ := hh
-    exact .fetch σ1 (go_congr hd hg) h1 hl hp hr (Or.inl hmo) (Or.inl ⟨hmo, F⟩) ho
+    obtain ⟨σ1, fetched, objects⟩ := hh
+    exact .fetch σ1 (go_congr hd hi.go) hi.atMostOneHead hi.notLocal hi.planEmpty hi.noReady
+      (Or.inl hi.missingOps) (Or.inl ⟨hi.missingOps, fetched⟩) objects
   | fetchObjs =>
-    obtain ⟨_, hg, h1, hl, hp, hr, hmo, hmb, hpost⟩ := hi
-    exact .fetch (norm σ) (go_congr hd hg) h1 hl hp hr (Or.inr hmb) (Or.inr ⟨hmo, rfl⟩)
-      (Or.inl ⟨hmb, hh⟩)
+    exact .fetch (norm σ) (go_congr hd hi.go) hi.atMostOneHead hi.notLocal hi.planEmpty hi.noReady
+      (Or.inr hi.missingObjects) (Or.inr ⟨hi.noMissingOps, rfl⟩)
+      (Or.inl ⟨hi.missingObjects, hh⟩)
   | differPoll =>
-    obtain ⟨_, hg, h1, hl, hdd, hf, ha, hpost⟩ := hi
-    exact .differPoll (go_congr hd hg) h1 hl hdd hf ha hh
+    exact .differPoll (go_congr hd hi.go) hi.atMostOneHead hi.knownLocal hi.covers hi.different
+      hi.noAnnouncement hh
   | push =>
-    obtain ⟨_, hg, h1, hl, hdd, hnr, hf, hw, hw', hnew⟩ := hi
-    refine .pushStale post new (go_congr hd hg) h1 hl hdd hnr hf hw (hph rfl) hw' hnew ?_
+    refine .pushStale post new (go_congr hd hi.go) hi.atMostOneHead hi.knownLocal hi.covers
+      hi.noAnnouncement hi.noDifference hi.work (hph rfl) hi.write hi.changed ?_
     rcases hh with ⟨-, hne, he⟩ | ⟨-, heq, F⟩ | ⟨hex, hne, A⟩
     · exact Or.inl ⟨hne, he⟩
     · exact Or.inr ⟨heq, F⟩
     · exact absurd ⟨hex, hne, A⟩ (hacc rfl)
   | writePoll =>
-    obtain ⟨_, hg, h1, hl, hdd, hnr, hf, hw, hw', hnew⟩ := hi
-    exact .writePoll post new (go_congr hd hg) h1 hl hdd hnr hf hw hw' hnew hh
+    exact .writePoll post new (go_congr hd hi.go) hi.atMostOneHead hi.knownLocal hi.covers
+      hi.noAnnouncement hi.noDifference hi.pending hi.write hi.restored hh
 
 end Transport
 
@@ -735,6 +809,12 @@ structure NodeOK (D : Nat → Nat → Nat → Prop) (n : Nat) (g : Sys) : Prop w
   scope : Scoped (g.node n).ns (g.node n).emb g
   wait : ∀ w, (g.node n).wait = some w → WaitOK D n g w
 
+/-- The outstanding request kind records whether its sender was between rounds. -/
+theorem NodeOK.wait_start_iff {D : Nat → Nat → Nat → Prop} {n : Nat} {g : Sys} {w : Wait}
+    (I : NodeOK D n g) (waiting : (g.node n).wait = some w) :
+    w.kind = .start ↔ (g.node n).ns.act = false :=
+  Issue.start_iff_inactive (I.wait w waiting).issue
+
 /-- Slots in flight are below the next one, a reply is what the hub's law answers its request
 with, and no push in flight drops its own new head, so it is refused only for other records. -/
 structure SysOK (law : HubLaw) (g : Sys) : Prop where
@@ -758,10 +838,94 @@ def AnsStable (st : Snap) : Ans → Prop
 def StableReps (t0 : Nat) (st : Snap) (g : Sys) : Prop :=
   ∀ r ∈ g.reps, t0 ≤ r.time → r.acc = false ∧ AnsStable st r.ans
 
+/-! ## Effects of a system step -/
+
 theorem SysStep.time {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {a : Act}
     {g g' : Sys} (h : SysStep N D law a g g') : g'.time = g.time + 1 := by
   cases h <;> assumption
 
+/-- A step outside hub answering keeps the hub and can only remove replies and notices.
+The named boundary lets invariant proofs ignore unrelated constructor fields. -/
+structure QuietEffect (g g' : Sys) : Prop where
+  hub : g'.hub = g.hub
+  replies : ∀ r ∈ g'.reps, r ∈ g.reps
+  notices : ∀ nt ∈ g'.notes, nt ∈ g.notes
+  time : g'.time = g.time + 1
+
+/-- Only hub answering can add a reply, publish a notice or move the hub. -/
+theorem SysStep.nonanswer_effect {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
+    {a : Act} {g g' : Sys} (hs : SysStep N D law a g g') (ha : a ≠ .answer) : QuietEffect g g' := by
+  cases hs with
+  | busy | idle | maint | env =>
+    rename_i hq ht
+    exact ⟨hq.hub, fun r h => hq.reps ▸ h, fun nt h => hq.notes ▸ h, ht⟩
+  | issue n kind post new emb requests hw hissue hg hb hslots hnodup hnode hreqs hslot
+      hrest ht hnd =>
+    exact ⟨hrest.1, fun r h => hrest.2.1 ▸ h, fun nt h => hrest.2.2 ▸ h, ht⟩
+  | answer => exact absurd rfl ha
+  | handle =>
+    rename_i hreps hrest ht
+    exact ⟨hrest.1, fun r h => ((hreps r).1 h).1, fun nt h => hrest.2.2.1 ▸ h, ht⟩
+  | notice | ignore =>
+    rename_i hnotes hrest ht
+    exact ⟨hrest.1, fun r h => hrest.2.2.1 ▸ h,
+      fun nt h => List.mem_of_mem_erase (hnotes ▸ h), ht⟩
+
+/-- The semantic boundary of hub answering. A quiet answer keeps the hub and adds no notice;
+an accept advances its sequence and any new notice names the new hub. New head-bearing replies
+name the corresponding snapshot. Request slots, packet fields and object payloads are hidden
+here because invariants of head observations do not read them. -/
+inductive AnswerEffect (g g' : Sys) : Prop
+  | quiet
+      (hub : g'.hub = g.hub)
+      (replies : ∀ r ∈ g'.reps, r ∈ g.reps ∨
+        r.time = g.time ∧ ∀ s, (r.ans = .fetched s ∨ r.ans = .head s) → s = g.hub)
+      (notices : ∀ nt ∈ g'.notes, nt ∈ g.notes)
+      (time : g'.time = g.time + 1)
+  | accepted
+      (sequence : g'.hub.seq = g.hub.seq + 1)
+      (replies : ∀ r ∈ g'.reps, r ∈ g.reps ∨
+        r.time = g.time ∧ ∀ s, (r.ans = .fetched s ∨ r.ans = .head s) → s = g'.hub)
+      (notices : ∀ nt ∈ g'.notes, nt ∈ g.notes ∨ nt.time = g.time ∧ nt.snap = g'.hub)
+      (time : g'.time = g.time + 1)
+
+/-- Every actual hub answer has a quiet or accepted effect on the observed snapshots. -/
+theorem SysStep.answer_effect {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
+    {g g' : Sys} (hs : SysStep N D law .answer g g') : AnswerEffect g g' := by
+  cases hs with
+  | answer request answer hr hreqs accepted hans hreps hrest ht =>
+    have replies (snapshot : Snap)
+        (carries : ∀ s, (answer = .fetched s ∨ answer = .head s) → s = snapshot) :
+        ∀ r ∈ g'.reps, r ∈ g.reps ∨
+          r.time = g.time ∧ ∀ s, (r.ans = .fetched s ∨ r.ans = .head s) → s = snapshot := by
+      intro r hr
+      rw [hreps, List.mem_append, List.mem_singleton] at hr
+      rcases hr with old | rfl
+      · exact Or.inl old
+      · exact Or.inr ⟨rfl, carries⟩
+    have notices
+        (published : g'.notes = g.notes ++
+          (List.range N).map (fun n => ⟨n, g.time, g'.hub⟩)) :
+        ∀ nt ∈ g'.notes, nt ∈ g.notes ∨ nt.time = g.time ∧ nt.snap = g'.hub := by
+      intro nt hn
+      rw [published, List.mem_append] at hn
+      rcases hn with old | fresh
+      · exact Or.inl old
+      · obtain ⟨n, _, rfl⟩ := List.mem_map.1 fresh
+        exact Or.inr ⟨rfl, rfl⟩
+    rcases hans with ⟨_, _, rfl, hub, notes⟩ | ⟨_, _, rfl, hub, notes⟩ |
+      ⟨p, _, (⟨_, _, hub, rfl, notes⟩ | ⟨_, _, _, rfl, hub, notes⟩ |
+        ⟨_, _, _, rfl, hub, notes⟩)⟩
+    · exact .quiet hub (replies g.hub (by rintro s (h | h) <;> cases h <;> rfl))
+        (fun nt hn => notes ▸ hn) ht
+    · exact .quiet hub (replies g.hub (by rintro s (h | h) <;> cases h))
+        (fun nt hn => notes ▸ hn) ht
+    · exact .accepted (by rw [hub])
+        (replies g'.hub (by rintro s (h | h) <;> cases h <;> rfl)) (notices notes) ht
+    · exact .quiet hub (replies g.hub (by rintro s (h | h) <;> cases h))
+        (fun nt hn => notes ▸ hn) ht
+    · exact .quiet hub (replies g.hub (by rintro s (h | h) <;> cases h <;> rfl))
+        (fun nt hn => notes ▸ hn) ht
 
 /-! ## Helpers for the simulation -/
 
@@ -769,32 +933,29 @@ theorem idle_graph {c : Ctx} {σ σ' : NS} (h : Idle c σ σ') :
     σ'.par = σ.par ∧ σ'.next = σ.next ∧ σ'.act = false := by
   cases h with
   | fetchIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl⟩
-  | differIdle _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl⟩
   | goal _ _ _ _ _ _ _ _ he => subst he; exact ⟨rfl, rfl, rfl⟩
 
 /-- The state after a step's write, as its own: well formed, if the step's state is. -/
 theorem post_inv {c : Ctx} {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : Nat}
     (hi : Issue d σ k post new) (I : NodeSettle.SInv c σ) : NodeSettle.SInv c post := by
   cases k with
-  | start => obtain ⟨_, rfl⟩ := hi; exact I
-  | fetchPoll => obtain ⟨_, _, _, _, _, _, _, rfl⟩ := hi; exact I
-  | fetchObjs => obtain ⟨_, _, _, _, _, _, _, _, rfl⟩ := hi; exact I
-  | differPoll => obtain ⟨_, _, _, _, _, _, _, rfl⟩ := hi; exact I
+  | start => have same := hi.unchanged; subst post; exact I
+  | fetchPoll => have same := hi.unchanged; subst post; exact I
+  | fetchObjs => have same := hi.unchanged; subst post; exact I
+  | differPoll => have same := hi.unchanged; subst post; exact I
   | push =>
-    obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi
-    exact (I.norm.plan []).writeRes hw'
+    exact (I.norm.plan []).writeRes hi.write
   | writePoll =>
-    obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi
-    exact (I.norm.plan []).writeRes hw'
+    exact (I.norm.plan []).writeRes hi.write
 
 /-- A step that wrote nothing kept its state. -/
 theorem post_same {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : Nat}
     (hi : Issue d σ k post new) (hk : k ≠ .push) (hk' : k ≠ .writePoll) : post = σ := by
   cases k with
-  | start => exact hi.2
-  | fetchPoll => exact hi.2.2.2.2.2.2.2
-  | fetchObjs => exact hi.2.2.2.2.2.2.2.2
-  | differPoll => exact hi.2.2.2.2.2.2.2
+  | start => exact hi.unchanged
+  | fetchPoll => exact hi.unchanged
+  | fetchObjs => exact hi.unchanged
+  | differPoll => exact hi.unchanged
   | push => exact absurd rfl hk
   | writePoll => exact absurd rfl hk'
 
@@ -883,20 +1044,7 @@ variable {N : Nat} {law : HubLaw} {g g' : Sys} {r : Req} {ans : Ans} {acc : Bool
 
 theorem sysOK_answer (S : SysOK law g) (hr : r ∈ g.reqs)
     (hreqs : g'.reqs = g.reqs.erase r)
-    (hans : (r.body = .fetch ∧ acc = false ∧ ans = .fetched g.hub ∧ g'.hub = g.hub ∧
-          g'.notes = g.notes) ∨
-        (r.body = .objs ∧ acc = false ∧ ans = .objects ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-        (∃ p, r.body = .push p ∧
-          ((law.accepts g.hub g.par p ∧ acc = true ∧
-              g'.hub = ⟨g.hub.seq + 1, p.new, law.recsAfter g.hub.recs p.pending⟩ ∧
-              ans = .head g'.hub ∧
-              g'.notes = g.notes ++ (List.range N).map (fun m => ⟨m, g.time, g'.hub⟩)) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs ≠ g.hub.recs ∨ law.dropped g.hub.recs p) ∧
-              ans = .refused g.hub.recs ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs = g.hub.recs ∧ ¬ law.dropped g.hub.recs p) ∧
-              ans = .head g.hub ∧ g'.hub = g.hub ∧ g'.notes = g.notes))))
+    (hans : AnswerLaw N law g g' r.body acc ans)
     (hreps : g'.reps = g.reps ++ [⟨r.node, r.slot, g.time, r.body, acc, ans⟩])
     (hslot : g'.slot = g.slot) : SysOK law g' := by
   have sub : ∀ q ∈ g'.reqs, q ∈ g.reqs := fun q h =>
@@ -957,20 +1105,7 @@ theorem sysOK_answer (S : SysOK law g) (hr : r ∈ g.reqs)
 
 theorem stable_answer {t0 : Nat} {st : Snap} (R : StableReps t0 st g) (hhub : g.hub = st)
     (hhub' : g'.hub = st)
-    (hans : (r.body = .fetch ∧ acc = false ∧ ans = .fetched g.hub ∧ g'.hub = g.hub ∧
-          g'.notes = g.notes) ∨
-        (r.body = .objs ∧ acc = false ∧ ans = .objects ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-        (∃ p, r.body = .push p ∧
-          ((law.accepts g.hub g.par p ∧ acc = true ∧
-              g'.hub = ⟨g.hub.seq + 1, p.new, law.recsAfter g.hub.recs p.pending⟩ ∧
-              ans = .head g'.hub ∧
-              g'.notes = g.notes ++ (List.range N).map (fun m => ⟨m, g.time, g'.hub⟩)) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs ≠ g.hub.recs ∨ law.dropped g.hub.recs p) ∧
-              ans = .refused g.hub.recs ∧ g'.hub = g.hub ∧ g'.notes = g.notes) ∨
-            (¬ law.accepts g.hub g.par p ∧ acc = false ∧
-              (p.recs = g.hub.recs ∧ ¬ law.dropped g.hub.recs p) ∧
-              ans = .head g.hub ∧ g'.hub = g.hub ∧ g'.notes = g.notes))))
+    (hans : AnswerLaw N law g g' r.body acc ans)
     (hreps : g'.reps = g.reps ++ [⟨r.node, r.slot, g.time, r.body, acc, ans⟩]) :
     StableReps t0 st g' := by
   intro x h ht
@@ -1064,23 +1199,23 @@ theorem handle_graph {c : Ctx} {d : Nat → Nat → Prop} {σ post σ' : NS} {k 
     σ'.par = post.par ∧ σ'.next = post.next := by
   cases k with
   | start =>
-    obtain ⟨_, rfl⟩ := hi
+    have same := hi.unchanged; subst post
     obtain ⟨σ1, F, rfl⟩ := hh
     exact ⟨F.par, F.next⟩
   | fetchPoll =>
-    obtain ⟨_, _, _, _, _, _, _, rfl⟩ := hi
+    have same := hi.unchanged; subst post
     obtain ⟨σ1, F, ho⟩ := hh
     rcases ho with ⟨-, O⟩ | ⟨-, rfl⟩
     · exact ⟨(objRep_graph O).1.trans F.par, (objRep_graph O).2.trans F.next⟩
     · exact ⟨F.par, F.next⟩
   | fetchObjs =>
-    obtain ⟨_, _, _, _, _, _, _, _, rfl⟩ := hi
-    have O : ObjRep (norm post) σ'
-        (fun x => Walk post x ∧ ¬ post.loc x ∧ post.stg x ∧ ¬ post.obj x) := hh
+    have same := hi.unchanged; subst post
+    have O : ObjRep (norm σ) σ'
+        (fun x => Walk σ x ∧ ¬ σ.loc x ∧ σ.stg x ∧ ¬ σ.obj x) := hh
     have h2 := objRep_graph O
     exact h2
   | differPoll =>
-    obtain ⟨_, _, _, _, _, _, _, rfl⟩ := hi
+    have same := hi.unchanged; subst post
     exact ⟨hh.par, hh.next⟩
   | push =>
     rcases hh with ⟨-, -, rfl⟩ | ⟨-, -, F⟩ | ⟨-, -, A⟩
@@ -1103,6 +1238,73 @@ theorem fits_stable {emb : Nat → Nat} {bound next h : Nat} {c' : Ctx} {st : Sn
     subst this
     exact ctx_of_fits hinj hnb hh he hd hf
 
+/-- Issuing a request batch preserves its sender's node invariant. Fresh slots exclude old
+requests and replies; the batch bodies identify each request of the new outstanding wait. -/
+theorem nodeOK_issue {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
+    {n : Nat} {kind : Kind} {g g' : Sys} (I : NodeOK D n g) (S : SysOK law g)
+    (step : SysStep N D law (.issue n kind) g g') : NodeOK D n g' := by
+  cases step with
+  | issue _ _ post new emb1 rq hw hissue hg hb hslot hnodup hnode hreqs hslot' hrest ht hnd =>
+    have hn' : g'.node n = ⟨(g.node n).ns, (g.node n).emb,
+        (g.node n).gen + (post.next - (g.node n).ns.next),
+        some ⟨kind, rq.map Req.slot, post, new, emb1⟩⟩ := by rw [hnode, upd_same]
+    have hfresh : ∀ x ∈ rq.map Req.slot, g.slot ≤ x := by
+      intro x hx
+      obtain ⟨q, hq, rfl⟩ := List.mem_map.1 hx
+      exact (hslot q hq).2.1
+    refine ⟨by rw [hn']; exact I.inv, by rw [hn']; exact scoped_raw I.scope hg.raw, ?_⟩
+    rw [hn']
+    intro w hw'
+    cases hw'
+    refine ⟨by rw [hn']; exact hissue, scoped_growR I.scope I.inv.parLt hg,
+      by rw [hn']; exact hg.next, by rw [hn']; exact hg.embOld, ?_, ?_, ?_⟩
+    · intro he
+      have := bodies_ne hb
+      rw [List.map_eq_nil_iff] at he
+      rw [he] at this
+      exact this rfl
+    · intro q hq' hqn hqs
+      rw [hreqs, List.mem_append] at hq'
+      rcases hq' with hq' | hq'
+      · have := S.reqs q hq'
+        have := hfresh _ hqs
+        omega
+      · refine ⟨fun hk => ?_, fun hh0 hk1 hk2 => ?_⟩
+        · subst hk
+          have hmem : q.body ∈ rq.map Req.body := List.mem_map_of_mem hq'
+          simp only [Bodies] at hb
+          rw [hb, List.mem_singleton] at hmem
+          exact ⟨_, hmem, rfl⟩
+        · have hne' : rq ≠ [] := List.ne_nil_of_mem hq'
+          obtain ⟨q0, rest, hq0⟩ := List.exists_cons_of_ne_nil hne'
+          subst hq0
+          simp only [List.map_cons, List.head?_cons, Option.some.injEq] at hh0
+          have hqq : q = q0 := by
+            rcases List.mem_cons.1 hq' with h' | h'
+            · exact h'
+            · exfalso
+              have hnd' := hnodup
+              simp only [List.map_cons, List.nodup_cons] at hnd'
+              exact hnd'.1 (by rw [hh0]; exact List.mem_map_of_mem h')
+          subst hqq
+          cases kind with
+          | push => exact absurd rfl hk1
+          | fetchObjs => exact absurd rfl hk2
+          | start =>
+            simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
+          | differPoll =>
+            simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
+          | writePoll =>
+            simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
+          | fetchPoll =>
+            simp only [Bodies, List.map_cons, List.cons.injEq] at hb
+            rcases hb with ⟨-, hb, -⟩ | ⟨-, hb, -⟩ <;> exact hb
+    · intro r hr' hrn hrs
+      rw [hrest.2.1] at hr'
+      have := S.reps r hr'
+      have := hfresh _ hrs
+      omega
+
 /-- One step of the system, after the hub has settled at `st`, is a NodeSettle event of node
 `n`'s core in the stable context, unless it is a push from the hub's head, and keeps what the
 simulation needs. Of the replies and notifications for the node, only those the step takes are
@@ -1117,6 +1319,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
     Ev c (labOf n c g a) (g.node n).ns (g'.node n).ns ∧ SimInv law D n c t0 st h g' := by
   have hcd : c.drops = D n := by rw [hc]
   have hcR : c.R = st.recs := by rw [hc]
+  have currentStep := hs
   cases hs with
   | busy m σ' emb' hw ha hsl hg hnode hq ht =>
     by_cases hm : m = n
@@ -1217,64 +1420,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
           exact absurd ⟨h'.2.1, h'.2.2⟩ hnotemit
         · rfl
       rw [hlab, hn']
-      have hfresh : ∀ x ∈ rq.map Req.slot, g.slot ≤ x := by
-        intro x hx
-        obtain ⟨q, hq, rfl⟩ := List.mem_map.1 hx
-        exact (hslot q hq).2.1
-      refine ⟨.frame, ⟨⟨?_, ?_, ?_⟩, hsys, ?_, ?_, ?_, ?_, ?_⟩⟩
-      · rw [hn']; exact I.node.inv
-      · rw [hn']; exact scoped_raw I.node.scope hg.raw
-      · rw [hn']
-        intro w hw'
-        cases hw'
-        refine ⟨by rw [hn']; exact hissue, scoped_growR I.node.scope I.node.inv.parLt hg,
-          by rw [hn']; exact hg.next, by rw [hn']; exact hg.embOld, ?_, ?_, ?_⟩
-        · intro he
-          have := bodies_ne hb
-          rw [List.map_eq_nil_iff] at he
-          rw [he] at this
-          exact this rfl
-        · intro q hq' hqn hqs
-          rw [hreqs, List.mem_append] at hq'
-          rcases hq' with hq' | hq'
-          · have := I.sys.reqs q hq'
-            have := hfresh _ hqs
-            omega
-          · refine ⟨fun hk => ?_, fun hh0 hk1 hk2 => ?_⟩
-            · subst hk
-              have hmem : q.body ∈ rq.map Req.body := List.mem_map_of_mem hq'
-              simp only [Bodies] at hb
-              rw [hb, List.mem_singleton] at hmem
-              exact ⟨_, hmem, rfl⟩
-            · have hne' : rq ≠ [] := List.ne_nil_of_mem hq'
-              obtain ⟨q0, rest, hq0⟩ := List.exists_cons_of_ne_nil hne'
-              subst hq0
-              simp only [List.map_cons, List.head?_cons, Option.some.injEq] at hh0
-              have hqq : q = q0 := by
-                rcases List.mem_cons.1 hq' with h' | h'
-                · exact h'
-                · exfalso
-                  have hnd := hnodup
-                  simp only [List.map_cons, List.nodup_cons] at hnd
-                  exact hnd.1 (by rw [hh0]; exact List.mem_map_of_mem h')
-              subst hqq
-              cases k with
-              | push => exact absurd rfl hk1
-              | fetchObjs => exact absurd rfl hk2
-              | start =>
-                simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-              | differPoll =>
-                simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-              | writePoll =>
-                simp only [Bodies, List.map_cons, List.cons.injEq] at hb; exact hb.1
-              | fetchPoll =>
-                simp only [Bodies, List.map_cons, List.cons.injEq] at hb
-                rcases hb with ⟨-, hb, -⟩ | ⟨-, hb, -⟩ <;> exact hb
-        · intro r hr' hrn hrs
-          rw [hrest.2.1] at hr'
-          have := I.sys.reps r hr'
-          have := hfresh _ hrs
-          omega
+      refine ⟨.frame, ⟨nodeOK_issue I.node I.sys currentStep, hsys, ?_, ?_, ?_, ?_, ?_⟩⟩
       · intro r hr' ht'; rw [hrest.2.1] at hr'; exact I.reps r hr' ht'
       · rw [hn']; exact I.hl
       · rw [hn']; exact I.he
@@ -1368,7 +1514,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
         have hi := W.issue
         cases hkk : w.kind <;> rw [hkk] at hi
         · exact absurd hkk hk
-        all_goals exact hi.1
+        all_goals exact hi.active
       have hl0 : labOf m c g (.handle m) = (if w.kind = .start then .start else .busy) := by
         simp [labOf, hw]
       have ev : Ev c (labOf m c g (.handle m)) (g.node m).ns σ' := by
@@ -1380,7 +1526,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
           rw [hkk] at hi hhh
           rw [fetched (by rw [hkk]; decide) (by rw [hkk]; decide)] at hhh
           obtain ⟨σ1, F, he⟩ := hhh
-          exact .start hi.1 F he
+          exact .start hi.inactive F he
         | fetchPoll =>
           rw [hkk] at hi hhh
           rw [fetched (by rw [hkk]; decide) (by rw [hkk]; decide)] at hhh
@@ -1404,7 +1550,7 @@ theorem sim_step {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} {n 
         | push =>
           rw [hkk] at hi hhh
           have hap : w.post.ap = (g.node m).ns.ap := by
-            have := write_ap hi.2.2.2.2.2.2.2.2.1
+            have := write_ap hi.write
             exact this
           -- what a reply to the push says of the records
           have headR : ∀ r ∈ rs, ∀ s, r.ans = .head s → (g.node m).ns.ap = st.recs := by
@@ -1539,8 +1685,9 @@ theorem emit_of_lab {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw} 
     split at he
     · rename_i h'
       obtain ⟨rfl, rfl, hk⟩ := h'
-      obtain ⟨ha, hg, h1, hl, hd, hnr, hf, hw', hwr, hnew⟩ := hissue
-      exact ⟨post, new, ha, go_congr hcd hg, h1, hl, hd, hnr, hf, hw', hk, hwr, hnew⟩
+      exact ⟨post, new, hissue.active, go_congr hcd hissue.go, hissue.atMostOneHead,
+        hissue.knownLocal, hissue.covers, hissue.noAnnouncement, hissue.noDifference,
+        hissue.work, hk, hissue.write, hissue.changed⟩
     · cases he
   | busy m => simp only [labOf] at he; split at he <;> cases he
   | idle m => simp only [labOf] at he; split at he <;> cases he
@@ -1733,6 +1880,114 @@ structure Fair (ρ : Nat → Sys) (acts : Nat → Act) (n k' : Nat) : Prop where
     ∃ j, i ≤ j ∧ ((∃ ck, acts j = .core n ck) ∨ (∃ kk, acts j = .issue n kk))
   reply : ∀ i, k' ≤ i → ((ρ i).node n).wait ≠ none → ∃ j, i ≤ j ∧ acts j = .handle n
 
+/-! ### Scheduling facts independent of simulation labels -/
+
+namespace Fair
+
+variable {N : Nat} {D : Nat → Nat → Nat → Prop} {law : HubLaw}
+    {ρ : Nat → Sys} {acts : Nat → Act} {n cut : Nat}
+
+/-- An inactive node reaches the handler of its round-start fetch. An outstanding start is
+completed; otherwise fairness first issues it and then completes its replies. -/
+theorem reaches_start (F : Fair ρ acts n cut)
+    (steps : ∀ i, cut ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
+    (invariants : ∀ i, cut ≤ i → NodeOK D n (ρ i))
+    (i : Nat) (afterCut : cut ≤ i) (inactive : ((ρ i).node n).ns.act = false) :
+    ∃ j, i ≤ j ∧ ∃ w, acts j = .handle n ∧ ((ρ j).node n).wait = some w ∧ w.kind = .start := by
+  cases waiting : ((ρ i).node n).wait with
+  | some w =>
+    obtain ⟨j, later, handled, same⟩ := reaches_handle ρ acts cut steps F.reply i afterCut
+      (by rw [waiting]; exact Option.some_ne_none _)
+    have atHandler : ((ρ j).node n).wait = some w := by rw [same]; exact waiting
+    exact ⟨j, later, w, handled, atHandler,
+      ((invariants i afterCut).wait_start_iff waiting).2 inactive⟩
+  | none =>
+    obtain ⟨issuedAt, later, issued⟩ := F.start i afterCut waiting inactive
+    have step := steps issuedAt (by omega)
+    rw [issued] at step
+    cases step with
+    | issue _ _ post new emb requests _ _ _ _ _ _ node =>
+      have pending : ((ρ (issuedAt + 1)).node n).wait =
+          some ⟨.start, requests.map Req.slot, post, new, emb⟩ := by rw [node, upd_same]
+      obtain ⟨j, afterIssue, handled, same⟩ := reaches_handle ρ acts cut steps F.reply (issuedAt + 1)
+        (by omega) (by rw [pending]; exact Option.some_ne_none _)
+      exact ⟨j, by omega, _, handled, by rw [same]; exact pending, rfl⟩
+
+/-- An active node reaches a core event or the handler of a running-round request. The result
+mentions actual actions and wait kinds; each simulation supplies its own label classification. -/
+theorem reaches_core (F : Fair ρ acts n cut)
+    (steps : ∀ i, cut ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)))
+    (invariants : ∀ i, cut ≤ i → NodeOK D n (ρ i))
+    (i : Nat) (afterCut : cut ≤ i) (active : ((ρ i).node n).ns.act = true) :
+    ∃ j, i ≤ j ∧ ((∃ kind, acts j = .core n kind) ∨
+      ∃ w, acts j = .handle n ∧ ((ρ j).node n).wait = some w ∧ w.kind ≠ .start) := by
+  have handleAfter : ∀ time, cut ≤ time → ((ρ time).node n).ns.act = true →
+      ((ρ time).node n).wait ≠ none → ∃ j, time ≤ j ∧ ∃ w,
+        acts j = .handle n ∧ ((ρ j).node n).wait = some w ∧ w.kind ≠ .start := by
+    intro time afterCut active waiting
+    obtain ⟨w, pending⟩ := Option.ne_none_iff_exists'.1 waiting
+    obtain ⟨j, later, handled, same⟩ := reaches_handle ρ acts cut steps F.reply time afterCut waiting
+    refine ⟨j, later, w, handled, by rw [same]; exact pending, ?_⟩
+    intro start
+    have inactive := ((invariants time afterCut).wait_start_iff pending).1 start
+    rw [active] at inactive
+    cases inactive
+  cases waiting : ((ρ i).node n).wait with
+  | some w =>
+    obtain ⟨j, later, pending⟩ := handleAfter i afterCut active
+      (by rw [waiting]; exact Option.some_ne_none _)
+    exact ⟨j, later, Or.inr pending⟩
+  | none =>
+    obtain ⟨candidate, later, own⟩ := F.core i afterCut waiting active
+    have about : (acts candidate).about n := by
+      rcases own with ⟨kind, event⟩ | ⟨kind, event⟩ <;> simp [event, Act.about]
+    obtain ⟨first, afterStart, own, same⟩ := reaches_own ρ acts cut steps i afterCut
+      ⟨candidate, later, about⟩
+    have step := steps first (by omega)
+    cases event : acts first with
+    | core node kind =>
+      rw [event] at own
+      simp only [Act.about] at own
+      subst own
+      exact ⟨first, afterStart, Or.inl ⟨kind, event⟩⟩
+    | issue sender kind =>
+      rw [event] at own step
+      simp only [Act.about] at own
+      subst own
+      cases step with
+      | issue _ _ post new emb requests _ _ _ _ _ _ nodeAfter =>
+        have pending : ((ρ (first + 1)).node sender).wait =
+            some ⟨kind, requests.map Req.slot, post, new, emb⟩ := by rw [nodeAfter, upd_same]
+        have running : ((ρ (first + 1)).node sender).ns.act = true := by
+          rw [nodeAfter, upd_same]
+          show ((ρ first).node sender).ns.act = true
+          rw [same]; exact active
+        obtain ⟨j, later, handled⟩ := handleAfter (first + 1) (by omega) running
+          (by rw [pending]; exact Option.some_ne_none _)
+        exact ⟨j, by omega, Or.inr handled⟩
+    | handle node =>
+      rw [event] at own step
+      simp only [Act.about] at own
+      subst own
+      cases step with
+      | handle _ _ _ _ _ _ _ _ _ pending => rw [same, waiting] at pending; cases pending
+    | notice node note =>
+      rw [event] at own step
+      simp only [Act.about] at own
+      subst own
+      cases step with
+      | notice _ _ _ _ _ _ _ _ inactive => rw [same, active] at inactive; cases inactive
+    | ignore node =>
+      rw [event] at own step
+      simp only [Act.about] at own
+      subst own
+      cases step with
+      | ignore _ _ _ inactive => rw [same, active] at inactive; cases inactive
+    | answer => rw [event] at own; exact own.elim
+    | env => rw [event] at own; exact own.elim
+
+end Fair
+
 /-- In the system, once the hub has settled, a fair node settles at its head, or sends a push
 from the hub's head with the hub's records: an actual `issue n .push` labelled `emit`
 (`lab_emit`), from a state where it is `Emit` (`emit_packet`), which the stable hub would accept.
@@ -1754,19 +2009,6 @@ theorem node_settles_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
   · exact Or.inl hem
   have hstep' : ∀ i, k' ≤ i → SysStep N D law (acts i) (ρ i) (ρ (i + 1)) :=
     fun i hi => hstep i (by omega)
-  -- the kind of a step's wait follows from whether the round is running
-  have kind_of : ∀ i, k' ≤ i → ∀ w, ((ρ i).node n).wait = some w →
-      (w.kind = .start ↔ ((ρ i).node n).ns.act = false) := by
-    intro i hi w hw
-    have hiss := ((hinv i hi).node.wait w hw).issue
-    constructor
-    · intro hk
-      rw [hk] at hiss
-      exact hiss.1
-    · intro ha
-      cases hkk : w.kind
-      · rfl
-      all_goals (rw [hkk] at hiss; exact absurd (hiss.1.symm.trans ha) (by decide))
   let c : NodeSettle.Ctx := ⟨st.seq, h, st.recs, D n⟩
   have lab_handle : ∀ j, acts j = .handle n → ∀ w, ((ρ j).node n).wait = some w →
       labOf n c (ρ j) (acts j) = if w.kind = .start then .start else .busy := by
@@ -1775,101 +2017,21 @@ theorem node_settles_sys {N : Nat} {D : Nat → Nat → Nat → Prop} {law : Hub
     simp [labOf, hw]
   have hstart : ∀ i, k' ≤ i → ((ρ i).node n).ns.act = false →
       ∃ j, i ≤ j ∧ labOf n c (ρ j) (acts j) = .start := by
-    intro i hi ha
-    cases hw : ((ρ i).node n).wait with
-    | some w =>
-      obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k' hstep' hfair.reply i hi
-        (by rw [hw]; exact Option.some_ne_none _)
-      have hw' : ((ρ j).node n).wait = some w := by rw [hsame]; exact hw
-      have hk : w.kind = .start := (kind_of i hi w hw).2 ha
-      exact ⟨j, hj, by rw [lab_handle j hh w hw']; simp [hk]⟩
-    | none =>
-      obtain ⟨j0, hj0, hiss⟩ := hfair.start i hi hw ha
-      have h1 := hstep' j0 (by omega)
-      rw [hiss] at h1
-      cases h1 with
-      | issue _ _ post new emb1 rq _ _ _ _ _ _ hnode =>
-        have hw1 : ((ρ (j0 + 1)).node n).wait =
-            some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by rw [hnode, upd_same]
-        obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k' hstep' hfair.reply (j0 + 1)
-          (by omega) (by rw [hw1]; exact Option.some_ne_none _)
-        have hw' : ((ρ j).node n).wait = some ⟨.start, rq.map Req.slot, post, new, emb1⟩ := by
-          rw [hsame]; exact hw1
-        exact ⟨j, by omega, by rw [lab_handle j hh _ hw']; rfl⟩
+    intro i hi inactive
+    obtain ⟨j, later, w, handled, waiting, start⟩ := hfair.reaches_start hstep'
+      (fun i hi => (hinv i hi).node) i hi inactive
+    exact ⟨j, later, by rw [lab_handle j handled w waiting]; simp [start]⟩
   have hcore : ∀ i, k' ≤ i → ((ρ i).node n).ns.act = true → ∃ j, i ≤ j ∧
       (labOf n c (ρ j) (acts j) = .busy ∨ labOf n c (ρ j) (acts j) = .idle ∨
         labOf n c (ρ j) (acts j) = .emit ∨ labOf n c (ρ j) (acts j) = .maint) := by
-    intro i hi ha
-    have busy_after : ∀ i', k' ≤ i' → ((ρ i').node n).ns.act = true →
-        ((ρ i').node n).wait ≠ none → ∃ j, i' ≤ j ∧ labOf n c (ρ j) (acts j) = .busy := by
-      intro i' hi' ha' hw'
-      obtain ⟨w, hw⟩ := Option.ne_none_iff_exists'.1 hw'
-      obtain ⟨j, hj, hh, hsame⟩ := reaches_handle ρ acts k' hstep' hfair.reply i' hi' hw'
-      have hwj : ((ρ j).node n).wait = some w := by rw [hsame]; exact hw
-      have hk : w.kind ≠ .start := fun hk => by
-        have := (kind_of i' hi' w hw).1 hk
-        rw [ha'] at this
-        cases this
-      exact ⟨j, hj, by rw [lab_handle j hh w hwj]; simp [hk]⟩
-    cases hw : ((ρ i).node n).wait with
-    | some w =>
-      obtain ⟨j, hj, hl⟩ := busy_after i hi ha (by rw [hw]; exact Option.some_ne_none _)
-      exact ⟨j, hj, Or.inl hl⟩
-    | none =>
-      obtain ⟨j1, hj1, hc⟩ := hfair.core i hi hw ha
-      have hab1 : (acts j1).about n := by
-        rcases hc with ⟨ck, he⟩ | ⟨kk, he⟩ <;> simp [he, Act.about]
-      obtain ⟨j0, hj0, hab, hsame⟩ := reaches_own ρ acts k' hstep' i hi ⟨j1, hj1, hab1⟩
-      have hstp := hstep' j0 (by omega)
-      cases ha0 : acts j0 with
-      | core m ck =>
-        rw [ha0] at hab
-        simp only [Act.about] at hab
-        subst hab
-        refine ⟨j0, hj0, ?_⟩
-        rw [ha0]
-        cases ck <;> simp [labOf]
-      | issue m kk =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        by_cases hem : labOf m c (ρ j0) (.issue m kk) = .emit
-        · exact ⟨j0, hj0, Or.inr (Or.inr (Or.inl (by rw [ha0]; exact hem)))⟩
-        · cases hstp with
-          | issue _ _ post new emb1 rq _ _ _ _ _ _ hnode =>
-            have hw1 : ((ρ (j0 + 1)).node m).wait =
-                some ⟨kk, rq.map Req.slot, post, new, emb1⟩ := by rw [hnode, upd_same]
-            have ha1 : ((ρ (j0 + 1)).node m).ns.act = true := by
-              rw [hnode, upd_same]; show ((ρ j0).node m).ns.act = true; rw [hsame]; exact ha
-            obtain ⟨j, hj, hl⟩ := busy_after (j0 + 1) (by omega) ha1
-              (by rw [hw1]; exact Option.some_ne_none _)
-            exact ⟨j, by omega, Or.inl hl⟩
-      | handle m =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | handle _ _ _ _ _ _ _ _ _ hw' =>
-          rw [hsame, hw] at hw'
-          cases hw'
-      | notice m _ =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | notice _ _ _ _ _ _ _ _ ha' =>
-          rw [hsame, ha] at ha'
-          cases ha'
-      | ignore m =>
-        rw [ha0] at hab hstp
-        simp only [Act.about] at hab
-        subst hab
-        cases hstp with
-        | ignore _ _ _ ha' =>
-          rw [hsame, ha] at ha'
-          cases ha'
-      | answer => rw [ha0] at hab; exact hab.elim
-      | env => rw [ha0] at hab; exact hab.elim
+    intro i hi active
+    obtain ⟨j, later, core | ⟨w, handled, waiting, running⟩⟩ := hfair.reaches_core hstep'
+      (fun i hi => (hinv i hi).node) i hi active
+    · obtain ⟨kind, event⟩ := core
+      refine ⟨j, later, ?_⟩
+      rw [event]
+      cases kind <;> simp [labOf]
+    · exact ⟨j, later, Or.inl (by rw [lab_handle j handled w waiting]; simp [running])⟩
   obtain ⟨kb, hkb⟩ := hmaint
   have hm : ∃ kb, ∀ i, kb ≤ i → labOf n c (ρ i) (acts i) ≠ .maint := by
     refine ⟨kb, fun i hi he => ?_⟩
@@ -1927,13 +2089,12 @@ theorem issue_quiet {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : 
     post.heads = σ.heads ∧ post.known = σ.known ∧ post.next = σ.next := by
   cases k with
   | push =>
-    obtain ⟨_, _, _, _, _, _, _, _, hw', _⟩ := hi
-    obtain ⟨y, -, (⟨hwr, -⟩ | ⟨-, he, -⟩)⟩ := hw'
+    obtain ⟨y, -, (⟨hwr, -⟩ | ⟨-, he, -⟩)⟩ := hi.write
     · exfalso
       have hp' : (norm σ).pending = [] := hp
       simp [pubOf, Retry.Publication.write, Retry.Fixup.write, hp'] at hwr
     · subst he; exact ⟨rfl, rfl, rfl⟩
-  | writePoll => exact absurd hp hi.2.2.2.2.2.2.2.1
+  | writePoll => exact absurd hp hi.pending
   | start =>
     have he := post_same hi (by decide) (by decide)
     subst he
@@ -1951,11 +2112,11 @@ theorem issue_quiet {d : Nat → Nat → Prop} {σ post : NS} {k : Kind} {new : 
     subst he
     exact ⟨rfl, rfl, rfl⟩
 
-/-- A node with no pending drops, an explicit premise here and nowhere derived (root's
-`eligible_pending_empty` would give it for an eligible node, and is under review), has in its
-repository the op heads, logical known pair and raw ids of its core's state, its replies out or
-not. Not so in general: a fix-up or tip written for a push is in the repository before the
-reply, while the core's state is the step's pre-state. The known pair is the logical one
+/-- A node with no pending drops has in its repository the op heads, logical known pair and
+raw ids of its core's state, whether replies are outstanding or not. Empty pending is a premise
+of this local lemma; `NativeEvents.RecordView.pending_empty` derives it for eligible nodes in
+the assembly. A fix-up or tip can appear in the repository before its reply, while the core
+still holds the step's pre-state. The known pair is the logical one
 (`NodeC.repo`), not the native one in the middle of an exchange. -/
 theorem repo_agrees {D : Nat → Nat → Nat → Prop} {n : Nat} {g : Sys} (I : NodeOK D n g)
     (hp : (g.node n).ns.pending = []) :

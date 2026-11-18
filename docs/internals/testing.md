@@ -1134,7 +1134,15 @@ machine's work and later the rest makes what jj makes of the same two merges. A 
 machine, rather than realized there, is judged against the parents as that machine had them
 too, where they lack only the working-copy commit of another machine's workspace it forgot,
 which the hive keeps: jj there merges as if the forget abandoned it ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)).
+limitations"](races.md#known-jj-limitations)). Where `jj op abandon`, or musubi reparenting the
+machine's operations to match the hive's contraction, later moved such a merge onto other
+parents, keeping its view, and the merge no longer qualifies, each native version of it, the same
+but for its parents, can witness it: its parents must stand for the canonical parents, in order,
+mapped or as earlier versions of the merge's own, its base must be mapped and below both canonical
+parents, and each must qualify as the merge's own inputs do.
+`reference::a_native_merge_qualifies_over_a_command_jj_op_abandon_reparented` checks that such a
+version witnesses a merge that can't, and that a version on parents in another order, on a parent
+that stands for none, or over a base not below both, witnesses nothing.
 
 The test also checks that the hive's history can stand for one repository's: every machine's
 realization of each operation has the hive's view of it, and no operation but a merge makes
@@ -1154,9 +1162,14 @@ canonical slot. Its unambiguous raw alias can carry an input name. If that alias
 forgotten, an already-certified live foreign binding can instead remain unchanged or follow
 its unique visible successor from the command's captured predecessor map. An owned or dormant
 binding, a hidden successor, or several visible successors supplies no such witness. A global
-birth or a matching outgoing name alone supplies no certificate. Native merge replay uses the same
-copy's actual owned bindings in its base and ordered parents, for authenticated names only,
-and checks the output structurally. Multiple closest bases retain their separate projections
+birth or a matching outgoing name alone supplies no certificate. A command that `jj op abandon`,
+or musubi reparenting, moved onto other parents, keeping its view, ran on its recorded input
+rather than its new parent: where the retained source records that input as the command's base,
+the command's own output certifies its maker's slots, though the new parent's bindings differ
+from that base. The test above checks that a native merge over such a command qualifies, and
+that without that retained input the maker's binding is not certified. Native merge replay uses
+the same copy's actual owned bindings in its base and ordered parents, for authenticated names
+only, and checks the output structurally. Multiple closest bases retain their separate projections
 and source-parent graphs, then jj recursively merges them in the order it found them. A base
 whose required source, command-input or fix-up dependency closure reaches an active proof
 cannot provide a new replay candidate. This preflight changes no certificates and rejects

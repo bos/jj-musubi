@@ -899,8 +899,27 @@ impl Reference {
                 );
                 result.inherit_known_births(input);
             }
+            // `jj op abandon`, or musubi reparenting a machine's operations, can move a command
+            // onto other parents, keeping its view, which jj computed on the input the command
+            // ran on. Where the retained source records that input as the command's base, a new
+            // parent's binding for one of the maker's own slots need not be that base's: the
+            // command's own output certifies the slot, as it does for any command. The
+            // adjudication already holds a retained operation to its view, not its parents.
+            let reparented = world
+                .evidence
+                .kept_operations
+                .get(&merge_key(op))
+                .is_some_and(|kept| {
+                    kept.native
+                        && !kept.realized
+                        && kept.copy == command.copy
+                        && kept.parent.as_ref() == Some(&command.base)
+                });
             for input in &command_inputs {
                 for (key, base) in input.bindings() {
+                    let owned = key
+                        .split_once('/')
+                        .is_some_and(|(owner, _)| owner == command.copy);
                     if let Some(actual) = view.wc_commit_ids.get(WorkspaceName::new(key))
                         && key
                             .split_once('/')
@@ -921,7 +940,7 @@ impl Reference {
                         command,
                         &world.evidence.workspace_births,
                         key,
-                        Some(base),
+                        (!(owned && reparented)).then_some(base),
                     ) else {
                         // A native command by another copy cannot remove a dormant
                         // owner's namespace. Carry only this already-certified absent

@@ -9,7 +9,8 @@
 //! own merge of the same parents, in the same order, by `RepoLoader::merge_operations`, as
 //! concurrent processes on one machine would have it merged. A merge made on a machine, rather
 //! than realized there, agrees too where it is jj's merge of the parents as that machine had
-//! them, lacking the working-copy commit or local alias of another machine's workspace.
+//! them when it made it, though `jj op abandon` or musubi has since moved it onto others keeping
+//! its view, lacking the working-copy commit or local alias of another machine's workspace.
 //! An alias omission with the same visible commits requires an exact captured native
 //! input and an independently certified foreign binding (`merged_as_made`). A native replay
 //! can also use that same copy's actual owned bindings in the base and ordered parents,
@@ -1458,6 +1459,185 @@ fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
         result
     }
     assert_eq!(run(false), run(true));
+}
+
+/// `jj op abandon` of the snapshot below a `jj commit` moves the commit's operation onto the
+/// snapshot's parent, keeping its view, so the commit's new working copy follows no binding of
+/// its new parent's. The operation's certificate still has the maker's working copies, as the
+/// commit made them, so a native merge over it qualifies. Before, the merge was refused, its
+/// base's workspace bindings uncertified. Where the merge itself can't qualify, an earlier
+/// version of it on earlier versions of its parents, as a reparenting leaves, witnesses it; a
+/// version on parents standing for no canonical parent, or for them in another order, or over a
+/// base not below both, witnesses nothing.
+#[test]
+fn a_native_merge_qualifies_over_a_command_jj_op_abandon_reparented() {
+    use crate::world::{Naming, Setup};
+    use witnesses::{RejectionCause, WitnessKind};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.commit(0, 0, 1);
+    let commit = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let snapshot = {
+        let store = world.fx.node(0).loader().op_store().clone();
+        block_on(store.read_operation(&commit)).unwrap().parents[0].hex()
+    };
+    world.op_abandon(0, &snapshot);
+    let base = world.latest_op_head(0);
+    for side in ["left", "right"] {
+        world.jj(
+            0,
+            &[
+                "--ignore-working-copy",
+                "--at-op",
+                &base,
+                "new",
+                "--no-edit",
+                "-m",
+                side,
+            ],
+        );
+    }
+    world.jj(0, &["status"]);
+    world.converge();
+    let node = world.fx.hive.members[0].adapter.repo();
+    let store = node.canonical_store();
+    let reparented = node
+        .canonical_of(&musubi_jj::op_id::LocalOp(
+            OperationId::try_from_hex(&base).unwrap(),
+        ))
+        .unwrap();
+    let id = store
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .find(|id| {
+            let Some(local) = node.local_of(id) else {
+                return false;
+            };
+            let op = block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
+            op.parents.len() == 2
+                && !op
+                    .metadata
+                    .attributes
+                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+        })
+        .expect("the native command must reconcile the two heads");
+    let op = store.read_operation(&id).unwrap();
+    let parents = CanonicalOp::parents_of(&op);
+    let views: HashMap<_, _> = store
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .chain([store.root_operation_id().clone()])
+        .map(|id| {
+            let view = store.read_operation_view(&id).unwrap();
+            (id, view)
+        })
+        .collect();
+    let output = views[&id].clone();
+    let mut reference = Reference::build(&world);
+    let copies: Vec<_> = parents
+        .iter()
+        .map(|id| reference.workspace_copy(&world, id).unwrap())
+        .collect();
+    let known = reference.changes_of(copies.iter());
+    let matched = reference.native_merge_matches(&world, &id, &parents, &output, &known, &views);
+    assert!(matched.is_ok(), "{}", matched.unwrap_err());
+    let own = format!("{}/", world.fx.machine_key(0));
+    let certificate = reference.workspace_certificate(&world, &reparented);
+    for (key, target) in &views[&reparented].wc_commit_ids {
+        if key.as_str().starts_with(&own) {
+            assert_eq!(certificate.binding(key.as_str()), Some(target), "{key:?}");
+        }
+    }
+
+    // An earlier version of the merge, on earlier versions of its parents over the operation
+    // below the reparented commit's, as a reparenting leaves them. It witnesses the merge where
+    // the merge itself can't, here for a base whose checked bindings are made to differ.
+    let ops = node.loader().op_store().clone();
+    let read = |id: &OperationId| block_on(ops.read_operation(id)).unwrap();
+    let write = |op: &op_store::Operation| block_on(ops.write_operation(op)).unwrap();
+    let native = read(&node.local_of(&id).unwrap().0);
+    let [left, right] = native.parents.clone().try_into().unwrap();
+    let version_on = |parents: Vec<OperationId>| {
+        let mut version = native.clone();
+        version.parents = parents;
+        write(&version)
+    };
+    let moved = |id: &OperationId, onto: &OperationId| {
+        let mut op = read(id);
+        op.parents = vec![onto.clone()];
+        write(&op)
+    };
+    let below = read(&OperationId::try_from_hex(&base).unwrap()).parents[0].clone();
+    version_on(vec![moved(&left, &below), moved(&right, &below)]);
+    let mut unchecked = views.clone();
+    unchecked
+        .get_mut(&reparented)
+        .unwrap()
+        .wc_commit_ids
+        .pop_first()
+        .unwrap();
+    let matched =
+        reference.native_merge_matches(&world, &id, &parents, &output, &known, &unchecked);
+    assert!(matched.is_ok(), "{}", matched.unwrap_err());
+
+    // Versions on wrong parents, or over a base above the merge, are tried too once the merge
+    // fails, here against a changed result, and are refused for those reasons.
+    let unmapped = {
+        let mut left = read(&left);
+        left.metadata.description = "not the left parent".to_owned();
+        write(&left)
+    };
+    let native_id = node.local_of(&id).unwrap().0;
+    version_on(vec![right.clone(), left.clone()]);
+    version_on(vec![unmapped, right.clone()]);
+    version_on(vec![moved(&left, &native_id), moved(&right, &native_id)]);
+    let mut wrong = output.clone();
+    wrong.local_bookmarks.insert(
+        "invented".into(),
+        RefTarget::normal(output.head_ids.iter().next().unwrap().clone()),
+    );
+    let rejected = reference
+        .native_merge_matches(&world, &id, &parents, &wrong, &known, &views)
+        .unwrap_err();
+    for cause in [
+        RejectionCause::StructuralResultDiffers,
+        RejectionCause::OrderedParentsDiffer,
+        RejectionCause::ParentMappingMissing,
+        RejectionCause::BaseNotShared,
+    ] {
+        assert!(
+            rejected.contains(WitnessKind::NativeDag, &cause),
+            "{rejected}"
+        );
+    }
+
+    // Without a retained source that records the commit's own input, the maker's binding must
+    // be the commit's base, as for any other command, and so is not certified.
+    let key = merge_key(&store.read_operation(&reparented).unwrap());
+    let own_key = format!("{}/{}", world.fx.machine_key(0), world.machine(0));
+    assert!(
+        views[&reparented]
+            .wc_commit_ids
+            .contains_key(WorkspaceName::new(&own_key))
+    );
+    let mut other_input = world.evidence.kept_operations[&key].clone();
+    other_input.parent = Some(other_input.view.clone());
+    for kept in [None, Some(other_input)] {
+        match kept {
+            None => world.evidence.kept_operations.remove(&key),
+            Some(kept) => world.evidence.kept_operations.insert(key.clone(), kept),
+        };
+        let mut reference = Reference::build(&world);
+        let certificate = reference.workspace_certificate(&world, &reparented);
+        assert_eq!(certificate.binding(&own_key), None);
+    }
 }
 
 #[test]

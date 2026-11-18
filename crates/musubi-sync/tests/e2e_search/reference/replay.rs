@@ -15,6 +15,7 @@ use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
@@ -684,7 +685,13 @@ impl Reference {
                 failures.reject(kind, Some(machine), RejectionCause::RealizationIsNotMaker);
                 continue;
             }
-            let native_parents = block_on(operation.parents()).map_err(|error| {
+            // A later `jj op abandon`, or musubi reparenting this machine's operations to
+            // match the hive's contraction, gives a merge other parents and keeps its view,
+            // which jj computed on the parents it had. So where the merge itself fails, each
+            // native version of it, the same but for its parents, can witness it, qualifying
+            // and replaying as the merge itself does. A version's parent may be an earlier
+            // version of one of the merge's own: it stands for that parent's canonical op.
+            let current = block_on(operation.parents()).map_err(|error| {
                 failures.stopped(
                     kind,
                     machine,
@@ -694,206 +701,294 @@ impl Reference {
                     },
                 )
             })?;
-            if native_parents.len() != 2 {
-                failures.reject(
-                    kind,
-                    Some(machine),
-                    RejectionCause::TwoParentsRequired {
-                        found: native_parents.len(),
-                    },
-                );
-                continue;
-            }
-            let mapped: Option<Vec<_>> = native_parents
-                .iter()
-                .map(|p| node.canonical_of(&LocalOp(p.id().clone())))
-                .collect();
-            if mapped.as_deref() != Some(parents) {
-                let cause = if mapped.is_none() {
-                    RejectionCause::ParentMappingMissing
-                } else {
-                    RejectionCause::OrderedParentsDiffer
-                };
-                failures.reject(kind, Some(machine), cause);
-                continue;
-            }
-            let bases = block_on(jj_lib::op_walk::closest_common_ancestors(
-                vec![native_parents[0].clone()],
-                [native_parents[1].clone()],
-            ))
-            .map_err(|error| {
-                failures.stopped(
-                    kind,
-                    machine,
-                    RejectionCause::ReadFailed {
-                        input: "the native common bases",
-                        error: error.to_string(),
-                    },
-                )
-            })?;
-            // A recursive base merge consumes further views. Keep this fallback to one
-            // independently qualified base; the other replay paths handle known omissions.
-            if bases.len() != 1 {
-                failures.reject(
-                    kind,
-                    Some(machine),
-                    RejectionCause::SingleBaseRequired { found: bases.len() },
-                );
-                continue;
-            }
-            let mut qualified = true;
-            for input in native_parents.iter().chain(&bases) {
-                let Some(mapped) = node.canonical_of(&LocalOp(input.id().clone())) else {
-                    failures.reject(kind, Some(machine), RejectionCause::InputMappingMissing);
-                    qualified = false;
-                    break;
-                };
-                let Some(expected) = views.get(&mapped) else {
-                    failures.reject(kind, Some(machine), RejectionCause::CheckedInputMissing);
-                    qualified = false;
-                    break;
-                };
-                let mut actual = block_on(input.view())
-                    .map_err(|error| {
+            let stands_for = |input: &Operation| {
+                node.canonical_of(&LocalOp(input.id().clone())).or_else(|| {
+                    current
+                        .iter()
+                        .find(|parent| same_but_parents(parent, input))
+                        .and_then(|parent| node.canonical_of(&LocalOp(parent.id().clone())))
+                })
+            };
+            let mut pending = vec![operation.clone()];
+            let mut earlier = false;
+            loop {
+                let Some(version) = pending.pop() else {
+                    if earlier {
+                        break;
+                    }
+                    earlier = true;
+                    pending = native_versions(node, &operation).map_err(|error| {
                         failures.stopped(
                             kind,
                             machine,
                             RejectionCause::ReadFailed {
-                                input: "an independently checked native input",
-                                error: error.to_string(),
+                                input: "the native versions of the merge",
+                                error,
                             },
                         )
-                    })?
-                    .store_view()
-                    .clone();
-                let certificate = self.workspace_certificate(world, &mapped);
-                let presence = world
-                    .fx
-                    .hive
-                    .members
-                    .iter()
-                    .find_map(|member| member.adapter.repo().presence(&mapped).ok())
-                    .ok_or_else(|| {
-                        failures.stopped(kind, machine, RejectionCause::InputPresenceUnavailable)
                     })?;
-                let maker = node.machine().key();
-                // Workspace bindings influence jj's shared merge even when visible
-                // commits agree. Require a bijection with exact certified input slots;
-                // an opaque name alone cannot authorize a changed target or omission.
-                let mut matched = BTreeSet::new();
-                let bindings = actual.wc_commit_ids.len() == expected.wc_commit_ids.len()
-                    && actual.wc_commit_ids.iter().all(|(raw, target)| {
-                        let candidates = expected
-                            .wc_commit_ids
-                            .iter()
-                            .filter(|(key, value)| {
-                                if *value != target
-                                    || certificate.binding(key.as_str()) != Some(target)
-                                {
-                                    return false;
-                                }
-                                let Some((owner, workspace)) = key.as_str().split_once('/') else {
-                                    return false;
-                                };
-                                if owner == maker {
-                                    return raw.as_str() == workspace;
-                                }
-                                let Some((prefix, shown)) = raw.as_str().split_once('/') else {
-                                    return false;
-                                };
-                                shown == workspace
-                                    && !certificate.has_name(&format!("{maker}/{}", raw.as_str()))
-                                    && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-                                    && presence
-                                        .known()
-                                        .iter()
-                                        .filter(|copy| {
-                                            musubi_jj::workspaces::could_be_shown_as(copy, prefix)
-                                        })
-                                        .count()
-                                        == 1
-                            })
-                            .map(|(key, _)| key.clone())
-                            .collect::<Vec<_>>();
-                        match candidates.as_slice() {
-                            [key] => matched.insert(key.clone()),
-                            _ => false,
-                        }
-                    });
-                if !bindings {
+                    pending.reverse();
+                    continue;
+                };
+                let label = if earlier {
+                    format!("{machine}, version {}", &version.id().hex()[..12])
+                } else {
+                    machine.to_owned()
+                };
+                let machine = label.as_str();
+                let native_parents = block_on(version.parents()).map_err(|error| {
+                    failures.stopped(
+                        kind,
+                        machine,
+                        RejectionCause::ReadFailed {
+                            input: "the native parents",
+                            error: error.to_string(),
+                        },
+                    )
+                })?;
+                if native_parents.len() != 2 {
                     failures.reject(
                         kind,
                         Some(machine),
-                        RejectionCause::CertifiedInputBindingsDiffer,
+                        RejectionCause::TwoParentsRequired {
+                            found: native_parents.len(),
+                        },
                     );
-                    qualified = false;
-                    break;
+                    continue;
                 }
-                actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-                if self.summary(&actual, known) != self.summary(expected, known) {
-                    failures.reject(kind, Some(machine), RejectionCause::SharedInputDiffers);
-                    qualified = false;
-                    break;
+                let mapped: Option<Vec<_>> = native_parents.iter().map(stands_for).collect();
+                if mapped.as_deref() != Some(parents) {
+                    let cause = if mapped.is_none() {
+                        RejectionCause::ParentMappingMissing
+                    } else {
+                        RejectionCause::OrderedParentsDiffer
+                    };
+                    failures.reject(kind, Some(machine), cause);
+                    continue;
                 }
-            }
-            if !qualified || bases.is_empty() {
-                continue;
-            }
-            let dir = musubi_testutil::tempdir();
-            let root = dir.path().join("repo");
-            musubi_testutil::copy_tree(world.fx.repo(m).path(), &root);
-            let loader = RepoLoader::init_from_file_system(
-                &settings(),
-                &root.join(".jj/repo"),
-                &default_backend_factories(),
-            )
-            .map_err(|error| {
-                failures.stopped(
-                    kind,
-                    machine,
-                    RejectionCause::ReadFailed {
-                        input: "the isolated native repository",
-                        error: error.to_string(),
-                    },
-                )
-            })?;
-            let inputs = native_parents
-                .iter()
-                .map(|p| block_on(loader.load_operation(p.id())))
-                .collect::<Result<Vec<_>, _>>()
+                let bases = block_on(jj_lib::op_walk::closest_common_ancestors(
+                    vec![native_parents[0].clone()],
+                    [native_parents[1].clone()],
+                ))
                 .map_err(|error| {
                     failures.stopped(
                         kind,
                         machine,
                         RejectionCause::ReadFailed {
-                            input: "the isolated native parents",
+                            input: "the native common bases",
                             error: error.to_string(),
                         },
                     )
                 })?;
-            let (merged, _) =
-                block_on(loader.merge_operations(inputs, None, Some("reference native merge"), []))
+                // A recursive base merge consumes further views. Keep this fallback to one
+                // independently qualified base; the other replay paths handle known omissions.
+                if bases.len() != 1 {
+                    failures.reject(
+                        kind,
+                        Some(machine),
+                        RejectionCause::SingleBaseRequired { found: bases.len() },
+                    );
+                    continue;
+                }
+                // Translation keeps the merge's own native ancestry in the canonical graph,
+                // but not an earlier version's: its base must still be below both parents.
+                if earlier && let Some(base) = node.canonical_of(&LocalOp(bases[0].id().clone())) {
+                    let mut shared = true;
+                    for parent in parents {
+                        shared &= node
+                            .canonical_store()
+                            .is_ancestor_of(&base, parent)
+                            .map_err(|error| {
+                                failures.stopped(
+                                    kind,
+                                    machine,
+                                    RejectionCause::ReadFailed {
+                                        input: "the canonical ancestry of the native base",
+                                        error: error.to_string(),
+                                    },
+                                )
+                            })?;
+                    }
+                    if !shared {
+                        failures.reject(kind, Some(machine), RejectionCause::BaseNotShared);
+                        continue;
+                    }
+                }
+                let mut qualified = true;
+                // A base stands only for itself: only parents have versions standing in.
+                let inputs = native_parents
+                    .iter()
+                    .zip(parents.iter().cloned().map(Some))
+                    .chain(
+                        bases
+                            .iter()
+                            .map(|base| (base, node.canonical_of(&LocalOp(base.id().clone())))),
+                    );
+                for (input, mapped) in inputs {
+                    let Some(mapped) = mapped else {
+                        failures.reject(kind, Some(machine), RejectionCause::InputMappingMissing);
+                        qualified = false;
+                        break;
+                    };
+                    let Some(expected) = views.get(&mapped) else {
+                        failures.reject(kind, Some(machine), RejectionCause::CheckedInputMissing);
+                        qualified = false;
+                        break;
+                    };
+                    let mut actual = block_on(input.view())
+                        .map_err(|error| {
+                            failures.stopped(
+                                kind,
+                                machine,
+                                RejectionCause::ReadFailed {
+                                    input: "an independently checked native input",
+                                    error: error.to_string(),
+                                },
+                            )
+                        })?
+                        .store_view()
+                        .clone();
+                    let certificate = self.workspace_certificate(world, &mapped);
+                    let presence = world
+                        .fx
+                        .hive
+                        .members
+                        .iter()
+                        .find_map(|member| member.adapter.repo().presence(&mapped).ok())
+                        .ok_or_else(|| {
+                            failures.stopped(
+                                kind,
+                                machine,
+                                RejectionCause::InputPresenceUnavailable,
+                            )
+                        })?;
+                    let maker = node.machine().key();
+                    // Workspace bindings influence jj's shared merge even when visible
+                    // commits agree. Require a bijection with exact certified input slots;
+                    // an opaque name alone cannot authorize a changed target or omission.
+                    let mut matched = BTreeSet::new();
+                    let bindings = actual.wc_commit_ids.len() == expected.wc_commit_ids.len()
+                        && actual.wc_commit_ids.iter().all(|(raw, target)| {
+                            let candidates = expected
+                                .wc_commit_ids
+                                .iter()
+                                .filter(|(key, value)| {
+                                    if *value != target
+                                        || certificate.binding(key.as_str()) != Some(target)
+                                    {
+                                        return false;
+                                    }
+                                    let Some((owner, workspace)) = key.as_str().split_once('/')
+                                    else {
+                                        return false;
+                                    };
+                                    if owner == maker {
+                                        return raw.as_str() == workspace;
+                                    }
+                                    let Some((prefix, shown)) = raw.as_str().split_once('/') else {
+                                        return false;
+                                    };
+                                    shown == workspace
+                                        && !certificate
+                                            .has_name(&format!("{maker}/{}", raw.as_str()))
+                                        && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
+                                        && presence
+                                            .known()
+                                            .iter()
+                                            .filter(|copy| {
+                                                musubi_jj::workspaces::could_be_shown_as(
+                                                    copy, prefix,
+                                                )
+                                            })
+                                            .count()
+                                            == 1
+                                })
+                                .map(|(key, _)| key.clone())
+                                .collect::<Vec<_>>();
+                            match candidates.as_slice() {
+                                [key] => matched.insert(key.clone()),
+                                _ => false,
+                            }
+                        });
+                    if !bindings {
+                        failures.reject(
+                            kind,
+                            Some(machine),
+                            RejectionCause::CertifiedInputBindingsDiffer,
+                        );
+                        qualified = false;
+                        break;
+                    }
+                    actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+                    if self.summary(&actual, known) != self.summary(expected, known) {
+                        failures.reject(kind, Some(machine), RejectionCause::SharedInputDiffers);
+                        qualified = false;
+                        break;
+                    }
+                }
+                if !qualified || bases.is_empty() {
+                    continue;
+                }
+                let dir = musubi_testutil::tempdir();
+                let root = dir.path().join("repo");
+                musubi_testutil::copy_tree(world.fx.repo(m).path(), &root);
+                let loader = RepoLoader::init_from_file_system(
+                    &settings(),
+                    &root.join(".jj/repo"),
+                    &default_backend_factories(),
+                )
+                .map_err(|error| {
+                    failures.stopped(
+                        kind,
+                        machine,
+                        RejectionCause::ReadFailed {
+                            input: "the isolated native repository",
+                            error: error.to_string(),
+                        },
+                    )
+                })?;
+                let inputs = native_parents
+                    .iter()
+                    .map(|p| block_on(loader.load_operation(p.id())))
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| {
                         failures.stopped(
                             kind,
                             machine,
                             RejectionCause::ReadFailed {
-                                input: "the isolated native merge result",
+                                input: "the isolated native parents",
                                 error: error.to_string(),
                             },
                         )
                     })?;
-            let mut actual = merged.view().store_view().clone();
-            actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-            // Rebased commits exist only in this isolated store. Read their structural
-            // facts there, with the reference's independent settings and random generator.
-            let reference_loader = std::mem::replace(&mut self.loader, loader);
-            let replayed = self.summary(&actual, known);
-            self.loader = reference_loader;
-            if replayed == self.summary(output, known) {
-                return Ok(world.machine(m));
+                let (merged, _) = block_on(loader.merge_operations(
+                    inputs,
+                    None,
+                    Some("reference native merge"),
+                    [],
+                ))
+                .map_err(|error| {
+                    failures.stopped(
+                        kind,
+                        machine,
+                        RejectionCause::ReadFailed {
+                            input: "the isolated native merge result",
+                            error: error.to_string(),
+                        },
+                    )
+                })?;
+                let mut actual = merged.view().store_view().clone();
+                actual.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+                // Rebased commits exist only in this isolated store. Read their structural
+                // facts there, with the reference's independent settings and random generator.
+                let reference_loader = std::mem::replace(&mut self.loader, loader);
+                let replayed = self.summary(&actual, known);
+                self.loader = reference_loader;
+                if replayed == self.summary(output, known) {
+                    return Ok(world.machine(m));
+                }
+                failures.reject(kind, Some(machine), RejectionCause::StructuralResultDiffers);
             }
-            failures.reject(kind, Some(machine), RejectionCause::StructuralResultDiffers);
         }
         if failures.is_empty() {
             failures.reject(kind, None, RejectionCause::NativeMakerMissing);
@@ -917,4 +1012,39 @@ impl Reference {
         let id = block_on(op_store.write_operation(&written)).unwrap();
         block_on(self.loader.load_operation(&id)).unwrap()
     }
+}
+
+/// The operations in `node`'s store that are `op` but for their parents, as jj's and musubi's
+/// reparenting write them, in a fixed order.
+fn native_versions(node: &NodeRepo, op: &Operation) -> Result<Vec<Operation>, String> {
+    let files = fs::read_dir(node.repo_path().join("op_store/operations"))
+        .map_err(|error| error.to_string())?;
+    let mut versions = vec![];
+    for file in files {
+        let file = file.map_err(|error| error.to_string())?;
+        let Some(id) = file
+            .file_name()
+            .to_str()
+            .and_then(OperationId::try_from_hex)
+        else {
+            continue;
+        };
+        if id == *op.id() {
+            continue;
+        }
+        let other =
+            block_on(node.loader().load_operation(&id)).map_err(|error| error.to_string())?;
+        if same_but_parents(op, &other) {
+            versions.push(other);
+        }
+    }
+    versions.sort_by(|a, b| a.id().cmp(b.id()));
+    Ok(versions)
+}
+
+/// Whether `a` and `b` are the same operation but for their parents.
+fn same_but_parents(a: &Operation, b: &Operation) -> bool {
+    let mut body = b.store_operation().clone();
+    body.parents.clone_from(&a.store_operation().parents);
+    body == *a.store_operation()
 }

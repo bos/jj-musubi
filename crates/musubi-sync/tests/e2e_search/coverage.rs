@@ -372,6 +372,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
             "op_abandon",
         ]),
     ),
+    // A plain jj repository, without musubi.
+    (
+        "jj_brings_back_a_forgotten_workspace_after_a_full_trim",
+        None,
+    ),
+    (
+        "a_full_trim_brings_back_a_name_its_owner_renamed_as_jj_does",
+        Some(&["workspace_rename", "op_abandon"]),
+    ),
     // The search has no owned slash-name rule or operation-restore rule.
     (
         "restoring_an_older_view_does_not_inherit_private_workspace_ownership",

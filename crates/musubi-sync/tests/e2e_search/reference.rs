@@ -84,6 +84,7 @@ use musubi_jj::op_id::CanonicalOp;
 use tempfile::TempDir;
 
 use crate::identity::NativeOperation;
+use crate::identity::SourceKey;
 use crate::world::World;
 use crate::world::merge_key;
 use adjudication::{HistoryEntry, ReplayHistory};
@@ -124,6 +125,10 @@ pub struct Reference {
     workspace_in_progress: HashSet<CanonicalOp>,
     workspace_copies: HashMap<CanonicalOp, Operation>,
     pub workspace_unmapped: BTreeSet<(String, OperationId)>,
+    /// Captured commands by copy and native id, for the number of commands it indexes.
+    workspace_command_index: (usize, HashMap<(String, OperationId), SourceKey>),
+    /// The keys of every operation in the hive's history, for the head they were read at.
+    workspace_history_keys: Option<(CanonicalOp, HashSet<SourceKey>)>,
 }
 
 /// Settings for the reference's merges. The user is the tests' user; a seed of its own for
@@ -232,6 +237,8 @@ impl Reference {
             workspace_in_progress: HashSet::new(),
             workspace_copies: HashMap::new(),
             workspace_unmapped: BTreeSet::new(),
+            workspace_command_index: (0, HashMap::new()),
+            workspace_history_keys: None,
         };
         let root_view = canonical
             .read_operation_view(canonical.root_operation_id())
@@ -564,6 +571,92 @@ fn foreign_commands_keep_bindings_after_their_local_aliases_are_forgotten() {
         &command,
         &new,
         &HashSet::from([new.clone(), commit(3)])
+    ));
+}
+
+#[test]
+fn only_an_abandoned_owner_command_adds_a_name_to_a_retained_command() {
+    use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
+
+    use crate::world::CommandSnapshot;
+
+    let op = |byte| OperationId::new(vec![byte; 64]);
+    let view = |work: Option<u8>| {
+        let mut view = View::make_root(CommitId::new(vec![0; 20]));
+        if let Some(byte) = work {
+            view.wc_commit_ids.insert(
+                WorkspaceNameBuf::from("work"),
+                CommitId::new(vec![byte; 20]),
+            );
+        }
+        view
+    };
+    let command = |id, parent, base, made| CommandSnapshot {
+        id: op(id),
+        copy: "alpha".to_owned(),
+        copies: BTreeSet::from(["alpha".to_owned()]),
+        parent: op(parent),
+        input: None,
+        predecessors: None,
+        base: view(base),
+        made: view(made),
+    };
+    let key = |n: u8| SourceKey::from_template(&n.to_string());
+    let name = WorkspaceName::new("work");
+    // The rename (1) on 0 created `work`; the retained command (2) ran on it.
+    let rename = command(1, 0, None, Some(1));
+    let retained = command(2, 1, Some(1), Some(2));
+    let check = |commands: &[(u8, &CommandSnapshot)],
+                 retained: &CommandSnapshot,
+                 in_history: Option<u8>,
+                 parents_have: bool| {
+        let commands: BTreeMap<_, _> = commands.iter().map(|(n, c)| (key(*n), *c)).collect();
+        workspaces::abandoned_creation(
+            |copy, id| {
+                commands
+                    .iter()
+                    .find(|(_, c)| c.copy == copy && c.id == *id)
+                    .map(|(key, c)| (key, *c))
+            },
+            retained,
+            name,
+            |chain| in_history.is_some_and(|n| chain.contains(&&key(n))),
+            || parents_have,
+        )
+    };
+    assert!(check(&[(1, &rename)], &retained, None, false));
+    // A parent in the hive's history that has the name: the command adds nothing.
+    assert!(!check(&[(1, &rename)], &retained, None, true));
+    // The creating command is still in the hive's history.
+    assert!(!check(&[(1, &rename)], &retained, Some(1), false));
+    // Broken chains: no captured command, another copy's, or one that made another base.
+    assert!(!check(&[], &retained, None, false));
+    let mut foreign = rename.clone();
+    foreign.copy = "beta".to_owned();
+    assert!(!check(&[(1, &foreign)], &retained, None, false));
+    assert!(!check(
+        &[(1, &rename)],
+        &command(2, 1, Some(3), Some(2)),
+        None,
+        false
+    ));
+    // A base that already had the name from anything but a captured command.
+    let kept = command(1, 0, Some(1), Some(1));
+    assert!(!check(&[(1, &kept)], &retained, None, false));
+    // A longer abandoned chain reaches its creator, and every link must be gone.
+    let created = command(3, 0, None, Some(1));
+    let kept = command(1, 3, Some(1), Some(1));
+    let chain = [(1, &kept), (3, &created)];
+    assert!(check(&chain, &retained, None, false));
+    assert!(!check(&chain, &retained, Some(1), false));
+    assert!(!check(&chain, &retained, Some(3), false));
+    // The store-reading checks run only when the cheap walk succeeds.
+    assert!(!workspaces::abandoned_creation(
+        |_, _| None,
+        &retained,
+        name,
+        |_| unreachable!(),
+        || unreachable!(),
     ));
 }
 

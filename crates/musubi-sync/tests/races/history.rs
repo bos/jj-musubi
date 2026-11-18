@@ -4404,6 +4404,92 @@ fn abandoning_a_rename_a_forget_saw_keeps_the_new_name() {
     assert_eq!(own, BTreeSet::from(["renamed".to_owned()]));
 }
 
+/// jj on one machine: a `jj workspace forget` concurrent with `jj op abandon ..X` of the
+/// history below it is reparented onto the root with the operations the abandon keeps, and
+/// jj's merge of the two against the root takes the forgotten workspace for an addition and
+/// keeps it. Without the trim, the forget wins. jj merges workspaces name by name, so a
+/// rename, the forget of one name and the addition of another, goes the same way;
+/// `a_full_trim_brings_back_a_name_its_owner_renamed_as_jj_does` relies on that.
+#[test]
+fn jj_brings_back_a_forgotten_workspace_after_a_full_trim() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("solo");
+    let second = repo.path().with_file_name("solo-work");
+    repo.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "work",
+        second.to_str().unwrap(),
+    ]);
+    repo.jj(&["new"]);
+    let before = op_log(&repo)[0].0.clone();
+    repo.jj(&["new"]);
+    let base = op_log(&repo)[0].0.clone();
+    repo.jj(&["new"]);
+    repo.jj(&[
+        "--at-op",
+        &before,
+        "--ignore-working-copy",
+        "workspace",
+        "forget",
+        "work",
+    ]);
+    repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("..{base}"),
+    ]);
+    let listed = repo.jj(&[
+        "--ignore-working-copy",
+        "workspace",
+        "list",
+        "-T",
+        "name ++ \"\\n\"",
+    ]);
+    let listed: BTreeSet<&str> = listed.lines().collect();
+    assert_eq!(listed, BTreeSet::from(["solo", "work"]));
+}
+
+/// Beta trims its whole history (`jj op abandon ..X`) while alpha, which hasn't synced since,
+/// renames its workspace `work` to `third`. Alpha's rename and beta's line now share only the
+/// root, so their merge takes `work` for an addition and keeps it beside `third`, on every
+/// machine, as jj does on one machine
+/// (`jj_brings_back_a_forgotten_workspace_after_a_full_trim`). Alpha's `jj workspace forget
+/// work` removes it.
+#[test]
+fn a_full_trim_brings_back_a_name_its_owner_renamed_as_jj_does() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    // Beta knows alpha's workspace as `work`, so its fix-up does alpha's dropped work again
+    // with it.
+    hive.repo(0).jj(&["workspace", "rename", "work"]);
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "rename", "third"]);
+    let base = op_log(hive.repo(1))[0].0.clone();
+    hive.repo(1).jj(&["new", "-m", "beta's surviving work"]);
+    hive.repo(1).jj(&["op", "abandon", &format!("..{base}")]);
+    // The trim reaches the hub before alpha publishes its rename, which it then takes onto
+    // the root.
+    hive.hive.sync(1).unwrap();
+    hive.sync();
+    hive.assert_converged();
+    let set = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+    assert_eq!(
+        hive.workspace_names(0),
+        set(&["third", "work", "beta/beta"])
+    );
+    assert_eq!(
+        hive.workspace_names(1),
+        set(&["beta", "alpha/third", "alpha/work"])
+    );
+    hive.repo(0).jj(&["workspace", "forget", "work"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.workspace_names(0), set(&["third", "beta/beta"]));
+    assert_eq!(hive.workspace_names(1), set(&["beta", "alpha/third"]));
+}
+
 /// Saved trim bindings must not claim a new local workspace after the foreign copy leaves.
 #[test]
 fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {

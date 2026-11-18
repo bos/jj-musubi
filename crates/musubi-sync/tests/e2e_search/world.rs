@@ -830,6 +830,59 @@ fn workspace_fixup_witnesses_require_the_native_source() {
     assert!(!world.evidence.workspace_trim_inputs.contains_key(&1));
 }
 
+/// After `jj op abandon` of a rename, the operation above it adds the new name. When the
+/// owner then renames it away and another copy trims its whole history, jj's merge against
+/// the root brings the old name back, so the reference must witness it: but only from the
+/// owner's own captured rename, not from the name merely being in the retained base.
+#[test]
+fn an_abandoned_rename_witnesses_the_name_a_full_trim_brings_back() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.rename_workspace(0, 0, "work");
+    let rename = world
+        .jj(
+            0,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                "id",
+            ],
+        )
+        .trim()
+        .to_owned();
+    world.jj(0, &["new", "-m", "above the rename"]);
+    world.abandon_ops(0, &rename, std::slice::from_ref(&rename));
+    world.sync(0);
+    world.sync(1);
+    world.rename_workspace(0, 0, "third");
+    let (base, dropped) = world.trim_range(1);
+    world.jj(1, &["new", "-m", "before the trim"]);
+    world.abandon_ops(1, &format!("..{base}"), &dropped);
+    world.sync(1);
+    world.sync(0);
+    world.sync(1);
+    let work = format!("{}/work", world.fx.machine_key(0));
+    let mut reference = crate::reference::Reference::build(&world);
+    assert!(reference.witnessed_workspace_names(&world).contains(&work));
+
+    // Without the owner's captured rename, the retained base alone proves nothing.
+    world
+        .evidence
+        .commands
+        .retain(|_, command| command.id.hex() != rename);
+    let mut reference = crate::reference::Reference::build(&world);
+    assert!(!reference.witnessed_workspace_names(&world).contains(&work));
+}
+
 #[test]
 fn private_git_inputs_require_a_known_birth_and_a_retained_name() {
     let mut world = World::new(Setup {

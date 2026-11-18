@@ -23,6 +23,7 @@ use musubi_jj::presence::Presence;
 use super::Reference;
 use super::replay::CertifiedParent;
 use super::replay::WorkspaceReplay;
+use crate::identity::SourceKey;
 use crate::world::CommandSnapshot;
 use crate::world::World;
 use crate::world::merge_key;
@@ -369,6 +370,42 @@ pub(super) fn command_workspace_alias(
         [name] => Some(name.clone()),
         _ => None,
     }
+}
+
+/// `jj op abandon` folds an abandoned operation's effect into its child, which keeps its
+/// view on the abandoned operation's parent. The retained command adds `name` where jj's
+/// history does when the owner's own captured commands from the command's native parent back
+/// lead, each the base of the next, to one that created `name`; when none of those commands
+/// is in the hive's history any more (`in_history` reads it); and when none of the retained
+/// command's parents in that history has the name (`parents_have`). A name the owner's base
+/// had from anything but its own abandoned command proves nothing. The checks run cheapest
+/// first; the later ones read stores and run only when the earlier ones hold.
+pub(super) fn abandoned_creation<'a>(
+    lookup: impl Fn(&str, &OperationId) -> Option<(&'a SourceKey, &'a CommandSnapshot)>,
+    command: &CommandSnapshot,
+    name: &WorkspaceName,
+    in_history: impl FnOnce(&[&SourceKey]) -> bool,
+    parents_have: impl FnOnce() -> bool,
+) -> bool {
+    let mut chain: Vec<&SourceKey> = vec![];
+    let mut next = command;
+    loop {
+        let Some((key, abandoned)) = lookup(&command.copy, &next.parent) else {
+            return false;
+        };
+        if chain.contains(&key)
+            || abandoned.made != next.base
+            || !abandoned.made.wc_commit_ids.contains_key(name)
+        {
+            return false;
+        }
+        chain.push(key);
+        if !abandoned.base.wc_commit_ids.contains_key(name) {
+            break;
+        }
+        next = abandoned;
+    }
+    !in_history(&chain) && !parents_have()
 }
 
 pub(super) fn workspace_fixup_input<'a>(
@@ -1006,10 +1043,13 @@ impl Reference {
                         .contains_key(WorkspaceName::new(name))
             });
             for (name, target) in &command.made.wc_commit_ids {
-                if name.as_str().contains('/') || command.base.wc_commit_ids.contains_key(name) {
+                let key = format!("{}/{}", command.copy, name.as_str());
+                if name.as_str().contains('/')
+                    || (command.base.wc_commit_ids.contains_key(name)
+                        && !self.created_by_abandoned_commands(world, context, command, name, &key))
+                {
                     continue;
                 }
-                let key = format!("{}/{}", command.copy, name.as_str());
                 if world.evidence.workspace_births.contains(&key)
                     && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(target)
                 {
@@ -1017,6 +1057,83 @@ impl Reference {
                 }
             }
         }
+    }
+
+    /// Whether the owner's abandoned commands created `name` for this retained command
+    /// (`abandoned_creation`), with the captured commands indexed and the hive's history read
+    /// once for each head.
+    fn created_by_abandoned_commands(
+        &mut self,
+        world: &World,
+        context: &WorkspaceDerivation<'_>,
+        command: &CommandSnapshot,
+        name: &WorkspaceName,
+        key: &str,
+    ) -> bool {
+        let commands = &world.evidence.commands;
+        if self.workspace_command_index.0 != commands.len() {
+            self.workspace_command_index = (
+                commands.len(),
+                commands
+                    .iter()
+                    .map(|(key, c)| ((c.copy.clone(), c.id.clone()), key.clone()))
+                    .collect(),
+            );
+        }
+        let index = &self.workspace_command_index.1;
+        let history = &mut self.workspace_history_keys;
+        abandoned_creation(
+            |copy, id| {
+                let key = index.get(&(copy.to_owned(), id.clone()))?;
+                Some((key, commands.get(key)?))
+            },
+            command,
+            name,
+            |chain| {
+                let keys = &Self::history_keys(world, history).1;
+                chain.iter().any(|key| keys.contains(*key))
+            },
+            || {
+                context.parents.iter().any(|parent| {
+                    Self::workspace_source(world, parent)
+                        .and_then(|source| {
+                            world.fx.hive.members.iter().find_map(|member| {
+                                member
+                                    .adapter
+                                    .repo()
+                                    .canonical_store()
+                                    .read_view(&source.view_id)
+                                    .ok()
+                            })
+                        })
+                        .is_none_or(|view| view.wc_commit_ids.contains_key(WorkspaceName::new(key)))
+                })
+            },
+        )
+    }
+
+    /// The keys of every operation in the hive's history at its current head.
+    fn history_keys<'a>(
+        world: &World,
+        cache: &'a mut Option<(CanonicalOp, HashSet<SourceKey>)>,
+    ) -> &'a (CanonicalOp, HashSet<SourceKey>) {
+        let head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+        if cache.as_ref().is_none_or(|(at, _)| *at != head) {
+            let mut keys = HashSet::new();
+            let mut seen = HashSet::new();
+            let mut pending = vec![head.clone()];
+            while let Some(next) = pending.pop() {
+                if !seen.insert(next.clone()) {
+                    continue;
+                }
+                if let Some(op) = Self::workspace_source(world, &next) {
+                    keys.insert(merge_key(&op));
+                    pending.extend(CanonicalOp::parents_of(&op));
+                }
+            }
+            *cache = Some((head, keys));
+        }
+        cache.as_ref().unwrap()
     }
 
     /// Attempt the ordered native source copies first, then discard all provisional

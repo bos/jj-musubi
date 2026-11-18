@@ -31,6 +31,18 @@ first(!). jj-musubi keeps both versions as a divergent change for you to resolve
 You can keep using Git alongside jj-musubi. A fetch or push on any machine updates the remote
 bookmarks in every synced copy, so you only need to do it once.
 
+## Peer-to-peer sync with jj-mesh
+
+[jj-mesh](https://github.com/baptiste0928/jj-mesh) works much like jj-musubi: it syncs commits,
+bookmarks and the operation log between your machines. Instead of a hub reached over ssh, its
+machines use [iroh](https://www.iroh.computer/) to connect through NAT. Iroh's public servers
+help machines find each other and relay traffic when a direct connection fails. jj-mesh also
+snapshots working copies on a timer and updates stale ones for you. Every repo you add syncs to
+every paired machine.
+
+jj-mesh includes unit and integration tests. [jj-musubi's safety page](safety.md) describes its
+proofs, conformance tests and end-to-end search.
+
 ## Working on one remote machine
 
 If a devbox already has the tools and compute you need, connecting over `ssh` or VS Code's

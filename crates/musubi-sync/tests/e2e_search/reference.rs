@@ -1067,6 +1067,69 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
 }
 
 #[test]
+fn contracted_merge_replays_the_forgotten_receivers_workspace() {
+    use musubi_jj::canonical::Contraction;
+
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::Own,
+        prejoin: true,
+        secondary: false,
+    });
+    let base = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+    let key = format!("{}/beta", world.fx.machine_key(1));
+    world.jj(
+        2,
+        &["describe", "-m", "rewrite beta's workspace", "beta/beta@"],
+    );
+    world.forget_copy(0, 1);
+    world.sync(0);
+    world.sync(2);
+    world.sync(1);
+
+    let head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+    let node = world.fx.hive.members[1].adapter.repo();
+    let store = node.canonical_store();
+    let shared = store.read_operation_view(&head).unwrap();
+    assert!(!shared.wc_commit_ids.contains_key(WorkspaceName::new(&key)));
+    let dropped = store.ancestors_until(&[base], |_| false).unwrap();
+    let mut contraction = Contraction::new(store, dropped).unwrap();
+    let [contracted] = contraction
+        .images(store, &head)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_ne!(contracted, head);
+    let original = store.read_operation(&head).unwrap();
+    let parents = store.parents(&contracted).unwrap();
+    assert_eq!(parents.len(), 2);
+    assert_ne!(parents, CanonicalOp::parents_of(&original));
+
+    let mut reference = Reference::build(&world);
+    assert!(
+        !reference
+            .workspace_certificate(&world, &contracted)
+            .has_merge_birth(&key)
+    );
+
+    world.fx.node(1).realize(&contracted).unwrap();
+    let mut reference = Reference::build(&world);
+    let certificate = reference.workspace_certificate(&world, &contracted);
+    assert!(certificate.has_merge_birth(&key));
+    assert!(certificate.is_dormant(&key));
+
+    world.evidence.workspace_births.remove(&key);
+    let mut reference = Reference::build(&world);
+    assert!(
+        !reference
+            .workspace_certificate(&world, &contracted)
+            .has_merge_birth(&key)
+    );
+}
+
+#[test]
 fn workspace_certificates_require_each_sources_existing_binding() {
     use crate::world::{Naming, Setup};
 

@@ -1164,11 +1164,11 @@ impl Reference {
                 .iter()
                 .map(|source| block_on(source.view()).unwrap().store_view().clone())
                 .collect();
-            let mut replays = vec![WorkspaceReplay {
+            let ordinary = WorkspaceReplay {
                 view: self.merge(copies.iter().collect()).view,
                 parents: parent_views,
                 private: None,
-            }];
+            };
             let certified: Vec<_> = parents
                 .iter()
                 .zip(inputs)
@@ -1177,12 +1177,35 @@ impl Reference {
                     certificate,
                 })
                 .collect();
-            replays.extend(self.workspace_private_replays(world, id, &certified));
-            for WorkspaceReplay {
-                view: native,
-                parents: source_views,
-                private,
-            } in replays
+            let mut replays = vec![(ordinary, false)];
+            replays.extend(
+                self.workspace_private_replays(world, id, &certified)
+                    .into_iter()
+                    .map(|replay| (replay, false)),
+            );
+            if let Some(contracted) = Self::contracted_workspace_parents(world, context) {
+                let certified = contracted
+                    .iter()
+                    .zip(inputs)
+                    .map(|(canonical, certificate)| CertifiedParent {
+                        canonical,
+                        certificate,
+                    })
+                    .collect::<Vec<_>>();
+                replays.extend(
+                    self.workspace_private_replays(world, id, &certified)
+                        .into_iter()
+                        .map(|replay| (replay, true)),
+                );
+            }
+            for (
+                WorkspaceReplay {
+                    view: native,
+                    parents: source_views,
+                    private,
+                },
+                private_only,
+            ) in replays
             {
                 let mut known = self.changes_of(copies.iter());
                 for source in &source_views {
@@ -1205,6 +1228,9 @@ impl Reference {
                 let structural = self.keys(&named, &|change| known.contains(change));
                 for (key, target) in &native.wc_commit_ids {
                     let name = key.as_str();
+                    if private_only && view.wc_commit_ids.contains_key(key) {
+                        continue;
+                    }
                     if world.evidence.workspace_births.contains(name)
                         && inputs.iter().zip(&source_views).any(|(input, source)| {
                             input.has_name(name) && source.wc_commit_ids.contains_key(key)
@@ -1263,6 +1289,34 @@ impl Reference {
                 }
             }
         }
+    }
+
+    /// A realization uses the contracted frontier even though the shared view came from
+    /// the original merge. When both parents are the same originals in order, their
+    /// unchanged views can use the original certificates for a private workspace replay.
+    fn contracted_workspace_parents(
+        world: &World,
+        context: &WorkspaceDerivation<'_>,
+    ) -> Option<Vec<CanonicalOp>> {
+        let parents = CanonicalOp::parents_of(context.op);
+        if parents.len() != 2 || context.parents.len() != 2 || parents == context.parents {
+            return None;
+        }
+        let original = |id| {
+            world
+                .fx
+                .hive
+                .members
+                .iter()
+                .find_map(|member| member.adapter.repo().canonical_store().original_id(id).ok())
+        };
+        parents
+            .iter()
+            .zip(context.parents)
+            .all(|(parent, source)| {
+                parent == source || original(parent).is_some_and(|id| original(source) == Some(id))
+            })
+            .then_some(parents)
     }
 
     /// Reconcile live membership after command/merge derivation. Only sources where the

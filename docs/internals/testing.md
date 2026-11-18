@@ -1088,6 +1088,10 @@ non-ancestral witness edges are preloaded too.
 `e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.
+`reference::contracted_merge_replays_the_forgotten_receivers_workspace` checks a merge whose
+ordered parents survive contraction with new ids. The receiver's replay can certify its omitted
+private workspace using those parents and their original certificates. The test requires a
+realization and independent evidence of the workspace's birth.
 
 `translation::root_realizations_keep_current_private_workspaces_without_a_receipt` checks
 exact private bindings when a forgotten copy realizes contracted history ahead of receipt.

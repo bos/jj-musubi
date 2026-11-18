@@ -20,6 +20,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use jiff::SignedDuration;
+use jiff::Span;
+use jiff::SpanRelativeTo;
+use jiff::SpanRound;
+use jiff::Unit;
+use jiff::fmt::friendly::SpanParser;
+use jiff::fmt::friendly::SpanPrinter;
 use jj_lib::op_store::OperationMetadata;
 
 use crate::workspaces;
@@ -36,19 +43,40 @@ pub const WORK_ATTRIBUTE: &str = "musubi.work";
 /// it. The operation is the copy's work, and changes nothing else.
 pub const FORGET_AFTER_ATTRIBUTE: &str = "musubi.forget-after";
 
+/// A month and a year in seconds, as `humantime` took them (30.44 and 365.25 days), which
+/// earlier builds recorded in hives' operation metadata.
+const MONTH_SECS: u64 = 2_630_016;
+const YEAR_SECS: u64 = 31_557_600;
+
 /// How long a copy may go unused before a daemon forgets it, `None` for never: from
-/// `never`, or a duration as `humantime` reads one, such as `6h`, `1h 30m` or `2 days`, of at
-/// least a second.
+/// `never`, or a duration in jiff's friendly format, such as `6h`, `1h 30m`, `2 days` or `1w`,
+/// of at least a second. Units run from seconds to years, a day being 24 hours, a week 7 days,
+/// a month 30.44 days and a year 365.25 days, as `humantime` took them. A negative duration is
+/// refused.
 pub fn parse_forget_after(text: &str) -> Result<Option<Duration>, BadForgetAfter> {
     let text = text.trim();
     if text == "never" {
         return Ok(None);
     }
-    let after = humantime::parse_duration(text).map_err(|_| BadForgetAfter::NotADuration)?;
+    let after = parse_duration(text).ok_or(BadForgetAfter::NotADuration)?;
     if after < Duration::from_secs(1) {
         return Err(BadForgetAfter::TooShort);
     }
     Ok(Some(after))
+}
+
+fn parse_duration(text: &str) -> Option<Duration> {
+    let span = SpanParser::new().parse_span(text).ok()?;
+    let fixed = SignedDuration::from_secs(i64::from(span.get_years()) * YEAR_SECS as i64)
+        .checked_add(SignedDuration::from_secs(
+            i64::from(span.get_months()) * MONTH_SECS as i64,
+        ))?;
+    let rest = span
+        .years(0)
+        .months(0)
+        .to_duration(SpanRelativeTo::days_are_24_hours())
+        .ok()?;
+    Duration::try_from(fixed.checked_add(rest)?).ok()
 }
 
 /// Why a `musubi.forget-after` can't be read, as a message says after naming it.
@@ -60,12 +88,39 @@ pub enum BadForgetAfter {
     TooShort,
 }
 
-/// A `musubi.forget-after` as [`parse_forget_after`] reads it: `6h`, `1h 30m`, `never`.
+/// A `musubi.forget-after` as [`parse_forget_after`] reads it: `6h`, `1h 30m`, `never`. Whole
+/// years and months come first, at the lengths above, then weeks, days, hours, minutes and
+/// seconds, a day being 24 hours: `1mo`, `2d`, `1w 1d 1s`.
 pub fn format_forget_after(after: Option<Duration>) -> String {
-    match after {
-        Some(after) => humantime::format_duration(after).to_string(),
-        None => "never".to_owned(),
+    let Some(after) = after else {
+        return "never".to_owned();
+    };
+    let secs = after.as_secs();
+    let years = secs / YEAR_SECS;
+    let months = secs % YEAR_SECS / MONTH_SECS;
+    let rest = after - Duration::from_secs(years * YEAR_SECS + months * MONTH_SECS);
+    let printer = SpanPrinter::new();
+    let mut parts = Vec::new();
+    if years > 0 {
+        parts.push(format!("{years}y"));
     }
+    if months > 0 {
+        parts.push(format!("{months}mo"));
+    }
+    if !rest.is_zero() || parts.is_empty() {
+        let span = Span::try_from(rest).and_then(|span| {
+            span.round(
+                SpanRound::new()
+                    .largest(Unit::Week)
+                    .relative(SpanRelativeTo::days_are_24_hours()),
+            )
+        });
+        parts.push(match span {
+            Ok(span) => printer.span_to_string(&span),
+            Err(_) => printer.unsigned_duration_to_string(&rest),
+        });
+    }
+    parts.join(" ")
 }
 
 /// What an operation is to presence: whose work it is, which copies it forgets, and the
@@ -558,20 +613,36 @@ mod tests {
 
     #[test]
     fn forget_after_reads_and_writes() {
-        let hours = |h: u64| Ok(Some(Duration::from_secs(h * 3600)));
-        assert_eq!(parse_forget_after("6h"), hours(6));
-        assert_eq!(parse_forget_after("6 hours"), hours(6));
-        assert_eq!(
-            parse_forget_after(" 1h 30m "),
-            Ok(Some(Duration::from_secs(5400)))
-        );
-        assert_eq!(
-            parse_forget_after("1h30m"),
-            Ok(Some(Duration::from_secs(5400)))
-        );
-        assert_eq!(parse_forget_after("2days"), hours(48));
+        let secs = |n: u64| Ok(Some(Duration::from_secs(n)));
+        for (text, expected) in [
+            ("6h", 6 * 3600),
+            ("6 hours", 6 * 3600),
+            (" 1h 30m ", 5400),
+            ("1h30m", 5400),
+            ("2 days", 48 * 3600),
+            ("2days", 48 * 3600),
+            ("1w", 7 * 24 * 3600),
+            ("1 week", 7 * 24 * 3600),
+            ("1w 1d 1s", 8 * 24 * 3600 + 1),
+            ("45s", 45),
+            // Months and years as `humantime` read them, and wrote them in earlier builds.
+            ("1month", MONTH_SECS),
+            ("2months", 2 * MONTH_SECS),
+            ("1mo", MONTH_SECS),
+            ("1year", YEAR_SECS),
+            ("7years", 7 * YEAR_SECS),
+            ("1y", YEAR_SECS),
+            ("1yr", YEAR_SECS),
+            ("1month 5h 2m 3s", MONTH_SECS + 5 * 3600 + 2 * 60 + 3),
+            (
+                "1year 2months 3days 4h 5m 6s",
+                YEAR_SECS + 2 * MONTH_SECS + 3 * 86400 + 4 * 3600 + 5 * 60 + 6,
+            ),
+        ] {
+            assert_eq!(parse_forget_after(text), secs(expected), "{text:?}");
+        }
         assert_eq!(parse_forget_after("never"), Ok(None));
-        for bad in ["", "6", "h", "6x", "-1h", "Never"] {
+        for bad in ["", "6", "h", "6x", "-1h", "-1month", "Never", "1M", "M"] {
             assert_eq!(
                 parse_forget_after(bad),
                 Err(BadForgetAfter::NotADuration),
@@ -593,8 +664,39 @@ mod tests {
             format_forget_after(Some(Duration::from_secs(5400))),
             "1h 30m"
         );
+        for (secs, printed) in [
+            (45, "45s"),
+            (48 * 3600, "2d"),
+            (7 * 24 * 3600, "1w"),
+            (8 * 24 * 3600 + 1, "1w 1d 1s"),
+            (MONTH_SECS, "1mo"),
+            (MONTH_SECS - 1, "4w 2d 10h 33m 35s"),
+            (2 * MONTH_SECS + 86400, "2mo 1d"),
+            (YEAR_SECS, "1y"),
+            (YEAR_SECS + MONTH_SECS + 5 * 3600, "1y 1mo 5h"),
+            (3 * YEAR_SECS + 11 * MONTH_SECS + 1, "3y 11mo 1s"),
+        ] {
+            assert_eq!(
+                format_forget_after(Some(Duration::from_secs(secs))),
+                printed
+            );
+        }
         assert_eq!(format_forget_after(None), "never");
-        for text in ["6h", "1h 30m", "9days", "45s", "1week", "never"] {
+        for text in [
+            "6h",
+            "1h 30m",
+            "9days",
+            "45s",
+            "1week",
+            "1w 1d 1s",
+            "2d",
+            "never",
+            "1month",
+            "2months",
+            "1year 2months 3days 4h 5m 6s",
+            "1y 11mo 4w 2d 10h",
+            "7years",
+        ] {
             let after = parse_forget_after(text).unwrap();
             assert_eq!(parse_forget_after(&format_forget_after(after)), Ok(after));
         }

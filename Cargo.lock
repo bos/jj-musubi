@@ -2969,7 +2969,7 @@ dependencies = [
  "futures",
  "gix",
  "hegeltest",
- "humantime",
+ "jiff",
  "jj-lib",
  "musubi-testutil",
  "pollster",

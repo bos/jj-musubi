@@ -4,10 +4,23 @@ import json
 from pathlib import Path
 
 from common import HERE
+from common import read_json
+
+
+def runs(values):
+    """`values` as a flat list of `[value, count]` pairs, one pair for each run of equal
+    values."""
+    pairs = []
+    for value in values:
+        if pairs and pairs[-2] == value:
+            pairs[-1] += 1
+        else:
+            pairs += [value, 1]
+    return pairs
 
 
 def render(dataset, output, standalone=False):
-    data = json.loads(Path(dataset).read_text())
+    data = read_json(dataset)
     labels = {
         item["id"]: item
         for item in json.loads((HERE / "catalog.json").read_text())["mechanisms"]
@@ -57,8 +70,13 @@ def render(dataset, output, standalone=False):
     for event in inline["measured"]["events"]:
         for key in ("n", "m", "models", "ok", "inputs", "corpusFiles"):
             event.pop(key, None)
+    # The figure must stay under 1 MB. Most of a dataset is which event first reached each
+    # executable line, by technique, and long runs of one event make up most of that: send
+    # those as runs, and the lines as their count, which is all the figure reads of them.
     for file in inline["measured"]["files"].values():
         file.pop("hash", None)
+        file["lines"] = len(file["lines"])
+        file["first"] = {m: runs(arrivals) for m, arrivals in file["first"].items()}
     inline["network"]["nodes"] = {
         id: {
             k: v

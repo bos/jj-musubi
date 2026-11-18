@@ -14,9 +14,33 @@ spec.loader.exec_module(source)
 
 
 def write_json(path, value):
+    """Writes `value` as JSON, compressed with zstd if the name ends in `.zst`, as saved
+    datasets are."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+    text = json.dumps(value, sort_keys=True, indent=2) + "\n"
+    if path.suffix == ".zst":
+        zstd(["-q", "-19", "-f", "-o", str(path)], input=text.encode())
+    else:
+        path.write_text(text)
+
+
+def read_json(path):
+    """Reads JSON that `write_json` wrote, decompressing it if the name ends in `.zst`."""
+    path = Path(path)
+    if path.suffix == ".zst":
+        return json.loads(zstd(["-q", "-d", "-c", str(path)]))
+    return json.loads(path.read_text())
+
+
+def zstd(args, input=None):
+    """Runs `zstd` with `args`, returning its output. Its own errors go to stderr."""
+    try:
+        return subprocess.run(
+            ["zstd", *args], input=input, stdout=subprocess.PIPE, check=True
+        ).stdout
+    except FileNotFoundError:
+        raise RuntimeError("zstd not found: install Zstandard to read or write .zst") from None
 
 
 def production_files():

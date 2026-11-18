@@ -10,7 +10,7 @@ From the repository root:
 
 ```sh
 python3 contrib/assurance/assurance.py render \
-    contrib/assurance/data/2026-11-07/snapshot.json \
+    contrib/assurance/data/2026-11-07/snapshot.json.zst \
     --out target/assurance/index.html --standalone
 ```
 
@@ -19,9 +19,10 @@ its labels and tooltips. It runs no tests, fuzzers, solvers or mutation campaign
 
 ## Files
 
-- `snapshot.json`: the source graph, layout, per-technique coverage timeline, mutation results,
-  and collection provenance. It contains 590 passing tests, 24 fuzz checkpoints and 126 mutation
-  results: 90 caught by tests, 1 survivor, and 35 compilation failures.
+- `snapshot.json.zst`: the source graph, layout, per-technique coverage timeline, mutation
+  results, and collection provenance, compressed with Zstandard. It contains 590 passing tests,
+  24 fuzz checkpoints and 126 mutation results: 90 caught by tests, 1 survivor, and 35
+  compilation failures.
 - `observations.tar.zst`: per-test and per-checkpoint line observations, test identities,
   observed oracle operations, fuzz logs and corpora, and collection manifests. Each mutation
   shard's directory contains its outcomes and diffs, plus `normalized-results.json` with the
@@ -30,7 +31,7 @@ its labels and tooltips. It runs no tests, fuzzers, solvers or mutation campaign
 
 The archive supports analysis of individual runs. LLVM profiles, binaries, build outputs and
 verbose mutation logs remain in the raw captures outside the repository. The normalized archive
-is not an input to `assurance.py export`; rendering needs only `snapshot.json`.
+is not an input to `assurance.py export`; rendering needs only `snapshot.json.zst`.
 
 Extract the observations with Zstandard and tar:
 

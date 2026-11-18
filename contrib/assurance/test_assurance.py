@@ -17,7 +17,7 @@ import common
 import graph
 import render
 import taxonomy
-from common import HERE, ROOT, write_json
+from common import HERE, ROOT, read_json, write_json
 
 
 class GraphTests(unittest.TestCase):
@@ -451,9 +451,21 @@ class EvidenceTests(unittest.TestCase):
             )
             self.assertEqual(json.loads((root / "data.json").read_text()), data)
 
+    def test_figure_sends_line_arrivals_as_runs(self):
+        self.assertEqual(render.runs([]), [])
+        self.assertEqual(render.runs([0, 0, 5, 5, 5, 0]), [0, 2, 5, 3, 0, 1])
+
+    def test_compressed_json_round_trips(self):
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / "data.json.zst"
+            write_json(path, {"a": [1, 2]})
+            self.assertEqual(path.read_bytes()[:4], b"\x28\xb5\x2f\xfd")
+            self.assertEqual(read_json(path), {"a": [1, 2]})
+
     def test_checked_in_snapshots_render_without_collecting_current_sources(self):
         with tempfile.TemporaryDirectory() as work:
-            snapshots = sorted((HERE / "data").glob("*/snapshot.json"))
+            snapshots = sorted((HERE / "data").glob("*/snapshot.json.zst"))
+            self.assertFalse(list((HERE / "data").glob("*/*.json")))
             self.assertTrue(snapshots)
             with patch.object(
                 common, "source_identity", side_effect=AssertionError("Fresh collection")

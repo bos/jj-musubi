@@ -53,6 +53,14 @@
   const measured = data.measured,
     events = measured?.events || [],
     duration = measured?.duration || 1;
+  // Each file's first arrivals come as [event, count] runs (render.py): expand them once.
+  for (const file of Object.values(measured?.files || {}))
+    for (const [m, runs] of Object.entries(file.first)) {
+      const arrivals = [];
+      for (let i = 0; i < runs.length; i += 2)
+        for (let n = 0; n < runs[i + 1]; n++) arrivals.push(runs[i]);
+      file.first[m] = arrivals;
+    }
   const graphFiles = new Set(Object.keys(measured.files)),
     graphImports = net.imports.filter(
       (e) => graphFiles.has(e.source) && graphFiles.has(e.target),
@@ -296,7 +304,7 @@
     if (coverageCache.has(id)) return coverageCache.get(id);
     const file = measured?.files[id],
       result = {
-        total: file?.lines.length || 0,
+        total: file?.lines || 0,
         hit: 0,
         kinds: [],
         byKind: {},
@@ -306,7 +314,7 @@
     if (file) {
       const selected = state.enabled.filter((m) => file.first[m]),
         cutoff = events.reduce((n, e, i) => (e.t <= state.time ? i + 1 : n), 0);
-      for (let i = 0; i < file.lines.length; i++) {
+      for (let i = 0; i < file.lines; i++) {
         const found = selected.filter(
           (m) => file.first[m][i] && file.first[m][i] <= cutoff,
         );

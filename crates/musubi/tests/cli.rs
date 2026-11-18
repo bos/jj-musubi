@@ -1752,6 +1752,28 @@ fn one_daemon_serves_a_machine_wherever_it_listens() {
     insta::assert_snapshot!(err, @"Error: this machine's daemon already runs, listening on $ROOT/home/.musubi/d.sock, not $ROOT/other.sock");
     insta::assert_snapshot!(daemon_line(Some(other)), @"Daemon: this machine's daemon already runs, listening on $ROOT/home/.musubi/d.sock, not $ROOT/other.sock");
 
+    // A daemon whose pid file names another build of the release is refused, whatever it says
+    // when asked, with the way out, and restarting it asks it to stop, as the daemon of any
+    // build is asked.
+    let info = state_dir(&env, &repo).join("daemon.pid");
+    let written = fs::read_to_string(&info).unwrap();
+    let (kept, version) = written.trim_end().rsplit_once('\n').unwrap();
+    let (release, _) = version.split_once('/').unwrap();
+    fs::write(&info, format!("{kept}\n{release}/control-0\n")).unwrap();
+    let (ok, _, err) = try_run(&logs, &env, musubi_on(None, &["daemon", "start"]));
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"
+    Error: the running daemon is from another build of musubi
+    Hint: `musubi daemon restart` restarts it.
+    ");
+    let out = run(
+        &env,
+        &logs,
+        musubi_on(Some("~/.musubi/d.sock"), &["daemon", "restart"]),
+    );
+    assert_eq!(out, "Started the daemon.\n");
+    assert!(chosen.exists());
+
     // As a temp cleaner would, while the daemon is held still, so that it can't listen again
     // before the commands below look.
     let pid = daemon_pid(&state_dir(&env, &repo)).unwrap();

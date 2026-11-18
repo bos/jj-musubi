@@ -15,7 +15,6 @@ use crate::block_on;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::UserState;
-use crate::control;
 use crate::copy;
 use crate::daemon;
 use crate::settings;
@@ -192,7 +191,7 @@ pub fn follow_move(
     block_on(async {
         if let Some(client) = daemon::running(socket).await? {
             client
-                .add(control::context(Duration::from_secs(2)), moved.key.clone())
+                .add(moved.key.clone(), Duration::from_secs(2))
                 .await
                 .ok();
         }

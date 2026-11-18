@@ -20,7 +20,6 @@ use crate::block_on;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::UserState;
-use crate::control;
 use crate::copy;
 use crate::daemon;
 use crate::daemon::Status;
@@ -67,7 +66,7 @@ pub fn list(
             Err(err) => return Ok((Err(err), BTreeMap::new())),
         };
         let statuses: BTreeMap<String, Status> = client
-            .status(control::context(Duration::from_secs(10)))
+            .status(Duration::from_secs(10))
             .await?
             .into_iter()
             .map(|repo| (repo.key, repo.status))

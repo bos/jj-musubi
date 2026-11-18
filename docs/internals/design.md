@@ -1426,11 +1426,30 @@ status and sync progress while that work runs.
 
 Only the owner may reach the control socket. musubi refuses unsafe socket directories or a
 named pipe another user has claimed, and a lock prevents a second daemon from taking over the
-endpoint. Commands check the daemon's version before using it. Installation delegates startup
-to the platform's login service where supported; commands use that service too, rather than
-starting a competing daemon. The service retains the installing environment needed to find
-programs, jj configuration and musubi state. The
+endpoint. Installation delegates startup to the platform's login service where supported;
+commands use that service too, rather than starting a competing daemon. The service retains
+the installing environment needed to find programs, jj configuration and musubi state. The
 [command reference](../reference/commands.md#run-the-daemon) describes daemon installation.
+
+Commands reach the daemon over the [hub's stream transport](#transport), on its local socket:
+the daemon greets, a command sends a JSON request, and the daemon answers with a JSON
+response, for each of seven operations (`Request` and `Response` in
+`crates/musubi/src/control.rs`). Every message names first the build that sent it, and a
+build reads no further into another's. A daemon writes its build as a fourth line of
+`daemon.pid`, so a command refuses one of another build, and says to restart it, without
+connecting; a daemon from before the protocol changed wrote none. The socket's greeting is the
+second check: a greeting that isn't the transport's is taken for another build's. A daemon that
+doesn't greet within a short wait is only slow to answer, as a busy one is, and is not taken for
+another build; one that closes the connection before greeting, as one stopping does, is taken
+for none. Only a request to stop is obeyed across builds, so that `musubi daemon restart`
+works. A daemon of another build that never greets, as one that spoke tarpc, can't be asked, so
+`stop` ends its process, with SIGTERM or on Windows `taskkill /F`, but only if something
+listens at its socket and the process at its pid has this executable's file name: a daemon
+killed hard leaves a pid file whose pid may be anything by now. A daemon of this build that
+doesn't answer is asked again until the deadline. Each call names how long it waits. A
+call that returns once a copy has synced waits an hour, the most the transport waits for any
+request. The daemon drops a request when its deadline passes, as tarpc's server did, and not
+when its command goes away: the request runs to the end.
 
 A daemon outlives the command and login session that started it. Repository-specific git
 environment variables therefore reach neither the daemon nor the git processes musubi runs,

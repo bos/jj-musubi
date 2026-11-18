@@ -227,10 +227,7 @@ pub fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(S
             stopped = true;
             return Ok(None);
         };
-        let sync = client.sync(
-            control::context(Duration::from_secs(3600)),
-            entry.key.clone(),
-        );
+        let sync = client.sync(entry.key.clone(), control::SYNC_LIMIT);
         let synced = ui
             .while_waiting(sync, daemon_progress(&client, &entry.key))
             .await?;
@@ -262,8 +259,8 @@ pub fn daemon_progress(
     move || {
         let (client, key) = (client.clone(), key.clone());
         Box::pin(async move {
-            let context = control::context(Duration::from_secs(1));
-            client.progress(context, key).await.ok().flatten()
+            let limit = Duration::from_secs(1);
+            client.progress(key, limit).await.ok().flatten()
         })
     }
 }

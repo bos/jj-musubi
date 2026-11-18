@@ -721,11 +721,7 @@ async fn statuses(socket: &Socket) -> anyhow::Result<Option<Vec<control::RepoSta
     let Some(client) = daemon::running(socket).await? else {
         return Ok(None);
     };
-    Ok(Some(
-        client
-            .status(control::context(Duration::from_secs(10)))
-            .await?,
-    ))
+    Ok(Some(client.status(Duration::from_secs(10)).await?))
 }
 
 /// Whether the hub has every one of this machine's operations, as of the hub's head at the

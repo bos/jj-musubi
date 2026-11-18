@@ -11,17 +11,16 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
-use futures::StreamExt as _;
 use musubi_sync::progress::Activity;
-use tarpc::server::Channel as _;
 
 use super::connections::Hubs;
 use super::worker::Worker;
 use crate::config::Settings;
 use crate::config::UserState;
 use crate::control;
-use crate::control::Control;
 use crate::control::RepoStatus;
+use crate::control::Request;
+use crate::control::Response;
 use crate::control::Synced;
 use crate::socket::Socket;
 
@@ -106,12 +105,30 @@ struct Daemon {
     stop: Arc<tokio::sync::Notify>,
 }
 
-impl Control for Daemon {
-    async fn version(self, _: tarpc::context::Context) -> String {
-        control::VERSION.to_owned()
+impl Daemon {
+    /// Does what a command asks. (Each [`Request`] is documented where it is defined.)
+    async fn answer(self, request: Request) -> Response {
+        match request {
+            Request::Version => Response::Version(control::VERSION.to_owned()),
+            Request::Add { key } => Response::Add(self.add(key).await),
+            Request::Remove { key } => {
+                if self.supervisor.remove(&key).await {
+                    tracing::info!("stopped serving {key}");
+                }
+                Response::Remove(Ok(()))
+            }
+            Request::Sync { key } => Response::Sync(self.supervisor.sync(&key).await),
+            Request::Progress { key } => Response::Progress(self.supervisor.progress(&key)),
+            Request::Status => Response::Status(self.supervisor.statuses()),
+            Request::Stop => {
+                tracing::info!("asked to stop");
+                self.stop.notify_one();
+                Response::Stop
+            }
+        }
     }
 
-    async fn add(self, _: tarpc::context::Context, key: String) -> Result<Synced, String> {
+    async fn add(&self, key: String) -> Result<Synced, String> {
         tracing::info!("serving {key} from now on");
         // Starting over if it serves it already, with its entry as it is now, as after
         // joining again. On a task of its own, which finishes even if this request is
@@ -137,30 +154,6 @@ impl Control for Daemon {
         .await
         .ok();
         self.supervisor.sync(&key).await
-    }
-
-    async fn remove(self, _: tarpc::context::Context, key: String) -> Result<(), String> {
-        if self.supervisor.remove(&key).await {
-            tracing::info!("stopped serving {key}");
-        }
-        Ok(())
-    }
-
-    async fn sync(self, _: tarpc::context::Context, key: String) -> Result<Synced, String> {
-        self.supervisor.sync(&key).await
-    }
-
-    async fn progress(self, _: tarpc::context::Context, key: String) -> Option<Activity> {
-        self.supervisor.progress(&key)
-    }
-
-    async fn status(self, _: tarpc::context::Context) -> Vec<RepoStatus> {
-        self.supervisor.statuses()
-    }
-
-    async fn stop(self, _: tarpc::context::Context) {
-        tracing::info!("asked to stop");
-        self.stop.notify_one();
     }
 }
 
@@ -204,6 +197,11 @@ pub(super) async fn listen(
         ))),
         stop: Arc::new(tokio::sync::Notify::new()),
     };
+    let requests = control::service({
+        let daemon = daemon.clone();
+        move |request| daemon.clone().answer(request)
+    })
+    .await?;
     for entry in copies {
         daemon.supervisor.start(entry.key);
     }
@@ -217,12 +215,7 @@ pub(super) async fn listen(
     loop {
         tokio::select! {
             stream = crate::socket::accept(&listener) => {
-                let channel =
-                    tarpc::server::BaseChannel::with_defaults(control::transport(stream));
-                let serve = channel.execute(daemon.clone().serve()).for_each(|request| async {
-                    tokio::spawn(request);
-                });
-                tokio::spawn(serve);
+                tokio::spawn(control::serve(requests.clone(), stream));
             }
             () = daemon.stop.notified() => break,
             exe = crate::upgrade::installed() => {

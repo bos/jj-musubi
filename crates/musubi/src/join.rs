@@ -409,7 +409,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             Ok(client) => client,
             Err(err) => return Ok(Served::NoDaemon(err)),
         };
-        let add = client.add(control::context(Duration::from_secs(3600)), key.clone());
+        let add = client.add(key.clone(), control::SYNC_LIMIT);
         let first = ui
             .while_waiting(add, daemon_progress(&client, &key))
             .await

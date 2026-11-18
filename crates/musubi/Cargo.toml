@@ -36,7 +36,6 @@ ratatui.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tarpc.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "time"] }
 toml.workspace = true

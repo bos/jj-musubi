@@ -16,7 +16,6 @@ use crate::block_on;
 use crate::config::HiveConfig;
 use crate::config::Membership;
 use crate::config::UserState;
-use crate::control;
 use crate::copy;
 use crate::daemon;
 use crate::repo::Located;
@@ -66,7 +65,7 @@ fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
             return Ok(false);
         };
         client
-            .remove(control::context(Duration::from_secs(120)), key.to_owned())
+            .remove(key.to_owned(), Duration::from_secs(120))
             .await?
             .map_err(anyhow::Error::msg)?;
         Ok::<_, anyhow::Error>(true)
@@ -101,8 +100,8 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
                 // As before: the daemon serves it again.
                 block_on(async {
                     if let Some(client) = daemon::running(socket).await? {
-                        let context = control::context(Duration::from_secs(10));
-                        client.add(context, entry.key.clone()).await.ok();
+                        let limit = Duration::from_secs(10);
+                        client.add(entry.key.clone(), limit).await.ok();
                     }
                     Ok::<_, anyhow::Error>(())
                 })

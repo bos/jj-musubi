@@ -9,7 +9,6 @@ use musubi_sync::wire::HubWideRequest;
 use tokio::time::Instant;
 
 use crate::config::UserState;
-use crate::control;
 use crate::daemon;
 use crate::hub;
 use crate::socket::Socket;
@@ -149,10 +148,7 @@ async fn serving(socket: &Socket) -> Result<Option<usize>, String> {
         Ok(None) => return Ok(None),
         Err(err) => return Err(format!("{err:#}")),
     };
-    match client
-        .status(control::context(Duration::from_secs(5)))
-        .await
-    {
+    match client.status(Duration::from_secs(5)).await {
         Ok(repos) => Ok(Some(repos.len())),
         Err(err) => Err(format!("{err}")),
     }

@@ -32,7 +32,11 @@ This updates the service and starts it. For other machines upgraded by hand, res
 musubi daemon restart
 ```
 
-A new command may refuse an older daemon's control protocol until the daemon restarts.
+A command from the new build tells you to run `musubi daemon restart` when the daemon is from
+an earlier build, and does nothing else until you do. Run that command from the new build: an
+older `musubi` can't stop a newer daemon. On Windows, the new build's `musubi daemon restart`
+force-stops a daemon from an earlier build, without letting it clean up; what it was syncing
+resumes when the new daemon starts.
 
 Run `musubi sync` in a joined repo to check that it can sync with the hub. `musubi top` shows
 the release each machine is running. If you use automatic upgrades, wait for those machines to

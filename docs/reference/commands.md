@@ -71,7 +71,7 @@ give an empty string or false. The keyword `problem` maps to `not_synced`, else 
 | `hive` | The repo's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
 | `not_synced` | Why a recorded copy does not sync (such as a filesystem duplicate), or why its state is unavailable (such as a missing directory or repo). `hive` is `null` in these cases; otherwise `not_synced` is `null`. See [Move, copy or restore a repo](../guides/manage.md#move-copy-or-restore-a-repo). |
 | `default_hub` | The hub commands use without `--hub`, or `null`. |
-| `daemon` | `running` (`null` if unknown), `error` (why its state is unknown or a running daemon is unreachable), `pid`, `serving` (whether it serves this repo), `served` (repo count), `at_login`, `socket`, `log`, and `upgrade_failed` (`release` and `error` if its last upgrade to a release newer than this command failed, otherwise `null`). |
+| `daemon` | `running` (`null` if unknown), `error` (why its state is unknown or a running daemon is unreachable), `pid`, `serving` (whether it serves this repo), `served` (repo count), `at_login` (whether `daemon install` set it to start on its own: at login, or at boot on illumos), `socket`, `log`, and `upgrade_failed` (`release` and `error` if its last upgrade to a release newer than this command failed, otherwise `null`). |
 
 For unattended checks, read `daemon.running`, `daemon.serving`, `hive.error`, `hive.last_sync`
 and `hive.sent` on each machine, allowing for expected offline periods. An old successful sync
@@ -138,10 +138,10 @@ a minute. Reports expire after a day without contact.
 
 | Command | Use it to |
 | --- | --- |
-| `daemon install` | Start the daemon now and at login. |
-| `daemon uninstall` | Stop the daemon and remove login startup. |
+| `daemon install` | Start the daemon now and at login (at boot on illumos). |
+| `daemon uninstall` | Stop the daemon and remove login startup (boot startup on illumos). |
 | `daemon start` | Start the daemon in the background, unless it is running. |
-| `daemon stop` | Stop background syncing for copies served by this daemon, keeping memberships and login startup. The hub keeps running; explicit `sync` still works. |
+| `daemon stop` | Stop background syncing for copies served by this daemon, keeping memberships and login startup (boot startup on illumos). The hub keeps running; explicit `sync` still works. |
 | `daemon restart` | Stop the daemon and start it again, as after upgrading jj-musubi. |
 | `daemon` | Run the daemon in the foreground, logging to the terminal. |
 
@@ -153,8 +153,8 @@ the daemon if running, or syncs directly with a warning. Each shows progress on 
 | Command | Use it to |
 | --- | --- |
 | `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
-| `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. Accepts the same flags as `hub`. macOS and Linux only. |
-| `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo. |
+| `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. On illumos it starts at boot either way; installing it uses pfexec and the Service Management rights profile (see [illumos](../guides/setup.md#illumos)). Accepts the same flags as `hub`. macOS, Linux and illumos only. |
+| `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo; on illumos, removing the hub's SMF service uses pfexec. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
 | `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines use it over ssh. |

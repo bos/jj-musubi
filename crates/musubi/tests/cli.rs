@@ -67,6 +67,12 @@ fn snapshot_filters(env: &TestEnv) -> impl Sized {
     settings.add_filter(r"\b\d+[smhd] ago\b", "N ago");
     settings.add_filter(r"#\d+", "#N");
     settings.add_filter(r"\(pid \d+\)", "(pid N)");
+    // SMF starts services at boot where launchd and systemd start them at login, and the
+    // snapshots say "at login" for both. Only after "starts" or "runs", so that help text naming
+    // both ("at login (at boot on illumos)") keeps its own words.
+    if SMF {
+        settings.add_filter(r"\b(starts?|runs?) at boot\b", "$1 at login");
+    }
     settings.bind_to_scope()
 }
 
@@ -1504,22 +1510,40 @@ fn daemon_install_and_uninstall_leave_the_daemon_as_they_say() {
             insta::assert_snapshot!(err, @"Error: `systemctl --user enable --now musubi.service` failed: installation refused");
         }
         assert!(err.contains("installation refused"), "{err}");
+        // Without the rights SMF wants, the hint says which profile.
+        if SMF {
+            let deny = env.root().join("home/deny");
+            fs::write(&deny, "").unwrap();
+            let (ok, out, err) = try_run(&logs, &env, musubi_here(&["daemon", "install"]));
+            assert!(!ok, "{out}");
+            assert!(
+                err.contains("Hint: If `profiles` doesn't list Service Management"),
+                "{err}"
+            );
+            // Refused at the import, nothing is left installed, and the daemon this stopped
+            // starts again as before.
+            assert!(!err.contains("removes what's left"), "{err}");
+            assert!(!err.contains("Couldn't start the daemon again"), "{err}");
+            fs::remove_file(&deny).unwrap();
+        }
     }
     #[cfg(not(unix))]
     run(&env, &logs, musubi_here(&["daemon", "start"]));
     let out = run(&env, &logs, musubi_here(&["daemon", "uninstall"]));
     assert_eq!(
         out,
-        "Stopped the daemon. It wasn't set to start at login.\n"
+        format!("Stopped the daemon. It wasn't set to start {STARTS}.\n")
     );
     let out = run(&env, &logs, musubi_here(&["daemon", "uninstall"]));
-    assert_eq!(out, "The daemon wasn't set to start at login.\n");
+    assert_eq!(out, format!("The daemon wasn't set to start {STARTS}.\n"));
 }
 
 /// A stand-in for systemctl and launchctl, in `<root>/service-manager`, which notes each call
 /// in `~/service-calls`, refuses to install the daemon while `~/fail-install` exists, and runs
 /// the hub that an installed unit or agent names as the service manager would, with the
-/// musubi in `MUSUBI_EXE`: a `PATH` that finds it first. It never reaches the real one.
+/// musubi in `MUSUBI_EXE`: a `PATH` that finds it first. It never reaches the real one. On
+/// illumos, musubi_testutil's pfexec and svcs stand-ins do the same for SMF, and pfexec also
+/// refuses every command while `~/deny` exists.
 #[cfg(unix)]
 fn with_service_manager(env: &TestEnv) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1557,9 +1581,14 @@ if test -n "${dir:-}"; then
     echo $! > "$pid"
 fi
 "#;
-    for name in ["systemctl", "launchctl"] {
+    for (name, text) in [
+        ("systemctl", script),
+        ("launchctl", script),
+        ("pfexec", musubi_testutil::PFEXEC_STAND_IN),
+        ("svcs", musubi_testutil::SVCS_STAND_IN),
+    ] {
         let path = bin.join(name);
-        fs::write(&path, script).unwrap();
+        fs::write(&path, text).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let sudo = bin.join("sudo");
@@ -1619,8 +1648,14 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
     let _uninstall = Daemons(vec![uninstall]);
     let installed = env.root().join("installed-hub");
     let installed = installed.to_str().unwrap();
-    let (ok, _, hint) = try_run(&logs, &env, hub(&["install", "--dir", installed]));
+    let (ok, out, hint) = try_run(&logs, &env, hub(&["install", "--dir", installed]));
     assert!(ok, "{hint}");
+    let first = out.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("The hub serves /")
+            && first.contains(&format!(", and runs {STARTS} from now on, through ")),
+        "{out}"
+    );
     if cfg!(target_os = "linux") {
         insta::assert_snapshot!(hint, @"Hint: To start it at boot and keep it running after logout: `musubi hub install --at-boot --dir $ROOT/installed-hub`");
     }
@@ -1647,8 +1682,9 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
             .success()
     );
     // Switching to boot startup replaces the login service, then switching back removes
-    // the system service. The daemon's separate login service is never touched.
-    if !rustix::process::getuid().is_root() {
+    // the system service. The daemon's separate login service is never touched. SMF starts
+    // the hub at boot either way, so there is no system service to switch to.
+    if !SMF && !rustix::process::getuid().is_root() {
         let out = run(
             &env,
             &logs,
@@ -1867,7 +1903,7 @@ fn the_daemon_picks_up_new_repositories() {
 
     Without a subcommand, it runs the daemon in the foreground, logging to standard error. Other
     commands start it in the background when they need it, logging to `daemon.log` in musubi's state
-    directory, or under systemd, to the journal.
+    directory, under systemd to the journal, or under SMF to its log in /var/svc/log.
 
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
@@ -2581,7 +2617,7 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
 
     Without a subcommand, it runs the daemon in the foreground, logging to standard error. Other
     commands start it in the background when they need it, logging to `daemon.log` in musubi's state
-    directory, or under systemd, to the journal.
+    directory, under systemd to the journal, or under SMF to its log in /var/svc/log.
 
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
@@ -2607,9 +2643,10 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
       start      Start the daemon in the background, unless it is running
       stop       Stop the running daemon
       restart    Stop the running daemon, if any, and start a new one in the background
-      install    Start the daemon at login from now on (a launchd agent on macOS, a systemd user unit on
-                 Linux, a Run registry entry on Windows), and now
-      uninstall  Stop starting the daemon at login, and stop it
+      install    Start the daemon at login (at boot on illumos) from now on, and now: through a launchd
+                 agent on macOS, a systemd user unit on Linux, an SMF service on illumos, or a Run
+                 registry entry on Windows
+      uninstall  Stop starting the daemon at login (at boot on illumos), and stop it
       help       Print this message or the help of the given subcommand(s)
 
     Options:
@@ -3085,7 +3122,13 @@ fn musubi_in_deleted_dir(
     let mut command = machine.program(Path::new("sh"));
     command
         .current_dir(env.root())
-        .args(["-c", r#"cd "$1" && rmdir "$1" && shift && exec "$@""#, "sh"])
+        // A subshell removes the directory, since illumos refuses to remove a process's own
+        // current directory.
+        .args([
+            "-c",
+            r#"cd "$1" && (cd / && rmdir "$1") && shift && exec "$@""#,
+            "sh",
+        ])
         .arg(&gone)
         .arg(musubi())
         .args(args);
@@ -4589,8 +4632,12 @@ fn the_daemon_starts_through_the_login_service() {
         return;
     }
     let env = TestEnv::with_real_op_times();
+    let mut files = vec![env.root().join("state/daemon.log")];
+    if SMF {
+        files.push(smf_log("daemon"));
+    }
     let logs = Logs {
-        files: vec![env.root().join("state/daemon.log")],
+        files,
         repos: Vec::new(),
     };
     let state = env.root().join("state");
@@ -4601,10 +4648,13 @@ fn the_daemon_starts_through_the_login_service() {
     uninstall.stdout(Stdio::null()).stderr(Stdio::null());
     let _uninstall = Daemons(vec![uninstall]);
     let out = run(&env, &logs, musubi_as_user(&state, &["daemon", "install"]));
-    assert!(out.contains("starts at login from now on"), "{out}");
+    assert!(
+        out.contains(&format!("starts {STARTS} from now on")),
+        "{out}"
+    );
     let line = daemon_line(&env, &logs, &state);
     assert!(
-        line.contains("running") && line.contains("starts at login"),
+        line.contains("running") && line.contains(&format!("starts {STARTS}")),
         "{line}"
     );
     let first = daemon_pid(&state).unwrap();
@@ -4636,10 +4686,24 @@ fn the_daemon_starts_through_the_login_service() {
                 && daemon_line(&env, &logs, &state).contains("running,")
         });
         // A clean stop: it stays stopped.
-        run(&env, &logs, musubi_as_user(&state, &["daemon", "stop"]));
-        std::thread::sleep(Duration::from_secs(12));
+        let out = run(&env, &logs, musubi_as_user(&state, &["daemon", "stop"]));
+        assert_eq!(out, "Stopped the daemon.\n");
+        // launchd and systemd decide in their own time whether to start it again. SMF has
+        // disabled it by the time `daemon stop` returns, and never starts a disabled instance.
+        if SMF {
+            let state = Command::new("svcs")
+                .args(["-H", "-o", "state", &smf_fmri("daemon")])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&state.stdout).trim(), "disabled");
+        } else {
+            std::thread::sleep(Duration::from_secs(12));
+        }
         let line = daemon_line(&env, &logs, &state);
         assert!(line.contains("not running"), "{line}");
+        // Stopping again finds nothing to stop, though the service manager still has the service.
+        let out = run(&env, &logs, musubi_as_user(&state, &["daemon", "stop"]));
+        assert_eq!(out, "No daemon is running.\n");
         // A command that needs it starts it through the service manager.
         run(&env, &logs, musubi_as_user(&state, &["daemon", "start"]));
         let managed = if cfg!(target_os = "macos") {
@@ -4655,6 +4719,12 @@ fn the_daemon_starts_through_the_login_service() {
                     .unwrap();
                 String::from_utf8_lossy(&print.stdout).contains("state = running")
             })
+        } else if SMF {
+            let state = Command::new("svcs")
+                .args(["-H", "-o", "state", &smf_fmri("daemon")])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&state.stdout).trim() == "online"
         } else {
             Command::new("systemctl")
                 .args(["--user", "is-active", "--quiet", "musubi.service"])
@@ -4670,9 +4740,27 @@ fn the_daemon_starts_through_the_login_service() {
         &logs,
         musubi_as_user(&state, &["daemon", "uninstall"]),
     );
-    assert!(out.contains("no longer starts at login"), "{out}");
+    assert!(out.contains(&format!("no longer starts {STARTS}")), "{out}");
     let line = daemon_line(&env, &logs, &state);
     assert!(line.contains("not running"), "{line}");
+}
+
+/// Whether SMF, which says "at boot" where launchd and systemd say "at login", runs the login
+/// services here.
+const SMF: bool = cfg!(any(target_os = "illumos", target_os = "solaris"));
+const STARTS: &str = if SMF { "at boot" } else { "at login" };
+
+/// The SMF instance musubi installs for `kind` (daemon or hub) for the user running the test,
+/// whose name these tests assume is a valid instance name.
+fn smf_fmri(kind: &str) -> String {
+    format!("svc:/site/musubi/{kind}:{}", whoami::username().unwrap())
+}
+
+/// Where svc.startd logs the instance: its FMRI without `svc:/`, with `/` as `-`.
+fn smf_log(kind: &str) -> PathBuf {
+    let fmri = smf_fmri(kind);
+    let name = fmri.trim_start_matches("svc:/").replace('/', "-");
+    PathBuf::from(format!("/var/svc/log/{name}.log"))
 }
 
 /// The pid the service manager runs the hub as, if it runs it.
@@ -4696,6 +4784,17 @@ fn hub_service_pid(at_boot: bool) -> Option<String> {
                 .lines()
                 .find_map(|line| line.trim().strip_prefix("pid = ").map(str::to_owned))
         })
+    } else if SMF {
+        // `svcs -Hp` prints the instance's line, then one line for each process: its start time,
+        // pid and name.
+        let processes = Command::new("svcs")
+            .args(["-H", "-p", &smf_fmri("hub")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&processes.stdout)
+            .lines()
+            .nth(1)
+            .and_then(|line| line.split_whitespace().nth(1).map(str::to_owned))
     } else {
         let mut command = Command::new("systemctl");
         let unit = if at_boot {
@@ -4735,6 +4834,13 @@ fn the_hub_runs_through_the_boot_service() {
         eprintln!("skipped: set MUSUBI_TEST_BOOT_SERVICE=1 to install a boot service");
         return;
     }
+    // Under SMF, `--at-boot` installs the hub's own service, which
+    // `the_hub_runs_through_the_login_service` exercises; running both would have two tests
+    // install that one instance at once.
+    if SMF {
+        eprintln!("skipped: SMF's hub service is the login service test's");
+        return;
+    }
     hub_runs_through_service(true);
 }
 
@@ -4768,20 +4874,21 @@ fn hub_runs_through_service(at_boot: bool) {
         files: vec![state.join("hub.log")],
         ..Logs::default()
     };
+    if SMF {
+        logs.files.push(smf_log("hub"));
+    }
     fs::create_dir_all(&state).unwrap();
     // Uninstalls, and so stops the hub, whatever happens below, once the daemons stop.
     let mut uninstall = musubi_as_user(&state, &["hub", "uninstall"]);
     uninstall.stdout(Stdio::null()).stderr(Stdio::null());
     let _uninstall = Daemons(vec![uninstall]);
     let out = run(&env, &logs, install(&dir));
-    assert!(
-        out.contains(if at_boot {
-            "runs at boot from now on"
-        } else {
-            "runs at login from now on"
-        }),
-        "{out}"
-    );
+    let runs = if at_boot {
+        "runs at boot from now on".to_owned()
+    } else {
+        format!("runs {STARTS} from now on")
+    };
+    assert!(out.contains(&runs), "{out}");
     assert!(out.contains("musubi create --hub 127.0.0.1"), "{out}");
     let first = hub_service_pid(at_boot).expect("the service manager isn't running the hub");
     #[cfg(unix)]
@@ -4828,14 +4935,7 @@ fn hub_runs_through_service(at_boot: bool) {
     let restarted = hub_service_pid(at_boot).unwrap();
     let other = env.root().join("other-hub");
     let out = run(&env, &logs, install(&other));
-    assert!(
-        out.contains(if at_boot {
-            "runs at boot from now on"
-        } else {
-            "runs at login from now on"
-        }),
-        "{out}"
-    );
+    assert!(out.contains(&runs), "{out}");
     let replaced = hub_service_pid(at_boot).expect("the service manager isn't running the hub");
     assert_ne!(replaced, restarted);
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);

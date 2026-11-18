@@ -530,24 +530,39 @@ quick start and the test with it. `cargo insta review` accepts a new snapshot. N
 a real machine over ssh: `musubi-testutil` points `MUSUBI_SSH` at a program that doesn't
 exist, so a test that needs ssh must give a stand-in.
 
-`login::process_tests` runs installation in disposable child processes with private home,
-config and state directories and stand-ins for launchctl or systemctl. It checks failed
-installation leaves no marker and no service file, successful installation records one, the
-daemon and hub keep separate markers, only the intended environment reaches the service, and
-uninstall works even after its service file was removed. On macOS it checks both GUI and
+`login::process_tests` runs installation in disposable child processes with private home, config
+and state directories and stand-ins for launchctl, systemctl, or on illumos pfexec and svcs. It
+checks failed installation leaves no marker and no service file, successful installation records
+one, the daemon and hub keep separate markers, only the intended environment reaches the service,
+and uninstall works even after its service file was removed. On macOS it checks both GUI and
 background launchd domains. A stand-in for sudo redirects boot-service installation into the
 private home; the tests check authorization refusal, failed installation cleanup, the user
-identity and environment, and retention of the marker when stopping fails. These tests never
-reach the real service manager; they do not check that it accepts the files or runs musubi.
+identity and environment, and retention of the marker when stopping fails. On illumos it also
+checks that a failed install, whether at the import or after it, leaves no instance and no
+service; that starting clears SMF's maintenance state; that stopping reports a running instance
+(one `online`, `degraded` or in transition) as stopped and a disabled one or one in maintenance as
+not; that stopping asks SMF nothing without this state directory's marker; that installing over a
+running instance restarts it, over a disabled one enables it, and over one in maintenance clears
+it; that a missing authorization surfaces, in svcadm's words and in svccfg's; that when undoing an
+install fails too with an instance left, the error says so and the marker stays for uninstalling
+to retry, and with none left, no marker stays, where under systemd only the install's own error
+is; that a failed install over an instance this state directory has no marker for leaves it be;
+that an uninstall SMF refuses keeps the marker and the instance; that an instance deleted behind
+musubi's back leaves stopping to the caller and is repaired by installing again; and that
+uninstalling keeps the service other users' instances share. These tests never reach the real
+service manager; they do not check that it accepts the files or runs musubi, though on illumos
+`smf_manifests_validate` has `svccfg validate`, which only reads the file, check the manifests
+against SMF's DTD.
 
 `agent::tests::the_link_follows_the_latest_agent_that_answers` uses local Unix sockets to check
 that commands select the latest responsive agent and leave it unchanged when inheriting the
-daemon's agent link, directly or through another symlink. It checks socket reachability and
-link targets, including short aliases for paths longer than a Unix socket address allows,
-not SSH authentication or signing.
+daemon's agent link, directly or through another symlink. It checks socket reachability and link
+targets, including short aliases for paths longer than a Unix socket address allows, not SSH
+authentication or signing.
 
-Two CLI tests put a stand-in for launchctl and systemctl first on the `PATH` instead, one that
-runs the hub an installed unit or agent names as the service manager would.
+Two CLI tests put a stand-in for launchctl, systemctl, pfexec and svcs first on the `PATH`
+instead, one that runs the hub an installed unit, agent or SMF manifest names as the service
+manager would.
 `daemon_install_and_uninstall_leave_the_daemon_as_they_say` checks that a daemon install the
 service manager refuses leaves the daemon running and nothing installed, and, first, that the
 daemon starts under a umask that lets the group write.
@@ -559,18 +574,22 @@ daemon's socket: a setting's `~/` and refusal of relative paths, commands findin
 where it listens, the refusal of a second daemon on another socket, and stopping and listening
 again after the socket is deleted.
 
-Two CLI tests install real login services, and so run only with
-`MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where
-musubi is installed for real. One installs the daemon with launchd or systemd and checks that
-the service manager starts it, restarts it after it is killed but not after
-`musubi daemon stop`, and starts it for a command that needs it; on Windows it runs the `Run`
-registry entry's command as a login would. The other installs the hub, and checks that a
-repository syncs through it, that the service manager restarts it after it is killed, that
-installing it again for another directory replaces it, and that `musubi hub uninstall` stops
-it; on Windows, which runs no hub at login, it checks the refusal, which changes nothing, and
-so runs always. CI's Linux runners have no systemd user manager without a login session, so
-the workflow enables lingering and starts one first. Logging in itself is the one step no test
-exercises.
+Two CLI tests install real login services, and so run only with `MUSUBI_TEST_LOGIN_SERVICE=1`,
+which CI sets on its throwaway runners and illumos VM: never set it where musubi is installed for
+real. CI's illumos job, in an OmniOS VM, runs only the musubi crate's tests, less
+`decisions_conformance`, which needs the Lean oracle, and `moved_copies_sync_again`, which fails
+there: the daemon doesn't notice a copy moved to another directory (see [copies.md](copies.md)).
+It runs as root, so the tests that use the real SMF never check real pfexec rights, a missing
+authorization, or SMF running musubi as another user; the stand-ins check what musubi does about a
+missing authorization. One installs the daemon with launchd, systemd or SMF and checks that the
+service manager starts it, restarts it after it is killed but not after `musubi daemon stop`, and
+starts it for a command that needs it; on Windows it runs the `Run` registry entry's command as a
+login would. The other installs the hub, and checks that a repository syncs through it, that the
+service manager restarts it after it is killed, that installing it again for another directory
+replaces it, and that `musubi hub uninstall` stops it; on Windows, which runs no hub at login, it
+checks the refusal, which changes nothing, and so runs always. CI's Linux runners have no systemd
+user manager without a login session, so the workflow enables lingering and starts one first.
+Logging in itself is the one step no test exercises.
 
 `the_hub_runs_through_the_boot_service` exercises the same hub-serving, crash-restart,
 replacement and uninstall behavior through a real system service, and checks the process

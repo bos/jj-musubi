@@ -117,10 +117,11 @@ The installer must replace the executable the daemon started from with the relea
 requested version before restarting. If you change the executable's path, run
 `musubi daemon install` again.
 
-The command runs through `sh -c` (`cmd /C` on Windows), in the state directory, without a
-terminal. It inherits the daemon's environment; under launchd or systemd, its `PATH` is the
-one seen by `musubi daemon install`. Output goes to `upgrade.log`. The daemon attempts the
-command once for each newer release; restart the daemon to retry a failure.
+The command runs through `sh -c` (`cmd /C` on Windows, and on illumos under `ctrun`, so that SMF
+stopping the daemon leaves it running), in the state directory, without a terminal. It inherits
+the daemon's environment; under launchd, systemd or SMF, its `PATH` is the one seen by `musubi
+daemon install`. Output goes to `upgrade.log`. The daemon attempts the command once for each newer
+release; restart the daemon to retry a failure.
 
 Keep the installer in the foreground and preserve its standard input, which holds the Unix
 upgrade lock. If the daemon restarts while the installer is running, the installer continues

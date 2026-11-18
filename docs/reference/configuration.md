@@ -67,9 +67,10 @@ signing settings. Set protections on each copy that needs them; see
 | `MUSUBI_UPGRADE_TO` | The daemon sets this for `musubi.upgrade-command`: the release to install, such as `0.6.0`. |
 | `COMPLETE` | Set by your shell to have `musubi` complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
-On macOS and Linux, `musubi daemon install` and `musubi hub install` pass their `PATH`,
-`MUSUBI_*`, `JJ_CONFIG`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` to the service. Run the install
-command again after changing them. On Windows, the login daemon gets the login's environment.
+On macOS, Linux and illumos, `musubi daemon install` and `musubi hub install` pass their
+`PATH`, `MUSUBI_*`, `JJ_CONFIG`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` to the service; on
+illumos, also `HOME`, `USER` and `LOGNAME`, which SMF doesn't set. Run the install command again
+after changing them. On Windows, the login daemon gets the login's environment.
 
 ## SSH
 
@@ -103,10 +104,12 @@ and others). Other commands log only warnings.
 
 - `musubi hub` logs to its terminal; installed by `musubi hub install`, to `hub.log` in the
   state directory on macOS. On Linux, use `journalctl --user -u musubi-hub` for login startup,
-  or `sudo journalctl -u musubi-hub-$(id -u).service` for boot startup.
+  or `sudo journalctl -u musubi-hub-$(id -u).service` for boot startup. On illumos, SMF logs
+  it to `/var/svc/log/site-musubi-hub:<you>.log`, which `logadm` rotates; `<you>` is your SMF
+  instance name (see [illumos](../guides/setup.md#illumos)).
 - `musubi daemon`, run in the foreground, logs to its terminal.
-- A background daemon logs to `daemon.log` in the state directory, or under systemd to
-  `journalctl --user -u musubi`.
+- A background daemon logs to `daemon.log` in the state directory, under systemd to
+  `journalctl --user -u musubi`, or under SMF to `/var/svc/log/site-musubi-daemon:<you>.log`.
 
 The file logs start afresh on startup if larger than 10 MiB.
 
@@ -125,7 +128,8 @@ To watch a serving daemon's requests, run `musubi daemon stop`, then
 
 A daemon started for you uses `musubi.daemon.log`: set it and run `musubi daemon restart`.
 If another command starts the daemon directly, it inherits that command's `RUST_LOG`, which
-overrides the setting. Daemons started through launchd or systemd use the service's environment.
+overrides the setting. Daemons started through launchd, systemd or SMF use the service's
+environment.
 
 [filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 
@@ -157,16 +161,18 @@ machine out](../guides/manage.md#take-a-repo-or-machine-out).
 
 | Path | Holds |
 | --- | --- |
-| The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`: copies the daemon syncs, their machine keys and paths, and the default hub. `daemon.log`: daemon log. `hub_key` and `hub_key.pub`: ssh key for reaching hubs. `ssh-agent`: link to the latest agent for the daemon. `upgrade.log` and `upgrade-failed`: last upgrade command's output and failure. `login-service`: present while `musubi daemon install` enables login startup. On the hub's machine, `hub.path`: directory served without `--dir`; `hub.log`: launchd hub log; `hub-login-service`: records whether `musubi hub install` enables login or boot startup. `daemon.pid`: daemon process id, socket and build. `daemon.lock`: prevents a second daemon serving the copies; other locks coordinate updates. The directory is readable and writable by you alone. |
+| The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`: copies the daemon syncs, their machine keys and paths, and the default hub. `daemon.log`: daemon log. `hub_key` and `hub_key.pub`: ssh key for reaching hubs. `ssh-agent`: link to the latest agent for the daemon. `upgrade.log` and `upgrade-failed`: last upgrade command's output and failure. `login-service`: present while `musubi daemon install` enables login startup (boot startup on illumos, with `smf-daemon.xml`, the SMF manifest it imported). On the hub's machine, `hub.path`: directory served without `--dir`; `hub.log`: launchd hub log; `hub-login-service`: records whether `musubi hub install` enables login or boot startup (on illumos, with `smf-hub.xml`). `daemon.pid`: daemon process id, socket and build. `daemon.lock`: prevents a second daemon serving the copies; other locks coordinate updates. The directory is readable and writable by you alone. |
 | `.jj/repo/musubi/` in each repo | `hive.toml`: hive, jj config id and membership (joined, left or hive removed). `machine`: this copy's identity. `status.json`: last sync. `gc` and `gc.lock`: last jj cleanup and its lock. `hive.lock` and `join.lock`: membership locks. `publication.lock`: publication lock. `publication-approval`: approval for inspected outgoing history. `publication-offers.json`: attempted publications. Also holds the hive's operation records and those `jj op abandon` removed. `musubi leave` marks the copy left in `hive.toml`, removes `status.json`, and keeps the rest. Do not delete these files from a syncing copy or copy them to another repo; use `musubi leave` and `musubi clone`. |
 | Each repo's jj repo config | Explicit `musubi join`, `create` and `clone` commands set a default `musubi.forget-after` unless jj's config sets it already. Clone also fills missing defaults once. Sync never copies Git remote definitions or jj config from another machine. jj keeps repo config outside the repo; `jj config path --repo` prints where. |
-| What `musubi daemon install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.plist`; on Linux, `~/.config/systemd/user/musubi.service` (in `$XDG_CONFIG_HOME` if set); on Windows, the value `musubi` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. `musubi daemon uninstall` removes it. |
-| What `musubi hub install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.hub.plist`; on Linux, `~/.config/systemd/user/musubi-hub.service` (in `$XDG_CONFIG_HOME` if set). With `--at-boot`, `/Library/LaunchDaemons/io.github.bos.musubi.hub.<uid>.plist` on macOS, or `/etc/systemd/system/musubi-hub-<uid>.service` on Linux, owned by root and running the hub as the installing user. `musubi hub uninstall` removes either kind. |
+| What `musubi daemon install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.plist`; on Linux, `~/.config/systemd/user/musubi.service` (in `$XDG_CONFIG_HOME` if set); on Windows, the value `musubi` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on illumos, the SMF instance `svc:/site/musubi/daemon:<you>`, imported from `smf-daemon.xml` in the state directory. `musubi daemon uninstall` removes it. |
+| What `musubi hub install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.hub.plist`; on Linux, `~/.config/systemd/user/musubi-hub.service` (in `$XDG_CONFIG_HOME` if set). With `--at-boot`, `/Library/LaunchDaemons/io.github.bos.musubi.hub.<uid>.plist` on macOS, or `/etc/systemd/system/musubi-hub-<uid>.service` on Linux, owned by root and running the hub as the installing user. On illumos, with or without `--at-boot`, the SMF instance `svc:/site/musubi/hub:<you>`, imported from `smf-hub.xml` in the state directory. `musubi hub uninstall` removes any of them. |
 
 The default daemon control socket is:
 
 - Linux: `$XDG_RUNTIME_DIR/musubi/daemon.sock`; without `XDG_RUNTIME_DIR`,
   `musubi-<uid>/daemon.sock` in `$TMPDIR` or `/tmp`.
+- illumos: as on Linux; SMF sets no `XDG_RUNTIME_DIR`, so the daemon it runs listens in
+  `musubi-<uid>/daemon.sock` in `/tmp`.
 - macOS: `$TMPDIR/musubi/daemon.sock`.
 - Windows: the named pipe `\\.\pipe\musubi-<user>`.
 

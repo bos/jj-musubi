@@ -1544,7 +1544,17 @@ mod tests {
 
     thread_local!(static REPO: (TestEnv, Arc<ReadonlyRepo>, [CommitId; 4]) = repository());
     // The model for every case on this thread, merging with `REPO`'s index.
-    thread_local!(static MODEL: RefCell<Option<RefsModel>> = const { RefCell::new(None) });
+    thread_local!(
+        #[cfg_attr(
+            any(target_os = "illumos", target_os = "solaris"),
+            expect(
+                clippy::missing_const_for_thread_local,
+                reason = "a false positive where std's thread_local! uses its OS-key \
+                          implementation, as on illumos"
+            )
+        )]
+        static MODEL: RefCell<Option<RefsModel>> = const { RefCell::new(None) }
+    );
 
     /// A slot: the bookmark absent or at either commit; `x@git` none, tracked with no
     /// target, or at either commit, tracked or not; and `git_refs` absent or at the first

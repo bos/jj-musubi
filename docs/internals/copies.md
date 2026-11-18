@@ -171,6 +171,9 @@ it's worth. Each says what happens if it occurs anyway.
 - **Moving or deleting a repository on Windows while the daemon has its files open.** Windows
   may refuse. Untested.
 - **A power cut.** AGENTS.md: surviving one isn't a goal.
+- **A copy moved on illumos.** The daemon doesn't notice a copy moved to another directory
+  there, so `moved_copies_sync_again` fails on illumos and CI's illumos job leaves it out, which
+  leaves the catalogue's three rows it pins unchecked there. Not yet investigated.
 
 ## Catalogue
 

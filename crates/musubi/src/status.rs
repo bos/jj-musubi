@@ -553,9 +553,9 @@ impl Daemon {
 
     fn print(&self, ui: &Ui) -> io::Result<()> {
         let at_login = if self.at_login {
-            "starts at login"
+            format!("starts {}", login::STARTS)
         } else {
-            "doesn't start at login"
+            format!("doesn't start {}", login::STARTS)
         };
         let mut out = ui.stdout();
         write!(out, "Daemon: ")?;

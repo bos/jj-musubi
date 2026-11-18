@@ -143,7 +143,10 @@ fi
 # one of them again rather than trusting the times recorded in the commit.
 rm -rf "$cache/src"
 mkdir -p "$cache/src"
-git --git-dir="$(jj git root)" archive "$commit" | tar -x -m -C "$cache/src"
+# The commit's tree rather than the commit, so that git writes no pax global header, which
+# illumos tar doesn't understand; and bundled options from inside the directory, which every
+# tar takes.
+git --git-dir="$(jj git root)" archive "$commit^{tree}" | (cd "$cache/src" && tar -xmf -)
 # From inside the copy, so that its own cargo config and toolchain apply, as in a checkout.
 # MUSUBI_BUILD names a deployed build, and is empty for a release (crates/musubi-sync/build.rs).
 cd "$cache/src"

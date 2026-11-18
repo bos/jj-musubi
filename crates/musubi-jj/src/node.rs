@@ -646,6 +646,14 @@ fn machine_path(repo_path: &Path) -> PathBuf {
 
 thread_local! {
     /// Whether this thread is in [`catch_jj_panic`], whose panics the hook doesn't print.
+    #[cfg_attr(
+        any(target_os = "illumos", target_os = "solaris"),
+        expect(
+            clippy::missing_const_for_thread_local,
+            reason = "a false positive where std's thread_local! uses its OS-key \
+                      implementation, as on illumos"
+        )
+    )]
     static CATCHING_JJ_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

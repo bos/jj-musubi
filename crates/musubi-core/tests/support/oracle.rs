@@ -26,6 +26,14 @@ pub struct Oracle {
 thread_local! {
     /// The oracle that this thread's last caller gave back, for the next: starting one takes
     /// longer than most generated cases.
+    #[cfg_attr(
+        any(target_os = "illumos", target_os = "solaris"),
+        expect(
+            clippy::missing_const_for_thread_local,
+            reason = "a false positive where std's thread_local! uses its OS-key \
+                      implementation, as on illumos"
+        )
+    )]
     static KEPT: Cell<Option<Oracle>> = const { Cell::new(None) };
 }
 

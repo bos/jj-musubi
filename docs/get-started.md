@@ -8,7 +8,8 @@ on each working machine syncs its repositories with the hub. Copies of one repo 
 
 Install jj-musubi, jj, and git on every machine. Download a build from the
 [releases page](https://github.com/bos/jj-musubi/releases) and put its `musubi`
-executable on your `PATH`. Builds cover Linux, macOS and Windows, on x86_64 and aarch64.
+executable on your `PATH`. Builds cover Linux, macOS and Windows, on x86_64 and aarch64; on
+illumos, build it from source, as the installation details say.
 
 Read the [installation details](guides/setup.md#install-jj-musubi) for more details. For an
 existing installation, follow the [upgrade guide](guides/upgrading.md).
@@ -61,7 +62,8 @@ Run `musubi status` in each copy. Check for a running daemon, a recent sync and
 `the hub has all its work`. The [first-sync check](guides/setup.md#your-first-sync)
 walks through recording work and checking the other copy's `jj log`.
 
-Run `musubi daemon install` on each working machine to start its daemon at login, and read [Keep
+Run `musubi daemon install` on each working machine to start its daemon at login (at boot on
+illumos, which needs a rights profile: see [illumos](guides/setup.md#illumos)), and read [Keep
 the hub running](guides/setup.md#keep-the-hub-running) for managing the hub.
 
 ## Day to day

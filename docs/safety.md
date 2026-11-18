@@ -24,9 +24,13 @@ back online after sleeping or being powered off.
 
 ## How jj-musubi is tested and verified
 
-The [coverage report](../contrib/assurance/data/2026-11-07/README.md) records **92.8% line
-coverage** across production Rust code, including **98.3%** in the sync protocol core. Of course
-code coverage is an imperfect measure, but it's about the best we have.
+As of November 18, 2026, the [coverage report](../contrib/assurance/data/2026-11-18/README.md)
+records **92.8% line coverage** across production Rust code, including **98.1%** in the sync
+protocol core. Of course code coverage is an imperfect measure, but it's about the best we have.
+An [interactive map](https://www.serpentine.com/software/jj-musubi/assurance/) shows, module by
+module, which lines the tests and fuzzers ran and what the proofs cover.
+
+<!-- musubi-assurance: Measured on November 18, 2026, using jj 0.47.1. -->
 
 jj-musubi is checked at several levels:
 

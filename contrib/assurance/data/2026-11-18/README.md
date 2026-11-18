@@ -1,6 +1,6 @@
 # Assurance snapshot, November 18, 2026
 
-Saved measurements for source commit `a0cfbd1ef1d1d7307ef15e2cce4622af4ac9be2e`, using jj 0.47.1.
+Saved measurements for source commit `f1b4774a0e99df4d1cb9af46598d5398f3261864`, using jj 0.47.1.
 Each capture ran in an empty child of that commit. `sourceCommit` identifies the source tree to
 check out; the capture revisions and source hashes remain in the dataset.
 
@@ -20,8 +20,8 @@ its labels and tooltips. It runs no tests, fuzzers, solvers or mutation campaign
 ## Files
 
 - `snapshot.json.zst`: the source graph, layout, per-technique coverage timeline, mutation
-  results, and collection provenance, compressed with Zstandard. It contains 695 passing tests,
-  24 fuzz checkpoints and 128 mutation results: 90 caught by tests, 1 survivor, and 37
+  results, and collection provenance, compressed with Zstandard. It contains 715 passing tests,
+  24 fuzz checkpoints and 127 mutation results: 90 caught by tests, no survivors, and 37
   compilation failures.
 - `observations.tar.zst`: per-test and per-checkpoint line observations, test identities,
   observed oracle operations, fuzz logs and corpora, and collection manifests. The mutation
@@ -53,7 +53,7 @@ hashes. The captures ran one after another on Linux, on one 32-CPU EC2 devbox:
 - Mutation testing: 150 conformance cases and seed 42, using Rust 1.100.0 and cargo-mutants
   27.1.0, as a single unsharded campaign with six workers.
 
-Archive paths retain the capture names: `tests-a0cfbd1`, `fuzz-a0cfbd1` and `mutation-a0cfbd1`.
+Archive paths retain the capture names: `tests-f1b4774`, `fuzz-f1b4774` and `mutation-f1b4774`.
 Their source fingerprints match. These measurements describe the recorded source commit,
 independently of later changes.
 

@@ -243,7 +243,7 @@ mutants-adapter *args: oracle
     filter+=' | test(/^fetch_base::/)'
     filter+=' | test(=history::a_forgotten_copy_behind_pruned_records_stops)'
     filter+=' | test(=history::a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup)'
-    # What the defaulted LocalRepo methods do, which the core's model leaves out.
+    # The LocalRepo state only the jj repository keeps, which the core's model leaves out.
     filter+=' | test(=history::lost_records_follow_an_older_name_the_receiver_never_held)'
     filter+=' | test(=history::record_bodies_keep_pending_drops_named_after_hub_rollback)'
     filter+=' | test(=history::records_fetched_without_operations_keep_their_bodies)'

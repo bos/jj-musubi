@@ -1250,9 +1250,9 @@ workspace:
   `request`: pending-call completion, failure reasons, reconnect subscriptions and request ids.
   It runs the transport crate's unit and public contract tests.
 - `mutants-adapter` selects the repository adapter's ancestry, missing-object, accepted-base,
-  record-preparation and permanent-history-loss decisions, and the `LocalRepo` methods the
-  core's model leaves to their defaults: naming pending drops, keeping record bodies and
-  receipts, noting pushes and their acceptance, and publication holds. It runs focused native
+  record-preparation and permanent-history-loss decisions, and the `LocalRepo` state the
+  core's model leaves out: naming pending drops, keeping record bodies and receipts, noting
+  pushes and their acceptance, and publication holds. It runs focused native
   tests of missing objects, gc of an abandoned base, pruned records, rollback across a cached
   fix-up, record custody, abandoning an accepted push and held publications, together with the
   adapter's unit tests. These use real repositories where the core's model uses an abstract

@@ -21,10 +21,10 @@ use crate::message::Request;
 
 /// A node's persistent state, in canonical terms.
 ///
-/// The methods with default bodies keep state only the jj repository has: names of pending
-/// drops to reconcile, record bodies and received records, and what this node pushed and may
-/// publish. The core's model keeps none of it: it leaves most of them to the defaults, and
-/// overrides the others only so that a test can observe or set them. Tests with real
+/// Some methods keep state only the jj repository has: names of pending drops to reconcile,
+/// record bodies and received records, and what this node pushed and may publish. The core's
+/// model keeps none of it: it leaves some to their default bodies, and implements the others
+/// only so that a test can observe or set them. Tests with real
 /// repositories cover what the jj repository does in them: docs/internals/conformance.md,
 /// "Record custody and recovery" and "Snapshot publication", and the rows of
 /// docs/internals/races.md on abandoning a push and on holding a publication.
@@ -87,15 +87,14 @@ pub trait LocalRepo {
     ) -> Result<(), Self::Error>;
 
     /// Stores the canonical bodies and parent closure of whole records without staging
-    /// them as ancestors of the current head. The core's model holds every operation's body
-    /// already.
+    /// them as ancestors of the current head, which a reply with no current operations
+    /// brings in no other way. Fails if a record names an operation that neither this node
+    /// nor `attachment` has.
     fn store_record_ops(
         &mut self,
-        _records: &[Vec<Self::Op>],
-        _attachment: &Self::Attachment,
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
+        records: &[Vec<Self::Op>],
+        attachment: &Self::Attachment,
+    ) -> Result<(), Self::Error>;
 
     /// Stores received objects for `for_ops`.
     fn stage_objects(
@@ -138,9 +137,7 @@ pub trait LocalRepo {
     /// Whether received records still need reconciliation. The jj repository keeps them before
     /// realizing their history, so that it can recover them even when the hub announces the
     /// same records this node already applied.
-    fn has_record_receipts(&self) -> Result<bool, Self::Error> {
-        Ok(false)
-    }
+    fn has_record_receipts(&self) -> Result<bool, Self::Error>;
 
     /// The state of [`Self::applied_records`].
     fn records(&self) -> Result<RecordState, Self::Error>;

@@ -14,8 +14,8 @@ use std::time::SystemTime;
 
 use jj_cli::formatter::FormatterExt as _;
 use jj_cli::generic_templater::GenericTemplateLanguage;
-use jj_cli::generic_templater::GenericTemplatePropertyKind;
-use jj_cli::templater::BoxedTemplateProperty;
+use jj_cli::template_builder::CoreTemplatePropertyKind;
+use jj_cli::template_value::OpaqueTemplateValue;
 use jj_cli::templater::TemplatePropertyExt as _;
 use jj_cli::templater::WrapTemplateProperty;
 use jj_lib::object_id::ObjectId as _;
@@ -649,11 +649,7 @@ impl serde::Serialize for Report {
 
 type Language = GenericTemplateLanguage<'static, Report>;
 
-impl<'a> WrapTemplateProperty<'a, Report> for GenericTemplatePropertyKind<'a, Report> {
-    fn wrap_property(property: BoxedTemplateProperty<'a, Report>) -> Self {
-        Self::Self_(property)
-    }
-}
+impl OpaqueTemplateValue for Report {}
 
 /// The keywords of a report, as `musubi status --help` gives them.
 fn language(settings: &UserSettings, cwd: &Path) -> Language {
@@ -730,7 +726,7 @@ fn language(settings: &UserSettings, cwd: &Path) -> Language {
 /// Adds keyword `name`, whose value is `value` of the report.
 fn keyword<O: 'static>(language: &mut Language, name: &'static str, value: fn(&Report) -> O)
 where
-    GenericTemplatePropertyKind<'static, Report>: WrapTemplateProperty<'static, O>,
+    CoreTemplatePropertyKind<'static>: WrapTemplateProperty<'static, O>,
 {
     language.add_keyword(name, move |report| {
         Ok(report.map(move |report| value(&report)).into_dyn_wrapped())

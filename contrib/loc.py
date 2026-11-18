@@ -126,7 +126,8 @@ def count(paths):
     try:
         result = subprocess.run(
             ["tokei", "--output", "json", "--hidden", "--exclude", ".jj", "--exclude", ".git",
-             "--exclude", "Cargo.lock", "--exclude", "lake-manifest.json", *map(str, paths)],
+             "--exclude", "Cargo.lock", "--exclude", "lake-manifest.json",
+             "--exclude", "**/contrib/assurance/data", *map(str, paths)],
             cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
         )
     except FileNotFoundError:
@@ -190,7 +191,8 @@ def main():
     assurance = sum(totals["Proof/model"].values()) + sum(totals["Tests"].values())
     if production:
         print(f"\nProof/model + tests: {assurance / production:.2f}x production")
-    print("Excludes blank lines, comments, documentation, lockfiles and ignored build output.")
+    print("Excludes blank lines, comments, documentation, lockfiles, data snapshots and ignored\n"
+          "build output.")
 
 
 if __name__ == "__main__":

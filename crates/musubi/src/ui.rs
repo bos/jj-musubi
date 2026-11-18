@@ -22,8 +22,8 @@ use jj_cli::formatter::HeadingLabeledWriter;
 use jj_cli::formatter::PlainTextFormatter;
 use jj_cli::template_builder;
 use jj_cli::template_builder::TemplateLanguage;
+use jj_cli::template_value::TemplateValue;
 use jj_cli::templater::TemplateRenderer;
-use jj_cli::templater::WrapTemplateProperty;
 use jj_cli::ui::ColorChoice;
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
@@ -180,9 +180,8 @@ impl Ui {
         text: &str,
     ) -> anyhow::Result<TemplateRenderer<'a, C>>
     where
-        C: Clone + 'a,
+        C: Clone + TemplateValue + 'a,
         L: TemplateLanguage<'a> + ?Sized,
-        L::Property: WrapTemplateProperty<'a, C>,
     {
         let aliases = load_template_aliases(&self.ui, &self.config).map_err(hinted)?;
         let mut diagnostics = TemplateDiagnostics::new();

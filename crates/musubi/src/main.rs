@@ -13,6 +13,7 @@ mod debug;
 mod hub;
 mod interrupt;
 mod join;
+mod keywords;
 mod leave;
 mod list;
 mod lock;

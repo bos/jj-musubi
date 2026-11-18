@@ -6,15 +6,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use jj_cli::generic_templater::GenericTemplateLanguage;
-use jj_cli::generic_templater::GenericTemplatePropertyKind;
-use jj_cli::templater::BoxedTemplateProperty;
+use jj_cli::template_value::OpaqueTemplateValue;
 use jj_cli::templater::TemplatePropertyExt as _;
 use jj_cli::templater::TemplateRenderer;
-use jj_cli::templater::WrapTemplateProperty;
 use jj_lib::settings::UserSettings;
 use musubi_hub::hub_dir::HiveInfo;
 
+use crate::keywords::KeywordLanguage;
 use crate::ui::Ui;
 
 /// A line of `musubi list`: a hub, a hive, or a copy of a hive here.
@@ -70,13 +68,9 @@ impl Line {
     }
 }
 
-type Language = GenericTemplateLanguage<'static, Line>;
+type Language = KeywordLanguage<Line>;
 
-impl<'a> WrapTemplateProperty<'a, Line> for GenericTemplatePropertyKind<'a, Line> {
-    fn wrap_property(property: BoxedTemplateProperty<'a, Line>) -> Self {
-        Self::Self_(property)
-    }
-}
+impl OpaqueTemplateValue for Line {}
 
 /// Prints lines through the template given, or else `musubi.templates.list`.
 pub struct Lister<'ui> {

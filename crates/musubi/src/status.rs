@@ -13,11 +13,9 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use jj_cli::formatter::FormatterExt as _;
-use jj_cli::generic_templater::GenericTemplateLanguage;
-use jj_cli::generic_templater::GenericTemplatePropertyKind;
-use jj_cli::templater::BoxedTemplateProperty;
+use jj_cli::template_value::OpaqueTemplateValue;
+use jj_cli::template_value::TemplateValue;
 use jj_cli::templater::TemplatePropertyExt as _;
-use jj_cli::templater::WrapTemplateProperty;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::settings::UserSettings;
@@ -30,6 +28,7 @@ use crate::config::UserState;
 use crate::control;
 use crate::copy;
 use crate::daemon;
+use crate::keywords::KeywordLanguage;
 use crate::login;
 use crate::repo::Located;
 use crate::socket::Socket;
@@ -663,13 +662,9 @@ impl serde::Serialize for Report {
     }
 }
 
-type Language = GenericTemplateLanguage<'static, Report>;
+type Language = KeywordLanguage<Report>;
 
-impl<'a> WrapTemplateProperty<'a, Report> for GenericTemplatePropertyKind<'a, Report> {
-    fn wrap_property(property: BoxedTemplateProperty<'a, Report>) -> Self {
-        Self::Self_(property)
-    }
-}
+impl OpaqueTemplateValue for Report {}
 
 /// The keywords of a report, as `musubi status --help` gives them.
 fn language(settings: &UserSettings, cwd: &Path) -> Language {
@@ -744,10 +739,7 @@ fn language(settings: &UserSettings, cwd: &Path) -> Language {
 }
 
 /// Adds keyword `name`, whose value is `value` of the report.
-fn keyword<O: 'static>(language: &mut Language, name: &'static str, value: fn(&Report) -> O)
-where
-    GenericTemplatePropertyKind<'static, Report>: WrapTemplateProperty<'static, O>,
-{
+fn keyword<O: TemplateValue>(language: &mut Language, name: &'static str, value: fn(&Report) -> O) {
     language.add_keyword(name, move |report| {
         Ok(report.map(move |report| value(&report)).into_dyn_wrapped())
     });

@@ -10,7 +10,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
+use jj_lib::lock::FileLock;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStoreLock;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceNameBuf;
@@ -43,6 +46,76 @@ struct PublishedHistory {
     heads: Vec<LocalOp>,
     locals: HashSet<LocalOp>,
     canonicals: Arc<HashMap<CanonicalOp, LocalOp>>,
+}
+
+/// Realizations [`NodeRepo::advance_to`] prepared outside the publication locks.
+struct Prepared {
+    /// The op heads captured, which must still be the op heads under the locks.
+    heads: Vec<LocalOp>,
+    /// The operations left to publish, the first of them the one it returns.
+    left: Vec<CanonicalOp>,
+    /// Their realizations, in the same order.
+    realized: Vec<LocalOp>,
+    /// The op heads the realizations descend from, which they replace.
+    superseded: Vec<LocalOp>,
+    /// The op heads concurrent with them, as the history was named when captured.
+    concurrent: Vec<Operation>,
+    /// Whether records being taken are based at the root (`NodeRepo::taking_root_base`).
+    root_base: bool,
+}
+
+/// What preparing to advance beside the op heads as they are came to.
+enum Preparation {
+    Ready(Prepared),
+    /// A native command moved the op heads after the records being taken were prepared:
+    /// prepare again.
+    Retry,
+    /// Every operation is at or below another of them or an op head: nothing to do.
+    NothingLeft,
+}
+
+/// The publication locks: jj's colocated import/export lock, in a colocated repository, and
+/// the op heads lock. Dropped, the op heads lock goes first, as [`Self::release`] does.
+struct PublicationLocks<'a> {
+    heads: Box<dyn OpHeadsStoreLock + 'a>,
+    git: Option<FileLock>,
+}
+
+impl PublicationLocks<'_> {
+    fn colocated(&self) -> bool {
+        self.git.is_some()
+    }
+
+    fn release(self) {
+        #[cfg(test)]
+        let colocated = self.colocated();
+        let Self { heads, git } = self;
+        drop(heads);
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::HeadsUnlocked);
+        drop(git);
+        #[cfg(test)]
+        if colocated {
+            native_contract::emit(native_contract::Event::GitUnlocked);
+        }
+    }
+}
+
+/// What the realization [`NodeRepo::advance_to`] returns is published beside.
+struct Beside {
+    /// The other realizations left, merged with it as op heads beside it would be.
+    others: Vec<Operation>,
+    /// Everything it is merged with, each once.
+    merging: Vec<Operation>,
+    /// Whether records are being taken (`NodeRepo::taking_unswitched`).
+    taking: bool,
+}
+
+/// The realization [`NodeRepo::advance_to`] returns, as exported, and its merge with what it
+/// is published beside, if it was merged.
+struct Exported {
+    head: LocalOp,
+    merged: Option<LocalOp>,
 }
 
 impl NodeRepo {
@@ -332,76 +405,128 @@ impl NodeRepo {
             ));
         }
         let op_heads_store = self.loader.op_heads_store().clone();
-        let (
+        // Prepare outside both publication locks. A native command can publish while this
+        // runs, so compare the exact captured head set again under those locks.
+        let (prepared, locks) = loop {
+            let mut prepared = match self.prepare_advance(canonicals)? {
+                Preparation::Ready(prepared) => prepared,
+                Preparation::Retry => continue,
+                Preparation::NothingLeft => return Ok(None),
+            };
+            if let Some(locks) = self.lock_if_unchanged(&mut prepared.heads, &*op_heads_store)? {
+                break (prepared, locks);
+            }
+        };
+        let Prepared {
             left,
             mut realized,
             superseded,
-            mut concurrent,
-            colocated,
+            concurrent,
             root_base,
-            _lock,
-            heads_lock,
-        ) = loop {
-            // Prepare outside both publication locks. A native command can publish while
-            // this runs, so compare the exact captured head set again under those locks.
-            let root_base = self.taking_root_base()?;
-            self.settle()?;
-            if !self.heads_mapped {
-                self.canonical_heads()?;
+            ..
+        } = prepared;
+        let current_git = self.carry_current_git(&left, &mut realized, root_base)?;
+        let primary = realized[0].clone();
+        let beside = self.beside(&primary, &realized, concurrent)?;
+        let exported = self.export_and_merge(primary, &beside.merging, current_git)?;
+        if locks.colocated() {
+            self.insert_map(exported.head.clone(), left[0].clone())?;
+        }
+        self.move_heads_to(&exported, &beside, superseded)?;
+        locks.release();
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::Cleanup);
+        self.move_taken_workspaces()?;
+        self.replace_abandoned_working_copies()?;
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::Complete);
+        Ok(Some(exported.head))
+    }
+
+    /// Realizes `canonicals` beside the op heads as they are now, outside the publication
+    /// locks, and finds which of them [`Self::advance_to`] publishes, and how.
+    fn prepare_advance(&mut self, canonicals: &[CanonicalOp]) -> Result<Preparation, NodeError> {
+        let root_base = self.taking_root_base()?;
+        self.settle()?;
+        if !self.heads_mapped {
+            self.canonical_heads()?;
+        }
+        self.realizing.clear_prepared();
+        let heads = self.local_heads()?;
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::Captured(heads.clone()));
+        let published = self.published_realizations(&heads)?;
+        let own = self.own_for_root(&heads)?;
+        let Some(prepared) = self.prepared_realizations(&heads) else {
+            return Ok(Preparation::Retry);
+        };
+        let all = self.current_realizations(canonicals, &published, &prepared, &own)?;
+        let Some((left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
+            return Ok(Preparation::NothingLeft);
+        };
+        for (id, local) in left.iter().zip(&mut realized) {
+            if self.realized_beside_other_heads(local)? {
+                *local = self.realize_again(id, local)?;
             }
-            self.realizing.clear_prepared();
-            let mut heads = self.local_heads()?;
+        }
+        let (superseded, concurrent) = self.check_mergeable(&left, &realized, &heads)?;
+        #[cfg(test)]
+        native_contract::prepared(self, &left, &realized);
+        Ok(Preparation::Ready(Prepared {
+            heads,
+            left,
+            realized,
+            superseded,
+            concurrent,
+            root_base,
+        }))
+    }
+
+    /// Takes the publication locks, jj's colocated import/export lock first in a colocated
+    /// repository, if the op heads are still those `captured`; otherwise releases them again.
+    fn lock_if_unchanged<'a>(
+        &self,
+        captured: &mut [LocalOp],
+        op_heads_store: &'a dyn OpHeadsStore,
+    ) -> Result<Option<PublicationLocks<'a>>, NodeError> {
+        let git = self.colocation().map(Colocation::lock).transpose()?;
+        #[cfg(test)]
+        if git.is_some() {
+            native_contract::emit(native_contract::Event::GitLocked);
+        }
+        let heads = op_heads_store.lock().block_on()?;
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::HeadsLocked);
+        let mut now = self.local_heads()?;
+        captured.sort();
+        now.sort();
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::Reread {
+            captured: captured.to_vec(),
+            actual: now.clone(),
+        });
+        if now[..] != captured[..] {
             #[cfg(test)]
-            native_contract::emit(native_contract::Event::Captured(heads.clone()));
-            let published = self.published_realizations(&heads)?;
-            let own = self.own_for_root(&heads)?;
-            let Some(prepared) = self.prepared_realizations(&heads) else {
-                continue;
-            };
-            let all = self.current_realizations(canonicals, &published, &prepared, &own)?;
-            let Some((left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
-                return Ok(None);
-            };
-            for (id, local) in left.iter().zip(&mut realized) {
-                if self.realized_beside_other_heads(local)? {
-                    *local = self.realize_again(id, local)?;
-                }
-            }
-            let (superseded, concurrent) = self.check_mergeable(&left, &realized, &heads)?;
-            let colocation = self.colocation();
-            let colocated = colocation.is_some();
-            #[cfg(test)]
-            native_contract::prepared(self, &left, &realized);
-            let lock = colocation.map(Colocation::lock).transpose()?;
-            #[cfg(test)]
-            if lock.is_some() {
-                native_contract::emit(native_contract::Event::GitLocked);
-            }
-            let heads_lock = op_heads_store.lock().block_on()?;
-            #[cfg(test)]
-            native_contract::emit(native_contract::Event::HeadsLocked);
-            let mut now = self.local_heads()?;
-            heads.sort();
-            now.sort();
-            #[cfg(test)]
-            native_contract::emit(native_contract::Event::Reread {
-                captured: heads.clone(),
+            native_contract::emit(native_contract::Event::RevalidationRetry {
+                captured: captured.to_vec(),
                 actual: now.clone(),
             });
-            if now != heads {
-                #[cfg(test)]
-                native_contract::emit(native_contract::Event::RevalidationRetry {
-                    captured: heads.clone(),
-                    actual: now.clone(),
-                });
-                drop(heads_lock);
-                drop(lock);
-                continue;
-            }
-            break (
-                left, realized, superseded, concurrent, colocated, root_base, lock, heads_lock,
-            );
-        };
+            drop(heads);
+            drop(git);
+            return Ok(None);
+        }
+        Ok(Some(PublicationLocks { heads, git }))
+    }
+
+    /// Under the publication locks, gives those of `realized`, the realizations of `left`,
+    /// that need them this copy's current Git records, from its op heads as they are now.
+    /// Returns whether any does.
+    fn carry_current_git(
+        &mut self,
+        left: &[CanonicalOp],
+        realized: &mut [LocalOp],
+        root_base: bool,
+    ) -> Result<bool, NodeError> {
         // Recheck the source under the colocated lock, after all realization work. A
         // root-based cached realization may have no Git fields, or ones from before a
         // concurrent command. Taking a trim must change neither this copy's record of Git
@@ -411,7 +536,7 @@ impl NodeRepo {
         // without the HEAD its commit recorded. A known forgotten copy with retained private
         // workspaces has the same missing shared authority even when its saved accepted base
         // is non-root. Use its actual current Git bookkeeping, and merge shared payloads
-        // before the export below.
+        // before the export.
         let sources = self.local_heads()?;
         #[cfg(test)]
         native_contract::emit(native_contract::Event::Sources(sources.clone()));
@@ -443,7 +568,7 @@ impl NodeRepo {
         let current_git = carried || private.iter().any(|kept| *kept);
         if current_git {
             let fields = self.inherited_per_machine(&sources)?;
-            for (i, (canonical, local)) in left.iter().zip(&mut realized).enumerate() {
+            for (i, (canonical, local)) in left.iter().zip(realized.iter_mut()).enumerate() {
                 if carried || private[i] {
                     #[cfg(test)]
                     let source_before = native_contract::observer()
@@ -465,8 +590,18 @@ impl NodeRepo {
                 }
             }
         }
-        let (canonical, primary) = (left[0].clone(), realized[0].clone());
-        // The others, merged with the first as op heads beside it would be.
+        Ok(current_git)
+    }
+
+    /// What `primary`, the first of `realized`, is published beside: the others, and the op
+    /// heads `check_mergeable` found `concurrent` with it, or those records being taken leave
+    /// beside it.
+    fn beside(
+        &mut self,
+        primary: &LocalOp,
+        realized: &[LocalOp],
+        mut concurrent: Vec<Operation>,
+    ) -> Result<Beside, NodeError> {
         let others: Vec<Operation> = realized[1..]
             .iter()
             .map(|op| self.loader.load_operation(&op.0).block_on())
@@ -478,7 +613,7 @@ impl NodeRepo {
         let taking = self.taking_unswitched();
         if taking {
             concurrent = self
-                .taken_beside(&primary)?
+                .taken_beside(primary)?
                 .iter()
                 .map(|op| self.loader.load_operation(&op.0).block_on())
                 .collect::<Result<_, _>>()?;
@@ -491,6 +626,22 @@ impl NodeRepo {
                 merging.push(op.clone());
             }
         }
+        Ok(Beside {
+            others,
+            merging,
+            taking,
+        })
+    }
+
+    /// In a colocated repository, exports `primary` to `.git` and merges it with `merging`,
+    /// exporting the merge too. `current_git` says whether a realization carries this copy's
+    /// current Git records.
+    fn export_and_merge(
+        &self,
+        primary: LocalOp,
+        merging: &[Operation],
+        current_git: bool,
+    ) -> Result<Exported, NodeError> {
         let colocation = self.colocation();
         let pending = self.pending_expected();
         // A transition that carries the current heads' Git records, rather than a shared
@@ -503,14 +654,14 @@ impl NodeRepo {
                 &self.loader,
                 &primary,
                 &|op| self.is_join_point(op),
-                &merging,
+                merging,
                 &pending,
             )?,
             _ => primary,
         };
         let merged = match colocation {
             Some(colocation) if !merging.is_empty() => {
-                match self.merge_unpublished(&head, &merging) {
+                match self.merge_unpublished(&head, merging) {
                     Ok(merged) => Some(colocation.export_refs(
                         &self.loader,
                         &merged,
@@ -533,20 +684,29 @@ impl NodeRepo {
             }
             _ => None,
         };
-        if colocated {
-            self.insert_map(head.clone(), canonical.clone())?;
-        }
-        // Published apart, where they weren't merged: the working-copy cleanup below merges
-        // them all at once, as loading the repository does.
+        Ok(Exported { head, merged })
+    }
+
+    /// Moves the op heads to `exported`, beside what `beside` says, in place of the op heads
+    /// it replaces, `superseded` among them.
+    fn move_heads_to(
+        &mut self,
+        exported: &Exported,
+        beside: &Beside,
+        superseded: Vec<LocalOp>,
+    ) -> Result<(), NodeError> {
+        let Exported { head, merged } = exported;
+        // Published apart, where they weren't merged: the working-copy cleanup at the end of
+        // `advance_to` merges them all at once, as loading the repository does.
         let apart: Vec<&Operation> = if merged.is_none() {
-            others.iter().collect()
+            beside.others.iter().collect()
         } else {
             vec![]
         };
-        if taking {
+        if beside.taking {
             // The hub's head, named as records this machine is taking name the history: the
             // op heads move there, renamed, at once (`NodeRepo::switch_to_taken`).
-            self.switch_to_taken(Some(&head), merged.as_ref())?;
+            self.switch_to_taken(Some(head), merged.as_ref())?;
             for other in &apart {
                 self.loader
                     .op_heads_store()
@@ -565,7 +725,7 @@ impl NodeRepo {
                 .parents;
             replaced.extend(superseded.into_iter().map(|op| op.0));
             if merged.is_some() {
-                replaced.extend(merging.iter().map(|op| op.id().clone()));
+                replaced.extend(beside.merging.iter().map(|op| op.id().clone()));
             }
             // The new heads go in before the old come out, the last with them.
             for other in &apart {
@@ -576,24 +736,10 @@ impl NodeRepo {
             }
             self.loader
                 .op_heads_store()
-                .update_op_heads(&replaced, &merged.as_ref().unwrap_or(&head).0)
+                .update_op_heads(&replaced, &merged.as_ref().unwrap_or(head).0)
                 .block_on()?;
         }
-        drop(heads_lock);
-        #[cfg(test)]
-        native_contract::emit(native_contract::Event::HeadsUnlocked);
-        drop(_lock);
-        #[cfg(test)]
-        if colocated {
-            native_contract::emit(native_contract::Event::GitUnlocked);
-        }
-        #[cfg(test)]
-        native_contract::emit(native_contract::Event::Cleanup);
-        self.move_taken_workspaces()?;
-        self.replace_abandoned_working_copies()?;
-        #[cfg(test)]
-        native_contract::emit(native_contract::Event::Complete);
-        Ok(Some(head))
+        Ok(())
     }
 
     /// Of `canonicals`, realized as `realized`, those [`Self::advance_to`] publishes beside

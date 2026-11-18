@@ -897,7 +897,7 @@ mod tests {
     /// Stores a view encoded by hand, as a peer could send it.
     fn import_encoded(
         store: &CanonicalStore,
-        view: &jj_lib::protos::simple_op_store::View,
+        view: &crate::protobuf::simple_op_store::View,
     ) -> ViewId {
         let bytes = view.encode_to_vec();
         // A view's id hashes jj's decoding of it, which the store reports for a wrong one.
@@ -916,7 +916,7 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn encoded_commits_include_legacy_fields() {
-        use jj_lib::protos::simple_op_store as proto;
+        use crate::protobuf::simple_op_store as proto;
 
         let dir = tempfile::tempdir().unwrap();
         let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
@@ -983,7 +983,7 @@ mod tests {
     /// empty, as an absent one decodes to, or too short.
     #[test]
     fn impossible_commits_are_refused() {
-        use jj_lib::protos::simple_op_store as proto;
+        use crate::protobuf::simple_op_store as proto;
 
         let dir = tempfile::tempdir().unwrap();
         let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn encodings_jj_reads_differently_are_refused() {
-        use jj_lib::protos::simple_op_store as proto;
+        use crate::protobuf::simple_op_store as proto;
 
         let dir = tempfile::tempdir().unwrap();
         let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
@@ -1102,7 +1102,7 @@ mod tests {
     /// and the root for an operation that has none, as from before jj had a root operation.
     #[test]
     fn parents_are_read_as_jj_decodes_them() {
-        use jj_lib::protos::simple_op_store as proto;
+        use crate::protobuf::simple_op_store as proto;
 
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
@@ -1167,7 +1167,7 @@ mod tests {
 
         // The base, its heads in the opposite order, and a delta against those bytes.
         let normal = sender.view_bytes(&base_view).unwrap();
-        let mut proto = jj_lib::protos::simple_op_store::View::decode(&*normal).unwrap();
+        let mut proto = crate::protobuf::simple_op_store::View::decode(&*normal).unwrap();
         proto.head_ids.reverse();
         let reordered = proto.encode_to_vec();
         assert_ne!(reordered, normal);
@@ -1207,7 +1207,7 @@ mod tests {
     /// form with deltas against the view before, is taken whole.
     #[hegel::test(test_cases = 200)]
     fn imports_store_only_what_reads_back_as_its_id(tc: TestCase) {
-        use jj_lib::protos::simple_op_store as proto;
+        use crate::protobuf::simple_op_store as proto;
 
         let dir = musubi_testutil::tempdir();
         let root_commit = commit(0);
@@ -1422,7 +1422,7 @@ mod tests {
 
         // The receiver has the base, with its heads in the opposite order.
         let bytes = sender.view_bytes(&base_view).unwrap();
-        let mut proto = jj_lib::protos::simple_op_store::View::decode(&*bytes).unwrap();
+        let mut proto = crate::protobuf::simple_op_store::View::decode(&*bytes).unwrap();
         proto.head_ids.reverse();
         let reordered = proto.encode_to_vec();
         assert_ne!(reordered, bytes);

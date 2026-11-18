@@ -8,4 +8,5 @@ __pycache__/
 /mutants.out*
 /target
 /target.partial
+/crates/musubi-jj/src/jj_store_protos/
 .claude/

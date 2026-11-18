@@ -4,7 +4,8 @@
 # them. It rewrites the jj-lib, jj-cli and jj-frontend dependencies, the gix and prost
 # requirements, which follow jj's, and the jj version the tests and the wire expect. The next
 # build updates Cargo.lock to match. Run it from the workspace root, and `jj restore` those
-# files afterwards. The checkout must lie outside this workspace, or cargo takes its crates
+# files afterwards. It also copies the simple-store protobuf definitions to an ignored
+# directory. The checkout must lie outside this workspace, or cargo takes its crates
 # for members of this one.
 #
 # Usage: use-jj-checkout.sh <jj checkout>
@@ -37,6 +38,15 @@ if [[ -z $version || -z $gix || -z $prost ]]; then
     exit 1
 fi
 
+proto_source="$jj/simple-stores/src/protos"
+if [[ ! -d $proto_source ]]; then
+    proto_source="$jj/lib/src/protos"
+fi
+if [[ ! -r $proto_source/simple_op_store.rs || ! -r $proto_source/simple_store.rs ]]; then
+    echo "use-jj-checkout.sh: can't read simple-store protobuf definitions from $proto_source" >&2
+    exit 1
+fi
+
 rewrite Cargo.toml "s|^jj-lib = \{ version = \"=[^\"]*\"|jj-lib = { version = \"=$version\", path = \"$jj/lib\"|"
 rewrite Cargo.toml "s|^jj-cli = \{ version = \"=[^\"]*\"|jj-cli = { version = \"=$version\", path = \"$jj/cli\"|"
 rewrite Cargo.toml "s|^jj-frontend = \{ version = \"=[^\"]*\"|jj-frontend = { version = \"=$version\", path = \"$jj/frontend\"|"
@@ -47,5 +57,11 @@ rewrite crates/musubi-testutil/src/lib.rs \
     "s|^pub const JJ_VERSION: &str = \"[^\"]*\";|pub const JJ_VERSION: &str = \"$version\";|"
 rewrite crates/musubi-sync/src/wire.rs \
     "s|^pub const JJ_LIB_VERSION: &str = \"[^\"]*\";|pub const JJ_LIB_VERSION: &str = \"$version\";|"
+
+# jj's simple-store protobuf modules are private. Compile the same generated definitions
+# alongside musubi's wire checks, without changing the upstream checkout.
+proto_dir=crates/musubi-jj/src/jj_store_protos
+mkdir -p "$proto_dir"
+cp "$proto_source/"{simple_op_store,simple_store}.rs "$proto_dir/"
 
 echo "Using jj $version from $jj (gix $gix, prost $prost)"

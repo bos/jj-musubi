@@ -1,6 +1,17 @@
 //! Protobuf's wire format read directly, for what decoding with prost hides: an encoding's
 //! exact bytes, and fields its schema doesn't know.
 
+// The upstream checkout script copies the definitions used by jj's simple stores here.
+#[allow(dead_code)]
+pub(crate) mod simple_op_store {
+    include!("jj_store_protos/simple_op_store.rs");
+}
+
+#[allow(dead_code)]
+pub(crate) mod simple_store {
+    include!("jj_store_protos/simple_store.rs");
+}
+
 /// Takes a varint off the front of `bytes`.
 pub(crate) fn varint(bytes: &mut &[u8]) -> Option<u64> {
     let mut value = 0;

@@ -240,8 +240,8 @@ workspace with the appropriate `jj-next` changes:
 2. From this workspace, build the matching jj with `cargo build -p jj-cli --bin jj`, which the
    script has pointed at the checkout, and put `target/debug` on `PATH`.
 3. Run `cargo nextest run --workspace --profile ci`.
-4. Afterwards, discard only the script's edits and its `Cargo.lock` changes, or remove the
-   disposable workspace.
+4. Afterwards, remove the disposable workspace or discard the script's edits and its
+   `Cargo.lock` changes and remove the generated `crates/musubi-jj/src/jj_store_protos/` directory.
 
 ## Protocol property tests
 

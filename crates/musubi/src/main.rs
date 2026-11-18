@@ -101,6 +101,7 @@ const JJ_CRATES: &[&str] = &[
     "jj_git_backend",
     "jj_lib",
     "jj_local_util",
+    "jj_simple_stores",
 ];
 
 /// What the hub and the daemon log unless told otherwise: what they do, and only warnings

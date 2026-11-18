@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 
+use crate::protobuf::simple_op_store as proto;
 use jj_lib::backend::CommitId;
 use jj_lib::backend::MillisSinceEpoch;
 use jj_lib::backend::Timestamp;
@@ -27,7 +28,6 @@ use jj_lib::op_store::RootOperationData;
 use jj_lib::op_store::TimestampRange;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
-use jj_lib::protos::simple_op_store as proto;
 use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
 use prost::Message as _;

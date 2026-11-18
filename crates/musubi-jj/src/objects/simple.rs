@@ -11,6 +11,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::protobuf::simple_store;
 use jj_lib::backend::Backend as _;
 use jj_lib::backend::CommitId;
 use jj_lib::backend::TreeId;
@@ -18,7 +19,6 @@ use jj_lib::content_hash::ContentHash;
 use jj_lib::content_hash::DigestUpdate;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::protos::simple_store;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathComponentBuf;
 use jj_lib::simple_backend::SimpleBackend;

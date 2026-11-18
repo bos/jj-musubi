@@ -36,9 +36,11 @@
 //! A daemon writes its [`VERSION`] beside its process id ([`crate::daemon::Running`]), so a
 //! command knows at once that the daemon is of another build, without connecting. One from
 //! before this protocol, which spoke tarpc, wrote none, and never greets. Either fails with
-//! [`OtherBuild`], and the command that reports it says how to restart the daemon. A daemon
-//! that doesn't greet within `HANDSHAKE` is only [`Unresponsive`], as a busy one is: the pid
-//! file is what tells it from one of another build.
+//! [`OtherBuild`], which says "another build", or "an earlier build" for one that named none.
+//! The command that reports it says how to restart the daemon, or for one from before this
+//! protocol, that it is to be ended by hand. A daemon that doesn't greet within `HANDSHAKE` is
+//! only [`Unresponsive`], as a busy one is: the pid file is what tells it from one of another
+//! build.
 //!
 //! # Timeouts
 //!
@@ -201,6 +203,11 @@ impl std::fmt::Display for OtherBuild {
                 f,
                 "the running daemon is musubi {theirs}, but this is {ours}"
             ),
+            // One that names no build predates the protocol: its pid file says none, or it
+            // doesn't greet as this transport's daemons do.
+            None if self.0.is_none() => {
+                write!(f, "the running daemon is from an earlier build of musubi")
+            }
             None => write!(f, "the running daemon is from another build of musubi"),
         }
     }
@@ -281,7 +288,7 @@ fn read_request(bytes: &[u8]) -> Result<Request, Response> {
             }
             // As the command will say of it. (The answer is sealed with this build's version,
             // so a command of another build reads it as that, and never sees this text.)
-            OtherBuild(None).to_string()
+            OtherBuild(Some(VERSION.to_owned())).to_string()
         }
         Some(OtherBuild(None)) => "the daemon couldn't read the request".to_owned(),
         None => {
@@ -699,6 +706,9 @@ mod tests {
 
     const ANOTHER: &str = "the running daemon is from another build of musubi";
 
+    /// What a command says of a daemon that names no build.
+    const EARLIER_BUILD: &str = "the running daemon is from an earlier build of musubi";
+
     /// A connector with one connection, which is all a test makes.
     struct Once(Mutex<Option<DuplexStream>>);
 
@@ -918,7 +928,7 @@ mod tests {
             err.downcast_ref::<OtherBuild>(),
             Some(OtherBuild(None))
         ));
-        assert_eq!(err.to_string(), ANOTHER);
+        assert_eq!(err.to_string(), EARLIER_BUILD);
     }
 
     /// A daemon that closes the connection before it greets is stopping, or starting over,

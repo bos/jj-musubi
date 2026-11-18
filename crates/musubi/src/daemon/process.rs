@@ -146,18 +146,42 @@ impl Running {
         )
     }
 
-    /// Whether this process can stop it when it isn't listening: not from a container
-    /// sharing the state directory with a daemon outside it.
-    fn stoppable(&self) -> bool {
+    /// Whether its pid is among this process's, and so names it here: not from a container
+    /// sharing the state directory with a daemon outside it, whose pid is another's.
+    fn local(&self) -> bool {
         self.among.as_deref() == Some(processes().as_str())
     }
 
-    /// What gets a daemon that isn't listening, or is of another build, going again.
-    fn remedy(&self) -> &'static str {
-        if self.stoppable() {
-            RESTART
+    /// Whether it is of a build from before pid files named their build, which spoke another
+    /// protocol, and can't be asked to stop.
+    fn predates(&self) -> bool {
+        self.pid.is_some() && self.version.is_none()
+    }
+
+    /// How to end it by hand, which is the one way out for a daemon that can't be asked: by
+    /// its pid, if that names it here.
+    fn by_hand(&self) -> String {
+        if self.local() {
+            let pid = self.pid.as_deref().unwrap_or("unknown");
+            format!("End it by hand (pid {pid}), then run `musubi daemon start`.")
         } else {
-            "Stop it where it runs, then start it again."
+            "End it where it runs, then run `musubi daemon start`.".to_owned()
+        }
+    }
+
+    /// What gets a daemon that isn't listening, or is of another build, going again. One that
+    /// speaks the protocol of another build is asked to stop on its socket, wherever it runs,
+    /// and one that doesn't listen is waited for to listen again, if it is of this build. One
+    /// from before the protocol can't be asked, and is ended by hand.
+    fn remedy(&self) -> String {
+        let other_protocol = self
+            .version
+            .as_deref()
+            .is_some_and(|theirs| theirs != control::VERSION);
+        if other_protocol || (self.local() && !self.predates()) {
+            RESTART.to_owned()
+        } else {
+            self.by_hand()
         }
     }
 }
@@ -165,8 +189,8 @@ impl Running {
 const RESTART: &str = "`musubi daemon restart` restarts it.";
 
 /// Which processes this one's id is among: on Linux, its pid namespace, which a container has
-/// of its own, though it may share the state directory, and so see the lock of a daemon it
-/// can't signal. Elsewhere, every process on the machine.
+/// of its own, though it may share the state directory, and so see the lock of a daemon whose
+/// pid names no process of its own. Elsewhere, every process on the machine.
 fn processes() -> String {
     fs::read_link("/proc/self/ns/pid")
         .map(|ns| ns.display().to_string())
@@ -179,13 +203,13 @@ pub fn unreachable(socket: &Socket) -> Option<String> {
     let running = Running::find().ok()??;
     let pid = running.pid.as_deref().unwrap_or("unknown");
     let socket = running.socket.as_ref().unwrap_or(socket);
-    Some(if running.stoppable() {
+    Some(if running.local() {
         format!(
             "running (pid {pid}), but not listening on {socket}; restart it with `musubi daemon \
              restart`"
         )
     } else {
-        format!("running (pid {pid}) elsewhere, not listening on {socket}; stop it where it runs")
+        format!("running (pid {pid}) elsewhere, not listening on {socket}; end it where it runs")
     })
 }
 
@@ -230,7 +254,8 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
 /// Where a service manager runs this machine's daemon on another socket, which the service's
 /// environment decides, not the command's, that one; where something else does, an error
 /// saying so, rather than `None`, which would have a command go around the daemon. One of
-/// another build is an error that says how to restart it.
+/// another build is an error that says how to restart it, or for one from before this
+/// protocol, which can't be stopped from here, to end it by hand.
 pub async fn running(socket: &Socket) -> anyhow::Result<Option<ControlClient>> {
     find_running(socket).await.map_err(|err| {
         if !err.is::<control::OtherBuild>() {
@@ -238,7 +263,7 @@ pub async fn running(socket: &Socket) -> anyhow::Result<Option<ControlClient>> {
         }
         let hint = match Running::find() {
             Ok(Some(running)) => running.remedy(),
-            _ => RESTART,
+            _ => RESTART.to_owned(),
         };
         crate::ui::with_hint(anyhow::anyhow!("{err}"), hint)
     })
@@ -445,11 +470,12 @@ pub async fn uninstall(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
 }
 
 /// Stops this machine's daemon, if it runs, and waits for it to go. Returns whether one was
-/// running. It is asked to stop on the socket it listens on, which may not be `socket`. One
-/// that listens, but doesn't greet, is ended if there is reason to think it is musubi's daemon
-/// of another build, which can't be asked ([`try_stop`]); one that is only slow, of this
-/// build, is asked again until it answers. One not listening, as for a daemon starting, or
-/// after its socket was deleted, is waited for to listen: it does, soon.
+/// running. It is asked to stop on the socket it listens on, which may not be `socket`, and
+/// obeys whatever build asks. No process is ever signalled: a pid file may be left by a daemon
+/// killed hard, and name anything by now. One that isn't listening, as for a daemon starting,
+/// is asked once it listens. One that listens, but doesn't greet, is asked again until it does:
+/// it is busy. Either, if it still hasn't by the deadline, fails with the way to end it by
+/// hand, as one from before this protocol does at once, which can't be asked ([`try_stop`]).
 pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut pause = Backoff::new(FIRST_POLL, LAST_POLL);
@@ -457,9 +483,9 @@ pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
         match try_stop(socket, Running::find()?).await? {
             Tried::NotRunning => return Ok(false),
             Tried::Asked => break,
-            Tried::Waiting { pid, listening } => {
+            Tried::Waiting(waiting) => {
                 if std::time::Instant::now() >= deadline {
-                    return Err(unstoppable(&pid, listening, socket));
+                    return Err(waiting.unstoppable(socket));
                 }
             }
         }
@@ -474,37 +500,41 @@ pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
 enum Tried {
     /// No daemon runs.
     NotRunning,
-    /// It was asked to stop, or ended.
+    /// It was asked to stop.
     Asked,
     /// It can't be stopped yet: it may be starting, or busy, or listen again soon.
-    Waiting {
-        pid: String,
-        /// Whether it took the connection, which it didn't answer.
-        listening: bool,
-    },
+    Waiting(Waiting),
 }
 
-/// Why the daemon `pid` couldn't be stopped in the time there was.
-fn unstoppable(pid: &str, listening: bool, socket: &Socket) -> anyhow::Error {
-    let said = if listening {
-        format!("this machine's daemon (pid {pid}) did not answer in time")
-    } else {
-        format!(
-            "this machine's daemon (pid {pid}) isn't listening on {socket}, and can't be stopped \
-             from here"
-        )
-    };
-    crate::ui::with_hint(anyhow::anyhow!(said), "Stop it where it runs.")
+/// A daemon that couldn't be asked to stop yet.
+#[derive(Debug)]
+struct Waiting {
+    pid: String,
+    /// How to end it by hand ([`Running::by_hand`]).
+    hint: String,
+    /// Whether it took the connection, which it didn't answer.
+    listening: bool,
 }
 
-/// Tries once to stop the daemon `running` describes, if there is one. Fails at once if it is
-/// of another build, and can't be ended.
+impl Waiting {
+    /// Why it couldn't be stopped in the time there was.
+    fn unstoppable(&self, socket: &Socket) -> anyhow::Error {
+        let pid = &self.pid;
+        let said = if self.listening {
+            format!("this machine's daemon (pid {pid}) did not answer in time")
+        } else {
+            format!("this machine's daemon (pid {pid}) isn't listening on {socket}")
+        };
+        crate::ui::with_hint(anyhow::anyhow!(said), self.hint.clone())
+    }
+}
+
+/// Tries once to stop the daemon `running` describes, if there is one.
 ///
-/// A daemon that greets is asked to stop, which every build obeys. One that doesn't is ended
-/// only if it took the connection, so that something listens, and its pid file names another
-/// build, which can't be asked, and its process looks like musubi ([`terminate`]): a pid file
-/// that a daemon killed hard left behind names a process that may be anything by now. A daemon
-/// that is slow to greet, and says it is of this build, is asked again.
+/// A daemon that greets is asked to stop, which every build obeys. One that took the connection
+/// but didn't greet is of this build and busy, to be asked again, unless its pid file says it
+/// is from before this protocol, which can't be asked: that fails at once, saying to end it by
+/// hand. One that isn't listening is waited for, and never signalled.
 async fn try_stop(socket: &Socket, running: Option<Running>) -> anyhow::Result<Tried> {
     let mut reached = reach(socket).await?;
     if matches!(reached, Reached::Nobody)
@@ -523,23 +553,21 @@ async fn try_stop(socket: &Socket, running: Option<Running>) -> anyhow::Result<T
         return Ok(Tried::NotRunning);
     };
     let listening = matches!(reached, Reached::Listening);
-    if listening && running.check_build().is_err() {
-        if terminate(&running)? {
-            return Ok(Tried::Asked);
-        }
+    if listening && running.predates() {
         let pid = running.pid.as_deref().unwrap_or("unknown");
         return Err(crate::ui::with_hint(
             anyhow::anyhow!(
-                "this machine's daemon (pid {pid}) is from another build of musubi, and can't be \
-                 stopped from here"
+                "this machine's daemon (pid {pid}) is from an earlier build of musubi, which \
+                 can't be stopped by this one"
             ),
-            "Stop it where it runs.",
+            running.by_hand(),
         ));
     }
-    Ok(Tried::Waiting {
+    Ok(Tried::Waiting(Waiting {
         pid: running.pid.as_deref().unwrap_or("unknown").to_owned(),
+        hint: running.by_hand(),
         listening,
-    })
+    }))
 }
 
 /// What [`reach`] found on a socket.
@@ -547,8 +575,8 @@ enum Reached {
     /// A daemon that speaks the control protocol of any build.
     Client(ControlClient),
     /// Something that took the connection, but didn't greet as a daemon of this protocol does:
-    /// one from before it, which never greets, or another build's, or one of this build that
-    /// is busy. The pid file says which.
+    /// one from before it, which never greets, or one of this build that is busy. The pid file
+    /// says which.
     Listening,
     /// None, or one that closed the connection before it greeted, as when it stops.
     Nobody,
@@ -563,141 +591,6 @@ async fn reach(socket: &Socket) -> anyhow::Result<Reached> {
             Ok(Reached::Listening)
         }
         Err(err) => Err(err),
-    }
-}
-
-/// Whether the process `pid` runs the executable that this one does, by its file name, as a
-/// daemon of any build of musubi does: the same program, where the daemon of an earlier build
-/// ran from the same path. False if it can't be told.
-fn runs_musubi(pid: u32) -> bool {
-    let Ok(ours) = std::env::current_exe() else {
-        return false;
-    };
-    let Some(ours) = ours.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    // A replaced binary's link says so.
-    let ours = ours.strip_suffix(" (deleted)").unwrap_or(ours);
-    image_of(pid).is_some_and(|theirs| {
-        if cfg!(windows) {
-            theirs.eq_ignore_ascii_case(ours)
-        } else {
-            theirs == ours
-        }
-    })
-}
-
-/// The file name of the executable that process `pid` runs, if there is one, and it can be
-/// told.
-#[cfg(unix)]
-fn image_of(pid: u32) -> Option<String> {
-    let exe = if cfg!(target_os = "linux") {
-        fs::read_link(format!("/proc/{pid}/exe")).ok()?
-    } else {
-        // `comm` is the path it runs from, or on some systems its name.
-        let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        let said = String::from_utf8_lossy(&output.stdout);
-        let said = said.trim();
-        if !output.status.success() || said.is_empty() {
-            return None;
-        }
-        PathBuf::from(said)
-    };
-    let name = exe.file_name()?.to_str()?;
-    Some(name.strip_suffix(" (deleted)").unwrap_or(name).to_owned())
-}
-
-/// The image name of the process `pid`, as `tasklist` lists it.
-#[cfg(windows)]
-fn image_of(pid: u32) -> Option<String> {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let tasklist = Path::new(&root).join("System32").join("tasklist.exe");
-    let output = std::process::Command::new(tasklist)
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    image_in_listing(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// The image name that a `tasklist /FO CSV /NH` listing starts with, `"musubi.exe","1234",...`.
-/// None for one without a process, which says so in a line that isn't a row.
-#[cfg(any(windows, test))]
-fn image_in_listing(listing: &str) -> Option<String> {
-    let row = listing
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    let (image, _) = row.strip_prefix('"')?.split_once('"')?;
-    Some(image.to_owned())
-}
-
-/// Stops a daemon that can't be asked to, as ^C stops one in a terminal, if its pid is among
-/// this process's and its process looks like musubi, and says whether it did.
-#[cfg(unix)]
-fn terminate(running: &Running) -> anyhow::Result<bool> {
-    use rustix::process::Pid;
-    use rustix::process::Signal;
-    let Some(raw) = running
-        .pid
-        .as_deref()
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .filter(|_| running.stoppable())
-    else {
-        return Ok(false);
-    };
-    let Some(pid) = i32::try_from(raw).ok().and_then(Pid::from_raw) else {
-        return Ok(false);
-    };
-    if !runs_musubi(raw) {
-        return Ok(false);
-    }
-    match rustix::process::kill_process(pid, Signal::TERM) {
-        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(true),
-        Err(err) => Err(err).context("stopping the daemon"),
-    }
-}
-
-/// Stops a daemon that can't be asked to, as one from before the control protocol changed
-/// can't, if its pid is among this process's and its process looks like musubi, and says
-/// whether it did. It ends it without letting it clean up, as `taskkill /F` does: what it served
-/// is resumed from what is on disk when a daemon starts again, and the system releases its lock
-/// when it ends. (There is no signal to ask it to stop, and this crate allows no unsafe code to
-/// call the system to end a process itself.)
-#[cfg(windows)]
-fn terminate(running: &Running) -> anyhow::Result<bool> {
-    let Some(pid) = running
-        .pid
-        .as_deref()
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .filter(|pid| *pid != 0 && running.stoppable())
-        .filter(|pid| runs_musubi(*pid))
-    else {
-        return Ok(false);
-    };
-    // Not whichever `taskkill` is first on the path.
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let taskkill = Path::new(&root).join("System32").join("taskkill.exe");
-    let output = std::process::Command::new(&taskkill)
-        .args(["/F", "/PID", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("stopping the daemon with {taskkill:?}"))?;
-    match output.status.code() {
-        // 128 is no such process, which has gone already.
-        Some(0 | 128) => Ok(true),
-        _ => {
-            let said = String::from_utf8_lossy(&output.stderr);
-            let said = said.lines().map(str::trim).find(|line| !line.is_empty());
-            anyhow::bail!(
-                "couldn't stop the daemon (pid {pid}): {}",
-                said.unwrap_or("taskkill failed")
-            )
-        }
     }
 }
 
@@ -743,7 +636,7 @@ mod tests {
         let earlier = "42\n/tmp/daemon.sock\nmachine\n";
         assert_eq!(
             said_of(earlier).unwrap(),
-            "the running daemon is from another build of musubi"
+            "the running daemon is from an earlier build of musubi"
         );
         let later = written("99.0.0/control-1");
         assert_eq!(
@@ -762,21 +655,15 @@ mod tests {
         assert_eq!(running.among.as_deref(), Some("machine"));
         assert_eq!(running.version.as_deref(), Some(control::VERSION));
         assert_eq!(Running::parse(earlier).version, None);
+        // Only a daemon with a pid, and no build, is from before pid files named it.
+        assert!(Running::parse(earlier).predates());
+        assert!(!Running::parse(&written(control::VERSION)).predates());
+        assert!(!Running::parse("").predates());
     }
 
-    /// What `tasklist /FO CSV /NH` lists, and what it says when there is no such process.
-    #[test]
-    fn an_image_is_read_from_a_task_listing() {
-        let listed = "\"musubi.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\"\r\n";
-        assert_eq!(image_in_listing(listed).as_deref(), Some("musubi.exe"));
-        let none = "INFO: No tasks are running which match the specified criteria.\r\n";
-        assert_eq!(image_in_listing(none), None);
-        assert_eq!(image_in_listing(""), None);
-    }
-
-    /// A daemon of any build is told by its pid file, written by whoever holds its lock, but
-    /// a daemon killed hard leaves it behind, naming a process that may be anything by now.
-    /// `stop` ends a process only on evidence that it is musubi's daemon of another build.
+    /// A daemon is told by its pid file, written by whoever holds its lock, but a daemon killed
+    /// hard leaves it behind, naming a process that may be anything by now. `stop` never
+    /// signals a process, whatever the pid file says.
     #[cfg(unix)]
     mod stopping {
         use std::os::unix::net::UnixListener;
@@ -796,18 +683,25 @@ mod tests {
 
         /// The pid file of a daemon `pid`, of the build `version`, or of one that wrote none.
         fn info(pid: u32, version: Option<&str>) -> Running {
+            info_among(pid, &processes(), version)
+        }
+
+        /// The same, of a daemon whose pid is among the processes `among`, as in a container
+        /// that shares the state directory.
+        fn info_among(pid: u32, among: &str, version: Option<&str>) -> Running {
             let version = version.map(|version| format!("{version}\n"));
             let info = format!(
-                "{pid}\n/tmp/daemon.sock\n{}\n{}",
-                processes(),
+                "{pid}\n/tmp/daemon.sock\n{among}\n{}",
                 version.unwrap_or_default()
             );
             Running::parse(&info)
         }
 
+        const CONTAINER: &str = "pid:[0]";
+
         /// A process of no use to anyone, which something stopping it by mistake ends.
-        fn bystander() -> Child {
-            Command::new("sleep").arg("60").spawn().unwrap()
+        fn bystander() -> Reaped {
+            Reaped(Command::new("sleep").arg("60").spawn().unwrap())
         }
 
         /// Ends the process when the test does, whether or not it passes.
@@ -830,99 +724,187 @@ mod tests {
             }
         }
 
-        /// Runs as this executable does, in the eyes of what looks at its file name: a copy
-        /// of `sleep` named for it.
-        #[cfg(target_os = "linux")]
-        fn musubi_like(dir: &Path) -> Reaped {
-            let ours = std::env::current_exe().unwrap();
-            let copy = dir.join(ours.file_name().unwrap());
-            let sleep = Command::new("which").arg("sleep").output().unwrap().stdout;
-            fs::copy(String::from_utf8(sleep).unwrap().trim(), &copy).unwrap();
-            Reaped(Command::new(copy).arg("60").spawn().unwrap())
-        }
-
         const OTHER: &str = "0.0.1/control-1";
 
-        /// A daemon of another build that listens, and doesn't greet, can't be asked to stop,
-        /// and is ended only if its process is musubi: a pid file naming something else is
-        /// stale. Failing at once, rather than after the half minute that waiting takes, as
-        /// the process won't become one.
+        /// A daemon from before the protocol changed listens and never greets, and can't be
+        /// asked to stop: `stop` fails at once, and not after the half minute that waiting
+        /// takes, with the way out, and leaves its process alone.
         #[tokio::test(start_paused = true)]
-        async fn a_process_that_is_not_musubi_is_not_ended() {
+        async fn a_daemon_from_before_this_protocol_is_left_to_be_ended_by_hand() {
             let dir = musubi_testutil::tempdir();
             let (_listener, socket) = silent(dir.path());
-            let mut other = Reaped(bystander());
+            let mut old = bystander();
             let started = TokioInstant::now();
-            let err = try_stop(&socket, Some(info(other.pid(), Some(OTHER))))
+            let err = try_stop(&socket, Some(info(old.pid(), None)))
                 .await
                 .unwrap_err();
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "this machine's daemon (pid {}) is from another build of musubi, and can't be \
-                     stopped from here",
-                    other.pid()
+                    "this machine's daemon (pid {}) is from an earlier build of musubi, which \
+                     can't be stopped by this one",
+                    old.pid()
+                )
+            );
+            assert_eq!(
+                info(old.pid(), None).by_hand(),
+                format!(
+                    "End it by hand (pid {}), then run `musubi daemon start`.",
+                    old.pid()
                 )
             );
             assert!(started.elapsed() < Duration::from_secs(5));
-            assert!(other.alive());
-            // Nor one whose pid file names no build, as one from before it did.
-            let err = try_stop(&socket, Some(info(other.pid(), None)))
+            assert!(old.alive());
+            // From a container sharing the state directory, its pid names nothing there.
+            try_stop(&socket, Some(info_among(old.pid(), CONTAINER, None)))
                 .await
                 .unwrap_err();
-            assert!(err.to_string().contains("from another build"), "{err:#}");
+            assert!(old.alive());
+        }
+
+        /// What a command says is what to do about the daemon, by what its pid file shows of
+        /// it: a daemon that speaks the protocol of another build is restarted, wherever it
+        /// runs, one from before it is ended by hand, by its pid if that is ours to name.
+        #[tokio::test(start_paused = true)]
+        async fn a_command_says_what_to_do_by_what_it_knows() {
+            let dir = musubi_testutil::tempdir();
+            let (_listener, socket) = silent(dir.path());
+            let old = info(42, None);
+            // Before connecting, as every command does.
+            let err = old.check_build().unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "the running daemon is from an earlier build of musubi"
+            );
+            assert_eq!(
+                old.remedy(),
+                "End it by hand (pid 42), then run `musubi daemon start`."
+            );
+            // Were it asked, it would say nothing.
+            let err = running_on(&socket).await.err().unwrap();
+            assert!(err.is::<control::Unresponsive>());
+            // Not ours to name.
+            assert_eq!(
+                info_among(42, CONTAINER, None).remedy(),
+                "End it where it runs, then run `musubi daemon start`."
+            );
+            // A daemon that speaks the protocol of another build is restarted, even from a
+            // container, where it is asked over the socket.
+            for other in [
+                info(42, Some(OTHER)),
+                info_among(42, CONTAINER, Some(OTHER)),
+            ] {
+                assert!(other.check_build().is_err());
+                assert_eq!(other.remedy(), RESTART);
+            }
+            // One of this build that doesn't listen is waited for, if it is here.
+            assert_eq!(info(42, Some(control::VERSION)).remedy(), RESTART);
+            assert_eq!(
+                info_among(42, CONTAINER, Some(control::VERSION)).remedy(),
+                "End it where it runs, then run `musubi daemon start`."
+            );
+        }
+
+        /// A daemon of another build that speaks the protocol is asked to stop on its socket,
+        /// as one of any build is, and isn't signalled.
+        #[tokio::test(start_paused = true)]
+        async fn a_daemon_of_another_build_that_greets_is_asked_to_stop() {
+            use std::sync::Arc;
+            use std::sync::atomic::AtomicBool;
+            use std::sync::atomic::Ordering;
+
+            let dir = musubi_testutil::tempdir();
+            let socket = Socket::Path(dir.path().join("daemon.sock"));
+            let listener = socket.listen().unwrap();
+            let mut other = bystander();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let answer = {
+                let stopped = stopped.clone();
+                move |request: control::Request| {
+                    let stopped = stopped.clone();
+                    async move {
+                        if request == control::Request::Stop {
+                            stopped.store(true, Ordering::SeqCst);
+                        }
+                        control::Response::Stop
+                    }
+                }
+            };
+            let requests = control::service(answer).await.unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let stream = crate::socket::accept(&listener).await;
+                    tokio::spawn(control::serve(requests.clone(), stream));
+                }
+            });
+            let tried = try_stop(&socket, Some(info(other.pid(), Some(OTHER))))
+                .await
+                .unwrap();
+            assert!(matches!(tried, Tried::Asked), "{tried:?}");
+            assert!(stopped.load(Ordering::SeqCst));
             assert!(other.alive());
         }
 
-        /// Nothing is ended unless something listens: a daemon killed hard leaves a pid file
-        /// that names a dead process's id, and the daemon starting after it has not yet
-        /// written its own, though it holds the lock.
-        #[cfg(target_os = "linux")]
+        /// Nothing is ended while nothing listens, whatever the pid file says of the daemon: it
+        /// may be starting, or its socket was deleted and it will listen again, or be left by
+        /// one killed hard, whose pid names anything by now. `stop` waits, and at the deadline
+        /// says how to end it by hand.
         #[tokio::test(start_paused = true)]
         async fn nothing_is_ended_while_nothing_listens() {
             let dir = musubi_testutil::tempdir();
             let socket = Socket::Path(dir.path().join("daemon.sock"));
-            let mut stale = musubi_like(dir.path());
-            let tried = try_stop(&socket, Some(info(stale.pid(), Some(OTHER))))
+            let mut other = bystander();
+            let versions = [None, Some(OTHER), Some(control::VERSION)];
+            for version in versions {
+                let tried = try_stop(&socket, Some(info(other.pid(), version)))
+                    .await
+                    .unwrap();
+                let Tried::Waiting(waiting) = tried else {
+                    panic!("{tried:?}");
+                };
+                assert!(!waiting.listening);
+                assert!(other.alive());
+                let err = waiting.unstoppable(&socket);
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "this machine's daemon (pid {}) isn't listening on {socket}",
+                        other.pid()
+                    )
+                );
+                assert_eq!(
+                    waiting.hint,
+                    format!(
+                        "End it by hand (pid {}), then run `musubi daemon start`.",
+                        other.pid()
+                    )
+                );
+            }
+            // As in a container, which can't name the pid.
+            let tried = try_stop(&socket, Some(info_among(other.pid(), CONTAINER, None)))
                 .await
                 .unwrap();
-            assert!(
-                matches!(
-                    tried,
-                    Tried::Waiting {
-                        listening: false,
-                        ..
-                    }
-                ),
-                "{tried:?}"
+            let Tried::Waiting(waiting) = tried else {
+                panic!("{tried:?}");
+            };
+            assert_eq!(
+                waiting.hint,
+                "End it where it runs, then run `musubi daemon start`."
             );
-            assert!(stale.alive());
-            let err = unstoppable(&stale.pid().to_string(), false, &socket);
-            assert!(err.to_string().contains("isn't listening on"), "{err:#}");
+            assert!(other.alive());
         }
 
-        /// Where something listens, and is musubi, a daemon that can't be asked to stop is
-        /// ended.
-        #[cfg(target_os = "linux")]
+        /// No daemon, nothing to stop.
         #[tokio::test(start_paused = true)]
-        async fn a_daemon_of_another_build_that_listens_is_ended() {
+        async fn no_daemon_is_not_stopped() {
             let dir = musubi_testutil::tempdir();
-            let (_listener, socket) = silent(dir.path());
-            let mut old = musubi_like(dir.path());
-            let tried = try_stop(&socket, Some(info(old.pid(), None)))
-                .await
-                .unwrap();
-            assert!(matches!(tried, Tried::Asked), "{tried:?}");
-            let started = std::time::Instant::now();
-            while old.alive() {
-                assert!(started.elapsed() < Duration::from_secs(10));
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let socket = Socket::Path(dir.path().join("daemon.sock"));
+            let tried = try_stop(&socket, None).await.unwrap();
+            assert!(matches!(tried, Tried::NotRunning), "{tried:?}");
         }
 
         /// A daemon of this build that is slow to greet, as a busy one is, isn't another
-        /// build, and isn't ended: it is asked to stop again, until it greets.
-        #[cfg(target_os = "linux")]
+        /// build, and isn't signalled: it is asked to stop again, until it greets.
         #[tokio::test(start_paused = true)]
         async fn a_busy_daemon_of_this_build_is_asked_again() {
             use std::sync::Arc;
@@ -932,7 +914,7 @@ mod tests {
             let dir = musubi_testutil::tempdir();
             let socket = Socket::Path(dir.path().join("daemon.sock"));
             let listener = socket.listen().unwrap();
-            let mut busy = musubi_like(dir.path());
+            let mut busy = bystander();
             let stopped = Arc::new(AtomicBool::new(false));
             let answer = {
                 let stopped = stopped.clone();
@@ -960,26 +942,30 @@ mod tests {
             let running = || Some(info(pid, Some(control::VERSION)));
             let started = TokioInstant::now();
             let tried = try_stop(&socket, running()).await.unwrap();
-            assert!(
-                matches!(
-                    tried,
-                    Tried::Waiting {
-                        listening: true,
-                        ..
-                    }
-                ),
-                "{tried:?}"
-            );
+            let Tried::Waiting(waiting) = tried else {
+                panic!("{tried:?}");
+            };
+            assert!(waiting.listening);
             assert!(started.elapsed() < Duration::from_secs(5));
             assert!(busy.alive() && !stopped.load(Ordering::SeqCst));
             let tried = try_stop(&socket, running()).await.unwrap();
             assert!(matches!(tried, Tried::Asked), "{tried:?}");
             assert!(stopped.load(Ordering::SeqCst));
             assert!(busy.alive());
-            let err = unstoppable(&busy.pid().to_string(), true, &socket);
-            assert!(
-                err.to_string().ends_with("did not answer in time"),
-                "{err:#}"
+            let err = waiting.unstoppable(&socket);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "this machine's daemon (pid {}) did not answer in time",
+                    busy.pid()
+                )
+            );
+            assert_eq!(
+                waiting.hint,
+                format!(
+                    "End it by hand (pid {}), then run `musubi daemon start`.",
+                    busy.pid()
+                )
             );
         }
 

@@ -1442,11 +1442,13 @@ second check: a greeting that isn't the transport's is taken for another build's
 doesn't greet within a short wait is only slow to answer, as a busy one is, and is not taken for
 another build; one that closes the connection before greeting, as one stopping does, is taken
 for none. Only a request to stop is obeyed across builds, so that `musubi daemon restart`
-works. A daemon of another build that never greets, as one that spoke tarpc, can't be asked, so
-`stop` ends its process, with SIGTERM or on Windows `taskkill /F`, but only if something
-listens at its socket and the process at its pid has this executable's file name: a daemon
-killed hard leaves a pid file whose pid may be anything by now. A daemon of this build that
-doesn't answer is asked again until the deadline. Each call names how long it waits. A
+works. A daemon from before the protocol, which spoke tarpc, can't be asked, so `stop` and
+commands that need the daemon fail at once, with its pid and a hint to end it by hand and run
+`musubi daemon start`, or, where its pid isn't among this process's, as in a container sharing
+the state directory, to end it where it runs. `stop` never signals a process: a pid file left
+by a daemon killed hard may name anything by now. A daemon of this build that isn't listening,
+as for one starting, or that doesn't answer, is asked again until the deadline, and then fails
+with the same hint. Each call names how long it waits. A
 call that returns once a copy has synced waits an hour, the most the transport waits for any
 request. The daemon drops a request when its deadline passes, as tarpc's server did, and not
 when its command goes away: the request runs to the end.

@@ -1759,6 +1759,14 @@ fn one_daemon_serves_a_machine_wherever_it_listens() {
     let written = fs::read_to_string(&info).unwrap();
     let (kept, version) = written.trim_end().rsplit_once('\n').unwrap();
     let (release, _) = version.split_once('/').unwrap();
+    // One from before pid files named builds can't be restarted, and is ended by hand.
+    fs::write(&info, format!("{kept}\n")).unwrap();
+    let (ok, _, err) = try_run(&logs, &env, musubi_on(None, &["daemon", "start"]));
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"
+    Error: the running daemon is from an earlier build of musubi
+    Hint: End it by hand (pid N), then run `musubi daemon start`.
+    ");
     fs::write(&info, format!("{kept}\n{release}/control-0\n")).unwrap();
     let (ok, _, err) = try_run(&logs, &env, musubi_on(None, &["daemon", "start"]));
     assert!(!ok);

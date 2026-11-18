@@ -26,17 +26,22 @@ Start the hub with the same directory and options. If it runs as a service, reru
 `--at-boot` if the service starts at boot.
 
 If a daemon service's executable moved, use the new executable to run `musubi daemon install`.
-This updates the service and starts it. For other machines upgraded by hand, restart the daemon:
+This updates the service and starts it. For other machines upgraded by hand, there is one
+exception to restarting the daemon: a daemon running a build that writes no build line to
+`daemon.pid` in the state directory can't be stopped by any newer build. Once, on each machine
+that runs one, end it by hand: the error message names its process id, and so does the first
+line of `daemon.pid`. Then run `musubi daemon start`. After that, restart the daemon after
+each upgrade:
 
 ```sh
 musubi daemon restart
 ```
 
 A command from the new build tells you to run `musubi daemon restart` when the daemon is from
-an earlier build, and does nothing else until you do. Run that command from the new build: an
-older `musubi` can't stop a newer daemon. On Windows, the new build's `musubi daemon restart`
-force-stops a daemon from an earlier build, without letting it clean up; what it was syncing
-resumes when the new daemon starts.
+another build that writes a build line, and does nothing else until you do. Run that command
+from the new build: an older `musubi` can't stop a newer daemon. Stopping the daemon never
+signals a process: `musubi daemon stop` and `musubi daemon restart` ask it over its socket, and
+if it doesn't answer, say how to end it by hand.
 
 Run `musubi sync` in a joined repo to check that it can sync with the hub. `musubi top` shows
 the release each machine is running. If you use automatic upgrades, wait for those machines to

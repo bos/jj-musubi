@@ -22,5 +22,3 @@ hax = "hax"
 # GitHub's anchors for headings that say "repository's" and "copy's".
 repositorys = "repositorys"
 copys = "copys"
-# `tasklist`'s option for its output format, which `musubi daemon restart` passes on Windows.
-FO = "FO"

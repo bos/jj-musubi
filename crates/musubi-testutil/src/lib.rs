@@ -44,6 +44,149 @@ use tempfile::TempDir;
 /// The jj version musubi's jj-lib is pinned to.
 pub const JJ_VERSION: &str = "0.47.1";
 
+/// A stand-in for `svcs -H -o state <fmri>` (or `<service>:*`) as musubi runs it on illumos. It
+/// notes each call in `~/service-calls`, refuses any other arguments, answers from the files
+/// [`PFEXEC_STAND_IN`] keeps in `~/smf`, and fails with svcs's own message when nothing matches.
+pub const SVCS_STAND_IN: &str = r#"#!/bin/sh
+PATH=/usr/bin:/bin
+printf 'svcs %s\n' "$*" >> "$HOME/service-calls"
+if test "$#" -ne 4 || test "$1 $2 $3" != '-H -o state'; then
+    echo "stand-in: unexpected svcs $*" >&2
+    exit 2
+fi
+pattern=$4
+case "$pattern" in
+    *:\*) set -- "$HOME/smf/$(printf '%s' "${pattern%\*}" | tr '/:' '__')"* ;;
+    *) set -- "$HOME/smf/$(printf '%s' "$pattern" | tr '/:' '__')" ;;
+esac
+if test -f "$1"; then
+    cat "$@"
+    exit 0
+fi
+echo "svcs: Pattern '$pattern' doesn't match any instances" >&2
+exit 1
+"#;
+
+/// A stand-in for `pfexec svccfg ...` and `pfexec svcadm ...` as musubi runs them on illumos,
+/// modelling as much of SMF as musubi relies on, with messages captured from a real illumos host.
+/// It notes each call in `~/service-calls`, and keeps each instance's state in `~/smf/<FMRI with
+/// / and : as _>` (and `~/smf/<service>.service` once one is imported). It fails with SMF's own
+/// messages on a missing instance or service and on clearing what isn't in maintenance; refuses
+/// `svccfg import` while `~/fail-install` exists, `svcadm enable` while `~/fail-enable` does,
+/// `svcadm disable` while `~/fail-disable` does (and leaves the instance in maintenance while
+/// `~/stop-times-out` does, as a stop method that times out would), and every command while
+/// `~/deny` does, as a missing authorization would, with svccfg's and svcadm's own words for it;
+/// and with `MUSUBI_EXE` set, runs and stops the hub as svc.startd would.
+pub const PFEXEC_STAND_IN: &str = r#"#!/bin/sh
+PATH=/usr/bin:/bin
+printf '%s\n' "$*" >> "$HOME/service-calls"
+# musubi names svcadm and svccfg by path.
+case "$1" in
+    /usr/sbin/svcadm|/usr/sbin/svccfg) ;;
+    *) echo "stand-in: $1, not by path" >&2; exit 2 ;;
+esac
+program=${1##*/}
+shift
+set -- "$program" "$@"
+mkdir -p "$HOME/smf"
+eval "fmri=\${$#}"
+key() { printf '%s' "$1" | tr '/:' '__'; }
+state="$HOME/smf/$(key "$fmri")"
+# Fails as `$2` says while ~/$1 exists.
+refuse_if() {
+    if test -f "$HOME/$1"; then
+        echo "$2" >&2
+        exit 1
+    fi
+}
+missing() {
+    echo "$1: Pattern '$fmri' doesn't match any instances$2" >&2
+    exit 1
+}
+if test -f "$HOME/deny"; then
+    case "$1 $2" in
+        'svccfg import')
+            service=$(sed -n 's/.*<service name="\([^"]*\)".*/\1/p' "$3")
+            echo "svccfg: Could not create temporary service \"TEMP/$service\" (permission denied)." >&2 ;;
+        *) echo "$1: $fmri: Permission denied." >&2 ;;
+    esac
+    exit 1
+fi
+case "$1 $2" in
+    'svccfg import')
+        refuse_if fail-install 'installation refused'
+        service=$(sed -n 's/.*<service name="\([^"]*\)".*/\1/p' "$3")
+        instance=$(sed -n 's/.*<instance name="\([^"]*\)".*/\1/p' "$3")
+        : > "$HOME/smf/$(key "svc:/$service").service"
+        imported="$HOME/smf/$(key "svc:/$service:$instance")"
+        test -f "$imported" || echo disabled > "$imported"
+        if test "$service" = site/musubi/hub; then
+            printf '%s' "$3" > "$HOME/hub-manifest"
+        fi ;;
+    'svccfg delete')
+        if test -f "$state"; then
+            case "$(cat "$state")" in
+                disabled|maintenance) ;;
+                *)
+                    echo "stand-in: svccfg delete without -f of $fmri, which runs" >&2
+                    exit 2 ;;
+            esac
+            rm "$state"
+        elif test -f "$state.service"; then
+            rm "$state.service"
+        else
+            missing svccfg ' or services'
+        fi ;;
+    'svcadm '*)
+        test -f "$state" || missing svcadm
+        case "$2" in
+            refresh) ;;
+            enable)
+                refuse_if fail-enable 'enabling refused'
+                if test "$(cat "$state")" != maintenance; then
+                    echo online > "$state"
+                fi ;;
+            disable)
+                refuse_if fail-disable 'disabling refused'
+                # A stop method that times out: SMF kills what's left, into maintenance.
+                if test -f "$HOME/stop-times-out"; then
+                    echo maintenance > "$state"
+                else
+                    echo disabled > "$state"
+                fi ;;
+            restart)
+                case "$(cat "$state")" in
+                    online|online\*|degraded) echo online > "$state" ;;
+                    *)
+                        echo "stand-in: svcadm restart of $fmri, which isn't running" >&2
+                        exit 2 ;;
+                esac ;;
+            clear)
+                if test "$(cat "$state")" != maintenance; then
+                    echo "svcadm: Instance \"$fmri\" is not in a maintenance or degraded state." >&2
+                    exit 1
+                fi
+                echo online > "$state" ;;
+            *) echo "stand-in: unexpected $*" >&2; exit 2 ;;
+        esac ;;
+    *) echo "stand-in: unexpected $*" >&2; exit 2 ;;
+esac
+pid="$HOME/hub-service.pid"
+case "$*" in
+    'svcadm enable '*'svc:/site/musubi/hub:'*)
+        if test -n "${MUSUBI_EXE:-}"; then
+            dir=$(sed -n 's/.*working_directory="\([^"]*\)".*/\1/p' "$(cat "$HOME/hub-manifest")")
+            (cd "$dir" && exec "$MUSUBI_EXE" hub) </dev/null >>"$HOME/hub-service.log" 2>&1 &
+            echo $! > "$pid"
+        fi ;;
+    'svcadm disable '*'svc:/site/musubi/hub:'*)
+        if test -f "$pid"; then
+            kill "$(cat "$pid")"
+            rm "$pid"
+        fi ;;
+esac
+"#;
+
 pub struct TestEnv {
     root: TempDir,
     seeds: Arc<AtomicU64>,

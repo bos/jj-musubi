@@ -154,9 +154,10 @@ A copy can also become unable to sync if its first sync after rejoining takes ov
 To stop using jj-musubi on a machine:
 
 1. Take each of its repos out with `musubi leave`. `musubi list` lists them.
-2. Run `musubi daemon uninstall`, which stops the daemon and stops it starting at login.
+2. Run `musubi daemon uninstall`, which stops the daemon and stops it starting at login (at
+   boot on illumos).
 3. If a hub runs on this machine, stop it (`musubi hub uninstall`, if `musubi hub install`
-   runs it at login), delete its directory, and remove the other machines' lines, those
+   runs it), delete its directory, and remove the other machines' lines, those
    ending in `musubi@<host>`, from `~/.ssh/authorized_keys` here.
    Move the hub first if other machines still use it: see [Replace or move a
    hub](#replace-or-move-a-hub).
@@ -174,7 +175,8 @@ To stop using jj-musubi on a machine:
 ## Move, copy or restore a repo
 
 After moving a copy with `mv`, on one disk or between disks, run jj or `musubi` there so the
-daemon finds its new location.
+daemon finds its new location. On illumos the daemon doesn't yet find a moved copy: a known
+limitation.
 
 A copy made with `cp -a`, `rsync` or a backup duplicates the original's hive identity.
 jj-musubi refuses to sync it because the two copies would overwrite each other's working

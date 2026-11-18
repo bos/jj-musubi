@@ -133,6 +133,65 @@ jobs:
         timeout-minutes: 15
         run: just bench-smoke
 
+  # musubi on illumos, in an OmniOS VM: GitHub has no illumos runners. Lean has no illumos
+  # build, so the tests that check the code against its oracle run on the other platforms
+  # only; this job lints the whole workspace, whose illumos code no other job compiles, and
+  # tests the musubi crate, where the platform-specific code (SMF, sockets, processes) is.
+  illumos:
+    name: Test (illumos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: vmactions/omnios-vm@aeee92416495d9685b2997d954f6b063ae5b832d # v1.3.8
+        with:
+          # The long-term support release, with the compilers and git that building needs.
+          release: "r151054-build"
+          envs: CARGO_TERM_COLOR CARGO_INCREMENTAL RUST_BACKTRACE
+          mem: 12288
+          copyback: false
+          # Building jj takes most of the time prepare does, so keep the prepared VM. The
+          # cache key covers this script, which pins what it installs; the toolchain it
+          # installs is brought up to date at each run.
+          cache-after-prepare: true
+          prepare: |
+            set -eux
+            # The installers are saved before they run, not piped into sh: illumos's sh is
+            # ksh93, whose `set -e` ignores a failed pipeline anywhere but at the end of a
+            # script, even with pipefail, so a failed download would go unnoticed.
+            curl --proto '=https' --tlsv1.2 -sSf --retry 5 -o /tmp/rustup-init.sh \
+              https://sh.rustup.rs
+            sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable \
+              --component clippy
+            . "$HOME/.cargo/env"
+            # nextest's installer checks the archive's SHA-256, and installs into ~/.cargo/bin.
+            curl --proto '=https' --tlsv1.2 -LsSf --retry 5 -o /tmp/nextest-install.sh \
+              https://get.nexte.st/install.sh
+            sh /tmp/nextest-install.sh --version 0.9.148
+            rm /tmp/rustup-init.sh /tmp/nextest-install.sh
+            # Tests need exactly the jj that musubi's jj-lib is (musubi_testutil::JJ_VERSION),
+            # and jj publishes no illumos build.
+            cargo install --locked --version 0.47.1 jj-cli --bin jj
+            # The crates the workspace needs, so that a run downloads only what Cargo.lock has
+            # gained since.
+            cargo fetch --locked
+          run: |
+            set -eux
+            . "$HOME/.cargo/env"
+            rustup update stable
+            uname -a
+            rustc --version
+            jj --version
+            git --version
+            cargo clippy --workspace --all-targets --locked -- -D warnings
+            # `decisions_conformance` needs the Lean oracle. `moved_copies_sync_again` fails on
+            # illumos: the daemon doesn't notice a copy moved to another directory.
+            # The VM is thrown away, so tests may install SMF services for real.
+            MUSUBI_TEST_LOGIN_SERVICE=1 cargo nextest run --locked --profile ci -p jj-musubi \
+              -E 'not test(=copy::conformance::decisions_conformance) and not test(=moved_copies_sync_again)'
+
   lean:
     name: Lean model and conformance
     runs-on: ubuntu-latest

@@ -219,6 +219,13 @@ fn shell(command: &str) -> Command {
         let mut shell = Command::new("cmd");
         shell.arg("/C");
         shell
+    } else if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+        // In a process contract of its own, which SMF's stop method, signalling every process in
+        // the daemon's contract, leaves be: a daemon stopped meanwhile leaves the command
+        // running, as elsewhere. ctrun waits for it and exits as it does.
+        let mut shell = Command::new("/usr/bin/ctrun");
+        shell.args(["-l", "child", "sh", "-c"]);
+        shell
     } else {
         let mut shell = Command::new("sh");
         shell.arg("-c");

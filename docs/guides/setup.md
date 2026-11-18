@@ -24,7 +24,16 @@ supported). To try things out, I recommend you use a disposable clone of some pr
 Install jj-musubi on every working machine and the hub machine. The easiest way is to download
 an archive from the [releases page](https://github.com/bos/jj-musubi/releases) and put
 its `musubi` executable on your `PATH`. There are builds for Linux (static), macOS and Windows,
-each for x86_64 and aarch64.
+each for x86_64 and aarch64. On illumos, build it from source, with
+[rustup](https://rustup.rs)'s Rust, a C compiler and git (`pkg install build-essential` on
+OmniOS):
+
+```sh
+cargo install --locked jj-musubi
+```
+
+jj publishes no illumos build either: build it from source too, as [jj's installation
+guide](https://docs.jj-vcs.dev/latest/install-and-setup/) says.
 
 The release's `SHA256SUMS` lists each archive's checksum. To check that this repo's
 release workflow built an archive, run `gh attestation verify <archive> --repo bos/jj-musubi`.
@@ -169,8 +178,9 @@ that will start it now and at login:
 musubi hub install
 ```
 
-This installs a launchd agent on macOS or a systemd user unit on Linux, and that will restart
-the hub if it fails. (Windows has no `hub install`.)
+This installs a launchd agent on macOS, a systemd user unit on Linux, or an SMF service on
+illumos, and that will restart the hub if it fails. (Windows has no `hub install`.) On illumos,
+the service starts at boot, whether or not you're logged in (see [illumos](#illumos)).
 
 To start the hub at boot and keep it running after logout, on macOS or Linux:
 
@@ -188,20 +198,53 @@ will affect *all* of your user services).
 
 On macOS, the hub logs to `hub.log` in jj-musubi's state directory. On Linux, use `journalctl
 --user -u musubi-hub` for a login service, or `sudo journalctl -u musubi-hub-$(id -u).service`
-for a boot service.
+for a boot service. On illumos, see [illumos](#illumos).
 
 `musubi hub uninstall` stops the hub and removes the service.
 
 ## Start the daemon at login
 
-`create`, `join` and `clone` start the daemon. To start it at login too:
+`create`, `join` and `clone` start the daemon. To start it at login (at boot on illumos) too:
 
 ```sh
 musubi daemon install
 ```
 
-This starts the daemon and installs a launchd agent on macOS, a systemd user unit on Linux,
-or a Windows `Run` registry entry. The [user-service requirements](#keep-the-hub-running) apply.
+This starts the daemon and installs a launchd agent on macOS, a systemd user unit on Linux, an SMF
+service on illumos, or a Windows `Run` registry entry. On macOS and Linux, the [user-service
+requirements](#keep-the-hub-running) apply.
+
+### illumos
+
+On illumos, `daemon install` and `hub install` each set up an SMF instance for you:
+`svc:/site/musubi/daemon:<you>` and `svc:/site/musubi/hub:<you>`. `<you>` is your user name, or
+`uid` and your numeric user ID (`uid1000`, say) if that name isn't a valid SMF instance name;
+`install` prints the full name, and `svcs '*musubi*'` lists them. SMF starts each at boot,
+whether or not you're logged in, runs it as you, and starts it again if it exits, so `hub
+install` needs no `--at-boot` there.
+
+musubi runs `svccfg` and `svcadm` through `pfexec` to set the service up, and to start and
+stop it afterwards, so your account needs the Service Management rights profile (Primary
+Administrator includes it). `profiles` lists yours. The profile lets an account change how any
+service on the machine runs, including as root, so granting it amounts to granting root on
+that machine. pfexec uses your account's own profiles: one granted to a role you `su` to
+doesn't count. Without it, `create`, `join` and `clone` still start the daemon, but nothing
+starts it after a reboot.
+
+An administrator adds the profile with `usermod -P`, which replaces the account's profiles, so
+name the ones it has already too, comma-separated. `grep '^<you>:' /etc/user_attr` shows them,
+as `profiles=` (none if there's no such line). For an account with Basic Solaris User, say:
+
+```sh
+usermod -P 'Basic Solaris User,Service Management' <you>
+```
+
+SMF writes the daemon's output to `/var/svc/log/site-musubi-daemon:<you>.log` and the hub's to
+`/var/svc/log/site-musubi-hub:<you>.log`, which `logadm` rotates. If one isn't running, or SMF
+has put it in maintenance, see [Troubleshooting](../troubleshooting.md#illumos).
+
+`musubi daemon stop` stops the daemon until a musubi command starts it again (`musubi daemon
+start`, or one that needs the daemon) or the next boot.
 
 ## Optional clone defaults
 

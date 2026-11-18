@@ -319,7 +319,8 @@ pub enum Command {
     ///
     /// Without a subcommand, it runs the daemon in the foreground, logging to standard
     /// error. Other commands start it in the background when they need it, logging to
-    /// `daemon.log` in musubi's state directory, or under systemd, to the journal.
+    /// `daemon.log` in musubi's state directory, under systemd to the journal, or under SMF to
+    /// its log in /var/svc/log.
     ///
     /// After detecting that the machine has woken, it ends old ssh connections and clears
     /// the delay from failed ssh attempts.
@@ -439,18 +440,22 @@ pub enum HubAction {
         hub: Option<String>,
     },
     /// Run the hub at login from now on, or at boot with --at-boot, and now, as this
-    /// machine's hub. macOS and Linux only.
+    /// machine's hub. macOS, Linux and illumos only.
+    ///
+    /// It installs a launchd agent or daemon on macOS, a systemd unit on Linux, or an SMF
+    /// service on illumos, which starts it at boot either way.
     ///
     /// It serves the directory `musubi hub` would, creating it the first time. On Linux,
     /// the hub stops when you log out, unless `loginctl enable-linger` keeps your services
-    /// running. With --at-boot, only the hub starts without a login, on either platform.
+    /// running. With --at-boot, only the hub starts without a login, on macOS or Linux.
     /// Run it again with the same startup choice to serve another directory, or after
     /// moving `musubi` or `git`.
     Install {
         #[command(flatten)]
         args: HubArgs,
         /// Start at boot and keep running after logout, as your user. Installs a system
-        /// service using sudo; run this command without sudo.
+        /// service using sudo; run this command without sudo. On illumos, the hub's SMF
+        /// service starts at boot without it.
         #[arg(long)]
         at_boot: bool,
     },
@@ -473,10 +478,11 @@ pub enum DaemonAction {
     Stop,
     /// Stop the running daemon, if any, and start a new one in the background.
     Restart,
-    /// Start the daemon at login from now on (a launchd agent on macOS, a systemd user
-    /// unit on Linux, a Run registry entry on Windows), and now.
+    /// Start the daemon at login (at boot on illumos) from now on, and now: through a launchd
+    /// agent on macOS, a systemd user unit on Linux, an SMF service on illumos, or a Run
+    /// registry entry on Windows.
     Install,
-    /// Stop starting the daemon at login, and stop it.
+    /// Stop starting the daemon at login (at boot on illumos), and stop it.
     Uninstall,
 }
 

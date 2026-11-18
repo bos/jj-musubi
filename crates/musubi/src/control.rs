@@ -7,7 +7,8 @@
 //!
 //! - `$MUSUBI_STATE_DIR/daemon.sock` when that is set (a pipe named after the directory on
 //!   Windows);
-//! - Linux: `$XDG_RUNTIME_DIR/musubi/daemon.sock`, or `/tmp/musubi-<uid>/daemon.sock`;
+//! - Linux and illumos: `$XDG_RUNTIME_DIR/musubi/daemon.sock`, or
+//!   `/tmp/musubi-<uid>/daemon.sock`;
 //! - macOS: `$TMPDIR/musubi/daemon.sock`;
 //! - Windows: `\\.\pipe\musubi-<user>`.
 //!

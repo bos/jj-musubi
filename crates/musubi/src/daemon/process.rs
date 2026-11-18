@@ -420,7 +420,8 @@ pub fn detach(command: &mut std::process::Command) {
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-/// `musubi daemon install`: has the service manager start the daemon at login.
+/// `musubi daemon install`: has the service manager start the daemon at login (at boot under
+/// SMF).
 pub async fn install(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
     // The service manager starts the daemon from now on, so stop one started otherwise; and
     // start it again if the service manager can't.
@@ -437,7 +438,8 @@ pub async fn install(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
     ensure(socket).await?;
     writeln!(
         ui.stdout(),
-        "The daemon starts at login from now on, through {described}."
+        "The daemon starts {} from now on, through {described}.",
+        login::STARTS
     )?;
     if cfg!(target_os = "linux") {
         writeln!(
@@ -449,34 +451,51 @@ pub async fn install(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `musubi daemon uninstall`: stops the daemon starting at login, and stops it.
+/// `musubi daemon uninstall`: stops the daemon starting at login (at boot under SMF), and stops
+/// it.
 pub async fn uninstall(ui: &Ui, socket: &Socket) -> anyhow::Result<()> {
     let was = login::uninstall(login::Service::Daemon)?;
     let stopped = stop(socket).await?;
     if was {
         writeln!(
             ui.stdout(),
-            "The daemon no longer starts at login, and is stopped."
+            "The daemon no longer starts {}, and is stopped.",
+            login::STARTS
         )?;
     } else if stopped {
         writeln!(
             ui.stdout(),
-            "Stopped the daemon. It wasn't set to start at login."
+            "Stopped the daemon. It wasn't set to start {}.",
+            login::STARTS
         )?;
     } else {
-        writeln!(ui.stdout(), "The daemon wasn't set to start at login.")?;
+        writeln!(
+            ui.stdout(),
+            "The daemon wasn't set to start {}.",
+            login::STARTS
+        )?;
     }
     Ok(())
 }
 
 /// Stops this machine's daemon, if it runs, and waits for it to go. Returns whether one was
-/// running. It is asked to stop on the socket it listens on, which may not be `socket`, and
-/// obeys whatever build asks. No process is ever signalled: a pid file may be left by a daemon
-/// killed hard, and name anything by now. One that isn't listening, as for a daemon starting,
-/// is asked once it listens. One that listens, but doesn't greet, is asked again until it does:
-/// it is busy. Either, if it still hasn't by the deadline, fails with the way to end it by
-/// hand, as one from before this protocol does at once, which can't be asked ([`try_stop`]).
+/// running. Under a service manager that starts a daemon again whenever it exits (SMF), only
+/// the service manager can stop it ([`login::stop`]); any daemon it doesn't run, one started in
+/// a terminal say, is stopped as [`stop_unmanaged`] says.
 pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
+    let stopped_by_manager = login::stop()?;
+    let stopped_here = stop_unmanaged(socket).await?;
+    Ok(stopped_by_manager || stopped_here)
+}
+
+/// Stops a daemon no service manager keeps running, and waits for it to go. Returns whether one
+/// was running. It is asked to stop on the socket it listens on, which may not be `socket`, and
+/// obeys whatever build asks. No process is ever signalled: a pid file may be left by a daemon
+/// killed hard, and name anything by now. One that isn't listening, as for a daemon starting, is
+/// asked once it listens. One that listens, but doesn't greet, is asked again until it does: it
+/// is busy. Either, if it still hasn't by the deadline, fails with the way to end it by hand, as
+/// one from before this protocol does at once, which can't be asked ([`try_stop`]).
+async fn stop_unmanaged(socket: &Socket) -> anyhow::Result<bool> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut pause = Backoff::new(FIRST_POLL, LAST_POLL);
     loop {

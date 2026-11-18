@@ -323,10 +323,10 @@ pub fn install(ui: &Ui, args: ServeArgs, at_boot: bool) -> anyhow::Result<()> {
             )
         })?;
     let mut out = ui.stdout();
-    let when = if at_boot { "boot" } else { "login" };
+    let when = if at_boot { "at boot" } else { login::STARTS };
     writeln!(
         out,
-        "The hub serves {}, and runs at {when} from now on, through {described}.",
+        "The hub serves {}, and runs {when} from now on, through {described}.",
         dir.display()
     )?;
     out.write_all(instructions(&settings, &dir)?.as_bytes())?;

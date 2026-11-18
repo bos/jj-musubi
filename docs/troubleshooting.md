@@ -71,10 +71,10 @@ a large first sync can take time and shows progress in a terminal.
 
 ## The daemon
 
-Run `musubi daemon start` to resume background syncing, or `musubi daemon install` to start
-it now and at login. On Linux, the installed daemon stops at logout unless you run
-`loginctl enable-linger`. `create`, `join` and `clone` start the daemon without installing
-login startup.
+Run `musubi daemon start` to resume background syncing, or `musubi daemon install` to start it now
+and at login (at boot on illumos). On Linux, the installed daemon stops at logout unless you run
+`loginctl enable-linger`. `create`, `join` and `clone` start the daemon without installing login
+startup.
 
 If a running daemon doesn't serve this copy, run `musubi join` here again. For a duplicate
 copy after a move, restore or state-directory change, follow
@@ -88,6 +88,17 @@ Use the same socket setting in every shell; see
 To pause background traffic while investigating, run `musubi daemon stop`. This pauses all
 copies on this machine. `musubi leave` attempts a final sync, even with `--force`; see
 [Pause syncing or leave](guides/manage.md#pause-syncing-or-leave).
+
+### illumos
+
+For where SMF logs the daemon and hub, and the rights profile setting them up needs, see
+[illumos](guides/setup.md#illumos); `svcs -xv svc:/site/musubi/daemon:<you>` (or `.../hub:<you>`)
+says why one isn't running.
+
+**The service is in maintenance:** SMF stopped restarting it because it kept exiting, or killed
+it because it didn't stop within a minute of being asked; `svcs -xv` and the log it names say
+why. Fix that, then run `musubi daemon start`, or for the hub, `musubi hub install` again with
+the `--dir` you installed it with.
 
 ## Joining is refused
 

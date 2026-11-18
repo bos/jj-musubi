@@ -187,9 +187,12 @@ pub fn list(
     }
     let mut out = ui.stdout();
     let at_login = if login::installed(login::Service::Daemon) {
-        "starts at login"
+        format!("starts {}", login::STARTS)
     } else {
-        "doesn't start at login; `musubi daemon install` makes it"
+        format!(
+            "doesn't start {}; `musubi daemon install` makes it",
+            login::STARTS
+        )
     };
     write!(out, "Daemon: ")?;
     match daemon {

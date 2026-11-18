@@ -298,7 +298,7 @@ impl NodeRepo {
     /// What a hub needs to know to decide which hive this repository belongs to.
     pub fn join_summary(&self) -> Result<JoinSummary, NodeError> {
         self.check_complete()?;
-        let repo = self.load_at_head()?;
+        let repo = self.load_head(None)?;
         let view = repo.view();
         let working_copies: BTreeSet<&CommitId> = view.wc_commit_ids().values().collect();
         let empty_tree = repo.store().empty_merged_tree().tree_ids().clone();

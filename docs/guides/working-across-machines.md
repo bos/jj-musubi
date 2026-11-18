@@ -157,8 +157,8 @@ others:
 - A commit abandoned on one machine while another builds on it is rebased onto its parent,
   once.
 
-In a colocated repository, a conflicted bookmark isn't exported to git, so each machine's
-`.git` keeps its own branch until you resolve it.
+In a colocated repo, sync updates the Git branches for resolved bookmarks moved by a merge.
+A conflicted bookmark leaves each machine's branch where it is until you resolve it.
 
 ## Fetch and push
 

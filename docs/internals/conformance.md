@@ -1413,7 +1413,7 @@ cleanup after publication locks are released.
 They do not establish a universal native writer lock. Abandon/integrate after-reread overlap
 and the one-to-multihead helper window are outside that theorem's schedule.
 
-The sibling `native_concurrency_tests.rs` separately characterizes two fixed schedules on
+The sibling `native_concurrency_tests.rs` separately exercises fixed schedules on
 pinned jj 0.47.1. `abandon_after_equal_reread_characterization` completes a real native
 operation abandon after the equal reread, while both publication locks remain held. The old
 ancestor becomes reachable again when the prepared publication finishes, and a subsequent
@@ -1423,15 +1423,12 @@ resurrection with a plain jj transaction loaded before the abandon. This establi
 native concurrency behavior, not a new musubi-specific data-loss finding or general safety
 outside E1. Integrate overlap and gc are not exercised by these fixtures.
 
-`helper_single_head_becomes_multihead_characterization` completes an actual historical
-describe after the helper's one-head branch observation. The loader merges the two heads and
-rebases the topic bookmark, but the direct branch returns without exporting it: physical Git
-and its import record retain the old target. A second `merge_heads` does not repair it; an
-ordinary `jj status` does. The same command completed before the branch observation reaches
-the normal multihead/export route and exports the rebased target. This is a known product
-limitation, pinned deliberately until its fix replaces the stale-target assertion. It is
-distinct from a native CLI command doing its own unexported merge. No arbitrary interleaving,
-physical HEAD, failed-CAS, full lifecycle simulation or search-coverage claim follows.
+`helper_exports_when_a_second_head_arrives` completes an actual historical describe after
+the helper first observes one head. The helper sees the second head on its next read and
+merges under the Git export lock. The physical branch and jj's import record both match the
+rebased topic bookmark before any subsequent jj command. The same command completed before
+the first observation is the control for the ordinary multihead route. The test covers a
+merge by musubi's helper and the export of the rebased bookmark.
 
 Run only these schedules with `cargo nextest run -p musubi-jj --lib
 -E 'test(/native_contract_tests::concurrency::/)'`. `MUSUBI_CONCURRENCY_DUMP` optionally names

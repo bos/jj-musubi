@@ -451,10 +451,9 @@ impl NodeRepo {
     /// the resulting single head. A `jj op abandon` is noticed first: what jj rewrote, musubi
     /// rewrites again, moving the op heads.
     ///
-    /// The merge can move bookmarks (jj rebases descendants of rewritten commits, and their
-    /// bookmarks with them), so in a colocated repository it is exported to `.git` before
-    /// becoming the op head, under jj's import/export lock, like every other op head musubi
-    /// publishes. The exported copy has the same canonical form as the merge.
+    /// The merge can move bookmarks as jj rebases descendants of rewritten commits. In a
+    /// colocated repository musubi merges and exports under jj's import/export lock. The
+    /// exported copy replaces the merge as the op head and has the same canonical form.
     pub fn merge_heads(&mut self) -> Result<LocalOp, NodeError> {
         Ok(LocalOp(self.merged_repo()?.op_id().clone()))
     }
@@ -469,29 +468,35 @@ impl NodeRepo {
     /// [`Self::merged_repo`] without noticing an abandon first: for musubi's own operations
     /// written one on another, an abandon noticed between which would rewrite those written.
     fn merged_repo_unchecked(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        let colocation = match self.colocation() {
-            Some(colocation)
-                if {
-                    let heads = self.local_heads()?;
-                    #[cfg(test)]
-                    native_contract::emit(native_contract::Event::HelperBranch {
-                        locked: heads.len() > 1,
-                        heads: heads.clone(),
-                    });
-                    heads.len() > 1
-                } =>
-            {
-                colocation
-            }
-            _ => {
-                let loaded = self.load_at_head();
+        let repo = match self.colocation() {
+            Some(colocation) => {
+                let heads = self.local_heads()?;
                 #[cfg(test)]
-                native_contract::emit(native_contract::Event::HelperComplete);
-                return loaded;
+                native_contract::emit(native_contract::Event::HelperHeads(heads.clone()));
+                // A head can arrive after the first read. Reread as jj's loader would,
+                // but load that exact operation on the fast path so a later arrival
+                // cannot trigger a merge without the Git export lock.
+                if heads.len() <= 1
+                    && let [head] = self.local_heads()?.as_slice()
+                {
+                    self.load_head(Some(head))
+                } else {
+                    self.merge_and_export_heads(colocation)
+                }
             }
-        };
+            None => self.load_head(None),
+        }?;
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::HelperComplete);
+        Ok(repo)
+    }
+
+    fn merge_and_export_heads(
+        &self,
+        colocation: &Colocation,
+    ) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let _lock = colocation.lock()?;
-        let merged = self.load_at_head()?;
+        let merged = self.load_head(None)?;
         let exported = colocation.export_refs(
             &self.loader,
             &LocalOp(merged.op_id().clone()),
@@ -500,18 +505,13 @@ impl NodeRepo {
             &self.pending_expected(),
         )?;
         if exported.0 == *merged.op_id() {
-            #[cfg(test)]
-            native_contract::emit(native_contract::Event::HelperComplete);
             return Ok(merged);
         }
         self.loader
             .op_heads_store()
             .update_op_heads(std::slice::from_ref(merged.op_id()), &exported.0)
             .block_on()?;
-        let repo = self.repo_at(&exported)?;
-        #[cfg(test)]
-        native_contract::emit(native_contract::Event::HelperComplete);
-        Ok(repo)
+        self.repo_at(&exported)
     }
 
     /// The repository as of its local operation `id`.
@@ -520,9 +520,18 @@ impl NodeRepo {
         Ok(self.loader.load_at(&op).block_on()?)
     }
 
-    /// Loads the repository at its op head, letting jj merge concurrent heads.
-    fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head(None).block_on()));
+    /// Loads the observed head, or lets jj resolve the current heads if none was supplied.
+    fn load_head(&self, head: Option<&LocalOp>) -> Result<Arc<ReadonlyRepo>, NodeError> {
+        let loaded = catch_jj_panic(|| {
+            Ok(match head {
+                Some(head) => self.repo_at(head),
+                None => self
+                    .loader
+                    .load_at_head(None)
+                    .block_on()
+                    .map_err(NodeError::from),
+            })
+        });
         match loaded {
             Ok(Ok(repo)) => {
                 #[cfg(test)]
@@ -531,7 +540,7 @@ impl NodeRepo {
                 )));
                 Ok(repo)
             }
-            Ok(Err(err)) => Err(err.into()),
+            Ok(Err(err)) => Err(err),
             Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
         }
     }

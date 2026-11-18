@@ -1,7 +1,7 @@
 //! Fixed native schedules outside the first lifecycle theorem's E1/E2 restrictions.
 //!
-//! These pin observed limitations, not safety guarantees. The helper case must be changed
-//! to require export when that race is repaired; its closed-window control already does.
+//! The abandon schedules characterize native behavior. The helper schedule checks that
+//! musubi exports the native merge even if another head arrives during the load.
 
 use super::lifecycle_conformance::bounded_native_command;
 use super::*;
@@ -151,7 +151,7 @@ fn abandon_after_equal_reread_characterization() {
 }
 
 #[test]
-fn helper_single_head_becomes_multihead_characterization() {
+fn helper_exports_when_a_second_head_arrives() {
     helper_schedule(true);
     helper_schedule(false);
 }
@@ -204,9 +204,7 @@ fn helper_schedule(interleave: bool) {
     }
     let _observer = Observe::new(move |event| {
         seen.lock().unwrap().push(event.clone());
-        if interleave
-            && matches!(&event, Event::HelperBranch { locked: false, heads } if heads.len() == 1)
-        {
+        if interleave && matches!(&event, Event::HelperHeads(heads) if heads.len() == 1) {
             execute();
         }
     });
@@ -221,7 +219,7 @@ fn helper_schedule(interleave: bool) {
         .lock()
         .unwrap()
         .clone()
-        .expect("reach the single-head branch");
+        .expect("run the historical describe");
     let events = events.lock().unwrap().clone();
     let heads = node.local_heads().unwrap();
     assert_eq!(heads.len(), 1);
@@ -245,8 +243,7 @@ fn helper_schedule(interleave: bool) {
     );
     assert_eq!(command["success"], true, "{command}");
     assert_eq!(changed.len(), 2, "reach the actual one-to-two-head window");
-    assert!(outcome.is_ok(), "{outcome:?}");
-    assert_eq!(heads.len(), 1);
+    assert_eq!(outcome.unwrap(), heads[0]);
     let target = view.local_bookmarks[jj_lib::ref_name::RefName::new("topic")]
         .as_normal()
         .unwrap()
@@ -255,43 +252,17 @@ fn helper_schedule(interleave: bool) {
         target, physical_before,
         "the merge really rebases the bookmark"
     );
-    if !interleave {
-        assert_eq!(
-            physical_after, target,
-            "the normal multihead helper exports the rebased bookmark"
-        );
-        assert!(events.iter().any(
-            |event| matches!(event, Event::HelperBranch { locked: true, heads } if heads.len() == 2)
-        ));
-        return;
-    }
-    // Known product limitation: the native merge changed the bookmark without export.
-    // This assertion deliberately stops passing once the helper is repaired.
     assert_eq!(
-        physical_after, physical_before,
-        "the direct helper never exports it"
+        physical_after, target,
+        "the helper exports the rebased bookmark before another jj command"
     );
     let record = &view.git_refs[jj_lib::ref_name::GitRefName::new("refs/heads/topic")];
-    assert_eq!(record.as_normal().unwrap().hex(), physical_after);
-    assert!(!events.iter().any(|event| matches!(event, Event::Export(_))));
-    drop(_observer);
-    let again = node.merge_heads().unwrap();
-    assert_eq!(raw(&node, &again).1.local_bookmarks, view.local_bookmarks);
-    assert_eq!(
-        repo.git(&["rev-parse", "refs/heads/topic"]).trim(),
-        physical_before
-    );
-    repo.jj(&["status"]);
-    let healed = repo.git(&["rev-parse", "refs/heads/topic"]);
-    eprintln!(
-        "R2 after ordinary status: physical={}, expected={target}",
-        healed.trim()
-    );
-    assert_eq!(
-        healed.trim(),
-        target,
-        "an ordinary jj command exports the merged bookmark"
-    );
+    assert_eq!(record.as_normal().unwrap().hex(), target);
+    assert!(events.iter().any(|event| matches!(event, Event::Export(_))));
+    let initial_head_count = if interleave { 1 } else { 2 };
+    assert!(events.iter().any(
+        |event| matches!(event, Event::HelperHeads(heads) if heads.len() == initial_head_count)
+    ));
 }
 
 #[test]

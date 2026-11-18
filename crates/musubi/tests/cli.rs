@@ -3956,6 +3956,8 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     except to see at once how a sync goes. It asks the daemon to sync, if the daemon serves the
     repository, and otherwise syncs in this process, saying if that's because the daemon isn't running.
 
+    In a colocated repository, sync exports resolved bookmarks moved by a merge to Git.
+
     If a hub reply leaves needed data missing, the sync fails. If the daemon serves this copy, it
     retries from the hub's current state. Run `musubi sync` again to retry at once.
 

@@ -281,6 +281,8 @@ pub enum Command {
     /// the daemon serves the repository, and otherwise syncs in this process, saying if
     /// that's because the daemon isn't running.
     ///
+    /// In a colocated repository, sync exports resolved bookmarks moved by a merge to Git.
+    ///
     /// If a hub reply leaves needed data missing, the sync fails. If the daemon serves
     /// this copy, it retries from the hub's current state. Run `musubi sync` again to retry
     /// at once.

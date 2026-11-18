@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Sync now exports rebased bookmarks to Git when a concurrent jj command adds an operation
+  just as sync reads the local history. Git branches used to keep their old targets until
+  the next ordinary jj command.
 - Commands now reach the daemon in a new way, so a daemon from an earlier build must be
   restarted after you upgrade. The one exception is a daemon from a build that writes no build
   line to `daemon.pid`, which no newer build can stop: end it by hand once, by the process id

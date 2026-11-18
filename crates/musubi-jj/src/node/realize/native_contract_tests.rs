@@ -430,7 +430,6 @@ fn native_command_before_validation_forces_refresh() {
             Event::Exported(id) | Event::Loaded(id) => {
                 assert!(!id.0.as_bytes().is_empty());
             }
-            Event::HelperBranch { locked, heads } => assert_eq!(*locked, heads.len() > 1),
             _ => {}
         }
     }

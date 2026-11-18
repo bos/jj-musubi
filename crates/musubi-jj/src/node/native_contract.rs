@@ -31,10 +31,7 @@ pub(super) enum Event {
         captured: Vec<LocalOp>,
         actual: Vec<LocalOp>,
     },
-    HelperBranch {
-        locked: bool,
-        heads: Vec<LocalOp>,
-    },
+    HelperHeads(Vec<LocalOp>),
     Loaded(LocalOp),
     HelperComplete,
     Export(LocalOp),

@@ -7,26 +7,31 @@ assertions, branches, runtime calls or data flowing between modules.
 The collector, source inventory, layout, renderer and offline browser assets live in
 `contrib/assurance/`. Nothing needs a chat transcript, a personal directory or a web service.
 [The assurance renderer](assurance-renderer.md) describes the design and browser implementation.
-Python 3.11 or later runs the tools. Collection and coverage export run on macOS or Linux
-and need the project's normal test tools,
+Python 3.11 or later runs the tools, and `zstd` reads and writes the saved snapshots.
+Collection and coverage export run on macOS or Linux and need the project's normal test tools,
 `llvm-tools-preview`, and, for the optional campaigns, cargo-fuzz with nightly Rust and
 cargo-mutants. The run manifests record the exact compiler and tool versions used.
 
 ## Render the saved snapshot
 
-The repository includes a
-[November 7, 2026 snapshot](../../contrib/assurance/data/2026-11-07/README.md)
-and a Zstandard archive of its normalized observations. To view it without collecting data:
+The repository includes snapshots from
+[November 7, 2026](../../contrib/assurance/data/2026-11-07/README.md) and
+[November 18, 2026](../../contrib/assurance/data/2026-11-18/README.md), each with a Zstandard
+archive of its normalized observations. To view the latest without collecting data:
 
 ```sh
 python3 contrib/assurance/assurance.py render \
-    contrib/assurance/data/2026-11-07/snapshot.json \
+    contrib/assurance/data/2026-11-18/snapshot.json.zst \
     --out target/assurance/index.html --standalone
 ```
 
 Open `target/assurance/index.html`. The renderer uses current labels and tooltips with the saved
 measurements. The snapshot records its source commit and collection provenance. Generated HTML
 stays under ignored `target/assurance/`; renderer code stays in `contrib/assurance/`.
+
+A saved snapshot goes in as `snapshot.json.zst`, never as plain JSON: `build` writes Zstandard
+when its `--out` ends in `.zst`, and `render` reads either. Add `sourceCommit`, the full commit
+the captures' empty children sit on, before saving one.
 
 ## Collect data
 

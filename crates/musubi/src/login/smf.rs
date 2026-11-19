@@ -72,7 +72,7 @@ pub(super) fn log_path(fmri: &str) -> String {
 /// A word for an SMF method's command line. svc.startd expands `%` tokens, then runs the method
 /// with `/sbin/sh -c "exec <method>"`, so the word is quoted for sh and its `%`s doubled.
 pub(super) fn exec_quote(text: &str) -> String {
-    crate::ui::shell_word(text).replace('%', "%%")
+    crate::ui::sh_word(text).replace('%', "%%")
 }
 
 /// An SMF manifest for one user's instance of `service`. It is wait-style (`duration=child`):

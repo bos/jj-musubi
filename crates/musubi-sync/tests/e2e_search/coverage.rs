@@ -682,19 +682,19 @@ type SharedCase = Rc<RefCell<CaseData>>;
 thread_local! {
     #[cfg_attr(
         any(target_os = "illumos", target_os = "solaris"),
-        expect(
+        allow(
             clippy::missing_const_for_thread_local,
-            reason = "a false positive where std's thread_local! uses its OS-key \
-                      implementation, as on illumos"
+            reason = "clippy wrongly reports this on illumos, but only when the \
+                      rust-src component is installed, so it's allowed rather than expected"
         )
     )]
     static REPORT: RefCell<Option<SharedTotals>> = const { RefCell::new(None) };
     #[cfg_attr(
         any(target_os = "illumos", target_os = "solaris"),
-        expect(
+        allow(
             clippy::missing_const_for_thread_local,
-            reason = "a false positive where std's thread_local! uses its OS-key \
-                      implementation, as on illumos"
+            reason = "clippy wrongly reports this on illumos, but only when the \
+                      rust-src component is installed, so it's allowed rather than expected"
         )
     )]
     static CASE: RefCell<Option<SharedCase>> = const { RefCell::new(None) };

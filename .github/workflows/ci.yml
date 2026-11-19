@@ -152,39 +152,48 @@ jobs:
           envs: CARGO_TERM_COLOR CARGO_INCREMENTAL RUST_BACKTRACE
           mem: 12288
           copyback: false
-          # Building jj takes most of the time prepare does, so keep the prepared VM. The
-          # cache key covers this script, which pins what it installs; the toolchain it
-          # installs is brought up to date at each run.
+          # Building jj takes up most of the time that prepare does, so the VM is cached once
+          # prepare has run. The cache key is derived from the prepare script, so anything
+          # prepare installs has to be pinned there. Otherwise, the cache would keep an old
+          # version, and nothing would show it. Things that don't need pinning, such as the Rust
+          # toolchain and nextest, are updated or installed at each run instead.
           cache-after-prepare: true
+          # The installers below are saved to a file before they run, rather than piped into
+          # sh. That's because illumos's sh is ksh93, and its `set -e` ignores a failed
+          # pipeline anywhere except at the end of a script, even with pipefail. So if a
+          # download failed partway, the script would carry on as though nothing happened.
           prepare: |
             set -eux
-            # The installers are saved before they run, not piped into sh: illumos's sh is
-            # ksh93, whose `set -e` ignores a failed pipeline anywhere but at the end of a
-            # script, even with pipefail, so a failed download would go unnoticed.
+            # The build image comes with compilers but not git, and the tests need git. pkg
+            # exits with status 4 if git is already installed, so treat that as success.
+            pkg install developer/versioning/git || test $? -eq 4
             curl --proto '=https' --tlsv1.2 -sSf --retry 5 -o /tmp/rustup-init.sh \
               https://sh.rustup.rs
             sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable \
               --component clippy
+            rm /tmp/rustup-init.sh
             . "$HOME/.cargo/env"
-            # nextest's installer checks the archive's SHA-256, and installs into ~/.cargo/bin.
-            curl --proto '=https' --tlsv1.2 -LsSf --retry 5 -o /tmp/nextest-install.sh \
-              https://get.nexte.st/install.sh
-            sh /tmp/nextest-install.sh --version 0.9.148
-            rm /tmp/rustup-init.sh /tmp/nextest-install.sh
-            # Tests need exactly the jj that musubi's jj-lib is (musubi_testutil::JJ_VERSION),
-            # and jj publishes no illumos build.
+            # The tests need the exact version of jj that musubi's jj-lib dependency is
+            # (musubi_testutil::JJ_VERSION), and jj doesn't publish builds for illumos.
             cargo install --locked --version 0.47.1 jj-cli --bin jj
-            # The crates the workspace needs, so that a run downloads only what Cargo.lock has
-            # gained since.
+            # Download the crates the workspace needs now, so that each run only downloads
+            # the ones Cargo.lock has gained since.
             cargo fetch --locked
           run: |
             set -eux
             . "$HOME/.cargo/env"
             rustup update stable
+            # The latest nextest, as the other jobs use. The installer checks the archive's
+            # SHA-256 checksum, and installs nextest into ~/.cargo/bin.
+            curl --proto '=https' --tlsv1.2 -LsSf --retry 5 -o /tmp/nextest-install.sh \
+              https://get.nexte.st/install.sh
+            sh /tmp/nextest-install.sh
+            rm /tmp/nextest-install.sh
             uname -a
             rustc --version
             jj --version
             git --version
+            cargo nextest --version
             cargo clippy --workspace --all-targets --locked -- -D warnings
             # `decisions_conformance` needs the Lean oracle. `moved_copies_sync_again` fails on
             # illumos: the daemon doesn't notice a copy moved to another directory.

@@ -54,7 +54,7 @@ impl NodeRepo {
         // recurse here: every reachable operation, including source aliases, is mapped now.
         self.heads_mapped = true;
         if !self.late.is_empty()
-            && let Err(err) = self.reparent_late()
+            && let Err(err) = self.reparent_late(&heads)
         {
             self.heads_mapped = false;
             return Err(err);
@@ -66,60 +66,109 @@ impl NodeRepo {
     /// onto the rewrites, as their canonical operations have them, and moves the op heads
     /// among them there: before anything merges them with the renamed history, which would
     /// merge against an older common ancestor.
-    fn reparent_late(&mut self) -> Result<(), NodeError> {
-        let late = self.late.clone();
-        let op_store = self.loader.op_store().clone();
-        let mut rewrites: HashMap<LocalOp, LocalOp> = HashMap::new();
-        for local in &late {
-            let Some(canonical) = self.canonical_of(local) else {
-                continue;
-            };
-            // Taking records can supersede an identity after it was queued. Its counted
-            // rewrite already supplies the current realization; do not revive its old body.
-            if self.current_ids(&canonical)? != [canonical.clone()] {
-                continue;
-            }
-            let mut op = op_store.read_operation(&local.0).block_on()?;
-            let mut parents = vec![];
-            for parent in self.canonical.parents(&canonical)? {
-                // A contraction can give an operation a parent not yet realized here.
-                // Keep the normalization pending if making that parent fails.
-                let parent = match self.local_of(&parent) {
-                    Some(local) => local,
-                    None => self.realize(&parent)?,
-                };
-                parents.push(parent.0);
-            }
-            if parents == op.parents
-                && OpAttrs(&op.metadata.attributes).canonical() == Some(canonical.0.hex().as_str())
+    fn reparent_late(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
+        let mut tips: Vec<_> = heads
+            .iter()
+            .filter_map(|head| self.canonical_of(head))
+            .collect();
+        let mut late: HashMap<CanonicalOp, Vec<LocalOp>> = HashMap::new();
+        for local in &self.late {
+            // A record received since queuing an operation can already have replaced it.
+            if let Some(canonical) = self.canonical_of(local)
+                && self.current_ids(&canonical)? == [canonical.clone()]
             {
+                late.entry(canonical.clone())
+                    .or_insert_with(|| {
+                        tips.push(canonical);
+                        vec![]
+                    })
+                    .push(local.clone());
+            }
+        }
+        if late.is_empty() {
+            self.late.clear();
+            return Ok(());
+        }
+
+        // A cached descendant on another native alias may never have been queued.
+        // Visit descendants in canonical order so every branch uses the same physical
+        // parent, even when the branches reached it through different native operations.
+        let published = self.published_realizations(heads)?;
+        let order = self.canonical.ancestors_until(&tips, |_| false)?;
+        let op_store = self.loader.op_store().clone();
+        let mut normalized = HashMap::new();
+        let mut rewrites = HashMap::new();
+        for canonical in order {
+            let parents = self.canonical.parents(&canonical)?;
+            let sources = late.remove(&canonical);
+            if sources.is_none() && !parents.iter().any(|parent| normalized.contains_key(parent)) {
                 continue;
             }
-            // A marker ends the native walk for private ownership. Capture that evidence
-            // before replacing the parents, so that this marked copy is self-contained.
-            let view = op_store.read_view(&op.view_id).block_on()?;
-            let own = self.own_of_view(view.wc_commit_ids, &canonical, &op)?;
-            self.record_private_workspaces(&mut op.metadata, own.into_keys(), &canonical)?;
-            op.parents = parents;
-            OpAttrs(&mut op.metadata.attributes).set_canonical(&canonical);
-            let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);
-            self.insert_map(rewrite.clone(), canonical)?;
-            rewrites.insert(local.clone(), rewrite);
+            let local = match published
+                .get(&canonical)
+                .cloned()
+                .or_else(|| self.local_of(&canonical))
+            {
+                Some(local) => local,
+                None => self.realize(&canonical)?,
+            };
+            let mut op = op_store.read_operation(&local.0).block_on()?;
+            let mut local_parents = Vec::with_capacity(parents.len());
+            for parent in &parents {
+                // A delayed command can make a cached source reachable again. Use the
+                // preferred realization for that parent even if it wasn't queued again.
+                let local = normalized
+                    .get(parent)
+                    .cloned()
+                    .or_else(|| self.local_of(parent));
+                let local = match local {
+                    Some(local) => local,
+                    None => self.realize(parent)?,
+                };
+                local_parents.push(local.0);
+            }
+            let rewrite = if local_parents == op.parents
+                && (sources.is_none()
+                    || OpAttrs(&op.metadata.attributes).canonical()
+                        == Some(canonical.0.hex().as_str()))
+            {
+                local.clone()
+            } else {
+                // A marker ends the native walk for private ownership. Capture that evidence
+                // before replacing the parents, so that this marked copy is self-contained.
+                let view = op_store.read_view(&op.view_id).block_on()?;
+                let own = self.own_of_view(view.wc_commit_ids, &canonical, &op)?;
+                self.record_private_workspaces(&mut op.metadata, own.into_keys(), &canonical)?;
+                op.parents = local_parents;
+                OpAttrs(&mut op.metadata.attributes).set_canonical(&canonical);
+                let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);
+                rewrites.insert(local, vec![rewrite.clone()]);
+                rewrite
+            };
+            for source in sources
+                .into_iter()
+                .flatten()
+                .filter(|source| source != &rewrite)
+            {
+                rewrites.insert(source, vec![rewrite.clone()]);
+            }
+            self.insert_map(rewrite.clone(), canonical.clone())?;
+            normalized.insert(canonical, rewrite);
         }
-        let heads = self.local_heads()?;
-        for head in &heads {
-            if let Some(rewrite) = rewrites.get(head) {
+        for head in self.local_heads()? {
+            if let Some(rewrite) = self
+                .canonical_of(&head)
+                .and_then(|canonical| normalized.get(&canonical))
+                && *rewrite != head
+            {
                 self.loader
                     .op_heads_store()
                     .update_op_heads(std::slice::from_ref(&head.0), &rewrite.0)
                     .block_on()?;
+                rewrites.insert(head, vec![rewrite.clone()]);
             }
         }
         self.late.clear();
-        let rewrites = rewrites
-            .into_iter()
-            .map(|(old, new)| (old, vec![new]))
-            .collect();
         self.move_workspaces(&rewrites)
     }
 

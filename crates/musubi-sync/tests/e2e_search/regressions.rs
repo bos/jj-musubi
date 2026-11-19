@@ -309,3 +309,33 @@ fn e2e_command_rerun_past_jj_duplicate_commit_bug() {
     }
     world.converge();
 }
+
+/// A second workspace brings back history that the primary workspace abandoned. After
+/// another abandon and a sync, both paths of the resulting merge must use the same local
+/// realization of each shared operation, including after translation cache loss.
+#[test]
+fn e2e_reparenting_a_merge_keeps_one_realization_per_operation() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::SharedHostname,
+        prejoin: false,
+        secondary: true,
+    });
+    world.jj(1, &["bookmark", "create", "drop-me", "-r", "@-"]);
+    let bookmark = world.op_heads(1).pop().unwrap();
+    world.converge();
+    world.op_abandon(1, &bookmark);
+    world.commit(1, 1, 0);
+    world.commit(0, 0, 0);
+    world.sync(0);
+    world.jj(1, &["describe", "-m", "drop after forgetting"]);
+    let describe = world.op_heads(1).pop().unwrap();
+    world.jj(1, &["git", "fetch"]);
+    world.forget_copy(1, 0);
+    world.op_abandon(1, &describe);
+    world.sync(1);
+    world.jj(1, &["new"]);
+    world.sync(0);
+    world.restart(0);
+    world.converge();
+}

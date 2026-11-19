@@ -168,7 +168,7 @@ impl NodeRepo {
 
     /// Actual native ancestry, not the cache's preferred unpublished aliases. Append-only
     /// moves extend only the new suffix; a trim or restore rebuilds the index.
-    fn published_realizations(
+    pub(in crate::node) fn published_realizations(
         &mut self,
         heads: &[LocalOp],
     ) -> Result<Arc<HashMap<CanonicalOp, LocalOp>>, NodeError> {

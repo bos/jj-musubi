@@ -343,6 +343,10 @@ operations need realizing. Restoring the old shortcut, which returned the identi
 walking those parents, fails its unmapped-parent assertion.
 Keeping a second delayed child on the cached old source fails its native-reachability
 assertion, even when that source and its normalized realization share a canonical id.
+`e2e_reparenting_a_merge_keeps_one_realization_per_operation` exercises two paths through
+the same operation after a stale workspace brings back abandoned history. Reparenting just
+the queued operations leaves a cached descendant on the old copy, which the translation
+check finds when it walks the converged history from an empty cache.
 `translation::taking_an_abandon_preserves_original_identity_after_cache_loss` also interrupts
 taking records before publishing the heads and removes the cache. Restoring the saved head
 identities directly into the cache fails its assertion that recovery maps every native ancestor.

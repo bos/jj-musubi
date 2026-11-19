@@ -648,10 +648,10 @@ thread_local! {
     /// Whether this thread is in [`catch_jj_panic`], whose panics the hook doesn't print.
     #[cfg_attr(
         any(target_os = "illumos", target_os = "solaris"),
-        expect(
+        allow(
             clippy::missing_const_for_thread_local,
-            reason = "a false positive where std's thread_local! uses its OS-key \
-                      implementation, as on illumos"
+            reason = "clippy wrongly reports this on illumos, but only when the \
+                      rust-src component is installed, so it's allowed rather than expected"
         )
     )]
     static CATCHING_JJ_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

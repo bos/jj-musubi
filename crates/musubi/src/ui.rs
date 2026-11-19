@@ -314,6 +314,17 @@ pub fn shell_word(text: &str) -> String {
         // A Windows path has no `"`.
         format!("\"{text}\"")
     } else {
+        sh_word(text)
+    }
+}
+
+/// Quotes `text` so that sh takes it as one word, such as a path with a space in it. Unlike
+/// [`shell_word`], this always quotes for sh, even when musubi is built for Windows.
+pub fn sh_word(text: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+=:,@".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        text.to_owned()
+    } else {
         format!("'{}'", text.replace('\'', r"'\''"))
     }
 }

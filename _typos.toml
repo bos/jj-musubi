@@ -19,6 +19,8 @@ Anc = "Anc"
 nd = "nd"
 hed = "hed"
 hax = "hax"
+# SMF's restarter is called svc.startd, and SMF manifests have a `startd` property group.
+startd = "startd"
 # GitHub's anchors for headings that say "repository's" and "copy's".
 repositorys = "repositorys"
 copys = "copys"

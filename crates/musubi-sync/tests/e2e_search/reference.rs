@@ -1095,7 +1095,7 @@ fn contracted_merge_replays_the_forgotten_receivers_workspace() {
     let shared = store.read_operation_view(&head).unwrap();
     assert!(!shared.wc_commit_ids.contains_key(WorkspaceName::new(&key)));
     let dropped = store.ancestors_until(&[base], |_| false).unwrap();
-    let mut contraction = Contraction::new(store, dropped).unwrap();
+    let mut contraction = Contraction::new(store, dropped.clone()).unwrap();
     let [contracted] = contraction
         .images(store, &head)
         .unwrap()
@@ -1119,12 +1119,75 @@ fn contracted_merge_replays_the_forgotten_receivers_workspace() {
     let certificate = reference.workspace_certificate(&world, &contracted);
     assert!(certificate.has_merge_birth(&key));
     assert!(certificate.is_dormant(&key));
+    let target = certificate.binding(&key).unwrap();
+
+    // Gamma's retained command can carry a private binding through a contracted parent.
+    world.sync(2);
+    world.jj(2, &["bookmark", "create", "after-merge", "-r", "@"]);
+    let gamma = world.fx.node(2);
+    let [child] = gamma.canonical_heads().unwrap().try_into().unwrap();
+    let store = gamma.canonical_store();
+    assert_eq!(store.parents(&child).unwrap(), std::slice::from_ref(&head));
+    let mut contraction = Contraction::new(store, dropped).unwrap();
+    let [contracted_child] = contraction
+        .images(store, &child)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        store.parents(&contracted_child).unwrap(),
+        std::slice::from_ref(&contracted)
+    );
+    let mut reference = Reference::build(&world);
+    // Leave the native replay of the contracted parent as the only witness.
+    reference
+        .workspace_certificates
+        .insert(head.clone(), WorkspaceCertificate::default());
+    let carried = reference.workspace_certificate(&world, &contracted_child);
+    assert_eq!(carried.binding(&key), Some(target));
+    assert!(carried.has_merge_birth(&key));
+    assert!(carried.is_dormant(&key));
+
+    world.jj(
+        2,
+        &["describe", &target.hex(), "-m", "rewrite dormant beta"],
+    );
+    let gamma = world.fx.node(2);
+    let [operation] = gamma.local_heads().unwrap().try_into().unwrap();
+    let native = block_on(gamma.loader().op_store().read_operation(&operation.0)).unwrap();
+    let [successor] = native
+        .commit_predecessors
+        .unwrap()
+        .into_iter()
+        .filter_map(|(new, old)| old.contains(target).then_some(new))
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let [rewritten] = gamma.canonical_heads().unwrap().try_into().unwrap();
+    let [contracted_rewrite] = contraction
+        .images(gamma.canonical_store(), &rewritten)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let mut reference = Reference::build(&world);
+    reference
+        .workspace_certificates
+        .insert(head, WorkspaceCertificate::default());
+    let carried = reference.workspace_certificate(&world, &contracted_rewrite);
+    assert_eq!(carried.binding(&key), Some(&successor));
+    assert!(carried.has_merge_birth(&key));
+    assert!(carried.is_dormant(&key));
 
     world.evidence.workspace_births.remove(&key);
     let mut reference = Reference::build(&world);
     assert!(
         !reference
             .workspace_certificate(&world, &contracted)
+            .has_merge_birth(&key)
+    );
+    assert!(
+        !reference
+            .workspace_certificate(&world, &contracted_child)
             .has_merge_birth(&key)
     );
 }

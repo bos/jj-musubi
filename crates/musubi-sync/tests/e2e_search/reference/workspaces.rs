@@ -493,6 +493,29 @@ impl WorkspaceDerivation<'_> {
             .any(|old| old.contains(target))
     }
 
+    /// Follow a private binding only through an unambiguous chain in the captured jj
+    /// command. The retained canonical output cannot supply proof of its own rewrite.
+    fn retained_private_target<'a>(&'a self, original: &'a CommitId) -> Option<&'a CommitId> {
+        if !self.rewritten(original) {
+            return Some(original);
+        }
+        let predecessors = self.command?.predecessors.as_ref()?;
+        let mut target = original;
+        let mut seen = HashSet::from([original]);
+        loop {
+            let mut successors = predecessors
+                .iter()
+                .filter_map(|(next, previous)| previous.contains(target).then_some(next));
+            let Some(next) = successors.next() else {
+                return (target != original).then_some(target);
+            };
+            if successors.next().is_some() || !seen.insert(next) {
+                return None;
+            }
+            target = next;
+        }
+    }
+
     /// Carry authenticated names, births and unchanged input bindings. This phase adds
     /// provisional evidence; later command checks may revoke it, and merge replay replaces it.
     fn inherit_inputs(&self, result: &mut WorkspaceCertificate) {
@@ -709,6 +732,9 @@ impl Reference {
             return vec![];
         };
         let mut dependencies = workspace_source_parents(&op).unwrap_or_default();
+        if let Some(parent) = Self::contracted_workspace_parent(world, &op, &dependencies) {
+            dependencies.push(parent);
+        }
         if let Some(input) = world
             .evidence
             .commands
@@ -850,6 +876,7 @@ impl Reference {
             self.derive_merge_workspaces(world, &context, &mut result);
         }
         self.reconcile_present_workspace_bindings(world, &context, &mut result);
+        self.carry_contracted_private_bindings(world, &context, &mut result);
         result.authenticate_bindings();
         self.workspace_certificates
             .insert(id.clone(), result.clone());
@@ -1183,7 +1210,10 @@ impl Reference {
                     .into_iter()
                     .map(|replay| (replay, false)),
             );
-            if let Some(contracted) = Self::contracted_workspace_parents(world, context) {
+            if parents.len() == 2
+                && let Some(contracted) =
+                    Self::contracted_workspace_parents(world, context.op, parents)
+            {
                 let certified = contracted
                     .iter()
                     .zip(inputs)
@@ -1292,14 +1322,15 @@ impl Reference {
     }
 
     /// A realization uses the contracted frontier even though the shared view came from
-    /// the original merge. When both parents are the same originals in order, their
-    /// unchanged views can use the original certificates for a private workspace replay.
+    /// the original operation. Match the same originals in order before using evidence
+    /// across these frontiers.
     fn contracted_workspace_parents(
         world: &World,
-        context: &WorkspaceDerivation<'_>,
+        op: &op_store::Operation,
+        source_parents: &[CanonicalOp],
     ) -> Option<Vec<CanonicalOp>> {
-        let parents = CanonicalOp::parents_of(context.op);
-        if parents.len() != 2 || context.parents.len() != 2 || parents == context.parents {
+        let parents = CanonicalOp::parents_of(op);
+        if parents.len() != source_parents.len() || parents == source_parents {
             return None;
         }
         let original = |id| {
@@ -1312,11 +1343,56 @@ impl Reference {
         };
         parents
             .iter()
-            .zip(context.parents)
+            .zip(source_parents)
             .all(|(parent, source)| {
                 parent == source || original(parent).is_some_and(|id| original(source) == Some(id))
             })
             .then_some(parents)
+    }
+
+    fn contracted_workspace_parent(
+        world: &World,
+        op: &op_store::Operation,
+        source_parents: &[CanonicalOp],
+    ) -> Option<CanonicalOp> {
+        let [_] = source_parents else {
+            return None;
+        };
+        Self::contracted_workspace_parents(world, op, source_parents)?.pop()
+    }
+
+    /// A contracted parent can have independently witnessed a private binding absent from
+    /// its original version. Carry it while the owner is absent, following any exact
+    /// rewrite observed in the command.
+    fn carry_contracted_private_bindings(
+        &mut self,
+        world: &World,
+        context: &WorkspaceDerivation<'_>,
+        result: &mut WorkspaceCertificate,
+    ) {
+        let Some(parent) = Self::contracted_workspace_parent(world, context.op, context.parents)
+        else {
+            return;
+        };
+        let source = self.workspace_certificate(world, &parent);
+        for (key, target) in source.bindings() {
+            let (owner, _) = key.split_once('/').unwrap();
+            if source.is_dormant(key)
+                && !context.presence.is_present(owner)
+                && !context
+                    .view
+                    .wc_commit_ids
+                    .contains_key(WorkspaceName::new(key))
+                && context.command.is_none_or(|command| command.copy != owner)
+                && let Some(target) = context.retained_private_target(target)
+            {
+                result.entry(key.clone()).carry_input(
+                    target.clone(),
+                    source.evidence_for(key),
+                    true,
+                );
+            }
+        }
     }
 
     /// Reconcile live membership after command/merge derivation. Only sources where the

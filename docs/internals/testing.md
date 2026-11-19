@@ -1114,7 +1114,10 @@ certifies that name nor disqualifies its independently checked replay.
 `reference::contracted_merge_replays_the_forgotten_receivers_workspace` checks a merge whose
 ordered parents survive contraction with new ids. The receiver's replay can certify its omitted
 private workspace using those parents and their original certificates. The test requires a
-realization and independent evidence of the workspace's birth.
+realization and independent evidence of the workspace's birth. A retained command on that
+contracted parent carries its dormant binding while the owner is absent, following a unique
+rewrite recorded by the native command. Removing the original parent's certificate isolates
+this path, and removing the birth evidence revokes it.
 
 `translation::root_realizations_keep_current_private_workspaces_without_a_receipt` checks
 exact private bindings when a forgotten copy realizes contracted history ahead of receipt.

@@ -3,6 +3,8 @@
 
 mod format_guard_props;
 mod git_executable;
+#[cfg(target_os = "linux")]
+mod head_schedule;
 mod join;
 #[path = "../../../musubi-core/tests/support/oracle.rs"]
 #[allow(dead_code, clippy::unwrap_used)]

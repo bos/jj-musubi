@@ -177,6 +177,11 @@ bench-smoke: dev
 property:
     just test --workspace --profile search
 
+# Explore, replay, or branch real Linux op-head schedules.
+[positional-arguments]
+head-schedule *args:
+    @python3 contrib/head_schedule.py "$@"
+
 # Fuzz all targets or one across available CPUs (see docs/internals/testing.md).
 [positional-arguments]
 fuzz target="all" *args:

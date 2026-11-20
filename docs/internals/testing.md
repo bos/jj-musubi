@@ -859,6 +859,59 @@ runs, can take all a machine's memory on a proof it can't finish, and macOS enfo
 
 ## Generated end-to-end tests
 
+A Linux operation-head scheduler complements this search at a finer boundary. It pauses a
+real `jj op abandon` immediately before unlinking its old head, after jj has written its new
+head. Its other actor runs the same `NodeRepo::check_abandon` as the daemon, including an
+interruption after publishing a replacement and a reopen of the local store.
+
+### Search and replay operation-head schedules
+
+Use the pinned jj built with dynamic Linux libraries and a C compiler named `cc`. A static
+jj binary cannot load the test shim that gates `unlink` and `unlinkat`. Run the search with
+`just head-schedule search`. Add `--unpublished` to start with local work above the synced
+operation, and `--out PATH` to retain a separate schedule.
+
+```sh
+just head-schedule search
+just head-schedule replay target/head-schedule.json
+just head-schedule branch target/head-schedule.json --at 1
+```
+
+Search continues one alternative in the current process and queues other enabled actions.
+It skips revisiting an equivalent observed state with no more steps left to spend. The
+observation includes the head IDs, pending drops, whether jj is paused, and the state of the
+abandon check. Each branch restores the saved starting repositories and replays only the
+prefix it needs. The fixtures and compiled shim are cached per test build. This is a bounded
+search of the selected filesystem and daemon boundaries.
+
+The saved JSON contains each action and its resulting state. Search saves the first failure,
+or a longest observed schedule on success. Replay verifies the recorded states. Branch keeps
+the first `--at` actions and tries other actions at that point, then saves a new schedule to
+`target/head-schedule-branch.json`. Use `replay --actions-only` to run a saved failure against a
+changed build, whose intermediate head IDs may legitimately differ.
+
+The scheduler checks that at least one readable operation head exists after every controlled
+step. Where the abandon check put the history back, the settled head also has the original
+view and canonical identity, with no pending drops. Disabling the fresh-head stamping for
+[#166](https://github.com/bos/jj-musubi/issues/166) makes the search rediscover the empty
+head store by choosing a daemon check while jj waits, then letting jj finish its unlink.
+
+To take an instruction-level recording on a Linux host with counters supported by
+[rr](https://rr-project.org/), record a saved schedule:
+
+```sh
+just head-schedule replay target/head-schedule.json --rr target/head-schedule-rr
+rr replay target/head-schedule-rr
+```
+
+If perf access requires root, add `--rr-as-root` to the record command and use
+`sudo rr replay target/head-schedule-rr`. The privileged recorder runs the test under the
+calling user's UID and leaves the trace owned by root. For a noninteractive replay check,
+pass `-a` to `rr replay`. The JSON schedule works independently of rr and its host counter
+requirements.
+
+### Generated command and sync schedules
+
 A Hegel state machine drives two or three real colocated repositories, each served by a musubi
 node, through an in-process hub. `musubi_sync::hive::Hive` delivers their requests to the hub
 directly, one step at a time, so that a failing case replays exactly, and has the hub prune its

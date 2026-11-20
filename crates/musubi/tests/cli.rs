@@ -760,22 +760,23 @@ fn joining_fetches_ambiguous_remote_bookmarks() {
     };
     assert_eq!(remote("origin"), "conflict");
     fs::rename(&offline, &origin).unwrap();
-    // Literal names must not be parsed as a union, and configured filters must not omit
-    // the bookmark being repaired. Only the secondary workspace is colocated here.
+    // The ampersand is legal in a Windows filename but needs quoting in jj patterns.
+    // Configured filters must not omit the bookmark being repaired. Only the secondary
+    // workspace is colocated here.
     beta.jj(&[
         "--ignore-working-copy",
         "git",
         "remote",
         "rename",
         "origin",
-        "foo|bar",
+        "foo&bar",
     ]);
     beta.jj(&[
         "--ignore-working-copy",
         "config",
         "set",
         "--repo",
-        r#"remotes."foo|bar".fetch-bookmarks"#,
+        r#"remotes."foo&bar".fetch-bookmarks"#,
         "topic-*",
     ]);
     let mut retry = beta.program(musubi());
@@ -783,7 +784,7 @@ fn joining_fetches_ambiguous_remote_bookmarks() {
     let (ok, stdout, stderr) = try_run(&logs, &env, retry);
     assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
     assert!(stderr.is_empty(), "{stderr}");
-    assert_eq!(remote("foo|bar"), expected);
+    assert_eq!(remote("foo&bar"), expected);
     assert_eq!(
         beta.jj(&[
             "--ignore-working-copy",
@@ -823,7 +824,7 @@ fn joining_fetches_ambiguous_remote_bookmarks() {
             "log",
             "--no-graph",
             "-r",
-            r#"main@"foo|bar""#,
+            r#"main@"foo&bar""#,
             "-T",
             "commit_id"
         ]),

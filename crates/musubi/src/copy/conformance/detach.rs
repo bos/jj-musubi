@@ -8,7 +8,6 @@ use std::fs;
 
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::op_store::OperationId;
-use jj_lib::repo::RepoLoader;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::canonical::CanonicalStore;
@@ -331,12 +330,9 @@ fn history(located: &Located, first: &str) -> &'static str {
     // Opening a store makes one where there is none: look first.
     let stored = dir.join("canonical").exists() && {
         let settings = settings::load(&located.workspace_root, &located.repo_path).unwrap();
-        let loader = RepoLoader::init_from_file_system(
-            &settings,
-            &located.repo_path,
-            &default_backend_factories(),
-        )
-        .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&settings, &located.repo_path)
+            .unwrap();
         let store = CanonicalStore::open(
             &dir.join("canonical"),
             loader.store().root_commit_id().clone(),

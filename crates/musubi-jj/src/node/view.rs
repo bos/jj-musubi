@@ -943,7 +943,6 @@ mod tests {
     use jj_lib::ref_name::GitRefName;
     use jj_lib::ref_name::RefName;
     use jj_lib::repo::ReadonlyRepo;
-    use jj_lib::repo::RepoLoader;
     use musubi_testutil::TestEnv;
 
     use super::*;
@@ -1017,12 +1016,9 @@ mod tests {
     fn repository() -> (TestEnv, Arc<ReadonlyRepo>, [CommitId; 4]) {
         let env = TestEnv::new();
         let repo = env.init_repo("alpha");
-        let loader = RepoLoader::init_from_file_system(
-            &repo.settings(),
-            &repo.repo_path(),
-            &default_backend_factories(),
-        )
-        .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&repo.settings(), &repo.repo_path())
+            .unwrap();
         let loaded = loader.load_at_head(None).block_on().unwrap();
         let tree = loaded.store().empty_merged_tree();
         let mut tx = loaded.start_transaction();

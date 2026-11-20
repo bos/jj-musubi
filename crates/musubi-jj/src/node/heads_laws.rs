@@ -29,12 +29,9 @@ use pollster::FutureExt as _;
 use super::join::fingerprint;
 
 fn loader(repo: &TestRepo) -> RepoLoader {
-    RepoLoader::init_from_file_system(
-        &repo.settings(),
-        &repo.repo_path(),
-        &default_backend_factories(),
-    )
-    .unwrap()
+    default_backend_factories()
+        .load_repo(&repo.settings(), &repo.repo_path())
+        .unwrap()
 }
 
 fn heads(store: &Arc<dyn OpHeadsStore>) -> Vec<OperationId> {

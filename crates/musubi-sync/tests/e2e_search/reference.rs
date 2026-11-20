@@ -166,9 +166,9 @@ impl Reference {
         for source in sources.values() {
             musubi_testutil::copy_tree(source, &extra);
         }
-        let loader =
-            RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
-                .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&settings, &repo_path)
+            .unwrap();
 
         // The hub's history, parents first.
         let store = world.fx.hive.hub.store();

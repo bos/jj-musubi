@@ -4548,15 +4548,12 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     // first sync after upgrading, which ends once it is renamed or forgotten.
     let old = env.root().join("alpha-old");
     alpha.jj(&["workspace", "add", "--name", "old/w", old.to_str().unwrap()]);
-    jj_lib::repo::RepoLoader::init_from_file_system(
-        &alpha.settings(),
-        &alpha.repo_path(),
-        &jj_lib::default_backend_factories::default_backend_factories(),
-    )
-    .unwrap()
-    .workspace_store()
-    .forget(&[jj_lib::ref_name::WorkspaceName::new("old/w")])
-    .unwrap();
+    jj_lib::default_backend_factories::default_backend_factories()
+        .load_repo(&alpha.settings(), &alpha.repo_path())
+        .unwrap()
+        .workspace_store()
+        .forget(&[jj_lib::ref_name::WorkspaceName::new("old/w")])
+        .unwrap();
     fs::remove_file(
         alpha
             .repo_path()

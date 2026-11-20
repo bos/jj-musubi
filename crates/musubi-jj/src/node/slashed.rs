@@ -84,8 +84,7 @@ pub fn slashed_workspaces(
     repo_path: &Path,
     settings: &UserSettings,
 ) -> Result<Option<SlashedWorkspaces>, NodeError> {
-    let loader =
-        RepoLoader::init_from_file_system(settings, repo_path, &default_backend_factories())?;
+    let loader = default_backend_factories().load_repo(settings, repo_path)?;
     let heads = loader.op_heads_store().get_op_heads().block_on()?;
     let store = loader.workspace_store();
     let mut slashed = slashed_at(
@@ -408,15 +407,12 @@ mod tests {
             "old/w",
             path.to_str().unwrap(),
         ]);
-        RepoLoader::init_from_file_system(
-            &repo.settings(),
-            &repo.repo_path(),
-            &default_backend_factories(),
-        )
-        .unwrap()
-        .workspace_store()
-        .forget(&[WorkspaceName::new("old/w")])
-        .unwrap();
+        default_backend_factories()
+            .load_repo(&repo.settings(), &repo.repo_path())
+            .unwrap()
+            .workspace_store()
+            .forget(&[WorkspaceName::new("old/w")])
+            .unwrap();
         let found = slashed_workspaces(&repo.repo_path(), &repo.settings())
             .unwrap()
             .unwrap();

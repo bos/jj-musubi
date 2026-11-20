@@ -36,12 +36,9 @@ impl HistoryTest {
     fn new() -> (Self, [CommitId; 4]) {
         let env = TestEnv::new();
         let repo = env.init_repo("history");
-        let loader = RepoLoader::init_from_file_system(
-            &repo.settings(),
-            &repo.repo_path(),
-            &default_backend_factories(),
-        )
-        .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&repo.settings(), &repo.repo_path())
+            .unwrap();
         let repo = block_on(loader.load_at_head(None)).unwrap();
         let tree = repo.store().empty_merged_tree();
         let mut tx = repo.start_transaction();

@@ -262,6 +262,35 @@ has put it in maintenance, see [Troubleshooting](../troubleshooting.md#illumos).
 `musubi daemon stop` stops the daemon until a musubi command starts it again (`musubi daemon
 start`, or one that needs the daemon) or the next boot.
 
+## Use musubi in a dev container
+
+Add the jj-musubi [Dev Container Feature](https://containers.dev/features) to your project's
+`.devcontainer/devcontainer.json`. It installs a Linux release of `musubi` on Debian and Ubuntu
+images for x86_64 or aarch64, and starts the daemon as your development user each time the
+container starts. Make sure the container also has `jj` and `git`.
+
+```json
+{
+    "features": {
+        "ghcr.io/bos/jj-musubi/musubi:1": {}
+    }
+}
+```
+
+The Feature installs the latest jj-musubi release by default. Set the Feature's `version`
+option to select a specific release. For Codespaces, use a release newer than 0.47.1 so OpenSSH
+can use the private key generated on the workspace mount.
+
+In GitHub Codespaces, add `"remoteEnv": {"MUSUBI_STATE_DIR": "/workspaces/.musubi"}` to the
+same configuration before joining a hive. Codespaces keeps `/workspaces` across rebuilds, so
+the daemon can keep its hub key and remember which repos it syncs. This path is outside the
+project checkout. If you configure SSH aliases or trust your hub's host key in the container,
+restore that SSH configuration and host key verification after a rebuild.
+
+Create or rebuild the container, then [connect to your hub over ssh](#connect-over-ssh) from
+inside the container. If Codespaces cloned your project with Git, run `jj git init --colocate`
+in that checkout before you [join the hive](#add-other-machines).
+
 ## Optional clone defaults
 
 Depending on how you like to work, it can be convenient to choose which jj and jj-musubi

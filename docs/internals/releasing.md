@@ -42,6 +42,14 @@ Review the draft, put the version's section of `CHANGELOG.md` at the top of its 
 publish it. Running the workflow by hand from the Actions tab builds the same archives
 without releasing anything.
 
+## Publish the Dev Container Feature
+
+The Feature downloads builds from GitHub releases. It has its own version in
+`features/musubi/devcontainer-feature.json`. Bump that version when its files change, then run
+**Publish Dev Container Feature** from the Actions tab once the change lands. Wait until a
+jj-musubi release newer than 0.47.1 is public before publishing the Feature for the first time.
+Then set the `jj-musubi/musubi` package's visibility to public so other projects can use it.
+
 ## Publish the crates
 
 Once the release has built, publish the crates from the tagged commit, with a crates.io

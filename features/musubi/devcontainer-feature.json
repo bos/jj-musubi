@@ -1,0 +1,15 @@
+{
+    "id": "musubi",
+    "version": "1.0.0",
+    "name": "jj-musubi",
+    "description": "Install musubi and start its daemon when the development container starts.",
+    "documentationURL": "https://github.com/bos/jj-musubi/blob/main/docs/guides/setup.md#use-musubi-in-a-dev-container",
+    "options": {
+        "version": {
+            "type": "string",
+            "default": "latest",
+            "description": "jj-musubi release to install (latest or a version such as 0.47.1)."
+        }
+    },
+    "postStartCommand": ["/usr/local/bin/musubi", "daemon", "start"]
+}

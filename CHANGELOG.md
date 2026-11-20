@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use the [jj-musubi Dev Container Feature](docs/guides/setup.md#use-musubi-in-a-dev-container)
+  to install `musubi` and start its daemon in GitHub Codespaces or other dev containers.
+
 - Set `musubi.hub-dir` in jj's user config to choose the default hub's data directory on
   the hub's machine. See [Configuration](docs/reference/configuration.md#this-machines).
 

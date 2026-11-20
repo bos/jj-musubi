@@ -62,9 +62,11 @@ Run `musubi status` in each copy. Check for a running daemon, a recent sync and
 `the hub has all its work`. The [first-sync check](guides/setup.md#your-first-sync)
 walks through recording work and checking the other copy's `jj log`.
 
-Run `musubi daemon install` on each working machine to start its daemon at login (at boot on
-illumos, which needs a rights profile: see [illumos](guides/setup.md#illumos)), and read [Keep
-the hub running](guides/setup.md#keep-the-hub-running) for managing the hub.
+In a Codespace or other dev container, use the [Dev Container
+Feature](guides/setup.md#use-musubi-in-a-dev-container) to start the daemon when the
+container starts. For a host installation, run `musubi daemon install` to start the daemon at
+login (at boot on illumos, which needs a [rights profile](guides/setup.md#illumos)). See
+[Keep the hub running](guides/setup.md#keep-the-hub-running) for managing the hub.
 
 ## Day to day
 

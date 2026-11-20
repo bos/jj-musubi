@@ -652,6 +652,15 @@ fn ensure_key(key: &Path) -> anyhow::Result<bool> {
         "ssh-keygen failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    // Codespaces' workspace mount can ignore the mode passed when creating a file.
+    // OpenSSH refuses to use a private key with group or other permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(&temporary_key, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting private SSH key permissions on {temporary_key:?}"))?;
+    }
     // The private filename is the publication point: whenever it exists, its public
     // half is ready. A failed keygen or public write leaves no published identity.
     let public = fs::read(temporary_key.with_extension("pub"))?;
@@ -735,6 +744,10 @@ mod tests {
             assert!(
                 ensure_key(&key).unwrap(),
                 "retry must publish a complete pair"
+            );
+            assert_eq!(
+                fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+                0o600
             );
             let private = fs::read(&key).unwrap();
             let derived = std::process::Command::new("ssh-keygen")

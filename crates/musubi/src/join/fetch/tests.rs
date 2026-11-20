@@ -29,7 +29,7 @@ async fn request(listener: &tokio::net::TcpListener) -> BufReader<tokio::net::Tc
 }
 
 /// Start the deadline check only after the native Git request reaches the server, then
-/// advance virtual time. EOF proves Git's socket was closed, not just its waiting jj parent.
+/// advance virtual time. The socket closing proves that Git stopped along with its jj parent.
 #[tokio::test]
 async fn a_stalled_fetch_stops_its_git_descendant() {
     let env = TestEnv::new();
@@ -53,13 +53,15 @@ async fn a_stalled_fetch_stops_its_git_descendant() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     tokio::time::resume();
     let mut byte = [0];
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
-            .await
-            .unwrap()
-            .unwrap(),
-        0
-    );
+    match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+        .await
+        .expect("Git's socket stayed open")
+    {
+        Ok(0) => {}
+        // Windows can reset the connection when the Git process is killed.
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        result => panic!("expected Git's socket to close, got {result:?}"),
+    }
 }
 
 /// A subprocess helper: its first interrupt must reap the fetch; its second, after the

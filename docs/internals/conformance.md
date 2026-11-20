@@ -1467,7 +1467,7 @@ The stale copy holds an obsolete revision with the same change id and tree as it
 It also exercises restricted fetch filters, a remote name containing expression syntax, and
 a non-colocated primary workspace whose secondary workspace is colocated. The native
 `a_stalled_fetch_stops_its_git_descendant` test accepts a real HTTP Git request, advances the
-deadline, and checks socket EOF to establish that the network child stopped too.
+deadline, and checks for EOF or a connection reset to establish that the network child stopped.
 `interrupts_stop_the_fetch_and_still_work_afterwards` sends actual interrupts to a subprocess,
 checking fetch cleanup and termination after the fetch runtime has ended.
 `e2e_join_after_upstream_rewrite` reaches an ambiguous join before continuing the generated

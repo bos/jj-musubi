@@ -1214,12 +1214,18 @@ impl Reference {
                 && let Some(contracted) =
                     Self::contracted_workspace_parents(world, context.op, parents)
             {
+                let root = world.fx.hive.hub.store().canonical().root_operation_id();
+                let empty = WorkspaceCertificate::default();
                 let certified = contracted
                     .iter()
                     .zip(inputs)
                     .map(|(canonical, certificate)| CertifiedParent {
                         canonical,
-                        certificate,
+                        certificate: if canonical == root {
+                            &empty
+                        } else {
+                            certificate
+                        },
                     })
                     .collect::<Vec<_>>();
                 replays.extend(
@@ -1322,8 +1328,8 @@ impl Reference {
     }
 
     /// A realization uses the contracted frontier even though the shared view came from
-    /// the original operation. Match the same originals in order before using evidence
-    /// across these frontiers.
+    /// the original operation. Match surviving originals in order. A parent trimmed to the
+    /// root contributes no workspace bindings.
     fn contracted_workspace_parents(
         world: &World,
         op: &op_store::Operation,
@@ -1333,6 +1339,7 @@ impl Reference {
         if parents.len() != source_parents.len() || parents == source_parents {
             return None;
         }
+        let root = world.fx.hive.hub.store().canonical().root_operation_id();
         let original = |id| {
             world
                 .fx
@@ -1345,7 +1352,9 @@ impl Reference {
             .iter()
             .zip(source_parents)
             .all(|(parent, source)| {
-                parent == source || original(parent).is_some_and(|id| original(source) == Some(id))
+                parent == root
+                    || parent == source
+                    || original(parent).is_some_and(|id| original(source) == Some(id))
             })
             .then_some(parents)
     }

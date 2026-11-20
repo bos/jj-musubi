@@ -3,6 +3,7 @@
 //! The server owns only a `Worker` handle. This module owns stopping and joining the thread,
 //! locating its copy, retrying failed sessions, and reacting to repository and hub changes.
 
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs;
 use std::path::Path;
@@ -34,6 +35,7 @@ use tokio::sync::watch;
 
 use super::Suspended;
 use super::connections::Hubs;
+use super::snapshots;
 use super::status::SharedStatus;
 use super::status::Status;
 use super::status::now;
@@ -126,6 +128,10 @@ impl Worker {
     pub(super) fn status(&self) -> Status {
         self.status.snapshot()
     }
+
+    pub(super) fn snapshot_issues(&self) -> BTreeMap<String, String> {
+        self.status.snapshot_issues()
+    }
 }
 
 /// Serves one copy until told to stop: a single-threaded runtime, since jj-lib's
@@ -155,9 +161,12 @@ fn serve(
         let mut stop = stop;
         tokio::select! {
             () = serve_retrying(key, commands, status, progress, hubs) => {}
+            () = snapshots::serve(key, status) => {}
             () = stopped(&mut stop) => {}
         }
     });
+    // Dropping the runtime joins blocking work, including a snapshot already in flight.
+    // `Worker::stop` joins this thread before letting another worker take its place.
 }
 
 /// Waits until told to stop, or until nothing can tell it anything any more.

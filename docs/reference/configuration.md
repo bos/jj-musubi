@@ -55,6 +55,15 @@ jj config stays local, including `trunk()`, `immutable_heads()`, `git.private-co
 signing settings. Set protections on each copy that needs them; see
 [Configure each machine](../guides/working-across-machines.md#configure-each-machine).
 
+### Each workspace's
+
+The daemon resolves this setting separately for each local workspace. Set it with `--user`,
+`--repo` or `--workspace`. Changes take effect by the next periodic workspace scan.
+
+| Key | Effect |
+| --- | --- |
+| `musubi.auto-snapshot` | `true` records edits in the background for joined repos while the daemon is running. Defaults to `false`. See [Record saves automatically](../guides/working-across-machines.md#record-saves-automatically). |
+
 ## Environment variables
 
 | Variable | Effect |

@@ -44,10 +44,23 @@ pub fn load(workspace_root: &Path, repo_path: &Path) -> anyhow::Result<UserSetti
     load_with(workspace_root, repo_path, None)
 }
 
+/// Loads repo settings before selecting a workspace.
+pub(super) fn load_repo(repo_path: &Path) -> anyhow::Result<UserSettings> {
+    load_for(repo_path, None, None)
+}
+
 /// [`load`], with `overrides` above every other layer, as `jj --config` gives them.
 pub fn load_with(
     workspace_root: &Path,
     repo_path: &Path,
+    overrides: Option<ConfigLayer>,
+) -> anyhow::Result<UserSettings> {
+    load_for(repo_path, Some(workspace_root), overrides)
+}
+
+fn load_for(
+    repo_path: &Path,
+    workspace_root: Option<&Path>,
     overrides: Option<ConfigLayer>,
 ) -> anyhow::Result<UserSettings> {
     let ui = Ui::null();
@@ -58,9 +71,11 @@ pub fn load_with(
     env.reset_repo_path(repo_path);
     env.reload_repo_config(&ui, &mut raw)
         .map_err(|err| anyhow::anyhow!("loading repo config: {err:?}"))?;
-    env.reset_workspace_path(workspace_root);
-    env.reload_workspace_config(&ui, &mut raw)
-        .map_err(|err| anyhow::anyhow!("loading workspace config: {err:?}"))?;
+    if let Some(workspace_root) = workspace_root {
+        env.reset_workspace_path(workspace_root);
+        env.reload_workspace_config(&ui, &mut raw)
+            .map_err(|err| anyhow::anyhow!("loading workspace config: {err:?}"))?;
+    }
     let config = env.resolve_config(&raw).context("resolving config")?;
     UserSettings::from_config_and_home_dir(config, env.home_dir().map(ToOwned::to_owned))
         .context("reading settings")

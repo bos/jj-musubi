@@ -57,13 +57,40 @@ before continuing.
 
 ### Record saves automatically
 
-Edits sync after jj records them. To record each save, install
-[watchman](https://facebook.github.io/watchman/) and enable its jj trigger:
+Enable background snapshots on the machine doing the editing. Run this from a joined repo to
+enable them for its local workspaces, including ones you add later.
 
 ```sh
-jj config set --user fsmonitor.backend watchman
-jj config set --user fsmonitor.watchman.register-snapshot-trigger true
+jj config set --repo musubi.auto-snapshot true
 ```
+
+Use `--workspace` to set it for one workspace or `--user` for all joined repos on the machine.
+The daemon picks up config changes on its next periodic workspace scan. If you just replaced
+the `musubi` executable, run `musubi daemon restart` to use the updated daemon.
+
+The daemon checks for changes about five seconds after a filesystem notification. If jj has
+`fsmonitor.backend = "watchman"` set, those checks use Watchman to find changed files. It also
+scans the whole working copy every few minutes to catch missed notifications and changes to
+global ignore rules. It records an operation only when the working-copy tree changes, and can
+record edits while the hub is offline and send them when it reconnects.
+
+Background snapshots read checked-out files and leave them in place. They wait if the workspace
+is [stale](#when-another-machine-rewrites-your-working-copy), Git `HEAD` has moved, or a Git
+operation is in progress. jj's ignore rules and jj-musubi's
+[snapshot limits](snapshots.md) still apply. Keep secrets and scratch files ignored or outside
+the repo before enabling this setting.
+
+If edits aren't being recorded, check `musubi status` for a workspace warning. If Git moved
+`HEAD`, run `jj status` in that workspace after your Git operation finishes so jj can import
+the change. If jj has no location recorded for a workspace, run `jj status` in that workspace
+to record its edits explicitly.
+
+Musubi skips workspaces with jj's Watchman snapshot trigger enabled. To use musubi's background
+snapshots there, set `fsmonitor.watchman.register-snapshot-trigger` to `false` at the same scope
+and run `jj status` once in each affected workspace to unregister the trigger. Keep
+`fsmonitor.backend = "watchman"` to use Watchman for background and interactive snapshots.
+Use the same trigger setting in workspaces that share a Watchman project root, since Watchman
+stores triggers on that root.
 
 ## Coding agents
 
@@ -75,7 +102,9 @@ jj log -r 'working_copies()'   # what every agent on every machine is working on
 jj diff -r devbox/default@     # review one agent's change
 ```
 
-[Pick up an agent's work](#pick-up-on-another-machine) as you would another machine's.
+[Enable background snapshots](#record-saves-automatically) to pick up edits even if an agent
+never runs `jj`. [Pick up an agent's work](#pick-up-on-another-machine) as you would another
+machine's.
 
 Use `musubi status` to [check syncing](#see-what-other-machines-are-doing) before starting.
 Copies stay in the hive until removed. For a temporary devbox, use `musubi join --lease 6h`

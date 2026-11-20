@@ -19,6 +19,7 @@ mod login;
 mod open_files;
 mod repo;
 mod settings;
+mod snapshot;
 mod socket;
 mod ssh;
 mod status;

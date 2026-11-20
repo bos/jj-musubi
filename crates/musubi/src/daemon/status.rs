@@ -3,6 +3,7 @@
 //! The worker records changes through `SharedStatus`, which keeps the memory update and the
 //! best-effort file write under one lock. Foreground syncs use the same status format directly.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;
@@ -103,24 +104,49 @@ pub fn now() -> u64 {
 
 /// A worker's status, readable by the server without exposing its locking or file updates.
 #[derive(Clone)]
-pub(super) struct SharedStatus(Arc<Mutex<Status>>);
+pub(super) struct SharedStatus(Arc<Mutex<WorkerStatus>>);
+
+struct WorkerStatus {
+    sync: Status,
+    snapshot_issues: BTreeMap<String, String>,
+}
 
 impl SharedStatus {
     pub(super) fn new(status: Status) -> Self {
-        Self(Arc::new(Mutex::new(status)))
+        Self(Arc::new(Mutex::new(WorkerStatus {
+            sync: status,
+            snapshot_issues: BTreeMap::new(),
+        })))
     }
 
     pub(super) fn snapshot(&self) -> Status {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .sync
             .clone()
+    }
+
+    pub(super) fn snapshot_issues(&self) -> BTreeMap<String, String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot_issues
+            .clone()
+    }
+
+    pub(super) fn set_snapshot_issues(&self, issues: BTreeMap<String, String>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot_issues = issues;
     }
 
     pub(super) fn succeeded_since(&self, started: u64) -> bool {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .sync
             .last_success
             .is_some_and(|time| time >= started)
     }
@@ -129,15 +155,16 @@ impl SharedStatus {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .sync
             .publication_held
     }
 
     /// Records in memory and, if this is still the copy being served, in its status file.
     pub(super) fn record(&self, copy: Option<&Located>, change: impl FnOnce(&mut Status)) {
         let mut status = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        change(&mut status);
+        change(&mut status.sync);
         if let Some(located) = copy {
-            status.save(&located.repo_path);
+            status.sync.save(&located.repo_path);
         }
     }
 }

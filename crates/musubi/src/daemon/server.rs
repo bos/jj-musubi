@@ -92,6 +92,7 @@ impl Supervisor {
             .map(|(key, served)| RepoStatus {
                 key: key.clone(),
                 status: served.status(),
+                snapshot_issues: served.snapshot_issues(),
             })
             .collect();
         statuses.sort_by(|a, b| a.key.cmp(&b.key));

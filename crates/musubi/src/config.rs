@@ -7,7 +7,8 @@
 //!   the daemon serves, one entry each, and the hub this machine saved as its default. musubi
 //!   writes it; it is the source of truth: the daemon reads it when it starts, and commands
 //!   that change it tell a running daemon.
-//! - What the user sets lives in jj's user config, under `musubi.` (see [`Settings`]).
+//! - What the user sets lives in jj's config, under `musubi.` (see [`Settings`] and
+//!   [`auto_snapshot`]).
 
 use std::fs;
 use std::path::Path;
@@ -215,6 +216,14 @@ impl Settings {
             upgrade_command: get("musubi.upgrade-command")?,
         })
     }
+}
+
+/// Whether to record edits automatically in a workspace, using its effective jj config.
+pub(crate) fn auto_snapshot(settings: &jj_lib::settings::UserSettings) -> anyhow::Result<bool> {
+    Ok(settings
+        .get_bool("musubi.auto-snapshot")
+        .optional()?
+        .unwrap_or_default())
 }
 
 /// A hub's directory written from the home directory, as `~/musubi-hub`, made absolute. An

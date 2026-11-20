@@ -1,5 +1,5 @@
 # The full local check. AGENTS.md says when to run it.
-check: fmt-check lint oracle _test-ready docs deny machete typos fuzz-runner-test assurance-check
+check: fmt-check lint oracle _test-ready docs deny machete typos fuzz-runner-test assurance-check antithesis-driver
 
 # Build musubi: target/debug/musubi.
 dev:
@@ -51,6 +51,8 @@ fmt-check:
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+    # The Antithesis build (antithesis/README.md), which no other check compiles.
+    cargo clippy -p jj-musubi --features antithesis -- -D warnings
 
 # On macOS the tests' directories go on a RAM disk made for the run, unless
 # MUSUBI_KEEP_TEST_DIRS keeps them: jj syncs what it writes, and on the SSD the suite takes
@@ -132,6 +134,12 @@ alias web := website-docs
 
 website-docs:
     JJ_MUSUBI_SOURCE={{ quote(justfile_directory()) }} python3 ../website/scripts/sync-jj-musubi-docs.py
+
+# The Antithesis workload's driver, a workspace of its own (antithesis/README.md).
+antithesis-driver:
+    cargo fmt --check --manifest-path antithesis/musubi/driver/Cargo.toml
+    cargo clippy --locked --manifest-path antithesis/musubi/driver/Cargo.toml -- -D warnings
+    cargo deny --log-level error --manifest-path antithesis/musubi/driver/Cargo.toml check
 
 deny:
     cargo deny --log-level error check

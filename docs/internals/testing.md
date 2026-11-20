@@ -28,6 +28,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
 | Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets, and bounded hub pushes across storage failures and retries | Arithmetic under a second each; storage solver ~11 s on macOS arm64; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
+| Antithesis workload | `antithesis/` | Real daemons and a hub, over real ssh, under killed, paused and partitioned machines: work lost, machines that don't converge, crashes | Compute hours a run; opt-in |
 
 Costs are approximate measurements, mostly on 32 Linux cores; the Kani storage figure is from
 macOS arm64. Use them as a rough guide; performance work needs fresh measurements alongside
@@ -1489,6 +1490,18 @@ To keep the search effective:
   for checking that two runs of a case did the same;
 - the run ends by listing rules that never fired. An unreached rule is a search problem: give
   it a richer starting state or fix its precondition.
+
+## Antithesis
+
+The workload in `antithesis/` runs musubi as users do, in containers that
+[Antithesis](https://antithesis.com/) kills, pauses and partitions: a hub and three machines,
+each machine's daemon reaching the hub over ssh, and a driver at all three running jj and musubi
+commands. Once faults stop, every machine must serve its copy again and converge on one
+history, and every commit a command made must reach every machine. musubi's `antithesis`
+feature adds the SDK and assertions on paths only faults reach; `just lint` runs clippy on it,
+and `just antithesis-driver` checks the driver, a workspace of its own.
+[antithesis/README.md](../../antithesis/README.md) says how to build, run locally and launch
+it, and [antithesis/FINDINGS.md](../../antithesis/FINDINGS.md) what its runs found.
 
 ## Testing the tests
 

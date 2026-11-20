@@ -1,0 +1,5 @@
+[user]
+	name = Antithesis
+	email = antithesis@example.com
+[safe]
+	directory = *

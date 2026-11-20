@@ -1,0 +1,37 @@
+# The local loop's overrides (scripts/local-run.sh): musubi built for source coverage, its
+# profiles and SDK output on a volume, and the driver's eventually off.
+x-coverage: &coverage
+  image: musubi-node-coverage:latest
+  pull_policy: never
+  volumes:
+    - coverage:/coverage
+
+services:
+  hub:
+    <<: *coverage
+    environment:
+      LLVM_PROFILE_FILE: /coverage/hub/%c%m.profraw
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /coverage/hub/sdk.jsonl
+  m1:
+    <<: *coverage
+    environment:
+      LLVM_PROFILE_FILE: /coverage/m1/%c%m.profraw
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /coverage/m1/sdk.jsonl
+  m2:
+    <<: *coverage
+    environment:
+      LLVM_PROFILE_FILE: /coverage/m2/%c%m.profraw
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /coverage/m2/sdk.jsonl
+  m3:
+    <<: *coverage
+    environment:
+      LLVM_PROFILE_FILE: /coverage/m3/%c%m.profraw
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /coverage/m3/sdk.jsonl
+  driver:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+      DRIVER_EVENTUALLY: "off"
+      DRIVER_EVENTUALLY_AFTER: ${DRIVER_EVENTUALLY_AFTER:-}
+
+volumes:
+  coverage:

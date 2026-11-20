@@ -1,0 +1,55 @@
+# The musubi workload (antithesis/README.md): a hub, three machines syncing a jj repository
+# through it over ssh, and the driver, which works on the machines as their user.
+x-node: &node
+  image: musubi-node:latest
+  platform: linux/amd64
+  pull_policy: never
+  # Not PID 1, as Antithesis recommends (docs/best_practices/docker_best_practices): tini runs
+  # first and passes signals on, so musubi gets SIGTERM, and a crash can leave a core dump.
+  init: true
+
+services:
+  hub:
+    <<: *node
+    container_name: hub
+    hostname: hub
+    command: ["hub"]
+    build:
+      context: ../../..
+      dockerfile: antithesis/musubi/image/Dockerfile
+      target: node
+
+  m1:
+    <<: *node
+    container_name: m1
+    hostname: m1
+    command: ["machine"]
+
+  m2:
+    <<: *node
+    container_name: m2
+    hostname: m2
+    command: ["machine"]
+
+  m3:
+    <<: *node
+    container_name: m3
+    hostname: m3
+    command: ["machine"]
+
+  driver:
+    image: musubi-driver:latest
+    platform: linux/amd64
+    pull_policy: never
+    # The driver installs no SIGTERM handler, so as PID 1 it would ignore one.
+    init: true
+    container_name: driver
+    hostname: driver
+    command: ["driver"]
+    build:
+      context: ../../..
+      dockerfile: antithesis/musubi/image/Dockerfile
+      target: driver
+    environment:
+      HUB: hub
+      MACHINES: m1,m2,m3

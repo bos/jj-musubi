@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+antithesis-instrumentation = { workspace = true, optional = true }
+antithesis_sdk = { workspace = true, optional = true }
 async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
@@ -47,6 +49,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 whoami.workspace = true
+
+[features]
+# The Antithesis build (antithesis/README.md): coverage instrumentation, the SDK, and its
+# assertions here, in musubi-jj and in musubi-sync.
+antithesis = [
+    "dep:antithesis-instrumentation",
+    "dep:antithesis_sdk",
+    "musubi-jj/antithesis",
+    "musubi-sync/antithesis",
+]
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

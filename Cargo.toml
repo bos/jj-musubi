@@ -20,6 +20,9 @@ musubi-testutil = { path = "crates/musubi-testutil" }
 musubi-transport = { path = "crates/musubi-transport", version = "=0.47.1" }
 
 anyhow = "1"
+# Only for the Antithesis build (antithesis/README.md), behind each crate's `antithesis` feature.
+antithesis-instrumentation = "0.1.1"
+antithesis_sdk = { version = "0.4.0", default-features = false, features = ["full"] }
 async-trait = "0.1.89"
 blake3 = "1"
 bytes = "1"

@@ -94,7 +94,11 @@ impl NodeDriver {
                         self.deliver(request).await?;
                     }
                 }
-                Step::Merged => tracing::debug!("merged the op heads"),
+                Step::Merged => {
+                    #[cfg(feature = "antithesis")]
+                    antithesis_sdk::assert_reachable!("a machine merges its work with the hive's");
+                    tracing::debug!("merged the op heads");
+                }
                 Step::Realized(op) => {
                     self.tally.realized += 1;
                     self.remote.progress().set(Activity::Applying {
@@ -146,12 +150,27 @@ impl NodeDriver {
         };
         self.remote.progress().set(Activity::Asking);
         let reply = self.remote.call(request).await?;
-        if self.core.hub_went_back(&reply) {
+        let went_back = self.core.hub_went_back(&reply);
+        if went_back {
             let Head { seq, head } = self.core.known();
             tracing::warn!(
                 "the hub has gone back from {seq} ({}), having lost heads it accepted: \
                  starting over from where it is",
                 short(head)
+            );
+        }
+        #[cfg(feature = "antithesis")]
+        if pushing > 0
+            && !went_back
+            && let Reply::Head {
+                kind: HeadKind::Rejected,
+                seq,
+                ..
+            } = &reply
+        {
+            antithesis_sdk::assert_reachable!(
+                "the hub rejects a push because another came first",
+                &antithesis_sdk::serde_json::json!({ "seq": seq, "ops": pushing })
             );
         }
         let incomplete = matches!(

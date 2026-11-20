@@ -293,6 +293,10 @@ impl HubService {
             self.uploads.remove(&blob);
         }
         tracing::debug!("answered a repeated request as before");
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_reachable!(
+            "the hub answers a repeated request with the reply it gave before"
+        );
         // The head moved once, whatever the replies to the push.
         self.outcome = match answered.outcome {
             Outcome::Accepted => Outcome::Other,

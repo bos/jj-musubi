@@ -328,6 +328,11 @@ impl RemoteHub {
                 Some(Patient::Resent) => {
                     let resends = patience.resends;
                     tracing::debug!("no reply in time; asking again ({resends} of {RESENDS})");
+                    #[cfg(feature = "antithesis")]
+                    antithesis_sdk::assert_reachable!(
+                        "a machine asks the hub again after no reply came in time",
+                        &antithesis_sdk::serde_json::json!({ "resends": resends })
+                    );
                 }
                 None => break result?,
             }

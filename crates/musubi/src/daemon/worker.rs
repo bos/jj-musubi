@@ -376,6 +376,10 @@ struct Session<'a> {
     /// that worked.
     woke_early: bool,
     retry: bool,
+    /// Whether a sync has failed since the last that worked, for the Antithesis build's
+    /// assertion that a daemon recovers from one.
+    #[cfg(feature = "antithesis")]
+    failed: bool,
     backoff: Backoff,
     poll: tokio::time::Interval,
     /// Where jj records the copy's path, which it rewrites when it finds the copy moved. A
@@ -434,6 +438,8 @@ impl<'a> Session<'a> {
             unreachable: None,
             woke_early: false,
             retry: false,
+            #[cfg(feature = "antithesis")]
+            failed: false,
             backoff: Backoff::new(Duration::from_millis(500), MAX_BACKOFF),
             poll,
             moves,
@@ -629,6 +635,10 @@ impl<'a> Session<'a> {
         answer_all(self.waiting, &reply);
         match result {
             Ok(_) => {
+                #[cfg(feature = "antithesis")]
+                if std::mem::take(&mut self.failed) {
+                    antithesis_sdk::assert_reachable!("a daemon syncs again after a failed sync");
+                }
                 self.backoff.reset();
                 self.retry = false;
                 self.woke_early = false;
@@ -658,6 +668,15 @@ impl<'a> Session<'a> {
     /// Starts over after a sync failed, reopened, and waits out the backoff before retrying.
     async fn after_failure(&mut self, err: &anyhow::Error) -> anyhow::Result<Flow<()>> {
         tracing::warn!("{err:#}");
+        #[cfg(feature = "antithesis")]
+        {
+            self.failed = true;
+        }
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_reachable!(
+            "a daemon's sync fails",
+            &serde_json::json!({ "error": format!("{err:#}") })
+        );
         // What failed may be that the copy is no longer there, as when it was moved or
         // deleted during the sync: then open nothing there, which would write.
         if !copy::holds(&self.entry, &self.entry.path) {

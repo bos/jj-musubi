@@ -168,6 +168,11 @@ impl State {
         let backoff = Duration::from_secs(1) * 2u32.saturating_pow(self.failures - 1);
         self.retry_at = Some(Instant::now() + backoff.min(MAX_BACKOFF));
         tracing::warn!("{problem}");
+        #[cfg(feature = "antithesis")]
+        antithesis_sdk::assert_reachable!(
+            "a machine's ssh connection to the hub fails",
+            &serde_json::json!({ "problem": problem, "failures": self.failures })
+        );
         self.problem = Some(problem);
     }
 }

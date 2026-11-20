@@ -1172,14 +1172,56 @@ fn contracted_merge_replays_the_forgotten_receivers_workspace() {
     let mut reference = Reference::build(&world);
     reference
         .workspace_certificates
-        .insert(head, WorkspaceCertificate::default());
+        .insert(head.clone(), WorkspaceCertificate::default());
     let carried = reference.workspace_certificate(&world, &contracted_rewrite);
     assert_eq!(carried.binding(&key), Some(&successor));
     assert!(carried.has_merge_birth(&key));
     assert!(carried.is_dormant(&key));
 
+    // Trim the forget's entire line this time. The receiver can still replay the
+    // surviving parent's private binding against the native root.
+    let node = world.fx.hive.members[1].adapter.repo();
+    let store = node.canonical_store();
+    let forgotten = CanonicalOp::parents_of(&original)
+        .into_iter()
+        .find(|parent| {
+            !store
+                .read_operation_view(parent)
+                .unwrap()
+                .wc_commit_ids
+                .contains_key(WorkspaceName::new(&key))
+        })
+        .unwrap();
+    let dropped = store.ancestors_until(&[forgotten], |_| false).unwrap();
+    let mut contraction = Contraction::new(store, dropped).unwrap();
+    let [root_contracted] = contraction
+        .images(store, &head)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let parents = store.parents(&root_contracted).unwrap();
+    assert_eq!(parents.len(), 2);
+    assert!(parents.contains(store.root_operation_id()));
+    let mut reference = Reference::build(&world);
+    assert!(
+        !reference
+            .workspace_certificate(&world, &root_contracted)
+            .has_merge_birth(&key)
+    );
+    world.fx.node(1).realize(&root_contracted).unwrap();
+    let mut reference = Reference::build(&world);
+    let certificate = reference.workspace_certificate(&world, &root_contracted);
+    assert_eq!(certificate.binding(&key), Some(target));
+    assert!(certificate.has_merge_birth(&key));
+    assert!(certificate.is_dormant(&key));
+
     world.evidence.workspace_births.remove(&key);
     let mut reference = Reference::build(&world);
+    assert!(
+        !reference
+            .workspace_certificate(&world, &root_contracted)
+            .has_merge_birth(&key)
+    );
     assert!(
         !reference
             .workspace_certificate(&world, &contracted)

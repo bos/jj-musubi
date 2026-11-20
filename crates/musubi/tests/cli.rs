@@ -559,6 +559,7 @@ fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
     let mut logs = Logs::default();
     let _filters = snapshot_filters(&env);
     let dir = env.root().join("my-hub");
+    machine.jj(&["config", "set", "--user", "musubi.hub-dir", "~/other-hub"]);
     fs::create_dir(&dir).unwrap();
     let alias = env.root().join("hub-link");
     std::os::unix::fs::symlink(&dir, &alias).unwrap();
@@ -619,8 +620,15 @@ fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
         "musubi.hub",
         long_alias.to_str().unwrap(),
     ]);
+    machine.jj(&[
+        "config",
+        "set",
+        "--user",
+        "musubi.hub-dir",
+        dir.to_str().unwrap(),
+    ]);
     let mut command = machine.program(musubi());
-    command.arg("hub").current_dir(&dir);
+    command.arg("hub");
     let mut short = Hub::spawn(&env, &mut logs, "short", command, dir.clone());
     insta::assert_snapshot!(short.printed.last().unwrap(), @"On this machine, use --hub $ROOT/my-hub.");
     let err = musubi_fails(
@@ -1832,10 +1840,18 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
     let mut uninstall = hub(&["uninstall"]);
     uninstall.stdout(Stdio::null()).stderr(Stdio::null());
     let _uninstall = Daemons(vec![uninstall]);
-    let installed = env.root().join("installed-hub");
+    repo.jj(&[
+        "config",
+        "set",
+        "--user",
+        "musubi.hub-dir",
+        "~/installed-hub",
+    ]);
+    let installed = home.join("installed-hub");
     let installed = installed.to_str().unwrap();
-    let (ok, out, hint) = try_run(&logs, &env, hub(&["install", "--dir", installed]));
+    let (ok, out, hint) = try_run(&logs, &env, hub(&["install"]));
     assert!(ok, "{hint}");
+    assert!(Path::new(installed).join("hub.toml").is_file());
     let first = out.lines().next().unwrap_or_default();
     assert!(
         first.starts_with("The hub serves /")
@@ -1843,7 +1859,7 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
         "{out}"
     );
     if cfg!(target_os = "linux") {
-        insta::assert_snapshot!(hint, @"Hint: To start it at boot and keep it running after logout: `musubi hub install --at-boot --dir $ROOT/installed-hub`");
+        insta::assert_snapshot!(hint, @"Hint: To start it at boot and keep it running after logout: `musubi hub install --at-boot --dir $ROOT/home/installed-hub`");
     }
     let pid = fs::read_to_string(home.join("hub-service.pid")).unwrap();
     let calls = fs::read_to_string(home.join("service-calls")).unwrap();
@@ -1893,9 +1909,9 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
         );
         let first = format!("{prefix}{suffix}");
         if cfg!(target_os = "macos") {
-            insta::assert_snapshot!(first, @"The hub serves $ROOT/installed-hub, and runs at boot from now on, through a launchd daemon, /Library/LaunchDaemons/io.github.bos.musubi.hub.[uid].plist.");
+            insta::assert_snapshot!(first, @"The hub serves $ROOT/home/installed-hub, and runs at boot from now on, through a launchd daemon, /Library/LaunchDaemons/io.github.bos.musubi.hub.[uid].plist.");
         } else {
-            insta::assert_snapshot!(first, @"The hub serves $ROOT/installed-hub, and runs at boot from now on, through a systemd system unit, /etc/systemd/system/musubi-hub-[uid].service.");
+            insta::assert_snapshot!(first, @"The hub serves $ROOT/home/installed-hub, and runs at boot from now on, through a systemd system unit, /etc/systemd/system/musubi-hub-[uid].service.");
         }
         let calls = fs::read_to_string(home.join("service-calls")).unwrap();
         assert!(!calls.contains("enable-linger"), "{calls}");

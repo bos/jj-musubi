@@ -218,6 +218,22 @@ impl Settings {
     }
 }
 
+/// The hub data directory from jj's machine-level config.
+pub fn hub_directory() -> anyhow::Result<Option<PathBuf>> {
+    let Some(value) = crate::settings::user_config()?
+        .get::<String>("musubi.hub-dir")
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(expand_home(&value));
+    anyhow::ensure!(
+        path.is_absolute(),
+        "musubi.hub-dir must be an absolute path or start with ~/"
+    );
+    Ok(Some(path))
+}
+
 /// Whether to record edits automatically in a workspace, using its effective jj config.
 pub(crate) fn auto_snapshot(settings: &jj_lib::settings::UserSettings) -> anyhow::Result<bool> {
     Ok(settings

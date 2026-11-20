@@ -411,9 +411,10 @@ no responder, a hub's refusal, and a caller's deadline, with Tokio's clock pause
 local hubs fail without waiting, both before a hub directory is made and after its server
 stops. `a_hub_restarts_in_its_directory_and_keeps_its_advertised_name`, Unix only, starts a
 real hub, checks both directory and per-user lock refusals, stops it with SIGTERM, checks
-socket cleanup, then restarts it from its directory with its saved advertised name. It also
-checks that a default symlink path too long for a Unix socket leaves usable explicit `--hub`
-instructions. The clean stop lets an instrumented hub flush its coverage profile.
+socket cleanup, then restarts it with its saved advertised name. `--dir` and a current directory
+that already contains a hub take precedence over `musubi.hub-dir`, which selects the directory
+on the final restart. A default symlink path too long for a Unix socket leaves usable explicit
+`--hub` instructions. The clean stop lets an instrumented hub flush its coverage profile.
 
 `musubi/tests/cli.rs` runs the binary as a user would: `musubi hub`; `musubi create` starting
 a hive and `musubi join` matching it, over the hub's socket and over a stand-in for ssh whose
@@ -570,9 +571,10 @@ manager would.
 `daemon_install_and_uninstall_leave_the_daemon_as_they_say` checks that a daemon install the
 service manager refuses leaves the daemon running and nothing installed, and, first, that the
 daemon starts under a umask that lets the group write.
-`a_refused_hub_install_leaves_the_installed_hub_running` checks that installing a hub for a
-directory another hub serves refuses before it stops the installed one, that switching startup
-modes replaces the service, and that another state directory cannot replace its boot service.
+`a_refused_hub_install_leaves_the_installed_hub_running` installs a hub using `musubi.hub-dir`
+with `~/`. It checks that installing a hub for a directory another hub serves refuses before it
+stops the installed one, that switching startup modes replaces the service, and that another
+state directory cannot replace its boot service.
 `one_daemon_serves_a_machine_wherever_it_listens`, without a service manager, checks the
 daemon's socket: a setting's `~/` and refusal of relative paths, commands finding the daemon
 where it listens, the refusal of a second daemon on another socket, and stopping and listening

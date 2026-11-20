@@ -28,6 +28,7 @@ with `--user`.
 | Key | Effect |
 | --- | --- |
 | `musubi.hub` | The hub to use without `--hub`, overriding the saved default: the first hub used, or the local hub's directory. Takes an ssh host name or, on the hub's machine, its directory (which may start with `~/`). That machine's own name or `localhost` reaches the hub served by `musubi hub` without `--dir`, without ssh. |
+| `musubi.hub-dir` | The data directory for `musubi hub` and `musubi hub install` on the hub's machine. Takes an absolute path or one starting with `~/`. `--dir` takes precedence, followed by the current directory if it already contains a hub, then this setting, then `~/musubi-hub`. |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | Override the daemon's control socket with an absolute path or one starting with `~/`. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed` (default): share one connection per hub across repos, adding a connection for each transfer of 16 MiB or more until it finishes. `one`: use one connection per hub even for large transfers, useful when each ssh connection is costly or asks you to log in. |
@@ -36,6 +37,11 @@ with `--user`.
 
 The daemon reads `musubi.daemon.*` when it starts, so run `musubi daemon restart` after
 changing them.
+
+To apply `musubi.hub-dir` to an installed hub, run `musubi hub install` again from outside
+the old hub directory. Keep `--at-boot` if the service starts at boot. Copies that connect
+using the old directory need that path to stay reachable, or need to
+[join at the new address](../guides/manage.md#replace-or-move-a-hub).
 
 ### Each repo's
 

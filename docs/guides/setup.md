@@ -83,7 +83,7 @@ The hub will keep running until you stop it. Leave this terminal open for now. O
 satisfied that you want to continue using jj-musubi, you can [manage it through a
 service](#keep-the-hub-running).
 
-When you first start a hub, it creates `~/musubi-hub` for its data, and prints what to run
+When you first start a hub, it creates `~/musubi-hub` by default and prints what to run
 elsewhere:
 
 ```text
@@ -95,7 +95,13 @@ Other machines reach this hub over ssh: use the name they ssh to this machine by
 On this machine, leave out --hub.
 ```
 
-Start the hub with `--dir` to point at a different hub directory.
+To choose a different data directory for the default hub, set
+[`musubi.hub-dir`](../reference/configuration.md#this-machines) on the hub's machine before
+starting the hub:
+
+```sh
+jj config set --user musubi.hub-dir '~/data/musubi-hub'
+```
 
 ## Share a repo
 

@@ -25,7 +25,6 @@ use jj_lib::backend::CommitId;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitSubprocessOptions;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo::RepoLoader;
 use jj_lib::settings::UserSettings;
 use jj_lib::store_factories::StoreLoadError;
 use pollster::FutureExt as _;
@@ -199,8 +198,7 @@ pub fn collect(
     settings: &UserSettings,
     keep_newer: SystemTime,
 ) -> Result<bool, GcError> {
-    let loader =
-        RepoLoader::init_from_file_system(settings, repo_path, &default_backend_factories())?;
+    let loader = default_backend_factories().load_repo(settings, repo_path)?;
     let heads = loader.op_heads_store().get_op_heads().block_on()?;
     let [head] = heads.as_slice() else {
         return Ok(false);

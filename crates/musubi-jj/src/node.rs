@@ -256,8 +256,7 @@ impl NodeRepo {
         settings: &UserSettings,
         machine: Machine,
     ) -> Result<Self, NodeError> {
-        let loader =
-            RepoLoader::init_from_file_system(settings, repo_path, &default_backend_factories())?;
+        let loader = default_backend_factories().load_repo(settings, repo_path)?;
         if loader.op_store().name() != SimpleOpStore::NAME {
             return Err(NodeError::UnsupportedOpStore(
                 loader.op_store().name().to_owned(),
@@ -392,11 +391,7 @@ impl NodeRepo {
     /// least one more.
     pub fn reload(&mut self) -> Result<(), NodeError> {
         let settings = self.loader.settings().clone();
-        self.loader = RepoLoader::init_from_file_system(
-            &settings,
-            &self.repo_path,
-            &default_backend_factories(),
-        )?;
+        self.loader = default_backend_factories().load_repo(&settings, &self.repo_path)?;
         Ok(())
     }
 

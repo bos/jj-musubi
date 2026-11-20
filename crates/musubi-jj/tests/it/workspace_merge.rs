@@ -11,7 +11,6 @@ use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo::RepoLoader;
 use musubi_jj::workspaces::merge_working_copy;
 use musubi_testutil::TestEnv;
 use pollster::FutureExt as _;
@@ -34,12 +33,9 @@ fn workspace_merge_matches_jj() {
             CommitId::try_from_hex(hex.trim()).unwrap()
         })
         .into();
-    let loader = RepoLoader::init_from_file_system(
-        &repo.settings(),
-        &repo.repo_path(),
-        &default_backend_factories(),
-    )
-    .unwrap();
+    let loader = default_backend_factories()
+        .load_repo(&repo.settings(), &repo.repo_path())
+        .unwrap();
     let name = WorkspaceNameBuf::from("w");
     let set = |from: &Arc<ReadonlyRepo>, value: Option<&CommitId>, side: &str| {
         let mut tx = from.start_transaction();

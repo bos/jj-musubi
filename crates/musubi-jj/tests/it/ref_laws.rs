@@ -15,7 +15,6 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::refs::merge_ref_targets;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo::RepoLoader;
 use musubi_testutil::TestEnv;
 use pollster::FutureExt as _;
 
@@ -25,11 +24,7 @@ fn merge(a: &RefTarget, b: &RefTarget, c: &RefTarget) -> RefTarget {
     thread_local!(static REPO: (TestEnv, std::sync::Arc<ReadonlyRepo>) = {
         let env = TestEnv::new();
         let repo = env.init_repo("alpha");
-        let loader = RepoLoader::init_from_file_system(
-            &repo.settings(),
-            &repo.repo_path(),
-            &default_backend_factories(),
-        )
+        let loader = default_backend_factories().load_repo(&repo.settings(), &repo.repo_path())
         .unwrap();
         let loaded = loader.load_at_head(None).block_on().unwrap();
         (env, loaded)

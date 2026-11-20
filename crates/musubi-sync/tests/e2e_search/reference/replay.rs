@@ -22,7 +22,6 @@ use jj_lib::op_store::View;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::ReadonlyRepo;
-use jj_lib::repo::RepoLoader;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
@@ -932,21 +931,18 @@ impl Reference {
                 let dir = musubi_testutil::tempdir();
                 let root = dir.path().join("repo");
                 musubi_testutil::copy_tree(world.fx.repo(m).path(), &root);
-                let loader = RepoLoader::init_from_file_system(
-                    &settings(),
-                    &root.join(".jj/repo"),
-                    &default_backend_factories(),
-                )
-                .map_err(|error| {
-                    failures.stopped(
-                        kind,
-                        machine,
-                        RejectionCause::ReadFailed {
-                            input: "the isolated native repository",
-                            error: error.to_string(),
-                        },
-                    )
-                })?;
+                let loader = default_backend_factories()
+                    .load_repo(&settings(), &root.join(".jj/repo"))
+                    .map_err(|error| {
+                        failures.stopped(
+                            kind,
+                            machine,
+                            RejectionCause::ReadFailed {
+                                input: "the isolated native repository",
+                                error: error.to_string(),
+                            },
+                        )
+                    })?;
                 let inputs = native_parents
                     .iter()
                     .map(|p| block_on(loader.load_operation(p.id())))

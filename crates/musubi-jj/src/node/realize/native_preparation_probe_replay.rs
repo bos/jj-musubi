@@ -196,12 +196,9 @@ pub(super) fn replay(capture: &Capture, index: usize) -> Value {
     };
     let settings = fresh_settings();
     let control_settings = fresh_settings();
-    let base = RepoLoader::init_from_file_system(
-        &settings,
-        &repo.repo_path(),
-        &default_backend_factories(),
-    )
-    .unwrap();
+    let base = default_backend_factories()
+        .load_repo(&settings, &repo.repo_path())
+        .unwrap();
     let writes = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(RecordingStore {
         inner: base.op_store().clone(),

@@ -187,9 +187,9 @@ impl Reference {
         for source in sources.values() {
             musubi_testutil::copy_tree(source, &extra);
         }
-        let loader =
-            RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
-                .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&settings, &repo_path)
+            .unwrap();
 
         // The hub's history, parents first.
         let store = world.fx.hive.hub.store();
@@ -2114,12 +2114,9 @@ fn a_native_serial_merge_can_repeat_a_rebase_after_abandon() {
     );
     let second = visible.iter().find(|id| **id != first).unwrap().clone();
 
-    let loader = RepoLoader::init_from_file_system(
-        &repo.settings(),
-        &repo.repo_path(),
-        &default_backend_factories(),
-    )
-    .unwrap();
+    let loader = default_backend_factories()
+        .load_repo(&repo.settings(), &repo.repo_path())
+        .unwrap();
     let load = |id: &str| {
         block_on(loader.load_operation(&OperationId::try_from_hex(id).unwrap())).unwrap()
     };

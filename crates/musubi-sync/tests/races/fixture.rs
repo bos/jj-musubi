@@ -12,7 +12,6 @@ use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo::RepoLoader;
 use jj_lib::revset::RevsetExpression;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
@@ -295,12 +294,9 @@ impl Fixture {
     /// snapshots nothing and imports nothing from git.
     pub fn load(&self, index: usize) -> Arc<ReadonlyRepo> {
         let repo = self.repo(index);
-        let loader = RepoLoader::init_from_file_system(
-            &repo.settings(),
-            &repo.repo_path(),
-            &default_backend_factories(),
-        )
-        .unwrap();
+        let loader = default_backend_factories()
+            .load_repo(&repo.settings(), &repo.repo_path())
+            .unwrap();
         block_on(loader.load_at_head(None)).unwrap()
     }
 

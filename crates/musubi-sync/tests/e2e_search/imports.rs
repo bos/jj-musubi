@@ -697,12 +697,9 @@ impl Log {
             let dir = musubi_testutil::tempdir();
             let root = dir.path().join("repo");
             musubi_testutil::copy_tree(&self.source_root, &root);
-            let loader = RepoLoader::init_from_file_system(
-                &crate::reference::settings(),
-                &root.join(".jj/repo"),
-                &default_backend_factories(),
-            )
-            .map_err(|err| format!("opening the native HEAD reference: {err}"))?;
+            let loader = default_backend_factories()
+                .load_repo(&crate::reference::settings(), &root.join(".jj/repo"))
+                .map_err(|err| format!("opening the native HEAD reference: {err}"))?;
             self.native_replay = Some((dir, loader));
         }
         Ok(&self.native_replay.as_ref().unwrap().1)

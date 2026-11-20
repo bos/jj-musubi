@@ -273,12 +273,9 @@ fn native_inflight_transaction_also_restores_abandoned_ancestry() {
     repo.jj(&["bookmark", "create", "parent", "-r", "@"]);
     let abandoned = repo.jj(&["op", "log", "--no-graph", "-n", "1", "-T", "id"]);
     repo.jj(&["bookmark", "create", "leaf", "-r", "@"]);
-    let loader = RepoLoader::init_from_file_system(
-        &repo.settings(),
-        &repo.repo_path(),
-        &default_backend_factories(),
-    )
-    .unwrap();
+    let loader = default_backend_factories()
+        .load_repo(&repo.settings(), &repo.repo_path())
+        .unwrap();
     let loaded = loader.load_at_head(None).block_on().unwrap();
     let old_head = loaded.op_id().clone();
     let mut tx = loaded.start_transaction();

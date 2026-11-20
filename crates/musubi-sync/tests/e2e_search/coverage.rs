@@ -542,6 +542,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_jj_command_in_flight_during_the_rewrite",
         Some(&["op_abandon", "at_op"]),
     ),
+    // The search runs native abandon to completion before the next daemon step.
+    ("abandon_put_back_survives_the_native_head_removal", None),
     (
         "a_native_serial_merge_can_repeat_a_rebase_after_abandon",
         Some(&["op_abandon", "at_op"]),

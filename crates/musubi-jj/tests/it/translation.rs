@@ -805,6 +805,83 @@ fn coalesced_history_after_gc_is_refused_before_publishing_drops() {
 }
 
 #[test]
+fn abandon_put_back_survives_the_native_head_removal() {
+    use pollster::FutureExt as _;
+
+    for (unpublished, interrupt) in [(false, false), (true, false), (false, true), (true, true)] {
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = env.init_repo("beta");
+        let mut receiver = open(&b);
+        let mut sender = open(&a);
+        let joined = single_canonical_head(&mut receiver);
+        sync(&receiver, &mut sender, &joined);
+        a.jj(&["describe", "-m", "first"]);
+        a.jj(&["describe", "-m", "second"]);
+        let base = single_canonical_head(&mut sender);
+        sync(&sender, &mut receiver, &base);
+        let [realized]: [LocalOp; 1] = receiver.local_heads().unwrap().try_into().unwrap();
+        let store = receiver.loader().op_store().clone();
+        let parent = store
+            .read_operation(&realized.0)
+            .block_on()
+            .unwrap()
+            .parents[0]
+            .hex();
+        if unpublished {
+            b.jj(&["describe", "-m", "unpublished"]);
+        }
+        let [old]: [LocalOp; 1] = receiver.local_heads().unwrap().try_into().unwrap();
+        b.jj(&["--ignore-working-copy", "op", "abandon", &parent]);
+        let [rewritten]: [LocalOp; 1] = receiver.local_heads().unwrap().try_into().unwrap();
+        assert_ne!(rewritten, old);
+
+        // jj adds its new head before unlinking the old one. Restore the old file to
+        // reproduce exactly what the daemon sees between those two steps.
+        let old_file = b.repo_path().join("op_heads/heads").join(old.0.hex());
+        std::fs::write(&old_file, "").unwrap();
+        std::fs::write(b.repo_path().join("musubi/accepted_base"), base.0.hex()).unwrap();
+        if interrupt {
+            receiver.crash_publishing_taken_heads();
+            assert!(receiver.check_abandon().is_err());
+            assert_eq!(receiver.local_heads().unwrap().len(), 3);
+        } else {
+            assert!(receiver.check_abandon().unwrap());
+        }
+        match std::fs::remove_file(&old_file) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("{err}"),
+        }
+
+        drop(receiver);
+        std::fs::remove_file(b.repo_path().join("musubi/translation")).unwrap();
+        let mut receiver = open(&b);
+        if interrupt {
+            assert!(receiver.check_abandon().unwrap());
+        }
+        let heads = receiver.local_heads().unwrap();
+        assert_eq!(heads.len(), 1, "jj's delayed unlink must leave a head");
+        assert_ne!(heads[0], rewritten, "the daemon put the operation back");
+        assert!(!receiver.check_abandon().unwrap());
+        assert_eq!(
+            store
+                .read_operation(&heads[0].0)
+                .block_on()
+                .unwrap()
+                .view_id,
+            store.read_operation(&old.0).block_on().unwrap().view_id
+        );
+        let restored = receiver.canonicalize(&heads[0]).unwrap();
+        assert_eq!(restored, receiver.canonicalize(&old).unwrap());
+        if !unpublished {
+            assert_eq!(restored, base);
+        }
+        assert!(receiver.pending_drops().is_empty());
+    }
+}
+
+#[test]
 fn a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss() {
     use musubi_jj::records::HubOp;
 

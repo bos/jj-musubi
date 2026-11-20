@@ -24,6 +24,7 @@ use crate::op_id::CanonicalOp;
 
 /// What jj records of the command that made an operation, as one string.
 const ARGS: &str = "args";
+const RECONCILED_FROM: &str = "musubi.reconciled-from";
 
 /// A view of operation attributes: an operation's `metadata.attributes`, shared or mutable, or
 /// the attributes a transaction will set.
@@ -109,6 +110,18 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
 
     pub fn set_canonical(&mut self, id: &CanonicalOp) {
         self.set(CANONICAL_ATTRIBUTE, id.0.hex());
+    }
+
+    /// Distinguishes a restored local realization from the head jj may still be removing.
+    pub fn set_reconciled_from(&mut self, source: &OperationId, replaced: &OperationId) {
+        self.set(
+            RECONCILED_FROM,
+            format!("{} {}", source.hex(), replaced.hex()),
+        );
+    }
+
+    pub fn remove_reconciled_from(&mut self) {
+        self.0.borrow_mut().remove(RECONCILED_FROM);
     }
 
     /// Marks step `step` of the checkpoint of the cleanup reviewed as `token`.

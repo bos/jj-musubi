@@ -438,12 +438,14 @@ impl Joins {
 
 /// What identifies an operation apart from its parents: its view, metadata, and the
 /// rewrites it records. `jj op abandon` changes only the parents of the operations it
-/// rewrites.
+/// rewrites. The local marker used to keep a restored op head distinct preserves this
+/// identity too.
 pub(super) fn fingerprint(op: &StoreOperation) -> String {
-    let without_parents = StoreOperation {
+    let mut without_parents = StoreOperation {
         parents: vec![],
         ..op.clone()
     };
+    OpAttrs(&mut without_parents.metadata.attributes).remove_reconciled_from();
     OperationId::new(blake2b_hash(&without_parents).to_vec()).hex()
 }
 

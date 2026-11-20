@@ -921,7 +921,9 @@ impl NodeRepo {
                 records.entry(root).or_default();
             }
         }
-        OpAttrs(&mut metadata.attributes).remove_private_workspaces();
+        let mut attributes = OpAttrs(&mut metadata.attributes);
+        attributes.remove_private_workspaces();
+        attributes.remove_reconciled_from();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&LocalOp(target))
             && self.canonical.is_ancestor(&canonical, &parents)?

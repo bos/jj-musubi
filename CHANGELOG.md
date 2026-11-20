@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
+  is putting rewritten history back.
+
 - Use the [jj-musubi Dev Container Feature](docs/guides/setup.md#use-musubi-in-a-dev-container)
   to install `musubi` and start its daemon in GitHub Codespaces or other dev containers.
 

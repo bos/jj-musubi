@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
+use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
@@ -245,6 +246,8 @@ impl NodeRepo {
         // Parents first: `ancestors_until` puts them so.
         let mut local_now: HashMap<CanonicalOp, LocalOp> = HashMap::new();
         let mut locals: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
+        let mut replaced_heads = HashMap::new();
+        let putting_back = contraction.dropped().is_empty() && !counterparts.is_empty();
         for c in &affected {
             let Some(template) = standing.get(c).cloned().or_else(|| self.local_of(c)) else {
                 continue;
@@ -280,7 +283,13 @@ impl NodeRepo {
                 // this rewrite after cache loss would mint an origin from its new parents.
                 // It also prevents jj's local content addressing from coalescing originals.
                 OpAttrs(&mut op.metadata.attributes).set_canonical(&new);
-                LocalOp(op_store.write_operation(&op).block_on()?)
+                self.write_local_rewrite(
+                    &mut op,
+                    &template,
+                    heads,
+                    putting_back,
+                    &mut replaced_heads,
+                )?
             } else {
                 template.clone()
             };
@@ -317,11 +326,64 @@ impl NodeRepo {
                 if let Some(context) = context {
                     OpAttrs(&mut op.metadata.attributes).set_namespace(context.to_owned());
                 }
-                LocalOp(op_store.write_operation(&op).block_on()?)
+                self.write_local_rewrite(&mut op, id, heads, putting_back, &mut replaced_heads)?
             };
             locals.insert(id.clone(), vec![rewrite]);
         }
+        if !replaced_heads.is_empty() {
+            for head in replaced_heads.keys() {
+                locals
+                    .entry(head.clone())
+                    .or_insert_with(|| vec![head.clone()]);
+            }
+            for images in locals.values_mut() {
+                for image in images {
+                    if let Some(replacement) = replaced_heads.get(image) {
+                        image.clone_from(replacement);
+                    }
+                }
+            }
+        }
         Ok(locals)
+    }
+
+    /// jj can still have an unlink pending for an old head, even if it has already
+    /// disappeared. Give restored heads fresh names when putting history back. Retire
+    /// any visible head whose body this would recreate, including a replacement added
+    /// before a restart.
+    fn write_local_rewrite(
+        &self,
+        op: &mut StoreOperation,
+        source: &LocalOp,
+        heads: &[LocalOp],
+        putting_back: bool,
+        replaced_heads: &mut HashMap<LocalOp, LocalOp>,
+    ) -> Result<LocalOp, NodeError> {
+        if !putting_back && heads.len() <= 1 {
+            return Ok(LocalOp(
+                self.loader.op_store().write_operation(op).block_on()?,
+            ));
+        }
+        let mut replaced = vec![];
+        let mut id = LocalOp(OperationId::new(blake2b_hash(op).to_vec()));
+        if id == *source {
+            return Ok(id);
+        }
+        if (putting_back && heads.contains(source)) || heads.contains(&id) {
+            loop {
+                OpAttrs(&mut op.metadata.attributes).set_reconciled_from(&source.0, &id.0);
+                if heads.contains(&id) {
+                    replaced.push(id);
+                }
+                id = LocalOp(OperationId::new(blake2b_hash(op).to_vec()));
+                if !heads.contains(&id) {
+                    break;
+                }
+            }
+        }
+        let rewrite = LocalOp(self.loader.op_store().write_operation(op).block_on()?);
+        replaced_heads.extend(replaced.into_iter().map(|old| (old, rewrite.clone())));
+        Ok(rewrite)
     }
 
     /// The local operation for `canonical`, a node-space operation: one just rewritten, or
@@ -483,7 +545,7 @@ impl NodeRepo {
 
     /// The rewrites `locals` makes, by the fingerprint of what each rewrites: its content but
     /// for its parents, which jj's own rewrite of an operation keeps. None for a fingerprint
-    /// that more than one operation has, or one that `locals` drops or splits.
+    /// with different rewrites, or one that `locals` drops or splits.
     fn rewrites_by_content(
         &self,
         locals: &HashMap<LocalOp, Vec<LocalOp>>,
@@ -501,7 +563,11 @@ impl NodeRepo {
             };
             by_content
                 .entry(fingerprint(&op))
-                .and_modify(|found| *found = None)
+                .and_modify(|found| {
+                    if *found != rewrite {
+                        *found = None;
+                    }
+                })
                 .or_insert(rewrite);
         }
         by_content

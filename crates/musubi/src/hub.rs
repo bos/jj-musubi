@@ -48,7 +48,7 @@ use crate::ui::Ui;
 /// What marks a directory as a hub's, and holds its settings.
 const HUB_FILE: &str = "hub.toml";
 
-/// The directory in the home directory that `musubi hub` uses without `--dir`.
+/// The fallback directory in the home directory.
 const DEFAULT_DIR: &str = "musubi-hub";
 
 /// The largest message the hub takes. Larger attachments move in chunks of about this size
@@ -80,8 +80,8 @@ pub struct ServeArgs {
     pub advertise: Option<String>,
 }
 
-/// The directory `musubi hub` serves: `dir`, or the current directory if it is a hub's, as
-/// where `musubi hub install` runs it, or `~/musubi-hub`.
+/// The directory to serve, in order of precedence: `dir`, the current directory if it is a
+/// hub's, `musubi.hub-dir`, and `~/musubi-hub`.
 fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(dir) = dir {
         return Ok(dir);
@@ -90,6 +90,9 @@ fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
         && cwd.join(HUB_FILE).exists()
     {
         return Ok(cwd);
+    }
+    if let Some(dir) = config::hub_directory()? {
+        return Ok(dir);
     }
     let home = etcetera::home_dir().context("no home directory; give the hub's with --dir")?;
     Ok(home.join(DEFAULT_DIR))

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Set `musubi.hub-dir` in jj's user config to choose the default hub's data directory on
+  the hub's machine. See [Configuration](docs/reference/configuration.md#this-machines).
+
 - `musubi join` and `musubi create` try fetching conflicted Git remote bookmarks after their
   first sync, with a 30-second limit per remote, then sync the result. Forward moves still
   come from either copy. A fresh fetch can resolve conflicts from rewritten upstream history

@@ -401,8 +401,8 @@ fn parse_lease(text: &str) -> Result<Duration, String> {
 /// Where a hub is, and what it tells other machines, for `hub` and `hub install`.
 #[derive(clap::Args)]
 pub struct HubArgs {
-    /// The hub's directory [default: the current directory if it is a hub's, or else
-    /// ~/musubi-hub].
+    /// The hub's directory [default: the current directory if it is a hub's, then
+    /// musubi.hub-dir in jj's config, then ~/musubi-hub].
     #[arg(short, long, value_hint = ValueHint::DirPath)]
     pub dir: Option<PathBuf>,
     /// The host name other machines ssh to this one by, for the commands it prints

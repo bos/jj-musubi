@@ -333,6 +333,8 @@ pub enum Command {
     /// during a sync apply to the following one; `musubi sync` waits for one with the new
     /// settings. Its own `musubi.daemon.*` settings need `musubi daemon restart`.
     ///
+    /// Set `musubi.auto-snapshot = true` in jj's config to record saved edits in the background.
+    ///
     /// When a hub runs a newer release of musubi, the daemon runs the command named by
     /// `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release.
     /// Once the command installs that release at the daemon's executable path, the daemon

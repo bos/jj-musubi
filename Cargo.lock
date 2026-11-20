@@ -258,6 +258,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cassowary"
@@ -1028,6 +1031,12 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "futures"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a471a38ef8ed83cd6e40aa59c1ffe17db6855c18e3604d9c4ed8c08ebc28678"
+
+[[package]]
+name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
@@ -1103,12 +1112,14 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures 0.1.31",
  "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
+ "libc",
  "memchr",
  "pin-project-lite",
  "slab",
@@ -2338,7 +2349,7 @@ dependencies = [
  "dunce",
  "erased-serde",
  "etcetera",
- "futures",
+ "futures 0.3.34",
  "gix",
  "globset",
  "indexmap",
@@ -2393,7 +2404,7 @@ dependencies = [
  "clru",
  "digest 0.11.3",
  "either",
- "futures",
+ "futures 0.3.34",
  "globset",
  "hashbrown 0.17.1",
  "indexmap",
@@ -2432,7 +2443,7 @@ dependencies = [
  "bstr",
  "digest 0.11.3",
  "either",
- "futures",
+ "futures 0.3.34",
  "itertools 0.15.0",
  "jj-core",
  "jj-local-util",
@@ -2481,7 +2492,7 @@ dependencies = [
  "async-trait",
  "blake2",
  "dunce",
- "futures",
+ "futures 0.3.34",
  "gix",
  "itertools 0.15.0",
  "jj-core",
@@ -2507,7 +2518,7 @@ dependencies = [
  "digest 0.11.3",
  "dunce",
  "either",
- "futures",
+ "futures 0.3.34",
  "gix",
  "gix-ignore",
  "globset",
@@ -2533,8 +2544,10 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "toml_edit",
  "tracing",
+ "watchman_client",
 ]
 
 [[package]]
@@ -2544,7 +2557,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1d32a882ff2453e9becbbca1dee041d8162240aaf020e11994a4ab88643c2e9"
 dependencies = [
  "blake2",
- "futures",
+ "futures 0.3.34",
  "itertools 0.15.0",
  "jj-core",
  "rand 0.10.3",
@@ -2568,10 +2581,12 @@ dependencies = [
  "clap_complete",
  "clap_complete_nushell",
  "etcetera",
- "futures",
+ "futures 0.3.34",
+ "gix",
  "insta",
  "interprocess",
  "jj-cli",
+ "jj-frontend",
  "jj-lib",
  "musubi-hub",
  "musubi-jj",
@@ -2912,7 +2927,7 @@ version = "0.47.1"
 dependencies = [
  "async-trait",
  "blake3",
- "futures",
+ "futures 0.3.34",
  "gix",
  "hegeltest",
  "jiff",
@@ -2936,7 +2951,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
- "futures",
+ "futures 0.3.34",
  "hegeltest",
  "jj-lib",
  "musubi-core",
@@ -3912,6 +3927,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bser"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a56b4bcc15e42e5b5ae16c6f75582bef80d36c6ffe2c03b1b5317754b38f8717"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "bytes",
+ "serde",
+ "serde_bytes",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "serde_bytes"
 version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4444,6 +4473,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -4482,6 +4512,22 @@ dependencies = [
  "futures-core",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.6.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36943ee01a6d67977dd3f84a5a1d2efeb4ada3a1ae771cadfaa535d9d9fc6507"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-io",
+ "futures-sink",
+ "log",
+ "pin-project-lite",
+ "slab",
+ "tokio",
 ]
 
 [[package]]
@@ -4854,6 +4900,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "watchman_client"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88bc4c9bb443a7aae10d4fa7807bffc397805315e2305288c90c80e2f66cfb52"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures 0.3.34",
+ "maplit",
+ "serde",
+ "serde_bser",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "winapi",
 ]
 
 [[package]]

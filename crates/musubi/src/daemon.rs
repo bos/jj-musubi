@@ -1,4 +1,4 @@
-//! The per-user daemon, serving every registered copy without touching working copies.
+//! The per-user daemon, syncing every registered copy and optionally snapshotting its workspaces.
 //!
 //! `process` owns daemon discovery and process lifetime; `server` owns control requests and
 //! the worker registry. Each `worker` owns one copy's sync thread, while `status` owns its
@@ -8,6 +8,7 @@
 mod connections;
 mod process;
 mod server;
+mod snapshots;
 mod status;
 mod sync;
 mod worker;

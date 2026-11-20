@@ -73,9 +73,10 @@ a secret, every machine in the hive receives it.
 
 ## Working copies
 
-musubi never touches working copies. It writes only what jj itself keeps: the operation log; the
-commit store, and in git-backed repositories the git object database and refs. Sync never
-rewrites Git remote definitions or jj config ([Local configuration](#local-configuration)).
+Sync writes jj's operation log and commit store and, in Git-backed repos, the object database
+and refs. Opt-in background snapshots also read working-copy files and record snapshot state
+with jj-lib. Background snapshots leave checked-out files in place. Sync leaves Git remote
+definitions and jj config alone ([Local configuration](#local-configuration)).
 
 A remote operation can still rewrite this machine's working-copy commit, for example by rebasing
 its parent. jj then treats the working copy as stale, exactly as after a `jj rebase` run in

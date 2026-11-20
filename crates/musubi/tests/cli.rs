@@ -1915,6 +1915,8 @@ fn the_daemon_picks_up_new_repositories() {
     apply to the following one; `musubi sync` waits for one with the new settings. Its own
     `musubi.daemon.*` settings need `musubi daemon restart`.
 
+    Set `musubi.auto-snapshot = true` in jj's config to record saved edits in the background.
+
     When a hub runs a newer release of musubi, the daemon runs the command named by
     `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release. Once the command
     installs that release at the daemon's executable path, the daemon restarts from it. Keep the
@@ -2220,6 +2222,79 @@ fn two_machines_with(
     (alpha, beta)
 }
 
+/// Background snapshots record unprompted edits in every local workspace even while the hub
+/// is down. A later sync publishes those operations without any snapshotting jj command.
+#[test]
+fn background_snapshots_from_secondary_workspaces_reach_other_copies() {
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let mut hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    let secondary_path = env.root().join("secondary");
+    alpha.jj(&[
+        "workspace",
+        "add",
+        "--colocate",
+        secondary_path.to_str().unwrap(),
+    ]);
+    let moved_path = env.root().join("moved-secondary");
+    // Git knows where the worktree moved. jj still has its original path.
+    alpha.git(&[
+        "worktree",
+        "move",
+        secondary_path.to_str().unwrap(),
+        moved_path.to_str().unwrap(),
+    ]);
+    let secondary = alpha.another_copy(&moved_path);
+    alpha.jj(&["config", "set", "--repo", "musubi.auto-snapshot", "true"]);
+    hub.kill();
+
+    alpha.write_file("primary.txt", "primary edit\n");
+    secondary.write_file("secondary.txt", "secondary edit\n");
+    musubi_in(&env, &logs, &alpha, &["daemon", "start"]);
+
+    let has_file = |repo: &TestRepo, workspace: &str, file: &str, content: &str| {
+        let output = repo.jj_output(&[
+            "--ignore-working-copy",
+            "file",
+            "show",
+            "-r",
+            workspace,
+            file,
+        ]);
+        output.status.success() && output.stdout == content.as_bytes()
+    };
+    wait_for(
+        &logs,
+        "both local workspaces to snapshot while offline",
+        || {
+            has_file(&alpha, "alpha@", "primary.txt", "primary edit\n")
+                && has_file(&alpha, "secondary@", "secondary.txt", "secondary edit\n")
+        },
+    );
+
+    let _hub = Hub::start(&env, &mut logs);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    assert!(
+        has_file(&beta, "alpha/alpha@", "primary.txt", "primary edit\n"),
+        "{}",
+        logs.dump()
+    );
+    assert!(
+        has_file(
+            &beta,
+            "alpha/secondary@",
+            "secondary.txt",
+            "secondary edit\n"
+        ),
+        "{}",
+        logs.dump()
+    );
+}
+
 /// The daemon knows a repository by the workspace it was made in, but commands run in any
 /// other workspace of it act on the same repository: a create there names the hive after the
 /// repository, a join in each doesn't have the daemon serve it twice, `musubi status` there
@@ -2240,6 +2315,21 @@ fn commands_in_another_workspace_act_on_the_repository() {
     alpha.jj(&["commit", "-m", "start"]);
     let second = env.root().join("alpha-second");
     alpha.jj(&["workspace", "add", second.to_str().unwrap()]);
+    let secondary = alpha.another_copy(&second);
+    for (key, value) in [
+        ("musubi.auto-snapshot", "true"),
+        ("fsmonitor.watchman.register-snapshot-trigger", "true"),
+        ("fsmonitor.backend", "watchman"),
+    ] {
+        secondary.jj(&[
+            "--ignore-working-copy",
+            "config",
+            "set",
+            "--workspace",
+            key,
+            value,
+        ]);
+    }
     let in_second = |args: &[&str]| {
         let mut command = alpha.program(musubi());
         command.args(args).current_dir(&second);
@@ -2261,7 +2351,11 @@ fn commands_in_another_workspace_act_on_the_repository() {
     let state_path = state_dir(&env, &alpha).join("state.toml");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("alpha-second"), "{state}");
-    let status = run(&env, &logs, in_second(&["status"]));
+    let (mut status, mut warnings) = (String::new(), String::new());
+    wait_for(&logs, "the secondary workspace's Watchman warning", || {
+        (status, warnings) = status_in(&env, &logs, &secondary);
+        warnings.contains("Background snapshot skipped for alpha-second@")
+    });
     insta::assert_snapshot!(status, @"
     Hive: alpha on $ROOT/hub
     This machine: alpha, synced N ago; the hub has all its work
@@ -2274,6 +2368,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
     Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
+    insta::assert_snapshot!(warnings, @"Warning: Background snapshot skipped for alpha-second@ (jj's Watchman snapshot trigger is enabled).");
 
     let out = run(&env, &logs, in_second(&["leave"]));
     insta::assert_snapshot!(out, @"This repository has left hive alpha.");
@@ -2628,6 +2723,8 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     It reloads changed jj settings for a repository before its next sync. Changes made during a sync
     apply to the following one; `musubi sync` waits for one with the new settings. Its own
     `musubi.daemon.*` settings need `musubi daemon restart`.
+
+    Set `musubi.auto-snapshot = true` in jj's config to record saved edits in the background.
 
     When a hub runs a newer release of musubi, the daemon runs the command named by
     `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release. Once the command

@@ -5,18 +5,19 @@ Mistakes and bugs can affect every copy, so we work hard to eliminate bugs.
 
 ## Minimal interaction with jj
 
-With jj-musubi, each machine maintains its own repo, workspaces, and working copies. It
-never touches your checked-out files; its medium of exchange is jj's operation log. Incoming
-synced work becomes available in the repo, and you choose whether or when to deal with it. If
-another machine rewrites the commit you're using, jj's normal machinery reports a stale working
-copy; files only change when you update them.
+With jj-musubi, each machine maintains its own repo, workspaces, and working copies. The daemon
+exchanges jj's operation log. Incoming work becomes available in the repo, and you choose when
+to check it out. If another machine rewrites the commit you're using, jj reports a stale working
+copy. Files only change when you update them.
 
 Commits, bookmarks, Git refs and repo operations are synced across repos. A mistaken rewrite,
 restore or operation abandon can reach every machine. Concurrent edits can leave conflicted
 bookmarks or divergent changes, as in local jj workspaces.
 
-When you edit files in your working copy, jj-musubi only sees those changes after jj snapshots
-them. The jj-musubi daemon syncs those snapshots for you.
+The daemon syncs edits once jj records a snapshot. You can opt in to
+[background snapshots](guides/working-across-machines.md#record-saves-automatically) so the daemon
+records edits even while you aren't running jj. It reads checked-out files and leaves them in
+place.
 
 Because jj-musubi syncs normal jj metadata and doesn't modify jj itself, jj works normally at
 all times, regardless of whether your machine is online and syncing, offline and busy, or coming

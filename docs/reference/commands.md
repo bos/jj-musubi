@@ -44,7 +44,7 @@ Agent-run commands have the same default. See [Set up a hub and machines](../gui
 | Command | Use it to |
 | --- | --- |
 | `list` | Show hubs' hives, local copies and sync state. `-T` uses a template; see `musubi list --help`. Use `-T 'json(self) ++ "\n"'` for JSON. |
-| `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with recovery hints. Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
+| `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with sync or enabled background snapshots. Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
 | `sync` | Sync this copy now. `--outgoing` inspects snapshot overhead without sending. `--approve TOKEN` approves the inspected history. `--prune OPERATION...` snapshots current edits and deletions, then discards unpublished operations while preserving current work and explicit change versions. Add `--dry-run` to preview recorded history without snapshotting or changing it. See [snapshot cleanup](../guides/snapshots.md). For an ambiguous operation abandon, first restore missing history with the `jj op integrate` hint. |
 | `top` | Watch hub traffic and machines that are offline, behind, or failing. |
 
@@ -69,6 +69,7 @@ give an empty string or false. The keyword `problem` maps to `not_synced`, else 
 | --- | --- |
 | `repository` | The workspace containing the current directory. `null` outside a jj repo or if unavailable; `not_synced` explains unavailable state. |
 | `hive` | The repo's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
+| `hive.snapshot_issues` | For enabled background snapshots, maps each affected local workspace name to the reason its latest attempt was skipped. The key is omitted when there are no issues. |
 | `not_synced` | Why a recorded copy does not sync (such as a filesystem duplicate), or why its state is unavailable (such as a missing directory or repo). `hive` is `null` in these cases; otherwise `not_synced` is `null`. See [Move, copy or restore a repo](../guides/manage.md#move-copy-or-restore-a-repo). |
 | `default_hub` | The hub commands use without `--hub`, or `null`. |
 | `daemon` | `running` (`null` if unknown), `error` (why its state is unknown or a running daemon is unreachable), `pid`, `serving` (whether it serves this repo), `served` (repo count), `at_login` (whether `daemon install` set it to start on its own: at login, or at boot on illumos), `socket`, `log`, and `upgrade_failed` (`release` and `error` if its last upgrade to a release newer than this command failed, otherwise `null`). |

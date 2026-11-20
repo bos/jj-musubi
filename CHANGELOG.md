@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Set `musubi.auto-snapshot = true` in jj's config to record edits in local workspaces while
+  the daemon runs, even when an editor or agent never runs `jj`. Run `musubi daemon restart`
+  after replacing the executable by hand so the command and daemon use the same build. See
+  [Record saves automatically](docs/guides/working-across-machines.md#record-saves-automatically).
+
 - On illumos, `musubi daemon install` and `musubi hub install` set up an SMF service,
   `svc:/site/musubi/daemon:<you>` (or `hub`), that starts at boot and runs as you. Setting it
   up, and starting and stopping it, needs the Service Management rights profile, which amounts

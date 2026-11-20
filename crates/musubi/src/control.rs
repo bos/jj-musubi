@@ -28,7 +28,7 @@
 //! A command connects, and the daemon greets it as a hub greets a machine. The command sends
 //! [`Request`]s on one subject, `SUBJECT`, and the daemon answers each with a [`Response`].
 //! Both travel as JSON, in an object that names first the [`VERSION`] of the build that sent
-//! it, as the hub's `Envelope` does: `{"control": "0.47.0/control-6", "body": ...}`. A message
+//! it, as the hub's `Envelope` does: `{"control": "0.47.1/control-7", "body": ...}`. A message
 //! of another build is never read past that name, so builds tell each other apart whatever
 //! else changed, and none may change how that is written. The one request every build obeys
 //! is [`Request::Stop`], written `"Stop"`, so that `musubi daemon restart` works across
@@ -54,6 +54,7 @@
 //! away, leaves its request running to the end: it is the same work that the next command
 //! would ask for, and `add` finishes what it started whatever happens to its caller.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -97,7 +98,7 @@ use crate::socket::uid;
 /// Changes whenever the control protocol does, or how commands find the daemon (its lock and
 /// the file beside it), so that a command and a daemon from different builds notice each
 /// other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-6");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-7");
 
 /// The subject of every request to the daemon.
 const SUBJECT: &str = "musubi.daemon.rpc";
@@ -128,6 +129,9 @@ pub struct RepoStatus {
     /// The copy's machine key.
     pub key: String,
     pub status: Status,
+    /// The latest reason each affected workspace could not be snapshotted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub snapshot_issues: BTreeMap<String, String>,
 }
 
 /// What a command asks of the daemon. Each is answered with the [`Response`] of its name.
@@ -778,6 +782,10 @@ mod tests {
                 Request::Status => Response::Status(vec![RepoStatus {
                     key: "k".to_owned(),
                     status: Status::default(),
+                    snapshot_issues: BTreeMap::from([(
+                        "secondary".to_owned(),
+                        "working copy is stale".to_owned(),
+                    )]),
                 }]),
                 Request::Stop => Response::Stop,
             }
@@ -805,6 +813,10 @@ mod tests {
         let statuses = client.status(SECOND).await.unwrap();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].key, "k");
+        assert_eq!(
+            statuses[0].snapshot_issues["secondary"],
+            "working copy is stale"
+        );
         client.stop(SECOND).await.unwrap();
     }
 

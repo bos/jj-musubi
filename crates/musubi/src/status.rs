@@ -5,6 +5,7 @@
 //! without changing what it finds out. It never starts the daemon, nor asks the hub: the last
 //! sync says whether the hub was in reach.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Write as _;
 use std::path::Path;
@@ -57,6 +58,8 @@ pub struct Hive {
     /// How its syncs go: the daemon's latest word if it serves the repository, else what the
     /// last sync recorded.
     pub sync: Option<daemon::Status>,
+    /// Workspaces the daemon could not snapshot on its last attempt.
+    snapshot_issues: BTreeMap<String, String>,
     /// Whether the hub has every operation of this machine's, as of the last sync; `None` if
     /// that can't be told, as before the first sync.
     pub sent: Option<bool>,
@@ -154,7 +157,9 @@ impl Report {
                     let sync = mine
                         .map(|repo| repo.status.clone())
                         .or_else(|| daemon::Status::load(&located.repo_path));
-                    hive = Some(Hive::gather(located, config, sync));
+                    let snapshot_issues =
+                        mine.map_or_else(BTreeMap::new, |repo| repo.snapshot_issues.clone());
+                    hive = Some(Hive::gather(located, config, sync, snapshot_issues));
                 }
                 (copy::Standing::Outside, _, _) => {}
                 (standing, record, entry) => {
@@ -250,7 +255,12 @@ impl Report {
 }
 
 impl Hive {
-    fn gather(located: &Located, config: HiveConfig, sync: Option<daemon::Status>) -> Self {
+    fn gather(
+        located: &Located,
+        config: HiveConfig,
+        sync: Option<daemon::Status>,
+        snapshot_issues: BTreeMap<String, String>,
+    ) -> Self {
         let mut hive = Self {
             config,
             sent: None,
@@ -258,6 +268,7 @@ impl Hive {
             working_copies: vec![],
             copies: vec![],
             sync,
+            snapshot_issues,
         };
         // The rest needs the repository, which a sync failing may be failing to open: the
         // sync's error says why.
@@ -423,7 +434,7 @@ impl Hive {
                 })
             })
             .collect();
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "name": self.config.display_name(),
             "id": self.config.hive.to_string(),
             "hub": self.config.hub,
@@ -435,7 +446,11 @@ impl Hive {
             "forgotten": self.forgotten,
             "working_copies": working_copies,
             "copies": copies,
-        })
+        });
+        if !self.snapshot_issues.is_empty() {
+            json["snapshot_issues"] = serde_json::json!(self.snapshot_issues);
+        }
+        json
     }
 
     /// This machine's name in the hive: as the hive names it among the copies present, which
@@ -455,6 +470,12 @@ impl Hive {
 
     /// Says what keeps the repository from syncing, and what to do about it.
     fn warn(&self, ui: &Ui, daemon: &Daemon) -> io::Result<()> {
+        for (workspace, reason) in &self.snapshot_issues {
+            writeln!(
+                ui.warning(),
+                "Background snapshot skipped for {workspace}@ ({reason})."
+            )?;
+        }
         let failing = self.failing();
         if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
             if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {

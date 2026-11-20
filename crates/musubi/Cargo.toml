@@ -23,9 +23,11 @@ clap_complete.workspace = true
 clap_complete_nushell.workspace = true
 etcetera.workspace = true
 futures.workspace = true
+gix.workspace = true
 interprocess.workspace = true
 jj-cli.workspace = true
-jj-lib.workspace = true
+jj-frontend.workspace = true
+jj-lib = { workspace = true, features = ["watchman"] }
 musubi-hub.workspace = true
 musubi-jj.workspace = true
 musubi-sync.workspace = true

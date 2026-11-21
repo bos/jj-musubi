@@ -700,3 +700,62 @@ fn git_never_sees_other_machines_working_copies() {
         );
     }
 }
+
+/// A `jj op abandon` that leaves an unpublished operation on the root, then a `jj` command
+/// written on jj's own operation ids from before musubi handled the abandon, as `--at-op` or
+/// a command that loaded the repository earlier writes it. Another machine's workspace stays
+/// that machine's: no operation here records it as this machine's own, and the other machine
+/// never shows it as this one's, as `alpha/beta/beta` (#167).
+#[test]
+fn a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+
+    let alpha = hive.repo(0);
+    alpha.jj(&["new", "-m", "y"]);
+    alpha.jj(&["undo"]);
+    alpha.jj(&["op", "abandon", "..@-"]);
+    alpha.jj(&["new", "-m", "off1"]);
+    let before = alpha.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "-n1",
+        "--no-graph",
+        "-T",
+        "id",
+    ]);
+    hive.node(0).settle().unwrap();
+    assert!(hive.node(0).check_abandon().unwrap());
+    hive.repo(0)
+        .jj(&["--at-op", before.trim(), "new", "-m", "late"]);
+    hive.sync();
+
+    let attributes = hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        r#"attributes ++ "\n""#,
+    ]);
+    // The context the trim left, mapping beta's workspace to beta: read as jj prints it.
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line.starts_with("musubi.workspace-context") && line.contains("beta/beta")),
+        "{attributes}"
+    );
+    assert!(
+        !attributes
+            .lines()
+            .any(|line| line.starts_with("musubi.local-workspaces") && line.contains("beta/beta")),
+        "alpha recorded beta's workspace as its own:\n{attributes}"
+    );
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
+}

@@ -11,6 +11,10 @@
   its path. A hub you run with `--dir`, that `musubi.hub-dir` names, or that
   `musubi hub install` set up isn't affected.
 
+- After `jj op abandon` of a machine's history, another machine's workspace no longer shows
+  up as that machine's, as `m3/m1/default`, when a `jj` command run on the history from
+  before the abandon (with `--at-op`, or one already running) finishes afterwards.
+
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.
 

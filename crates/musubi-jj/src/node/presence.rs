@@ -18,6 +18,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
 use crate::canonical::Work;
+use crate::canonical::namespace::Namespace;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_ATTRIBUTE;
@@ -234,7 +235,11 @@ impl NodeRepo {
 
     /// This machine's own of `workspaces`, a local view's, whose canonical form is
     /// `canonical`: every one but those the canonical view gives other machines, and other
-    /// machines' under names the hive no longer gives them (`names_other_machine`).
+    /// machines' under names the hive no longer gives them (`names_other_machine`) or that
+    /// the canonical operation's namespace context gives them, judged with the machines it
+    /// knows. Where a trim left its history the root alone, the canonical view has no other
+    /// machine's workspaces to go by, and the context, which `canonical_view` reads too
+    /// (`apply_namespace_context`), stands for the views the operation started from.
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
@@ -244,8 +249,9 @@ impl NodeRepo {
         if canonical == self.canonical.root_operation_id() {
             return Ok(workspaces);
         }
+        let canonical_op = self.canonical.read_operation(canonical)?;
         let private = self.private_workspace_names(op, &workspaces)?;
-        let canonical_view = self.canonical.read_operation_view(canonical)?;
+        let canonical_view = self.canonical.read_view(&canonical_op.view_id)?;
         let prefixes =
             self.prefixes_with_own(&canonical_view, &*self.presence(canonical)?, &private)?;
         let others: BTreeSet<_> = self
@@ -254,17 +260,32 @@ impl NodeRepo {
             .filter(|(key, _)| !self.is_own_key(key))
             .map(|(_, name)| name)
             .collect();
-        let machines = self.known_machines(canonical)?;
         let own = self.own_names(canonical)?;
-        Ok(workspaces
+        let (mut kept, undecided): (BTreeMap<_, _>, BTreeMap<_, _>) = workspaces
             .into_iter()
-            .filter(|(name, _)| {
-                !others.contains(name)
-                    && (private.contains(name)
-                        || own.contains(name)
-                        || !self.names_other_machine(name, &machines))
-            })
-            .collect())
+            .filter(|(name, _)| !others.contains(name))
+            .partition(|(name, _)| private.contains(name) || own.contains(name));
+        if undecided.is_empty() {
+            return Ok(kept);
+        }
+        let mut machines = self.known_machines(canonical)?;
+        let mut context_others = BTreeSet::new();
+        if let Some(context) = Namespace::read(&canonical_op.metadata)?
+            .filter(|context| context.source == self.machine.key())
+        {
+            machines.extend(context.known);
+            context_others.extend(
+                context
+                    .names
+                    .into_iter()
+                    .filter(|(_, key)| !self.is_own_key(&WorkspaceNameBuf::from(key.clone())))
+                    .map(|(name, _)| WorkspaceNameBuf::from(name)),
+            );
+        }
+        kept.extend(undecided.into_iter().filter(|(name, _)| {
+            !context_others.contains(name) && !self.names_other_machine(name, &machines)
+        }));
+        Ok(kept)
     }
 
     /// This exact native head set's owned bindings, qualified before their aliases are read.

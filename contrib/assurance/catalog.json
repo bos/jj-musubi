@@ -442,7 +442,8 @@
         "e70",
         "e71",
         "e72",
-        "e73"
+        "e73",
+        "e74"
       ]
     },
     {
@@ -1102,6 +1103,17 @@
       "source": "crates/musubi-sync/tests/races/workspaces.rs",
       "detail": "Late commands after one and two trims, and their merges, keep other machines’ workspaces theirs.",
       "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e74",
+      "claim": "ownership",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/canonical/namespace.rs#folding_contexts_conforms",
+      "detail": "Folding a carried or recorded context is checked against the namespace oracle.",
+      "needs": [
+        "lean"
+      ],
       "provenance": "documented"
     },
     {
@@ -1809,6 +1821,10 @@
       "path": "crates/musubi-jj/src/node/ownership_conformance.rs",
       "symbol": "ownership_conforms"
     },
+    "crates/musubi-jj/src/canonical/namespace.rs#folding_contexts_conforms": {
+      "path": "crates/musubi-jj/src/canonical/namespace.rs",
+      "symbol": "folding_contexts_conforms"
+    },
     "formal/Musubi/Copies.lean": {
       "path": "formal/Musubi/Copies.lean",
       "symbol": null
@@ -2075,6 +2091,9 @@
     "ownership": [
       "Ownership",
       "Names"
+    ],
+    "namespace": [
+      "Ownership"
     ],
     "copies": [
       "Copies"

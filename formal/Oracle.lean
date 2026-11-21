@@ -3,10 +3,10 @@ The conformance oracle (`docs/internals/conformance.md`): reads one JSON request
 stdin, writes one JSON reply per line on stdout, flushing after each. `Musubi.Exec.Json.handle`
 dispatches on the request's `op`: the session requests (`reset`, `step`, `measure`, `upload`,
 `pushSnapshot`, `localBurst`) drive the hive step machine, and every other request (for example
-`presence`, `chunks`, `names`, `ownership`, `copies`, `refs`, `expected`, `publication`,
-`contractedAncestry`, `retryFixup`, `nativeLifecycle`) runs its own executable model on that
-request alone. The codec and the dispatch are in `Musubi/ExecJson.lean`; the models are the
-modules it imports.
+`presence`, `chunks`, `names`, `ownership`, `namespace`, `copies`, `refs`, `expected`,
+`publication`, `contractedAncestry`, `retryFixup`, `nativeLifecycle`) runs its own executable
+model on that request alone. The codec and the dispatch are in `Musubi/ExecJson.lean`; the models
+are the modules it imports.
 -/
 import Musubi.ExecJson
 

@@ -17,7 +17,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
 | `Publication.lean`: cumulative snapshot budgets, scoped approval and selected cleanup | `node/publication` and the pre-upload gate | `node::publication::tests` through the oracle, and `musubi-sync` publication fixtures | [Snapshot publication](#snapshot-publication) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
-| `Ownership.lean`: which workspaces of a local operation are this machine's own, through trims and merges | `NodeRepo::canonical_view` and `own_of_view`, and the context `canonical_form` recomputes and carries | `node::ownership_conformance`, through the oracle, and the trim race tests | [Workspace ownership](#workspace-ownership) |
+| `Ownership.lean`: which workspaces of a local operation are this machine's own, through trims and merges | `NodeRepo::canonical_view` and `own_of_view`, the context `canonical_form` recomputes and carries, and `Namespace::keep_others_of` and `take_others_of` | `node::ownership_conformance` and `canonical::namespace::tests::folding_contexts_conforms`, through the oracle, and the trim race tests | [Workspace ownership](#workspace-ownership) |
 
 ## The claim
 
@@ -2206,21 +2206,24 @@ trim. The chain has four links:
    taking beta's workspace for this machine's.
 3. **Safety, over histories.** A history is this machine's operations, starting from realizations
    of canonical operations from the hive, which may know different machines. Each step is a `jj`
-   command on any earlier operations, one or several (a merge), or a trim of the whole history. A
-   command whose parents all come from before a trim is translated on the root alone, with the
-   context `canonical_form` recomputes from its translation on its parents' canonical forms; that
-   translation reads the contexts they carry, and the recomputed context keeps their other
-   machines' names and the machines they know (`capture`, `Namespace::keep_others_of`). A command
-   on operations since carries their contexts, folded together at a merge (`carriedOf`,
-   `carried_context`). Each operation also has the canonical form the untrimmed history would give
-   it, from the same views and private names. `trims_keep_ownership` proves the two own the same
-   names, and so `safety` that a name gets this machine's key only if the untrimmed history's
-   translation makes it this machine's. `safety` also proves that only a history's bases keep a
-   nonempty private record: translating a command records none, and a late operation's rewrite an
-   empty one. Both hold of every reachable history; the invariant is `NodeOK`, and `merge_owns`
-   and `late_owns` are the two kinds of step. `#guard`s show each half of the two fixes after #167
-   is needed: a source translation that reads no carried context owns beta's workspace, and a
-   merge that reads only its first parent's context owns gamma's.
+   command on any earlier operations, one or several (a merge), a realization of another canonical
+   operation from the hive, which can arrive between trims, as a workspace another machine
+   renamed, or a trim of the whole history. A command whose parents all come from before a trim is
+   translated on the root alone, with the context `canonical_form` recomputes from its translation
+   on its parents' canonical forms; that translation reads the contexts they carry, and the
+   recomputed context keeps their other machines' names and the machines they know (`capture`,
+   `Namespace::keep_others_of`). A command on operations since carries their contexts, folded
+   together at a merge (`carriedOf`, `carried_context`). Each operation also has the canonical
+   form the untrimmed history would give it, from the same views and private names.
+   `trims_keep_ownership` proves the two own the same names, and so `safety` that a name gets this
+   machine's key only if the untrimmed history's translation makes it this machine's. `safety`
+   also proves that only an operation realizing one from the hive, a base or a realization, keeps
+   a nonempty private record: translating a command records none, and a late operation's rewrite
+   an empty one. Both hold of every reachable history; the invariant is `NodeOK`, `merge_owns` and
+   `late_owns` are the two kinds of command, and a realization keeps the invariant as a base does.
+   `#guard`s show each half of the two fixes after #167 is needed: a source translation that reads
+   no carried context owns beta's workspace, and a merge that reads only its first parent's
+   context owns gamma's.
 4. **Oracle to Rust.** `owned`, `canonView` and `ownOfView` compute as they are, so the oracle
    answers `ownership` requests with them, and refuses one outside `agreement`'s hypotheses
    (`wfB`, proved to imply them by `wf_of_wfB`). The Hegel test `ownership_conforms`, in
@@ -2245,6 +2248,25 @@ history model proves, and the race tests
 `a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs` and
 `a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs` check natively.
 
+**An operation whose parents jj rewrites after a trim.** A trim leaves the operation it keeps on
+the root, recording the context it was translated with (`rewrite_locals`). A later `jj op abandon`
+of an operation below it can give it local parents whose views lack names the context covers, and
+`canonical_form` then recomputes its context by judging it against those parents: a name beyond
+their views looks made by the operation. The search found that route (`jj op abandon` of a late
+command after a rename and a second trim:
+`abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs` and
+`e2e_abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs`), and the fix takes
+the recorded context's other machines' names over the names the recomputation gives this machine
+(`Namespace::take_others_of`). `recompute` models the recomputation, with `takeOthers` beside
+`keepOthers`, and `#guard`s show the route: before the fix the operation takes the renamed
+workspace for this machine's, and after it leaves it its owner's. The history model has no abandon
+of a single operation, so the route is checked at the level of one translation, not proved over
+histories. `folding_contexts_conforms`, in `crates/musubi-jj/src/canonical/namespace.rs`, checks
+`keep_others_of` and `take_others_of` against `keepOthers` and `takeOthers` through the oracle's
+`namespace` request, on contexts drawn to clash. It fails if `take_others_of` stops taking the
+recorded context over a name the recomputation gives this machine, or takes this machine's names
+from it too, or if `keep_others_of` adds a workspace already named.
+
 **What the model leaves out.**
 
 - **Presence.** `agreement` holds where this machine is present at the canonical operation. Where
@@ -2265,22 +2287,22 @@ history model proves, and the race tests
   canonical operation it reads neither has `M`'s workspaces nor knows `M`.
 - **Joining.** Before a copy joins, `canonical_view` reads no private names (`joins.is_empty`);
   the model assumes a copy that has joined.
-- **The history model's steps.** It has `jj` commands only: no undo, restore or revert (the model
-  of one translation and the test have them), no realization of another machine's operation after
-  the bases, no fix-up (`ContextBasis::FixUp` is in the model of one translation only), no
-  reserved names, and no contraction: a trim takes every canonical form away, where a published
-  operation it keeps is contracted with its view and presence. Its bases carry no context of this
-  machine's, so a canonical operation this machine wrote and realizes again, as on joining again
-  after leaving, is outside it. The untrimmed history reads the same private names as the trimmed
-  one: both read the views and records on this machine, and a late operation's rewrite is proved
-  to record nothing. `canonical_form` keeps the context of a publication checkpoint, or of an
-  operation with recorded intent, even where its parents know every machine the context does;
-  `carriedKept` drops it, which leaves the same names owned. A merge's canonical operation keeps
-  every parent's other workspaces, where jj's merge can drop one. Two merges are left out: of an
-  operation from before a trim with one since, and one where a parent shows another machine's
-  workspace under a name this machine owns at another parent: the known limitation of a `jj`
-  command that publishes during a sync step ([races.md, "Copies that go
-  away"](races.md#copies-that-go-away)).
+- **The history model's steps.** It has `jj` commands, realizations of canonical operations from
+  the hive, and trims of the whole history: no undo, restore or revert (the model of one
+  translation and the test have them), no abandon of a single operation or of a range, no fix-up
+  (`ContextBasis::FixUp` is in the model of one translation only), no reserved names, and no
+  contraction: a trim takes every canonical form away, where a published operation it keeps is
+  contracted with its view and presence. Its bases carry no context of this machine's, so a
+  canonical operation this machine wrote and realizes again, as on joining again after leaving, is
+  outside it. The untrimmed history reads the same private names as the trimmed one: both read the
+  views and records on this machine, and a late operation's rewrite is proved to record nothing.
+  `canonical_form` keeps the context of a publication checkpoint, or of an operation with recorded
+  intent, even where its parents know every machine the context does; `carriedKept` drops it,
+  which leaves the same names owned. A merge's canonical operation keeps every parent's other
+  workspaces, where jj's merge can drop one. Two merges are left out: of an operation from before
+  a trim with one since, and one where a parent shows another machine's workspace under a name
+  this machine owns at another parent: the known limitation of a `jj` command that publishes
+  during a sync step ([races.md, "Copies that go away"](races.md#copies-that-go-away)).
 - **Other callers of `own_of_view`.** Realization (`with_own_workspaces`), rewrites after an
   abandon (`supersede/rewrite.rs`), `musubi leave`, working-copy repair and cleanup call it on
   canonical operations other machines or contractions wrote; the test calls it on the canonical
@@ -2288,9 +2310,36 @@ history model proves, and the race tests
   `own_of_view` from before #167's fix, reading no context; its fixtures carry none.
 - **Keys.** Machine keys have no `/` or whitespace, as musubi makes them; the oracle refuses
   others.
+- **An operation judged against parents it was given.** Where jj's abandon gives an operation
+  local parents whose views lack a name its own views had, the recomputation and the final
+  translation on the root both take that name for one the operation made, unless the context it
+  records names it. The fix covers what the recorded context names. A `#guard` shows what it
+  doesn't: an old alias, as `jj undo` brings back, that the operation's translation on its own
+  parents left another machine's, and that its recorded context, naming the machine's workspaces
+  as the hive now shows them, doesn't mention, is given to this machine after such an abandon. An
+  operation that records no context, carrying only its parents', is judged the same way. Whether
+  musubi can reach this is open; nothing in the code rules out one shape: after a trim, a late
+  command that is itself the undo or restore bringing the alias back, a command run on it with
+  `--at-op`, and `jj op abandon` of the late command. Where the operation is itself the undo or
+  restore, its restored names leave the alias another machine's, and the gap doesn't arise. The
+  design's rule for such an operation is to judge it where it started ([design.md, "Publishing an
+  abandon"](design.md#publishing-an-abandon)); a context records only the names of the workspaces
+  its view had, not the names its translation left to other machines. A merge of an operation from
+  before a trim with one since arises only from such an abandon, which leaves part of the history
+  standing.
 - **The test's cases.** Every working copy is at one commit, so which commit a workspace is at,
   and the rewrites `canonical_view` follows, aren't checked; the model has no commits. The test
   writes private records in the format `record_private_workspaces` writes, not through it.
+
+The oracle's namespace request folds one context into another, as a carried context (`keep`) or as
+the one the operation records (`take`), and answers with the result. The model keeps `known` as a
+list, so a machine both contexts know appears twice; the test compares it as a set, as Rust keeps
+it:
+
+```json
+{"op": "namespace", "kind": "take", "into": {"source": {"name": "alpha", "suffix": "aaaa1111"}, "names": [{"name": "alpha", "key": {"machine": {"name": "alpha", "suffix": "aaaa1111"}, "workspace": "alpha"}}, {"name": "beta/third", "key": {"machine": {"name": "alpha", "suffix": "aaaa1111"}, "workspace": "beta/third"}}], "known": [{"name": "alpha", "suffix": "aaaa1111"}]}, "from": {"source": {"name": "alpha", "suffix": "aaaa1111"}, "names": [{"name": "beta/third", "key": {"machine": {"name": "beta", "suffix": "bbbb2222"}, "workspace": "third"}}], "known": [{"name": "alpha", "suffix": "aaaa1111"}, {"name": "beta", "suffix": "bbbb2222"}]}}
+{"context":{"known":[{"name":"alpha","suffix":"aaaa1111"},{"name":"alpha","suffix":"aaaa1111"},{"name":"beta","suffix":"bbbb2222"}],"names":[{"key":{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"},"name":"alpha"},{"key":{"machine":{"name":"beta","suffix":"bbbb2222"},"workspace":"third"},"name":"beta/third"}],"source":{"name":"alpha","suffix":"aaaa1111"}},"ok":true}
+```
 
 The oracle's ownership request and reply:
 
@@ -2312,7 +2361,7 @@ beta's, and before the fix it took it for this machine's. An ownership request l
 session as it was.
 
 ```sh
-cargo nextest run -p musubi-jj --lib -E 'test(/ownership_conformance/)'
+cargo nextest run -p musubi-jj --lib -E 'test(/ownership_conformance/) | test(/namespace::tests/)'
 ```
 
 `ownership_conforms` makes 200 cases. With `presence.rs` from before #167's fix, it and

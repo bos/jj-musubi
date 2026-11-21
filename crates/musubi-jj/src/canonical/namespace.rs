@@ -197,4 +197,125 @@ mod tests {
             .encode()
         );
     }
+
+    const SOURCE: &str = "alpha#aaaa1111";
+    const MACHINES: [&str; 3] = [SOURCE, "beta#bbbb2222", "gamma#cccc3333"];
+    const NAMES: [&str; 5] = ["alpha", "beta/x", "beta/third", "gamma/x", "x/y"];
+    const WORKSPACES: [&str; 2] = ["x", "third"];
+
+    /// A context of `SOURCE`'s, as `Namespace::read` accepts one: each workspace named once,
+    /// and the source's under their own names.
+    fn context(tc: &hegel::TestCase) -> Namespace {
+        use hegel::generators as gs;
+        let mut names = BTreeMap::new();
+        let mut keys = BTreeSet::new();
+        for _ in 0..tc.draw(gs::integers::<usize>().max_value(4)) {
+            let name = tc.draw(gs::sampled_from(NAMES.to_vec()));
+            let machine = tc.draw(gs::sampled_from(MACHINES.to_vec()));
+            let workspace = if machine == SOURCE {
+                name
+            } else {
+                tc.draw(gs::sampled_from(WORKSPACES.to_vec()))
+            };
+            let key = workspaces::workspace_key(machine, workspace)
+                .as_str()
+                .to_owned();
+            if !names.contains_key(name) && keys.insert(key.clone()) {
+                names.insert(name.to_owned(), key);
+            }
+        }
+        let mut known: BTreeSet<String> = names
+            .values()
+            .map(|key| workspaces::split_key(key).unwrap().0.to_owned())
+            .collect();
+        known.insert(SOURCE.to_owned());
+        // A machine can be known with no workspace named.
+        known.extend(
+            tc.draw(gs::vecs(gs::sampled_from(MACHINES.to_vec())).max_size(2))
+                .into_iter()
+                .map(str::to_owned),
+        );
+        Namespace {
+            source: SOURCE.to_owned(),
+            names,
+            known,
+        }
+    }
+
+    fn machine_json(machine: &str) -> serde_json::Value {
+        let (name, suffix) = machine.split_once('#').unwrap();
+        serde_json::json!({"name": name, "suffix": suffix})
+    }
+
+    fn context_json(context: &Namespace) -> serde_json::Value {
+        serde_json::json!({
+            "source": machine_json(&context.source),
+            "names": context.names.iter().map(|(name, key)| {
+                let (machine, workspace) = workspaces::split_key(key).unwrap();
+                serde_json::json!({
+                    "name": name,
+                    "key": {"machine": machine_json(machine), "workspace": workspace},
+                })
+            }).collect::<Vec<_>>(),
+            "known": context.known.iter().map(|machine| machine_json(machine)).collect::<Vec<_>>(),
+        })
+    }
+
+    /// `keep_others_of` and `take_others_of` against `keepOthers` and `takeOthers` in
+    /// formal/Musubi/Ownership.lean, through the oracle (docs/internals/conformance.md,
+    /// "Workspace ownership"), on contexts drawn to clash: the same names, the same
+    /// workspaces under other names, and names one gives this machine and the other another.
+    #[hegel::test(profile = "slow-cases", test_cases = 200)]
+    fn folding_contexts_conforms(tc: hegel::TestCase) {
+        let into = context(&tc);
+        let from = context(&tc);
+        let take = tc.draw(hegel::generators::booleans());
+        let mut folded = into.clone();
+        if take {
+            folded.take_others_of(from.clone());
+        } else {
+            folded.keep_others_of(from.clone());
+        }
+        let request = serde_json::json!({
+            "op": "namespace",
+            "kind": if take { "take" } else { "keep" },
+            "into": context_json(&into),
+            "from": context_json(&from),
+        });
+        // Namespace requests leave the oracle as they found it.
+        let reply = crate::oracle::Oracle::with(|oracle| oracle.call(&request));
+        assert_eq!(reply["ok"], true, "the oracle refused {request}: {reply}");
+        let entries = reply["context"]["names"].as_array().unwrap();
+        let names: BTreeMap<String, String> = entries
+            .iter()
+            .map(|entry| {
+                let key = &entry["key"];
+                (
+                    entry["name"].as_str().unwrap().to_owned(),
+                    format!(
+                        "{}#{}/{}",
+                        key["machine"]["name"].as_str().unwrap(),
+                        key["machine"]["suffix"].as_str().unwrap(),
+                        key["workspace"].as_str().unwrap()
+                    ),
+                )
+            })
+            .collect();
+        let known: BTreeSet<String> = reply["context"]["known"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|machine| {
+                format!(
+                    "{}#{}",
+                    machine["name"].as_str().unwrap(),
+                    machine["suffix"].as_str().unwrap()
+                )
+            })
+            .collect();
+        // The model's names are a list, Rust's a map: it must name nothing twice.
+        assert_eq!(entries.len(), names.len(), "a name twice\n{request}");
+        assert_eq!(folded.names, names, "names\n{request}");
+        assert_eq!(folded.known, known, "known\n{request}");
+    }
 }

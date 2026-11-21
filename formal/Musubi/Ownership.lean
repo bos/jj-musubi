@@ -19,9 +19,11 @@ Ownership is defined once, as a proposition (`Owns`), and both are executable fo
 - `agreement`: where this machine is present, `own_of_view` of the canonical operation
   `canonical_view` wrote owns exactly what `canonical_view` put under this machine's key;
 - `trims_keep_ownership`, `safety`: over every history of commands and merges on any earlier
-  operations, with trims of the whole history between, an operation's canonical form owns what
+  operations and realizations of other machines' operations, with trims of the whole history
+  between, an operation's canonical form owns what
   the untrimmed history's would, so a name gets this machine's key only if the complete evidence
-  makes it this machine's, and only a history's bases keep a nonempty private record.
+  makes it this machine's, and only realizations of the hive's operations keep a nonempty private
+  record: translating a command records none.
 
 jj's effects (the views, which workspaces a merge keeps) and presence are inputs: neither is
 modeled here. Machine keys are `Names.Key`s, and names lists of characters, as in `Names.lean`.
@@ -941,6 +943,8 @@ structure Node where
   canon : Canon
   ref : Canon
   trimmed : Bool
+  /-- Whether it realizes a canonical operation from the hive, rather than a command here. -/
+  realized : Bool := false
 
 /-- The private names a child of `x` reads, before its own view (`private_workspace_names`):
 those `x` records where it is marked, those it reads otherwise, each still in `x`'s view. -/
@@ -954,6 +958,10 @@ inductive Step where
   | command (parents : List Nat) (view : List Name)
   /-- A trim: every canonical form so far is taken away. -/
   | trim
+  /-- A realization of `c`, a canonical operation from the hive, with local view `view` and the
+  private names it records: another machine's work arriving, before a trim or after one, as a
+  workspace renamed. -/
+  | realize (c : Canon) (view : List Name) (record : Option (List Name))
 
 /-- A command on `ps` with view `view`, translated on canonical `parents` with `context`. -/
 def commandEv (me : Key) (ps : List Node) (view : List Name) (parents : List Parent)
@@ -1016,6 +1024,29 @@ def carriedOf (me : Key) (cs : List Canon) : Option Context :=
   | [] => none
   | c :: rest => some (rest.foldl keepOthers c)
 
+/-- `Namespace::take_others_of`: what `recorded`, the context an operation itself records, gives
+other machines, as `keepOthers` adds it, but over a name `x` gives this machine. -/
+def takeOthers (x recorded : Context) : Context :=
+  let added := recorded.names.filter fun e =>
+    e.2.owner != x.source && !(x.names.any fun f => f.1 == e.1 && f.2.owner != x.source) &&
+      !(x.names.any (·.2 == e.2))
+  { x with
+    known := x.known ++ recorded.known
+    names := x.names.filter (fun f => !(added.any (·.1 == f.1))) ++ added }
+
+/-- `canonical_form`'s recomputed context for an operation on canonical parents `cs` whose
+parents changed, from its translation `src` on them, as fixed for one that records a context of
+its own (`recorded`), as a trim leaves on the operation it keeps: that context's other machines'
+names are taken over the names `src` gives this machine, then the carried contexts' kept. -/
+def recompute (me : Key) (cs : List Canon) (src : Ev) (recorded : Option Context) : Context :=
+  let x := contextOf me (canonView src (mergeFacts me cs)) (mergedPresence cs)
+  let x := match ctxFor me recorded with
+    | some r => takeOthers x r
+    | none => x
+  match carriedOf me cs with
+  | some c => keepOthers x c
+  | none => x
+
 /-- The context of a command on parents `cs` after a trim, recomputed from its translation `src`
 on them, which reads the contexts they carry. -/
 def capture (me : Key) (cs : List Canon) (src : Ev) : Context :=
@@ -1042,8 +1073,23 @@ def clashFree (me : Key) (priv view : List Name) (cs : List Canon) : Bool :=
   view.all fun n => !(cs.any fun q => (othersOf me q (priv ++ [])).contains n) ||
     !(cs.any fun c => (ownNamesIn me c).contains n)
 
+def noSlashB (k : Key) : Bool := !k.name.contains '/' && !k.suffix.contains '/'
+
+theorem noSlash_of {k : Key} (h : noSlashB k = true) : NoSlash k := by
+  simp only [noSlashB, Bool.and_eq_true, Bool.not_eq_true', contains_false] at h
+  exact h
+
+/-- A canonical operation a realization can stand for: one from the hive, carrying no context of
+this machine's, with machine keys as musubi makes them. -/
+def hiveB (c : Canon) : Bool := c.context.isNone && (machinesOf c).all noSlashB
+
 def stepNodes (me : Key) (nodes : List Node) : Step → List Node
   | .trim => nodes.map fun x => { x with trimmed := true }
+  | .realize c view record =>
+    if hiveB c then
+      nodes ++ [{ view, priv := [], record, canon := c, ref := c, trimmed := false,
+                  realized := true }]
+    else nodes
   | .command is view =>
     match is.mapM (nodes[·]?) with
     | none => nodes
@@ -1081,7 +1127,7 @@ def ctxNames : Option Context → List (Name × WKey)
 /-- A node's canonical form owns what its untrimmed one owns; it and the context it carries
 know the same other machines; the context gives other machines only names shown as theirs;
 machine keys are as musubi makes them; and the private record it writes, if any, is empty,
-unless it is a base, which a trim may since have reached. -/
+unless it realizes a canonical operation from the hive, as a base or a realization does. -/
 structure NodeOK (me : Key) (bases : List Node) (x : Node) : Prop where
   own : ∀ n, n ∈ ownNamesIn me x.canon ↔ n ∈ ownNamesIn me x.ref
   knows : ∀ m, m ≠ me →
@@ -1091,11 +1137,12 @@ structure NodeOK (me : Key) (bases : List Node) (x : Node) : Prop where
   slashCanon : ∀ m ∈ machinesOf x.canon, NoSlash m
   slashRef : ∀ m ∈ machinesOf x.ref, NoSlash m
   same : x.canon = x.ref ∨ (x.canon.present = true ∧ x.ref.present = true)
-  record : x.record = none ∨ x.record = some [] ∨ ∃ b ∈ bases, { b with trimmed := x.trimmed } = x
+  record : x.record = none ∨ x.record = some [] ∨ x.realized = true
 
 /-- A history's start: a realization of a canonical operation from the hive, which carries no
 context of this machine's, with machine keys as musubi makes them. -/
 structure BaseOK (x : Node) : Prop where
+  realized : x.realized = true
   ref : x.canon = x.ref
   context : x.canon.context = none
   slash : ∀ m ∈ machinesOf x.canon, NoSlash m
@@ -1935,11 +1982,22 @@ theorem stepNodes_ok (hme : NoSlash me) {nodes : List Node} (hok : ∀ x ∈ nod
     obtain ⟨y, hy, rfl⟩ := hx
     have h := hok y hy
     refine ⟨h.own, h.knows, h.aliases, h.slashCanon, h.slashRef, h.same, ?_⟩
-    rcases h.record with h | h | ⟨b, hb, hby⟩
-    · exact Or.inl h
-    · exact Or.inr (Or.inl h)
-    · refine Or.inr (Or.inr ⟨b, hb, ?_⟩)
-      rw [← hby]
+    exact h.record
+  | realize c view record =>
+    simp only [stepNodes]
+    split
+    · next hc =>
+      simp only [hiveB, Bool.and_eq_true, Option.isNone_iff_eq_none, List.all_eq_true] at hc
+      intro x hx
+      rcases List.mem_append.mp hx with hx | hx
+      · exact hok x hx
+      · rw [List.mem_singleton.mp hx]
+        refine ⟨fun n => Iff.rfl, fun m _ => ?_, fun e he => ?_,
+          fun m hm => noSlash_of (hc.2 m hm), fun m hm => noSlash_of (hc.2 m hm), Or.inl rfl,
+          Or.inr (Or.inr rfl)⟩
+        · simp [hc.1, ctxFor, Option.filter, knownOf]
+        · simp [hc.1, ctxFor, Option.filter, ctxNames] at he
+    · exact hok
   | command is view =>
     simp only [stepNodes]
     split
@@ -1972,7 +2030,7 @@ theorem reach_ok (hme : NoSlash me) (hb : ∀ x ∈ bases, BaseOK x) {nodes : Li
     intro x hx
     have hbx := hb x hx
     refine ⟨fun n => by rw [hbx.ref], fun m _ => ?_, fun e he => ?_, hbx.slash,
-      hbx.ref ▸ hbx.slash, Or.inl hbx.ref, Or.inr (Or.inr ⟨x, hx, by cases x; rfl⟩)⟩
+      hbx.ref ▸ hbx.slash, Or.inl hbx.ref, Or.inr (Or.inr hbx.realized)⟩
     · rw [hbx.context, ← hbx.ref]
       simp [ctxFor, Option.filter, knownOf]
     · rw [hbx.context] at he
@@ -1996,25 +2054,23 @@ theorem trims_keep_ownership (hme : NoSlash me) (hb : ∀ x ∈ bases, BaseOK x)
 /-- **Safety.** A name gets this machine's key in an operation's canonical form only if the
 untrimmed history's translation of it makes the name this machine's (`Owns`): no evidence a trim
 leaves behind, no context recomputed or carried, gives this machine a name the complete
-evidence gives another machine. And only a base keeps a nonempty private record: translating a
-command records none, and a late operation's rewrite an empty one, so nothing launders a name
-into the private names both functions trust from then on. -/
+evidence gives another machine. And only an operation that realizes one from the hive, a base or
+a realization, keeps a nonempty private record (`realized`): translating a command records none, and a late
+operation's rewrite an empty one, so nothing launders a name into the private names both
+functions trust from then on. -/
 theorem safety (hme : NoSlash me) (hb : ∀ x ∈ bases, BaseOK x) {nodes : List Node}
     (h : Reach me bases nodes) :
     ∀ x ∈ nodes, (∀ n, n ∈ ownKeys me x.canon → n ∈ ownKeys me x.ref) ∧
-      (x.record = none ∨ x.record = some [] ∨ ∃ b ∈ bases, { b with trimmed := x.trimmed } = x) :=
+      (x.record = none ∨ x.record = some [] ∨ x.realized = true) :=
   fun x hx => ⟨fun n hc => (trims_keep_ownership hme hb h x hx n).mp hc,
     (reach_ok hme hb h x hx).record⟩
 
 end Reach
 
+theorem recompute_none {me : Key} {cs : List Canon} {src : Ev} :
+    recompute me cs src none = capture me cs src := rfl
+
 /-! ## What the oracle checks of a request -/
-
-def noSlashB (k : Key) : Bool := !k.name.contains '/' && !k.suffix.contains '/'
-
-theorem noSlash_of {k : Key} (h : noSlashB k = true) : NoSlash k := by
-  simp only [noSlashB, Bool.and_eq_true, Bool.not_eq_true', contains_false] at h
-  exact h
 
 /-- `WF`, decided: the oracle answers only requests that meet it, so that `agreement` covers
 every one it answers. -/
@@ -2108,5 +2164,87 @@ private def merge (context : Option Context) : Ev where
 
 #guard owned (merge (ctxFor alpha beforeGamma.context)) == ["alpha".toList, "gamma/g".toList]
 #guard owned (merge (carriedOf alpha [beforeGamma, afterGamma])) == ["alpha".toList]
+
+/-- Finding A. A trim leaves alpha's operation `d3` on the root, recording the context it was
+translated with, which gives `beta/third`, beta's workspace renamed, to beta. `jj op abandon`
+of an operation below it then gives `d3` a local parent `d1` whose view lacks `beta/third`, and
+whose canonical form, written after an earlier trim, knows only alpha and carries a context of
+that trim's, from before the rename. -/
+private def d1 : Canon :=
+  rebased ⟨alpha, [("alpha".toList, ⟨alpha, "alpha".toList⟩),
+    ("beta/beta".toList, ⟨beta, "beta".toList⟩)], [alpha, beta]⟩
+
+private def recordedA : Context :=
+  ⟨alpha, [("alpha".toList, ⟨alpha, "alpha".toList⟩), ("beta/beta".toList, ⟨beta, "beta".toList⟩),
+    ("beta/third".toList, ⟨beta, "third".toList⟩)], [alpha, beta]⟩
+
+private def viewA : List Name := ["alpha".toList, "beta/beta".toList, "beta/third".toList]
+
+/-- `d3` judged on `d1`, as `canonical_form`'s source translation judges it: `beta/third` is in
+no view it now starts from, so it looks made by `d3`. -/
+private def sourceA : Ev where
+  me := alpha
+  view := viewA
+  priv := []
+  parents := onParents [d1]
+  start := ["alpha".toList, "beta/beta".toList]
+  command := true
+  context := some recordedA
+
+/-- `d3` on the root, with the context the recomputation leaves it. -/
+private def onRootA (context : Context) : Ev :=
+  { sourceA with parents := [.root], context := some context }
+
+#guard owned sourceA == ["alpha".toList, "beta/third".toList]
+-- Before the fix, the recomputed context gives `beta/third` to alpha, and so does `d3`.
+#guard owned (onRootA (recompute alpha [d1] sourceA none)) ==
+  ["alpha".toList, "beta/third".toList]
+-- With the context `d3` records taken over it, `beta/third` stays beta's.
+#guard owned (onRootA (recompute alpha [d1] sourceA (some recordedA))) == ["alpha".toList]
+
+/-- An old alias, as `jj undo` brings back: two machines named beta now show as `beta-bbbb` and
+`beta-bbbb9999`, but `d3`'s view still names the first one's workspace `beta/x`, as when it was
+the only one. Translated on its parents, which had that name, `d3` left it beta's, and the
+context it recorded names beta's workspace as `beta-bbbb/x`, so it says nothing of `beta/x`. -/
+private def beta9 : Key := ⟨"beta".toList, "bbbb9999".toList⟩
+
+private def recordedB : Context :=
+  ⟨alpha, [("alpha".toList, ⟨alpha, "alpha".toList⟩),
+    ("beta-bbbb/x".toList, ⟨beta, "x".toList⟩)], [alpha, beta, beta9]⟩
+
+private def d1B : Canon := rebased recordedB
+
+private def sourceB : Ev where
+  me := alpha
+  view := ["alpha".toList, "beta/x".toList]
+  priv := []
+  parents := onParents [d1B]
+  start := ["alpha".toList]
+  command := true
+  context := some recordedB
+
+/-- `d3` as it was translated before the abandon, on a parent that showed beta's workspace, and
+whose view had the old alias: being in a view it started from, the alias wasn't its own. -/
+private def p0B : Canon where
+  keys := [⟨alpha, "alpha".toList⟩, ⟨beta, "x".toList⟩]
+  known := [alpha, beta, beta9]
+  present := true
+
+private def beforeB : Ev where
+  me := alpha
+  view := ["alpha".toList, "beta/x".toList]
+  priv := []
+  parents := onParents [p0B]
+  start := ["alpha".toList, "beta/x".toList]
+  command := true
+
+private def onRootB (context : Context) : Ev :=
+  { sourceB with parents := [.root], context := some context }
+
+#guard owned beforeB == ["alpha".toList]
+-- After the abandon, even with the fix, the recomputed context gives the old alias to alpha:
+-- the context `d3` records doesn't mention it.
+#guard owned (onRootB (recompute alpha [d1B] sourceB (some recordedB))) ==
+  ["alpha".toList, "beta/x".toList]
 
 end Musubi.Ownership

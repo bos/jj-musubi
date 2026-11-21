@@ -619,6 +619,26 @@ def ownershipReply (j : Json) : Except String Json := do
     ("ownOfView", encodeNameList (Ownership.ownOfView me ev.view ev.priv c)),
     ("unfixed", encodeNameList (Ownership.ownOfViewUnfixed me ev.view ev.priv c))])
 
+/-- A namespace context, as `decodeContext` reads it, without refusing a repeated name. -/
+def encodeContext (c : Ownership.Context) : Json :=
+  Json.mkObj [("source", encodeKey c.source),
+    ("names", Json.arr (c.names.map fun (n, k) =>
+      Json.mkObj [("name", Json.str (String.ofList n)), ("key", encodeWKey k)]).toArray),
+    ("known", Json.arr (c.known.map encodeKey).toArray)]
+
+/-- Decode a `namespace` request: two contexts of one source, `into` and `from`, and whether to
+fold `from` in as a carried context (`keep`, `Namespace::keep_others_of`) or as the one the
+operation records (`take`, `Namespace::take_others_of`). Answer with the result. -/
+def namespaceReply (j : Json) : Except String Json := do
+  let into ← j.getObjVal? "into" >>= decodeContext
+  let source ← j.getObjVal? "from" >>= decodeContext
+  if into.source != source.source then throw "the contexts have different sources"
+  let folded ← match ← j.getObjValAs? String "kind" with
+    | "keep" => pure (Ownership.keepOthers into source)
+    | "take" => pure (Ownership.takeOthers into source)
+    | k => throw s!"unknown kind {k}"
+  pure (Json.mkObj [("ok", Json.bool true), ("context", encodeContext folded)])
+
 /-! ## Per-machine refs (`RefsExec.lean`) -/
 
 def decodeTable (j : Json) : Except String Refs.Exec.Table := do
@@ -1123,6 +1143,7 @@ def badRequestOps : List (String × (Json → Except String Json)) :=
     ("rawBurst", rawBurstReply), ("rawPush", rawPushReply),
     ("rawControl", rawControlReply), ("chunks", chunksReply), ("refresh", refreshReply),
     ("attempts", attemptsReply), ("names", namesReply), ("ownership", ownershipReply),
+    ("namespace", namespaceReply),
     ("copies", copiesReply),
     ("expected", expectedReply), ("retryFixup", retryFixupReply),
     ("contractedAncestry", contractedAncestryReply), ("retryInbox", retryInboxReply),

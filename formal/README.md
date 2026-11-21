@@ -429,7 +429,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
-| `Musubi/Ownership.lean` | Which workspaces of a local operation are this machine's own: ownership defined once, `canonical_view`'s and `own_of_view`'s routes to it and their agreement, histories with trims and merges, and the oracle's check of a request. |
+| `Musubi/Ownership.lean` | Which workspaces of a local operation are this machine's own: ownership defined once, `canonical_view`'s and `own_of_view`'s routes to it and their agreement, histories with trims, merges and realizations, contexts folded and recomputed, and the oracle's check of a request. |
 | `Musubi/Publication.lean` | Cumulative snapshot accounting, exact approval, selected operation cleanup, and checks of the prepared result before installation. |
 | `Musubi/NativeLifecycle.lean` | Entry point for the finite native lifecycle model. |
 | `Musubi/NativeLifecycle/Types.lean`, `Musubi/NativeLifecycle/Graph.lean`, `Musubi/NativeLifecycle/Selectors.lean` | Raw observations, finite graph queries, and source selection with explicit evidence gaps. |
@@ -438,7 +438,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/NativeLifecycle/ConstructionSound.lean`, `Musubi/NativeLifecycle/RunSound.lean` | Conditional construction facts and record custody along executable traces. |
 | `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples. They do not authenticate native observations. |
 | `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, ownership, refs, expected-value, publication and native lifecycle requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, ownership, namespace, refs, expected-value, publication and native lifecycle requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 ## Correspondence with protocol.md
@@ -1008,13 +1008,17 @@ the namespace context with its basis and the views the operation started from ([
   `canonical_view` put under this machine's key, given machine keys as musubi makes them and
   every machine a parent knows known at the operation.
 - `trims_keep_ownership`, `safety`: over every history of `jj` commands and merges on any earlier
-  operations, with trims of the whole history between, an operation's canonical form owns
-  exactly what the untrimmed history's would, whether it is on the root alone with a recomputed
-  context or below one carrying its parents' contexts folded together. So a name gets this
-  machine's key only if the untrimmed history's translation makes it this machine's, and only a
-  history's bases keep a nonempty private record. `merge_owns` and `late_owns` are the two kinds
-  of step.
+  operations and realizations of other canonical operations, with trims of the whole history
+  between, an operation's canonical form owns exactly what the untrimmed history's would, whether
+  it is on the root alone with a recomputed context or below one carrying its parents' contexts
+  folded together. So a name gets this machine's key only if the untrimmed history's translation
+  makes it this machine's, and only realizations of the hive's operations keep a nonempty private
+  record. `merge_owns` and `late_owns` are the two kinds of command.
 - `wf_of_wfB`: the oracle answers only requests that meet `agreement`'s hypotheses.
+- `recompute`, `takeOthers`: the context `canonical_form` recomputes for an operation whose
+  parents jj rewrote after a trim, taking the context it records over names it would give this
+  machine; `#guard`s show the route the search found, before and after its fix, and an old alias
+  the fix doesn't cover.
 
 ### Native preparation and publication (`NativeLifecycle/`)
 

@@ -104,8 +104,10 @@ static void gate(int dir, const char *path, enum phase phase)
     static atomic_bool reached_create, reached_unlink;
     atomic_bool *reached = phase == BEFORE_CREATE ? &reached_create : &reached_unlink;
     int saved_errno = errno;
+    // A merge removes several heads: in that mode, stop before each.
+    bool every = phase == BEFORE_UNLINK && getenv("MUSUBI_TEST_HEAD_GATE_ANY") != NULL;
     if (matches_head(dir, path, phase)
-        && !atomic_exchange_explicit(reached, true, memory_order_relaxed))
+        && (every || !atomic_exchange_explicit(reached, true, memory_order_relaxed)))
         wait_for_release(phase);
     errno = saved_errno;
 }

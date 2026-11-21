@@ -878,7 +878,7 @@ schedule. With `--concurrent`, `--peer write` makes the second command an ordina
 `jj describe` on the same old head instead of another abandon, and `--loader` adds a third,
 `jj op log`, which merges the heads it finds. `--receive`, with or without `--concurrent`, lets
 the daemon receive the other machine's work once the native commands have started. `--steps N`
-sets the most actions a schedule may take: 8 by default, 14 with `--concurrent` and 18 with
+sets the most actions a schedule may take: 8 by default, 14 with `--concurrent` and 22 with
 `--loader`. `--jobs N` runs that many branches at once, half the CPUs by default.
 
 ```sh
@@ -926,12 +926,12 @@ still have the write's commit in its view if the write added its head, even if i
 before removing the old one.
 
 With `--loader`, once there are several heads and no command holds the lock, the search can
-start a `jj op log`. Loading the repository, it takes the lock and merges the heads, or, where
-one is an ancestor of another, as a paused write's is of the old head, finishes that command's
-unlink for it. The shim pauses it before it adds a head and again before it removes the first
-one; it doesn't stop between removing one and the next. Where the heads have settled by the
-time it holds the lock, it exits without either. While it holds the lock, the daemon merges no
-heads.
+start a `jj op log`. Loading the repository, it takes the lock and merges the heads, or, where one
+is an ancestor of another, as a paused write's is of the old head, finishes that command's unlink
+for it. The shim pauses it before it adds a head and again before it removes each one, so the
+search can let it remove one head at a time, or finish, or kill it between two. Where the heads
+have settled by the time it holds the lock, it exits without either. While it holds the lock, the
+daemon merges no heads.
 
 A native merge is not reproducible. jj orders the parents of a merge by their end times, and
 an abandon's rewrite has the end time of the operation it rewrote, so jj puts them in whatever
@@ -957,16 +957,15 @@ settled, every op head must still have the received commit in its view, and a pu
 sit below it; the check then compares canonical history, not views.
 
 Without `--loader` or `--receive`, each search reaches every state it can within the default
-horizon: a deeper `--steps` finds no new ones. The single command has 20 states, two abandons
-358 and an abandon with a write 482, with or without unpublished work, each found in seconds.
-With `--loader`, two abandons reach about 4,400 states and an abandon with a write about
-3,000, and a deeper horizon adds none; the counts vary by a few states from run to run, as
-native merges do. Each takes one to two minutes with 14 jobs on an otherwise idle 16-core
-machine, and four to six with one. With `--receive`, the single command reaches 34 states, two
-abandons about 830, an abandon with a write about 710, and an abandon with a loader about
-9,100, the last in about four minutes with 14 jobs; again a deeper horizon adds none. On a
-shared machine, pass a `--jobs` that leaves room for others. A command that misses its pause
-for 30 seconds under load is reported as a failed step; replay the saved schedule before
+horizon: a deeper `--steps` finds no new ones. The single command has 20 states, two abandons 358
+and an abandon with a write 482, with or without unpublished work, each found in seconds. With
+`--loader`, two abandons reach about 12,000 to 13,000 states and an abandon with a write about
+7,500; with `--receive` as well, an abandon with a loader reaches about 24,000. These take
+minutes, the last most of an hour with five jobs. A deeper horizon adds no states to them either,
+but their counts vary by a few percent from run to run, as native merges do. With `--receive`
+alone, the single command reaches 34 states, two abandons about 830 and an abandon with a write
+about 710. On a shared machine, pass a `--jobs` that leaves room for others. A command that misses
+its pause for 30 seconds under load is reported as a failed step; replay the saved schedule before
 believing it.
 
 To take an instruction-level recording on a Linux host with counters supported by

@@ -226,6 +226,13 @@ impl PausedCommand {
         self.try_wait_for(Phase::BeforeUnlink)
     }
 
+    /// Lets a command paused before an unlink remove that one head: true if it paused before
+    /// another, false if it exited.
+    pub(super) fn unlink_one(&mut self) -> bool {
+        self.resume(Phase::BeforeUnlink);
+        self.try_wait_for(Phase::BeforeUnlink)
+    }
+
     pub(super) fn kill(mut self) {
         self.child
             .kill()
@@ -235,24 +242,12 @@ impl PausedCommand {
             .expect("reap jj at the operation-head gate");
     }
 
+    /// Lets the command finish, through every later pause before an unlink, as a merge of
+    /// several heads makes.
     pub(super) fn release(mut self) {
         self.resume(Phase::BeforeUnlink);
-        let mut backoff = Backoff::new();
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(
-                    status.success(),
-                    "jj failed with {status} after reaching unlink of {:?}: {}",
-                    self.old_head,
-                    self.diagnostics()
-                );
-                return;
-            }
-            assert!(
-                backoff.wait(),
-                "jj did not exit within {TIMEOUT:?} after reaching unlink of {:?}",
-                self.old_head
-            );
+        while self.try_wait_for(Phase::BeforeUnlink) {
+            self.resume(Phase::BeforeUnlink);
         }
     }
 }

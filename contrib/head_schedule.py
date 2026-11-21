@@ -85,7 +85,7 @@ def main():
     for mode in (search, replay, branch):
         mode.add_argument(
             "--steps", type=int, metavar="N",
-            help="most actions a schedule may take (8; 14 with --concurrent; 18 with --loader)",
+            help="most actions a schedule may take (8; 14 with --concurrent; 22 with --loader)",
         )
     args = parser.parse_args()
 

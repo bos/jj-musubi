@@ -28,7 +28,7 @@ use crate::translation::{abandon_put_back_fixture, single_canonical_head, sync};
 const MAX_STEPS: usize = 8;
 const CONCURRENT_STEPS: usize = 14;
 /// A native merge widens the search: it reaches every state by this many actions.
-const LOADER_STEPS: usize = 18;
+const LOADER_STEPS: usize = 22;
 const VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -53,7 +53,13 @@ enum Action {
     PublishLoader,
     FinishLoader,
     KillLoader,
+    UnlinkLoader,
     Receive,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// What the second native command does in a concurrent search: the same `jj op abandon`, or
@@ -96,6 +102,10 @@ struct State {
     /// A native command that loads the repository at several heads, merging them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loader: Option<Native>,
+    /// How many heads the loader removed one at a time: two paused merges with the same heads
+    /// can have different removals still to come.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    loader_unlinks: usize,
     /// Whether the daemon received the other machine's work.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     received: bool,
@@ -223,6 +233,7 @@ impl<'a> Fixture<'a> {
             children: [None, None],
             loader: self.loader.then_some(Native::Ready),
             loader_child: None,
+            loader_unlinks: 0,
             receive: self.receive,
             received: false,
             concurrent: self.concurrent,
@@ -285,6 +296,7 @@ struct World<'a> {
     children: [Option<PausedCommand>; 2],
     loader: Option<Native>,
     loader_child: Option<PausedCommand>,
+    loader_unlinks: usize,
     /// Whether the search may receive the other machine's work, and whether it has.
     receive: bool,
     received: bool,
@@ -403,6 +415,7 @@ impl World<'_> {
             native: self.native[0],
             peer: self.concurrent.then_some(self.native[1]),
             loader: self.loader,
+            loader_unlinks: self.loader_unlinks,
             received: self.received,
             heads: self.head_keys(&read_heads(&self.repo)),
             checked_heads: self.checked_heads.clone(),
@@ -493,6 +506,7 @@ impl World<'_> {
                 choices.push(Action::KillLoader);
             }
             Some(Native::Paused) => {
+                choices.push(Action::UnlinkLoader);
                 choices.push(Action::FinishLoader);
                 choices.push(Action::KillLoader);
             }
@@ -593,6 +607,14 @@ impl World<'_> {
                     self.loader_child.take();
                     Native::Finished
                 });
+            }
+            Action::UnlinkLoader => {
+                let paused = self.loader_child.as_mut().unwrap().unlink_one();
+                self.loader_unlinks += 1;
+                if !paused {
+                    self.loader_child.take();
+                    self.loader = Some(Native::Finished);
+                }
             }
             Action::FinishLoader => {
                 self.loader_child.take().unwrap().release();
@@ -1001,6 +1023,13 @@ fn explore(
                     .keys()
                     .any(|state| state.received && state.native == Native::Paused),
             "the search must receive the other machine's work while jj waits to unlink"
+        );
+        assert!(
+            !fixture.loader
+                || visited.keys().any(|state| {
+                    state.loader == Some(Native::Paused) && state.loader_unlinks > 0
+                }),
+            "the search must stop a native merge between removing one head and the next"
         );
         for (loader, what) in [
             (Native::Killed, "kill a native merge"),

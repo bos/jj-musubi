@@ -619,3 +619,139 @@ fn e2e_abandoning_a_late_describe_after_a_join_keeps_others_workspaces_theirs() 
     world.op_abandon(0, &described);
     world.converge();
 }
+
+/// Found by `late_commands_after_trims` with every fix for #167 then on main, reduced by hand.
+/// Alpha trims and, with its clock stepped back, describes beta's secondary working copy late;
+/// gamma renames its workspace without syncing. Alpha trims again and restores late to that
+/// describe, then, with the clock stepped back, describes its own working copy late; gamma syncs.
+/// Alpha trims a third time, taking gamma's rename, restores late to its first restore and
+/// abandons late its rewritten working copy, both with the clock stepped back, and then runs `jj
+/// op abandon` of that second restore and of its second late describe. Before lysvtvvk, after the
+/// syncs the hive gave alpha gamma's renamed workspace, `gamma/gamma`, as its own, and gamma's
+/// own view had its old name back, so its working-copy state named a workspace its view lacked:
+/// its next command failed with "Workspace `gamma` doesn't have a working-copy commit". Dropping
+/// the rename, or either `jj op abandon`, made it pass. On one machine jj does the same when an
+/// undo crosses another workspace's rename (races.md, "Known jj limitations"), which that row
+/// says can't happen across machines.
+#[test]
+fn e2e_abandoning_late_restores_after_a_rename_keeps_a_machines_own_workspace() {
+    let mut world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: true,
+    });
+    let newest = |world: &World, merge: bool| {
+        world
+            .late_ops(0)
+            .into_iter()
+            .find(|op| op.merge == merge)
+            .unwrap()
+            .id
+    };
+    let merge = |world: &mut World| {
+        if world.op_heads(0).len() > 1 {
+            world.merge_late_heads(0);
+        }
+    };
+    let describe = |world: &mut World, op: &str, commit: &str, back: bool| {
+        let message = world.message(0);
+        world.late_command(0, op, &["describe", commit, "-m", &message], back);
+    };
+    let first = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 1, None);
+    let second = working_copy_at(&world, 0, &first, "beta/second").id;
+    describe(&mut world, &first, &second, true);
+    let described = newest(&world, false);
+    merge(&mut world);
+    let merged = newest(&world, true);
+    world.rename_workspace(2, 0, "gamma");
+    world.trim_to_unpublished_root(0);
+    world.sync(0);
+    world.late_command(0, &merged, &["op", "restore", &described], false);
+    let restored = newest(&world, false);
+    merge(&mut world);
+    let own = working_copy_at(&world, 0, &merged, "default");
+    describe(&mut world, &merged, &own.id, true);
+    let described_own = newest(&world, false);
+    merge(&mut world);
+    let merged_again = newest(&world, true);
+    world.sync(2);
+    world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    world.late_command(0, &merged_again, &["op", "restore", &restored], true);
+    let restored_again = newest(&world, false);
+    merge(&mut world);
+    let last = newest(&world, true);
+    let rewritten = world
+        .view_at(0, &last)
+        .commits
+        .into_iter()
+        .find(|c| c.change == own.change && c.id != own.id)
+        .unwrap()
+        .id;
+    world.late_command(0, &last, &["abandon", &rewritten], true);
+    merge(&mut world);
+    world.op_abandon(0, &restored_again);
+    world.op_abandon(0, &described_own);
+    for _ in 0..2 {
+        world.sync(0);
+        world.sync(1);
+    }
+    world.sync_partial(1, 3, None);
+    world.sync(2);
+    let message = world.message(2);
+    world.jj(2, &["new", "-m", &message]);
+    world.converge();
+}
+
+/// Reduced from a failure of `late_commands_after_trims` (finding G): a gap in the import check,
+/// which this pins until it closes. After a full trim, beta runs a late `jj new` on alpha's
+/// working copy, and on that, with the clock stepped back, a late abandon of the same commit,
+/// which leaves beta's working copy on the root and `.git`'s HEAD unborn; then `jj op abandon` of
+/// that late abandon. Alpha commits and syncs. Beta trims again and, with the clock stepped back,
+/// abandons late the parent of its working copy at that trim's op head, leaving HEAD unborn
+/// again, then runs `jj op abandon` of that op head. The next import takes the unborn HEAD, as jj
+/// does where both heads wrote it. But `jj op abandon` has reparented the late command that wrote
+/// it onto the root, where its absent record looks unchanged, so the check counts no writer of it
+/// on that side of the merge and blames the other. Judging ancestry by the parents it judges
+/// records by (captured originals, jj's and musubi's rewrites of merges above an abandon,
+/// `musubi.reconciled-from`) would close it. Once it does, this fails: make it a plain
+/// regression.
+#[test]
+#[should_panic(expected = "taking HEAD absent for jj's record of it")]
+fn e2e_abandons_below_a_late_unborn_head() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    let merge = |world: &mut World| {
+        if world.op_heads(1).len() > 1 {
+            world.merge_late_heads(1);
+        }
+    };
+    let first = world.trim_to_unpublished_root(1);
+    world.sync_partial(1, 2, None);
+    let alpha = working_copy_at(&world, 1, &first, "alpha/alpha").id;
+    world.late_command(1, &first, &["new", &alpha], false);
+    let on_alpha = world.late_ops(1)[0].id.clone();
+    merge(&mut world);
+    world.late_command(1, &on_alpha, &["abandon", &alpha], true);
+    let abandoned = world.late_ops(1)[0].id.clone();
+    merge(&mut world);
+    world.op_abandon(1, &abandoned);
+    let file = world::FILES.iter().position(|f| *f == "dir/c.txt").unwrap();
+    world.commit(0, 0, file);
+    world.sync(0);
+    let second = world.trim_to_unpublished_root(1);
+    world.sync_partial(1, 2, None);
+    let below = working_copy_at(&world, 1, &second, "beta").parents[0].clone();
+    world.late_command(1, &second, &["abandon", &below], true);
+    world.op_abandon(1, &second);
+    for m in 0..2 {
+        world.check_imports(m);
+    }
+    world.converge();
+}

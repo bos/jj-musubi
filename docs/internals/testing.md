@@ -990,6 +990,23 @@ performance counters to `perf_event_open`; the devbox tool offers no metal size.
 bare-metal Linux host, or a VM whose hypervisor exposes the counters and applies the Zen
 workaround.
 
+On a bare-metal Intel laptop (Core Ultra 5 125H, Fedora, rr 5.10.0) with
+`kernel.perf_event_paranoid` set to 1, rr records a `--concurrent` schedule, including its
+`jj op abandon` child processes, and replays it to the same test result. A 13-step schedule
+with two abandons made a 733 MB trace. That CPU mixes performance and efficiency cores, so, to
+be safe, pin recording and replay to one kind: `lscpu --extended` shows which CPUs are which,
+and CPUs 0-7 are the performance cores there.
+
+```sh
+taskset -c 0-7 just head-schedule replay target/head-schedule.json --rr target/head-schedule-rr
+taskset -c 0-7 rr replay -a target/head-schedule-rr
+rr ps target/head-schedule-rr
+taskset -c 0-7 rr replay -p PID target/head-schedule-rr
+```
+
+`rr ps` lists the recorded processes. `-p PID` replays just that process, such as one
+`jj op abandon` child, under the debugger; add `-a` to replay it without one.
+
 ### Generated command and sync schedules
 
 A Hegel state machine drives two or three real colocated repositories, each served by a musubi

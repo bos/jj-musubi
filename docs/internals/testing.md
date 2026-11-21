@@ -876,9 +876,10 @@ family and removing the old one through `unlink` and `unlinkat`. Run the search 
 operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
 schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
 `jj describe` on the same old head instead of another abandon, and `--loader` adds a third,
-`jj op log`, which merges the heads it finds. `--steps N` sets the most actions a schedule
-may take: 8 by default, 14 with `--concurrent` and 18 with `--loader`. `--jobs N` runs that
-many branches at once, half the CPUs by default.
+`jj op log`, which merges the heads it finds. `--receive`, with or without `--concurrent`, lets
+the daemon receive the other machine's work once the native commands have started. `--steps N`
+sets the most actions a schedule may take: 8 by default, 14 with `--concurrent` and 18 with
+`--loader`. `--jobs N` runs that many branches at once, half the CPUs by default.
 
 ```sh
 just head-schedule search
@@ -938,22 +939,35 @@ order its hash set gives, which changes from run to run. musubi's rewrites of th
 the canonical forms it gives them, follow that order. States name each operation by a key:
 its id for the starting history, and otherwise a hash of its body with its parents' keys, a
 merge's sorted, and ids in its metadata replaced by their keys. That makes a merge and what is
-written on it comparable across runs, but not musubi's rewrites of a merge. So a search with
-`--loader` replays a prefix without comparing its states, continues from the state it reaches,
-and drops the branch if a step of the prefix is no longer enabled there, counting the branches
-it drops. Such a search is best effort: it may miss a state a different merge order reaches.
+written on it comparable across runs, but not musubi's rewrites of a merge. Receiving at several
+heads merges them the same way. So a search with `--loader` or `--receive` replays a prefix
+without comparing its states, continues from the state it reaches, and drops the branch if a
+step of the prefix is no longer enabled there. It fails if it drops more than a tenth of its
+branches, which would mean the harness, not jj, disables steps. Such a search is best effort:
+it may miss a state a different merge order reaches.
 `replay` of such a schedule checks only that its actions are enabled, as `--actions-only`
 does, and a failure it saved may take several replays to happen again.
 
-Without `--loader`, each search reaches every state it can within the default horizon: a
-deeper `--steps` finds no new ones. The single command has 20 states, two abandons 358 and an
-abandon with a write 482, with or without unpublished work, each found in seconds. With
-`--loader`, two abandons reach about 4,400 states and an abandon with a write about 3,000, and
-a deeper horizon adds none; the counts vary by a few states from run to run, as native merges
-do. Each takes one to two minutes with 14 jobs on an otherwise idle 16-core machine, and four
-to six with one. On a shared machine, pass a `--jobs` that leaves room for others. A command
-that misses its pause for 30 seconds under load is reported as a failed step; replay the saved
-schedule before believing it.
+Receiving realizes the other machine's operations and publishes heads under the op-heads lock,
+so the search offers it only while no native command holds the lock. It may receive before the
+daemon has checked for an abandon, which the daemon's own sync does first; `advance` must
+revalidate either way. A single command pauses only once it has published, so receiving while
+an abandon is computed but not yet published needs `--concurrent`. Once everything has
+settled, every op head must still have the received commit in its view, and a put-back may
+sit below it; the check then compares canonical history, not views.
+
+Without `--loader` or `--receive`, each search reaches every state it can within the default
+horizon: a deeper `--steps` finds no new ones. The single command has 20 states, two abandons
+358 and an abandon with a write 482, with or without unpublished work, each found in seconds.
+With `--loader`, two abandons reach about 4,400 states and an abandon with a write about
+3,000, and a deeper horizon adds none; the counts vary by a few states from run to run, as
+native merges do. Each takes one to two minutes with 14 jobs on an otherwise idle 16-core
+machine, and four to six with one. With `--receive`, the single command reaches 34 states, two
+abandons about 830, an abandon with a write about 710, and an abandon with a loader about
+9,100, the last in about four minutes with 14 jobs; again a deeper horizon adds none. On a
+shared machine, pass a `--jobs` that leaves room for others. A command that misses its pause
+for 30 seconds under load is reported as a failed step; replay the saved schedule before
+believing it.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:

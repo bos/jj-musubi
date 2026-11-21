@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 mod gate;
 use gate::{Gate, PausedCommand};
 
-use crate::translation::abandon_put_back_fixture;
+use crate::translation::{abandon_put_back_fixture, single_canonical_head, sync};
 
 const MAX_STEPS: usize = 8;
 const CONCURRENT_STEPS: usize = 14;
@@ -53,6 +53,7 @@ enum Action {
     PublishLoader,
     FinishLoader,
     KillLoader,
+    Receive,
 }
 
 /// What the second native command does in a concurrent search: the same `jj op abandon`, or
@@ -74,6 +75,8 @@ impl Peer {
 
 /// The description the write peer gives the working-copy commit, to find it afterwards.
 const WRITE_MARKER: &str = "musubi head-schedule write";
+/// The description the other machine gives its work before this one receives it.
+const RECEIVE_MARKER: &str = "musubi head-schedule received";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +96,9 @@ struct State {
     /// A native command that loads the repository at several heads, merging them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loader: Option<Native>,
+    /// Whether the daemon received the other machine's work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    received: bool,
     heads: Vec<String>,
     checked_heads: Option<Vec<String>>,
     online: bool,
@@ -125,7 +131,23 @@ struct Schedule {
     peer: Peer,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     loader: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    receive: bool,
     steps: Vec<Step>,
+}
+
+/// Whether replaying a schedule reaches the same states. jj orders the parents of a merge of
+/// heads with equal end times as its hash set gives them, and musubi's rewrites of the merge
+/// follow that order: a native command or a sync that loads the repository at several heads
+/// makes one.
+fn exact(loader: bool, receive: bool) -> bool {
+    !loader && !receive
+}
+
+impl Schedule {
+    fn exact(&self) -> bool {
+        exact(self.loader, self.receive)
+    }
 }
 
 struct Fixture<'a> {
@@ -136,6 +158,7 @@ struct Fixture<'a> {
     concurrent: bool,
     peer: Peer,
     loader: bool,
+    receive: bool,
 }
 
 impl<'a> Fixture<'a> {
@@ -146,6 +169,7 @@ impl<'a> Fixture<'a> {
         concurrent: bool,
         peer: Peer,
         loader: bool,
+        receive: bool,
     ) -> Self {
         let case = if unpublished {
             "unpublished"
@@ -167,6 +191,7 @@ impl<'a> Fixture<'a> {
             concurrent,
             peer,
             loader,
+            receive,
         }
     }
 
@@ -198,6 +223,8 @@ impl<'a> Fixture<'a> {
             children: [None, None],
             loader: self.loader.then_some(Native::Ready),
             loader_child: None,
+            receive: self.receive,
+            received: false,
             concurrent: self.concurrent,
             peer: self.peer,
             checked_heads: None,
@@ -221,12 +248,17 @@ impl<'a> Fixture<'a> {
             concurrent: self.concurrent,
             peer: self.peer,
             loader: self.loader,
+            receive: self.receive,
             steps: vec![],
         }
     }
 
     fn horizon(&self) -> usize {
         horizon(self.concurrent, self.loader)
+    }
+
+    fn exact(&self) -> bool {
+        exact(self.loader, self.receive)
     }
 }
 
@@ -253,6 +285,9 @@ struct World<'a> {
     children: [Option<PausedCommand>; 2],
     loader: Option<Native>,
     loader_child: Option<PausedCommand>,
+    /// Whether the search may receive the other machine's work, and whether it has.
+    receive: bool,
+    received: bool,
     concurrent: bool,
     peer: Peer,
     checked_heads: Option<Vec<String>>,
@@ -368,6 +403,7 @@ impl World<'_> {
             native: self.native[0],
             peer: self.concurrent.then_some(self.native[1]),
             loader: self.loader,
+            received: self.received,
             heads: self.head_keys(&read_heads(&self.repo)),
             checked_heads: self.checked_heads.clone(),
             online: self.node.is_some(),
@@ -439,6 +475,13 @@ impl World<'_> {
             }
         } else if self.concurrent && state.heads.len() > 1 && !self.locked() {
             choices.push(Action::MergeHeads);
+        }
+        // Receiving publishes heads under jj's op-heads lock. The native commands start from
+        // the old head first, and receive during and after them.
+        let started = self.native[0] != Native::Ready
+            && !(self.concurrent && self.native[1] == Native::Ready);
+        if self.receive && started && !self.received && state.online && !self.locked() {
+            choices.push(Action::Receive);
         }
         match self.loader {
             // Loading at one head takes no lock and changes nothing.
@@ -633,6 +676,15 @@ impl World<'_> {
                 self.node =
                     Some(NodeRepo::open(&self.repo.repo_path(), &self.repo.settings()).unwrap());
             }
+            Action::Receive => {
+                let alpha = self.env.repo_handle("alpha");
+                alpha.jj(&["describe", "-m", RECEIVE_MARKER]);
+                let mut from = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
+                let head = single_canonical_head(&mut from);
+                sync(&from, self.node.as_mut().unwrap(), &head);
+                self.received = true;
+                self.checked_heads = None;
+            }
             Action::MergeHeads => {
                 let node = self.node.as_mut().unwrap();
                 node.settle().unwrap();
@@ -678,7 +730,12 @@ impl World<'_> {
         }
         if self.choices(state).is_empty() {
             if self.write_published
-                && let Err(error) = self.check_write_kept()
+                && let Err(error) = self.check_kept(WRITE_MARKER, "the concurrent write")
+            {
+                return Some(error);
+            }
+            if self.received
+                && let Err(error) = self.check_kept(RECEIVE_MARKER, "the received work")
             {
                 return Some(error);
             }
@@ -689,8 +746,8 @@ impl World<'_> {
         None
     }
 
-    /// The write's commit is in the view of every op head, settled, once it added its head.
-    fn check_write_kept(&self) -> Result<(), String> {
+    /// A commit described with `marker` is in the view of every op head, settled.
+    fn check_kept(&self, marker: &str, what: &str) -> Result<(), String> {
         for head in read_heads(&self.repo) {
             let output = self
                 .repo
@@ -702,7 +759,7 @@ impl World<'_> {
                     "log",
                     "--no-graph",
                 ])
-                .args(["-r", &format!("description(substring:{WRITE_MARKER:?})")])
+                .args(["-r", &format!("description(substring:{marker:?})")])
                 .args(["-T", "commit_id"])
                 .output()
                 .map_err(|error| format!("run jj log: {error}"))?;
@@ -713,7 +770,7 @@ impl World<'_> {
                 ));
             }
             if output.stdout.is_empty() {
-                return Err(format!("op head {head} lost the finished concurrent write"));
+                return Err(format!("op head {head} lost {what}"));
             }
         }
         Ok(())
@@ -727,8 +784,9 @@ impl World<'_> {
         let head = LocalOp(OperationId::try_from_hex(head).unwrap());
         let old = LocalOp(OperationId::try_from_hex(&self.old_head).unwrap());
         let restored = self.store.read_operation(&head.0).block_on().unwrap();
-        // A published write changes the view; `check_write_kept` checks what it added.
-        if !self.write_published && restored.view_id != self.old_view {
+        // A published write or received work changes the view; `check_kept` checks what they
+        // added.
+        if !self.write_published && !self.received && restored.view_id != self.old_view {
             return Err("put-back changed the original view".into());
         }
         let node = self.node.as_mut().unwrap();
@@ -738,8 +796,9 @@ impl World<'_> {
             .map_err(|error| error.to_string())?;
         // A second native publisher can put the rewritten head back after the daemon
         // retired it. jj may merge that alias with the restored head on the next sync.
+        // As can work received on top of it.
         let kept = id_before == id_after
-            || (self.concurrent
+            || ((self.concurrent || self.received)
                 && node
                     .canonical_store()
                     .is_ancestor_of(&id_before, &id_after)
@@ -763,7 +822,11 @@ fn replay(
     for (index, step) in trace.steps.iter().enumerate() {
         let index = index + 1;
         if !world.choices(&state).contains(&step.action) {
-            assert!(trace.loader, "step {index} ({:?}) is disabled", step.action);
+            assert!(
+                !trace.exact(),
+                "step {index} ({:?}) is disabled",
+                step.action
+            );
             return None;
         }
         let (actual, error) = world.attempt(step.action);
@@ -882,6 +945,12 @@ fn explore(
         return (trace, Some(violation));
     }
     assert!(!panicked, "a search worker panicked");
+    // A merge that went otherwise makes a prefix unreachable now and then; many such would
+    // mean the harness disables steps it shouldn't.
+    assert!(
+        dropped * 10 <= runs,
+        "dropped {dropped} of {runs} branches: replay is not reaching the recorded steps"
+    );
     assert!(
         different_from.is_none() || longest.steps.len() > prefix.steps.len(),
         "no alternative is enabled at that prefix"
@@ -925,6 +994,13 @@ fn explore(
                     .keys()
                     .any(|state| state.loader == Some(Native::Paused)),
             "the search must pause a native merge between adding and removing heads"
+        );
+        assert!(
+            !fixture.receive
+                || visited
+                    .keys()
+                    .any(|state| state.received && state.native == Native::Paused),
+            "the search must receive the other machine's work while jj waits to unlink"
         );
         for (loader, what) in [
             (Native::Killed, "kill a native merge"),
@@ -995,7 +1071,7 @@ fn work(
         // jj orders the parents of a merge it makes of heads with equal end times as it
         // pleases, and musubi's rewrites of the merge follow that order: a schedule with a
         // native merge need not reach the same states again. Continue from where it does.
-        let Some((mut state, mut error)) = replay(&mut world, &trace, !fixture.loader) else {
+        let Some((mut state, mut error)) = replay(&mut world, &trace, fixture.exact()) else {
             counts.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
@@ -1014,7 +1090,7 @@ fn work(
             }
             let action = if let Some(action) = following.take() {
                 if !world.choices(&state).contains(&action) {
-                    assert!(fixture.loader, "{action:?} is disabled after its prefix");
+                    assert!(!fixture.exact(), "{action:?} is disabled after its prefix");
                     counts.dropped.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -1138,7 +1214,19 @@ fn run() {
         |trace| trace.loader,
     );
     assert!(concurrent || !loader, "a loader needs a concurrent search");
-    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent, peer, loader);
+    let receive = trace.as_ref().map_or_else(
+        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_RECEIVE").is_some(),
+        |trace| trace.receive,
+    );
+    let fixture = Fixture::load(
+        &gate,
+        &cache,
+        unpublished,
+        concurrent,
+        peer,
+        loader,
+        receive,
+    );
     let (trace, violation) = match mode.as_str() {
         "search" => explore(&fixture, fixture.empty_schedule(), None),
         "replay" => {
@@ -1146,7 +1234,7 @@ fn run() {
             let mut world = fixture.restore();
             // As in a search, a native merge need not reach the recorded states again.
             let verify =
-                std::env::var_os("MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY").is_none() && !trace.loader;
+                std::env::var_os("MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY").is_none() && trace.exact();
             let (state, error) = replay(&mut world, &trace, verify).expect(
                 "a step is disabled: jj merged the heads otherwise this time; replay it again",
             );

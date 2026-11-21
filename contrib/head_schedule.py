@@ -50,6 +50,10 @@ def main():
         help="race a second native command: an abandon, or what --peer says",
     )
     search.add_argument(
+        "--receive", action="store_true",
+        help="also let the daemon receive the other machine's work once",
+    )
+    search.add_argument(
         "--loader", action="store_true",
         help="with --concurrent, also load the repository once at several heads, merging them",
     )
@@ -121,6 +125,8 @@ def main():
         settings["MUSUBI_HEAD_SCHEDULE_AT"] = str(args.at)
     if getattr(args, "unpublished", False):
         settings["MUSUBI_HEAD_SCHEDULE_UNPUBLISHED"] = "1"
+    if getattr(args, "receive", False):
+        settings["MUSUBI_HEAD_SCHEDULE_RECEIVE"] = "1"
     if getattr(args, "concurrent", False):
         settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
         settings["MUSUBI_HEAD_SCHEDULE_PEER"] = args.peer

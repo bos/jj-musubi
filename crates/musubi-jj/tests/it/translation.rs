@@ -1135,7 +1135,7 @@ fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &CanonicalOp) {
 }
 
 /// Ships objects and canonical operations, then makes `head` an op head of `to`.
-fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
+pub(super) fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
     ship_objects(from, to, head);
     ship_operations(from, to, head);
     to.advance(head).unwrap();
@@ -1158,7 +1158,7 @@ fn ship_operations(from: &NodeRepo, to: &NodeRepo, head: &CanonicalOp) {
     assert_eq!(imported, ops);
 }
 
-fn single_canonical_head(node: &mut NodeRepo) -> CanonicalOp {
+pub(super) fn single_canonical_head(node: &mut NodeRepo) -> CanonicalOp {
     node.merge_heads().unwrap();
     let heads = node.canonical_heads().unwrap();
     assert_eq!(heads.len(), 1, "expected one head, got {heads:?}");

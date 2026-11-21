@@ -4800,14 +4800,17 @@ fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {
         second.to_str().unwrap(),
     ]);
     hive.hive.sync(0).unwrap();
-    let workspaces = hive.node(0).machine_workspaces().unwrap();
-    assert!(workspaces.iter().any(|(name, _)| name == "beta/default"));
-    // Bringing beta back must keep the local name and choose a distinct foreign prefix.
+    assert!(hive.workspace_names(0).contains("beta/default"));
+    // Bringing beta back must keep the local name, unpublished, and choose a distinct foreign
+    // prefix.
     hive.commit(1, "back", "beta returns");
     hive.sync();
     hive.assert_converged();
-    assert!(hive.workspace_names(0).contains("beta/default"));
-    assert!(hive.workspace_names(1).contains("alpha/beta/default"));
+    let qualified = musubi_jj::workspaces::qualified_name(&beta);
+    let alpha = hive.workspace_names(0);
+    assert!(alpha.contains("beta/default"), "{alpha:?}");
+    assert!(alpha.contains(&format!("{qualified}/default")), "{alpha:?}");
+    assert!(!hive.workspace_names(1).contains("alpha/beta/default"));
 }
 
 /// A command between deciding to take a full trim and advancing must be translated on
@@ -6946,7 +6949,7 @@ fn a_full_trim_keeps_a_forgotten_receivers_private_workspaces() {
         hive.assert_converged();
         assert!(hive.workspace_names(0).contains("beta/default"));
         assert!(
-            hive.workspace_names(1).contains("alpha/beta/default"),
+            !hive.workspace_names(1).contains("alpha/beta/default"),
             "alpha: {:?}; beta: {:?}",
             hive.workspace_names(0),
             hive.workspace_names(1)
@@ -6957,61 +6960,11 @@ fn a_full_trim_keeps_a_forgotten_receivers_private_workspaces() {
         );
         hive.repo(0).jj(&["workspace", "forget", "beta/default"]);
         hive.sync();
-        assert!(!hive.workspace_names(1).contains("alpha/beta/default"));
-    }
-}
-
-/// Restoring a view from before a private owned name existed must not claim the foreign
-/// alias that used to occupy the same literal name.
-#[test]
-fn restoring_an_older_view_does_not_inherit_private_workspace_ownership() {
-    let mut hive = default_workspaces();
-    hive.repo(0)
-        .jj(&["describe", "-m", "alpha's retained commit"]);
-    hive.repo(1)
-        .jj(&["describe", "-m", "beta's retained commit"]);
-    hive.sync();
-    let foreign = op_log(hive.repo(0))[0].0.clone();
-    let beta = hive.machine_key(1);
-    hive.node(0).forget_copy(&beta, "beta").unwrap();
-    hive.hive.sync(0).unwrap();
-    let second = hive.repo(0).path().with_file_name("alpha-second");
-    hive.repo(0).jj(&[
-        "workspace",
-        "add",
-        "--name",
-        "beta/default",
-        second.to_str().unwrap(),
-    ]);
-    hive.hive.sync(0).unwrap();
-    hive.repo(1).jj(&["new", "-m", "beta returns"]);
-    hive.sync();
-    assert!(hive.workspace_names(1).contains("alpha/beta/default"));
-    let alpha = hive.machine_key(0);
-    hive.node(1).forget_copy(&alpha, "alpha").unwrap();
-    hive.hive.sync(1).unwrap();
-    let base = op_log(hive.repo(1))[0].0.clone();
-    hive.repo(1).jj(&["new", "-m", "surviving tip"]);
-    hive.repo(1).jj(&["op", "abandon", &format!("..{base}")]);
-    hive.hive.sync(1).unwrap();
-    hive.hive.sync(0).unwrap();
-    assert!(hive.workspace_names(0).contains("beta/default"));
-    hive.repo(0)
-        .jj(&["--ignore-working-copy", "op", "restore", &foreign]);
-    let head = hive.node(0).canonical_heads().unwrap();
-    for head in head {
-        let view = hive
-            .node(0)
-            .canonical_store()
-            .read_operation_view(&head)
-            .unwrap();
-        assert!(
-            !view
-                .wc_commit_ids
-                .keys()
-                .any(|key| key.as_str() == format!("{alpha}/beta/default"))
+        // beta's workspace takes the plain name again.
+        hive.assert_converged();
+        assert_eq!(
+            hive.workspaces(0).get("beta/default"),
+            hive.workspaces(1).get("default")
         );
     }
-    hive.sync();
-    assert!(!hive.workspace_names(1).contains("alpha/beta/default"));
 }

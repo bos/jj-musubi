@@ -9,6 +9,7 @@ use std::sync::PoisonError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::View;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
@@ -28,6 +29,14 @@ use crate::workspaces;
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
 pub(super) type WorkedNames = Option<(Vec<Option<CanonicalOp>>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
+
+/// The names `NodeRepo::has_working_copy_here` answered for, with the workspace store file's
+/// modification time and length then, if it could be read.
+#[derive(Default)]
+pub(super) struct WorkingCopies {
+    stamp: Option<(Option<std::time::SystemTime>, u64)>,
+    names: std::collections::HashMap<WorkspaceNameBuf, bool>,
+}
 
 /// The names of this machine's own workspaces in a canonical view.
 fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
@@ -233,20 +242,26 @@ impl NodeRepo {
         )
     }
 
-    /// This machine's own of `workspaces`, a local view's, whose canonical form is
-    /// `canonical`: every one but those the canonical view gives other machines, and other
-    /// machines' under names the hive no longer gives them (`names_other_machine`) or that
-    /// the canonical operation's namespace context gives them, judged with the machines it
-    /// knows. Where a trim left its history the root alone, the canonical view has no other
-    /// machine's workspaces to go by, and the context, which `canonical_view` reads too
-    /// (`apply_namespace_context`), stands for the views the operation started from.
+    /// This machine's of `workspaces`, a local view's, whose canonical form is `canonical`:
+    /// every one but those the canonical view gives other machines, and other machines' under
+    /// names the hive no longer gives them, as `jj undo` or a trim brings back
+    /// (`names_other_machine`), judged with the machines the canonical operation's namespace
+    /// context knows too, unless this machine records the name as its own here
+    /// (`private_workspace_names`) or has a working copy for it (`has_working_copy_here`). Where a trim left its history the root alone, the
+    /// canonical view has no other machine's workspaces to go by, and the context stands for
+    /// the views the operation started from. Those with a `/` in their names are this
+    /// machine's to keep but not to publish (`view::is_publishable`).
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
         canonical: &CanonicalOp,
         op: &jj_lib::op_store::Operation,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        if canonical == self.canonical.root_operation_id() {
+        if canonical == self.canonical.root_operation_id()
+            || workspaces
+                .keys()
+                .all(|name| super::view::is_publishable(name))
+        {
             return Ok(workspaces);
         }
         let canonical_op = self.canonical.read_operation(canonical)?;
@@ -254,27 +269,18 @@ impl NodeRepo {
         let canonical_view = self.canonical.read_view(&canonical_op.view_id)?;
         let prefixes =
             self.prefixes_with_own(&canonical_view, &*self.presence(canonical)?, &private)?;
-        let others: BTreeSet<_> = self
+        let mut others: BTreeSet<_> = self
             .names_of(&canonical_view, &prefixes)
             .into_iter()
             .filter(|(key, _)| !self.is_own_key(key))
             .map(|(_, name)| name)
             .collect();
-        let own = self.own_names(canonical)?;
-        let (mut kept, undecided): (BTreeMap<_, _>, BTreeMap<_, _>) = workspaces
-            .into_iter()
-            .filter(|(name, _)| !others.contains(name))
-            .partition(|(name, _)| private.contains(name) || own.contains(name));
-        if undecided.is_empty() {
-            return Ok(kept);
-        }
         let mut machines = self.known_machines(canonical)?;
-        let mut context_others = BTreeSet::new();
         if let Some(context) = Namespace::read(&canonical_op.metadata)?
             .filter(|context| context.source == self.machine.key())
         {
             machines.extend(context.known);
-            context_others.extend(
+            others.extend(
                 context
                     .names
                     .into_iter()
@@ -282,10 +288,55 @@ impl NodeRepo {
                     .map(|(name, _)| WorkspaceNameBuf::from(name)),
             );
         }
-        kept.extend(undecided.into_iter().filter(|(name, _)| {
-            !context_others.contains(name) && !self.names_other_machine(name, &machines)
-        }));
-        Ok(kept)
+        Ok(workspaces
+            .into_iter()
+            .filter(|(name, _)| {
+                super::view::is_publishable(name)
+                    || private.contains(name)
+                    || !others.contains(name)
+                        && (!self.names_other_machine(name, &machines)
+                            || self.has_working_copy_here(name))
+            })
+            .collect())
+    }
+
+    /// Whether jj's workspace store records a working copy here for `name`, in a directory
+    /// that is still there: musubi makes none for another machine's workspace, so a name of the
+    /// form other machines' show by, `beta/x`, with one is this machine's, which it doesn't
+    /// publish. jj records one from `jj workspace add` on, moves it with `jj workspace rename`,
+    /// and leaves it after `jj workspace forget`. Remembered while the store's file is
+    /// unchanged, since every other machine's workspace of every operation is asked about.
+    pub(super) fn has_working_copy_here(&self, name: &WorkspaceName) -> bool {
+        let ask = || {
+            matches!(
+                self.loader.workspace_store().get_workspace_path(name),
+                Ok(Some(path)) if path.exists()
+            )
+        };
+        let Some(stamp) = std::fs::metadata(self.repo_path.join("workspace_store").join("index"))
+            .ok()
+            .map(|metadata| (metadata.modified().ok(), metadata.len()))
+        else {
+            return ask();
+        };
+        let stamp = Some(stamp);
+        let mut memo = self
+            .names
+            .working_copies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if memo.stamp != stamp {
+            *memo = WorkingCopies {
+                stamp,
+                ..WorkingCopies::default()
+            };
+        }
+        if let Some(&here) = memo.names.get(name) {
+            return here;
+        }
+        let here = ask();
+        memo.names.insert(name.to_owned(), here);
+        here
     }
 
     /// This exact native head set's owned bindings, qualified before their aliases are read.
@@ -429,17 +480,6 @@ impl NodeRepo {
         Ok(self.machines_of(&view, self.presence(canonical)?.known()))
     }
 
-    /// Whether jj's workspace store records a working copy here for `name`, or can't say:
-    /// a guard against dropping a workspace of this machine's own whose name looks like
-    /// another machine's. Never what decides whose a workspace is, since repositories from
-    /// before the store have none of theirs in it.
-    pub(super) fn may_be_registered(&self, name: &jj_lib::ref_name::WorkspaceName) -> bool {
-        !matches!(
-            self.loader.workspace_store().get_workspace_path(name),
-            Ok(None)
-        )
-    }
-
     /// The local names of other machines' workspaces in a canonical operation's view, with
     /// their keys.
     pub(super) fn other_names(
@@ -461,6 +501,10 @@ impl NodeRepo {
 
     /// Machine prefixes reserve local workspace names even when a copy currently has no
     /// workspace. Membership, rather than workspace existence, determines who can be named.
+    /// They keep clear of this machine's names in the local operation standing for
+    /// `canonical`, as the local view names other machines: those it records
+    /// (`private_workspace_names`), keeps (`own_of_view`), or has working copies for but
+    /// doesn't publish (`unpublished_of`).
     pub(super) fn machine_prefixes(
         &self,
         canonical: &CanonicalOp,
@@ -469,7 +513,13 @@ impl NodeRepo {
         let private = if let Some(local) = self.local_of(canonical) {
             let op = self.loader.op_store().read_operation(&local.0).block_on()?;
             let local_view = self.loader.op_store().read_view(&op.view_id).block_on()?;
-            self.private_workspace_names(&op, &local_view.wc_commit_ids)?
+            let mut names = self.private_workspace_names(&op, &local_view.wc_commit_ids)?;
+            names.extend(self.unpublished_of(&local_view.wc_commit_ids));
+            names.extend(
+                self.own_of_view(local_view.wc_commit_ids, canonical, &op)?
+                    .into_keys(),
+            );
+            names
         } else {
             BTreeSet::new()
         };

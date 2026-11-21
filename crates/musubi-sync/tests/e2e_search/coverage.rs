@@ -240,17 +240,20 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("a_copy_that_leaves_gets_a_new_working_copy", None),
     ("a_copy_that_left_shows_again_once_it_joins", None),
     // The search names workspaces without a `/`.
-    ("own_workspaces_with_a_slash_are_own", None),
-    ("own_workspaces_named_like_another_machine_are_own", None),
+    ("own_workspaces_with_a_slash_stay_here_until_renamed", None),
+    ("own_workspaces_named_like_another_machine_stay_apart", None),
     (
-        "own_workspaces_named_like_one_added_meanwhile_are_own",
+        "own_workspaces_named_like_one_added_meanwhile_stay_apart",
         None,
     ),
     (
-        "own_workspaces_named_like_one_of_a_machine_joining_meanwhile_are_own",
+        "own_workspaces_named_like_one_of_a_machine_joining_meanwhile_stay_apart",
         None,
     ),
-    ("own_workspaces_named_like_one_forgotten_here_are_own", None),
+    (
+        "own_workspaces_named_like_one_forgotten_here_stay_apart",
+        None,
+    ),
     (
         "a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile",
         None,
@@ -428,11 +431,6 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_full_trim_brings_back_a_name_its_owner_renamed_as_jj_does",
         Some(&["workspace_rename", "op_abandon"]),
     ),
-    // The search has no owned slash-name rule or operation-restore rule.
-    (
-        "restoring_an_older_view_does_not_inherit_private_workspace_ownership",
-        None,
-    ),
     // The workspace-name pool has no foreign alias containing a slash.
     (
         "a_trim_does_not_reserve_a_forgotten_copys_workspace_name",
@@ -482,7 +480,7 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs",
         None,
     ),
-    ("abandoning_the_add_of_an_own_workspace_keeps_it_own", None),
+    ("abandoning_the_add_of_an_own_workspace_keeps_it_here", None),
     (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A workspace whose name has a `/`, such as `feat/x`, is no longer shown on other machines,
+  which use names like `laptop/default` for each other's workspaces. It keeps working on its
+  own machine, and `musubi status` and the daemon's log warn about it. After you upgrade a
+  machine, other machines stop showing that machine's workspaces with a `/` in their names (as
+  `desk/feat/x`) the next time it syncs; a machine not yet upgraded goes on showing its own. To
+  show one again, run `jj workspace rename <new name>` in that workspace, with no `/` in the new
+  name.
+
 - `musubi hub` makes a new hub in `~/.local/share/musubi/hub` (`$XDG_DATA_HOME/musubi/hub`,
   or `%LOCALAPPDATA%\musubi\hub` on Windows) instead of `~/musubi-hub`. A hub already in
   `~/musubi-hub` stays there, and musubi keeps serving it, but a release after 2027-02-21
@@ -28,10 +36,7 @@
   `jj` command and `jj op abandon` of the restore before the next sync, every machine showed the
   laptop's workspace as this machine's too, as `desk/laptop/default` on a machine named `desk`.
   It now stays the laptop's. Upgrading doesn't remove such a workspace: run
-  `jj workspace forget laptop/default` on `desk`. In return, if you abandon both operations of
-  `jj workspace add --name laptop/x`, or any name that starts with a machine's, with `jj op
-  abandon` before the next sync, keeping a `jj` command run after them, the workspace stops
-  being listed; add it again.
+  `jj workspace forget laptop/default` on `desk`.
 
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.

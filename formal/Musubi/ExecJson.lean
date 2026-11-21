@@ -15,7 +15,6 @@ import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Chunks
 import Musubi.Names
-import Musubi.Ownership
 import Musubi.RefsExec
 import Musubi.RetryControl
 import Musubi.ContractOrder
@@ -543,105 +542,6 @@ def namesReply (j : Json) : Except String Json := do
   let workspaces ← (← j.getObjValAs? (Array Json) "workspaces").toList.mapM decodeWorkspace
   pure (encodeNames machines own.toList me workspaces)
 
-/-! ## Workspace ownership (`Ownership.lean`) -/
-
-def decodeNames (j : Json) (k : String) : Except String (List Ownership.Name) := do
-  pure ((← j.getObjValAs? (Array String) k).toList.map String.toList)
-
-def decodeKeys (j : Json) (k : String) : Except String (List Names.Key) := do
-  (← j.getObjValAs? (Array Json) k).toList.mapM decodeKey
-
-def decodeWKey (j : Json) : Except String Ownership.WKey := do
-  pure ⟨← j.getObjVal? "machine" >>= decodeKey, (← j.getObjValAs? String "workspace").toList⟩
-
-def decodeWKeys (j : Json) (k : String) : Except String (List Ownership.WKey) := do
-  (← j.getObjValAs? (Array Json) k).toList.mapM decodeWKey
-
-/-- `worked`: this machine's names as of its latest work, or `null` if it hasn't worked. -/
-def decodeWorked (j : Json) : Except String (Option (List Ownership.Name)) :=
-  getOpt j "worked" fun v => do
-    pure ((← (← v.getArr?).toList.mapM (·.getStr?)).map String.toList)
-
-/-- A canonical parent: `null` for the root. -/
-def decodeParent (j : Json) : Except String Ownership.Parent :=
-  match j with
-  | .null => pure .root
-  | _ => do
-    pure (.op { keys := ← decodeWKeys j "keys", known := ← decodeKeys j "known",
-                present := ← j.getObjValAs? Bool "present", worked := ← decodeWorked j }
-      (← decodeNames j "reserved"))
-
-def decodeContext (j : Json) : Except String Ownership.Context := do
-  let names ← (← j.getObjValAs? (Array Json) "names").toList.mapM fun e => do
-    pure ((← e.getObjValAs? String "name").toList, ← e.getObjVal? "key" >>= decodeWKey)
-  if (names.map (·.1)).Nodup then
-    pure ⟨← j.getObjVal? "source" >>= decodeKey, names, ← decodeKeys j "known"⟩
-  else throw "a context names a workspace twice"
-
-def decodeSource (j : Json) : Except String Ownership.Source := do
-  match ← j.getObjValAs? String "kind" with
-  | "parents" => pure .parents
-  | "restore" => pure (.restore (← decodeNames j "names") (← decodeNames j "own"))
-  | "revert" => pure (.revert (← decodeNames j "names") (← decodeNames j "own"))
-  | "collected" => pure .collected
-  | k => throw s!"unknown source {k}"
-
-def encodeNameList (l : List Ownership.Name) : Json :=
-  Json.arr (l.map fun n => Json.str (String.ofList n)).toArray
-
-def encodeKey (k : Names.Key) : Json :=
-  Json.mkObj [("name", Json.str (String.ofList k.name)),
-    ("suffix", Json.str (String.ofList k.suffix))]
-
-def encodeWKey (k : Ownership.WKey) : Json :=
-  Json.mkObj [("machine", encodeKey k.owner), ("workspace", Json.str (String.ofList k.ws))]
-
-/-- Decode an `ownership` request: one translation's evidence, with the names a `jj` command says
-it added (`adds`), and what its canonical operation gets besides this machine's names. Answer
-with the names `canonical_view` puts under this machine's key (`owned`), the canonical
-operation's keys, and what `own_of_view` owns reading it, as fixed for #167 and as before. A
-request outside `agreement`'s hypotheses is refused. -/
-def ownershipReply (j : Json) : Except String Json := do
-  let me ← j.getObjVal? "me" >>= decodeKey
-  let parents ← (← j.getObjValAs? (Array Json) "parents").toList.mapM decodeParent
-  let ev : Ownership.Ev :=
-    { me, view := ← decodeNames j "view", priv := ← decodeNames j "private", parents,
-      start := ← decodeNames j "start", source := ← j.getObjVal? "source" >>= decodeSource,
-      command := ← j.getObjValAs? Bool "command", adds := ← decodeNames j "adds",
-      fixup := ← j.getObjValAs? Bool "fixup",
-      context := ← getOpt j "context" decodeContext }
-  let fj ← j.getObjVal? "facts"
-  let f : Ownership.Facts :=
-    { present := ← fj.getObjValAs? Bool "present", known := ← decodeKeys fj "known",
-      worked := ← decodeWorked fj, others := ← decodeWKeys fj "others" }
-  if !Ownership.wfB ev f then
-    throw "the parents' machines must be known at the operation, and no key may have a /"
-  let c := Ownership.canonView ev f
-  pure (Json.mkObj [("ok", Json.bool true), ("owned", encodeNameList (Ownership.owned ev)),
-    ("keys", Json.arr (c.keys.map encodeWKey).toArray),
-    ("ownOfView", encodeNameList (Ownership.ownOfView me ev.view ev.priv c)),
-    ("unfixed", encodeNameList (Ownership.ownOfViewUnfixed me ev.view ev.priv c))])
-
-/-- A namespace context, as `decodeContext` reads it, without refusing a repeated name. -/
-def encodeContext (c : Ownership.Context) : Json :=
-  Json.mkObj [("source", encodeKey c.source),
-    ("names", Json.arr (c.names.map fun (n, k) =>
-      Json.mkObj [("name", Json.str (String.ofList n)), ("key", encodeWKey k)]).toArray),
-    ("known", Json.arr (c.known.map encodeKey).toArray)]
-
-/-- Decode a `namespace` request: two contexts of one source, `into` and `from`, and whether to
-fold `from` in as a carried context (`keep`, `Namespace::keep_others_of`) or as the one the
-operation records (`take`, `Namespace::take_others_of`). Answer with the result. -/
-def namespaceReply (j : Json) : Except String Json := do
-  let into ← j.getObjVal? "into" >>= decodeContext
-  let source ← j.getObjVal? "from" >>= decodeContext
-  if into.source != source.source then throw "the contexts have different sources"
-  let folded ← match ← j.getObjValAs? String "kind" with
-    | "keep" => pure (Ownership.keepOthers into source)
-    | "take" => pure (Ownership.takeOthers into source)
-    | k => throw s!"unknown kind {k}"
-  pure (Json.mkObj [("ok", Json.bool true), ("context", encodeContext folded)])
-
 /-! ## Per-machine refs (`RefsExec.lean`) -/
 
 def decodeTable (j : Json) : Except String Refs.Exec.Table := do
@@ -1145,8 +1045,7 @@ def badRequestOps : List (String × (Json → Except String Json)) :=
     ("hubRead", hubReadReply), ("nodeGrow", nodeGrowReply),
     ("rawBurst", rawBurstReply), ("rawPush", rawPushReply),
     ("rawControl", rawControlReply), ("chunks", chunksReply), ("refresh", refreshReply),
-    ("attempts", attemptsReply), ("names", namesReply), ("ownership", ownershipReply),
-    ("namespace", namespaceReply),
+    ("attempts", attemptsReply), ("names", namesReply),
     ("copies", copiesReply),
     ("expected", expectedReply), ("retryFixup", retryFixupReply),
     ("contractedAncestry", contractedAncestryReply), ("retryInbox", retryInboxReply),

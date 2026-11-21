@@ -42,7 +42,6 @@ import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Names
-import Musubi.Ownership
 import Musubi.Contract
 import Musubi.PresenceContract
 import Musubi.OpHeadsRace
@@ -518,17 +517,6 @@ open Musubi
 #assert_axioms Names.localName_injective
 
 -- Which workspaces in a local operation are this machine's own
-#assert_axioms Ownership.mem_owned_iff
-#assert_axioms Ownership.agreement
-#assert_axioms Ownership.canonical_owns
-#assert_axioms Ownership.ownOfView_owns
-#assert_axioms Ownership.wf_of_wfB
-#assert_axioms Ownership.namesOther_localName
-#assert_axioms Ownership.merge_owns
-#assert_axioms Ownership.late_owns
-#assert_axioms Ownership.reach_ok
-#assert_axioms Ownership.trims_keep_ownership
-#assert_axioms Ownership.safety
 
 -- Contracting abandoned operations out of a history
 #assert_axioms Contract.cpar_union

@@ -4109,7 +4109,7 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["sync"]);
     for (repo, expected) in [
         (&alpha, vec!["alpha", "local/linked", "beta/beta"]),
-        (&beta, vec!["beta", "alpha/alpha", "alpha/local/linked"]),
+        (&beta, vec!["beta", "alpha/alpha"]),
     ] {
         let names = repo.jj(&["workspace", "list", "-T", NAMES]);
         let actual: std::collections::BTreeSet<_> = names.lines().collect();
@@ -4129,6 +4129,12 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
             );
         }
     }
+    // alpha keeps its own `local/linked`, which no other machine shows, and says why.
+    let (_, warnings) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(warnings, @r#"
+    Warning: Other machines don't show workspace local/linked@, because its name has a "/".
+    Hint: Run `jj workspace rename <new name>`, with no "/", in local/linked's directory (`jj workspace root --name local/linked`).
+    "#);
     // jj displays Windows paths without the verbatim prefix canonicalize adds.
     let displayed = alpha.jj(&["workspace", "root", "--name", "local/linked"]);
     assert_eq!(

@@ -69,6 +69,8 @@ pub struct Hive {
     pub working_copies: Vec<WorkingCopy>,
     /// Each copy in the hive.
     pub copies: Vec<Copy>,
+    /// This machine's workspaces that other machines don't show, having a `/` in their names.
+    pub unpublished: Vec<String>,
 }
 
 /// A working copy, as `jj workspace list` shows one.
@@ -267,6 +269,7 @@ impl Hive {
             forgotten: false,
             working_copies: vec![],
             copies: vec![],
+            unpublished: vec![],
             sync,
             snapshot_issues,
         };
@@ -311,6 +314,7 @@ impl Hive {
             .collect();
         // This machine's first, as its working copies are.
         self.copies.sort_by_key(|copy| !copy.this);
+        self.unpublished = node.unpublished_workspaces()?.into_iter().collect();
         Ok(())
     }
 
@@ -474,6 +478,18 @@ impl Hive {
             writeln!(
                 ui.warning(),
                 "Background snapshot skipped for {workspace}@ ({reason})."
+            )?;
+        }
+        for workspace in &self.unpublished {
+            writeln!(
+                ui.warning(),
+                "Other machines don't show workspace {workspace}@, because its name has a \
+                 \"/\"."
+            )?;
+            writeln!(
+                ui.hint(),
+                "Run `jj workspace rename <new name>`, with no \"/\", in {workspace}'s \
+                 directory (`jj workspace root --name {workspace}`)."
             )?;
         }
         let failing = self.failing();

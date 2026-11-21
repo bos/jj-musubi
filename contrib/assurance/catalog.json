@@ -431,17 +431,11 @@
       "id": "ownership",
       "area": "identity",
       "title": "Another machine’s workspaces never become this machine’s own",
-      "detail": "canonical_view and own_of_view agree, and trims and merges don't change which names an operation owns, within what the model covers.",
+      "detail": "canonical_view publishes as this machine's own only names without a /, the form no other machine's workspace shows under here.",
       "code": [
-        "crates/musubi-jj/src/node/view.rs",
-        "crates/musubi-jj/src/node/presence.rs",
-        "crates/musubi-jj/src/node/translate.rs",
-        "crates/musubi-jj/src/canonical/namespace.rs"
+        "crates/musubi-jj/src/node/view.rs"
       ],
       "evidence": [
-        "e70",
-        "e71",
-        "e72",
         "e73",
         "e74"
       ]
@@ -1066,54 +1060,21 @@
       "provenance": "documented"
     },
     {
-      "id": "e70",
-      "claim": "ownership",
-      "mechanism": "conformance",
-      "source": "formal/Musubi/Ownership.lean#safety",
-      "detail": "Over histories of jj commands and merges with trims between, an operation owns what the untrimmed history gives it.",
-      "needs": [],
-      "provenance": "documented",
-      "kind": "proof"
-    },
-    {
-      "id": "e71",
-      "claim": "ownership",
-      "mechanism": "conformance",
-      "source": "formal/Musubi/Ownership.lean#agreement",
-      "detail": "own_of_view owns what canonical_view puts under this machine’s key.",
-      "needs": [],
-      "provenance": "documented",
-      "kind": "proof"
-    },
-    {
-      "id": "e72",
-      "claim": "ownership",
-      "mechanism": "conformance",
-      "source": "crates/musubi-jj/src/node/ownership_conformance.rs#ownership_conforms",
-      "detail": "Generated evidence is checked against the ownership oracle.",
-      "needs": [
-        "lean"
-      ],
-      "provenance": "documented"
-    },
-    {
       "id": "e73",
       "claim": "ownership",
       "mechanism": "races",
       "source": "crates/musubi-sync/tests/races/workspaces.rs",
-      "detail": "Late commands after one and two trims, and their merges, keep other machines’ workspaces theirs.",
+      "detail": "Late commands after one and two trims, their merges, and abandoned restores keep other machines’ workspaces theirs.",
       "needs": [],
       "provenance": "documented"
     },
     {
       "id": "e74",
       "claim": "ownership",
-      "mechanism": "conformance",
-      "source": "crates/musubi-jj/src/canonical/namespace.rs#folding_contexts_conforms",
-      "detail": "Folding a carried or recorded context is checked against the namespace oracle.",
-      "needs": [
-        "lean"
-      ],
+      "mechanism": "races",
+      "source": "crates/musubi-sync/tests/races/forget.rs",
+      "detail": "A workspace of this machine's named with a / stays here unpublished until renamed.",
+      "needs": [],
       "provenance": "documented"
     },
     {
@@ -1809,22 +1770,6 @@
       "path": "crates/musubi-sync/tests/races/workspaces.rs",
       "symbol": null
     },
-    "formal/Musubi/Ownership.lean#safety": {
-      "path": "formal/Musubi/Ownership.lean",
-      "symbol": "safety"
-    },
-    "formal/Musubi/Ownership.lean#agreement": {
-      "path": "formal/Musubi/Ownership.lean",
-      "symbol": "agreement"
-    },
-    "crates/musubi-jj/src/node/ownership_conformance.rs#ownership_conforms": {
-      "path": "crates/musubi-jj/src/node/ownership_conformance.rs",
-      "symbol": "ownership_conforms"
-    },
-    "crates/musubi-jj/src/canonical/namespace.rs#folding_contexts_conforms": {
-      "path": "crates/musubi-jj/src/canonical/namespace.rs",
-      "symbol": "folding_contexts_conforms"
-    },
     "formal/Musubi/Copies.lean": {
       "path": "formal/Musubi/Copies.lean",
       "symbol": null
@@ -2087,13 +2032,6 @@
     ],
     "names": [
       "Names"
-    ],
-    "ownership": [
-      "Ownership",
-      "Names"
-    ],
-    "namespace": [
-      "Ownership"
     ],
     "copies": [
       "Copies"

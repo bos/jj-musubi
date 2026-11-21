@@ -27,9 +27,9 @@ impl NodeRepo {
     /// operations, a removal winning. They are the other machines' own, so this machine's
     /// changes to them never count (see `canonical_view`), and the canonical view still has
     /// them. Drops other machines' workspaces under names the hive no longer gives them, as
-    /// `jj undo` brings back (`names_other_machine`), unless jj's workspace store says this
-    /// machine has a working copy for one. Returns whether it wrote an operation, which then
-    /// needs uploading.
+    /// `jj undo` brings back: those this machine's view doesn't keep as its own
+    /// (`own_of_view`) and that it has no working copy for (`has_working_copy_here`). Returns
+    /// whether it wrote an operation, which then needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
         let repo = self.merged_repo()?;
         let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
@@ -37,9 +37,7 @@ impl NodeRepo {
             return Ok(false);
         }
         let view = self.canonical.read_operation_view(&canonical)?;
-        let known = self.presence(&canonical)?;
-        let names = self.local_names(&view, &known)?;
-        let machines = self.machines_of(&view, known.known());
+        let names = self.local_names(&canonical, &view)?;
         let hive_heads: Vec<CommitId> = view.head_ids.iter().cloned().collect();
         let mut tx = repo.start_transaction();
         let mut shown = false;
@@ -67,16 +65,19 @@ impl NodeRepo {
             shown = true;
         }
         let shown_names: BTreeSet<&WorkspaceNameBuf> = names.values().collect();
-        let own = self.own_names(&canonical)?;
+        let own = self.own_of_view(
+            repo.view().wc_commit_ids().clone(),
+            &canonical,
+            repo.operation().store_operation(),
+        )?;
         let stale: Vec<WorkspaceNameBuf> = repo
             .view()
             .wc_commit_ids()
             .keys()
             .filter(|name| {
                 !shown_names.contains(name)
-                    && !own.contains(*name)
-                    && self.names_other_machine(name, &machines)
-                    && !self.may_be_registered(name)
+                    && !own.contains_key(*name)
+                    && !self.has_working_copy_here(name)
             })
             .cloned()
             .collect();

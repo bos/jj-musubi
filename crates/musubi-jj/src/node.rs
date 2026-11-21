@@ -48,8 +48,6 @@ mod join;
 #[cfg(test)]
 mod native_contract;
 mod originals;
-#[cfg(test)]
-mod ownership_conformance;
 mod presence;
 mod publication;
 mod realize;
@@ -100,7 +98,7 @@ pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 
 /// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
 struct ReservedNames {
-    heads: Vec<(LocalOp, Option<CanonicalOp>)>,
+    heads: Vec<LocalOp>,
     names: Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
 }
 
@@ -126,6 +124,9 @@ struct NameMemos {
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked: Mutex<presence::WorkedNames>,
+    /// What `has_working_copy_here` answered for each name, as of the workspace store's
+    /// metadata then: asked for every other machine's workspace of every operation.
+    working_copies: Mutex<presence::WorkingCopies>,
 }
 
 /// The op heads, base and accepted push an abandon was last looked for at, and not found.

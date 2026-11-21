@@ -344,11 +344,17 @@ impl Fixture {
             .collect();
         let shown_machines = self.shown_machines();
         let keys: Vec<String> = (0..self.repos.len()).map(|i| self.machine_key(i)).collect();
-        // A machine's own workspaces: those named without a `/`, and those the hub's head
-        // gives it, as `beta/x` of `alpha#1a2b/beta/x`.
-        let published = self.hub_workspaces();
+        // A machine's own workspaces: those named without a `/`, which it publishes, and those
+        // it has a working copy for, which it keeps but doesn't publish, as `beta/x`.
         let is_own = |index: usize, name: &str| {
-            !name.contains('/') || published.contains(&format!("{}/{name}", keys[index]))
+            !name.contains('/')
+                || matches!(
+                    repos[index]
+                        .loader()
+                        .workspace_store()
+                        .get_workspace_path(jj_lib::ref_name::WorkspaceName::new(name)),
+                    Ok(Some(_))
+                )
         };
         for (index, shown) in workspaces.iter().enumerate() {
             let mut shown: Vec<String> = shown
@@ -361,7 +367,7 @@ impl Fixture {
                 .flat_map(|other| {
                     workspaces[other]
                         .iter()
-                        .filter(move |(name, _)| is_own(other, name))
+                        .filter(move |(name, _)| !name.contains('/'))
                         .map(|(_, commit)| commit.clone())
                 })
                 .collect();

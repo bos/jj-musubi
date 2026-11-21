@@ -139,8 +139,9 @@ fn repeated_restores_keep_distinct_identities_when_contracted() {
     assert!(!node.notice_abandon(&musubi_jj::records::HubOp(x)).unwrap());
 }
 
-/// Reparenting unpublished work to root must retain its actual namespace, including an
-/// owned literal that used to name another copy's workspace.
+/// Reparenting unpublished work to root must retain its actual namespace: which other copy's
+/// workspace each name stands for, but none that this copy has a working copy for, named
+/// like the other copy's, which it doesn't publish.
 #[test]
 fn an_orphaned_command_keeps_its_native_workspace_owners() {
     use jj_lib::workspace::WorkspaceLoaderFactory as _;
@@ -159,12 +160,11 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
         sync(&other, &mut node, &joined);
         let basis = node.local_heads().unwrap().pop().unwrap();
         let base = node.canonicalize(&basis).unwrap();
-        let foreign = node
+        let (foreign, theirs) = node
             .machine_workspaces()
             .unwrap()
             .into_iter()
-            .map(|(name, _)| name)
-            .find(|name| name.contains('/'))
+            .find(|(name, _)| name.contains('/'))
             .unwrap();
         let foreign_key = format!(
             "{}/{}",
@@ -265,19 +265,23 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
             continue;
         }
         let head = node.canonical_heads().unwrap().pop().unwrap();
-        let view = node.canonical_store().read_operation_view(&head).unwrap();
         let own = format!("{}/{}", node.machine().key(), foreign);
-        let expected_key = if own_alias { &own } else { &foreign_key };
-        assert_eq!(
-            view.wc_commit_ids
-                .get(jj_lib::ref_name::WorkspaceName::new(expected_key)),
-            Some(&target)
-        );
-        assert_eq!(
-            view.wc_commit_ids
-                .contains_key(jj_lib::ref_name::WorkspaceName::new(&own)),
-            own_alias
-        );
+        // The other copy's workspace follows the survivor's move of it; this copy's own
+        // workspace of that name, which it doesn't publish, moves nothing of the other's.
+        let expected = if own_alias { &theirs } else { &target };
+        let check = |view: &jj_lib::op_store::View| {
+            assert_eq!(
+                view.wc_commit_ids
+                    .get(jj_lib::ref_name::WorkspaceName::new(&foreign_key)),
+                Some(expected)
+            );
+            assert!(
+                !view
+                    .wc_commit_ids
+                    .contains_key(jj_lib::ref_name::WorkspaceName::new(&own))
+            );
+        };
+        check(&node.canonical_store().read_operation_view(&head).unwrap());
         // Again from before, crashing once the new op heads are in, before the workspaces
         // move, and restarting without the translation cache: the saved move finishes.
         drop(node);
@@ -341,18 +345,11 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
                 assert!(!heads.is_empty());
                 for local in delayed {
                     let canonical = node.canonicalize(&local).unwrap();
-                    let view = node
-                        .canonical_store()
-                        .read_operation_view(&canonical)
-                        .unwrap();
-                    assert_eq!(
-                        view.wc_commit_ids
-                            .get(jj_lib::ref_name::WorkspaceName::new(expected_key)),
-                        Some(&target)
-                    );
-                    assert_eq!(
-                        view.wc_commit_ids.keys().any(|name| name.as_str() == own),
-                        own_alias
+                    check(
+                        &node
+                            .canonical_store()
+                            .read_operation_view(&canonical)
+                            .unwrap(),
                     );
                 }
             }
@@ -1233,7 +1230,6 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
         "unchanged",
         "rename",
         "delete",
-        "owned alias",
         "rename after",
         "delete after",
         "cached child",
@@ -1352,15 +1348,6 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
             b.jj(&["workspace", "rename", "private"]);
         } else if change == "delete" {
             b.jj(&["workspace", "forget", "default"]);
-        } else if change == "owned alias" {
-            b.jj(&["workspace", "forget", "alpha/default"]);
-            b.jj(&[
-                "workspace",
-                "add",
-                "--name",
-                "alpha/default",
-                env.root().join("owned").to_str().unwrap(),
-            ]);
         }
         let read_own = |node: &NodeRepo, local: &LocalOp| {
             let op = node
@@ -1377,10 +1364,7 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
                 .unwrap();
             view.wc_commit_ids
                 .iter()
-                .filter(|(name, _)| {
-                    !name.as_str().contains('/')
-                        || name.as_str() == "alpha/default" && change == "owned alias"
-                })
+                .filter(|(name, _)| !name.as_str().contains('/'))
                 .map(|(name, target)| (name.as_str().to_owned(), target.clone()))
                 .collect::<BTreeMap<_, _>>()
         };
@@ -1393,21 +1377,6 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
             .read_operation(&realized.0)
             .block_on()
             .unwrap();
-        if change == "owned alias" {
-            let context: serde_json::Value = serde_json::from_str(
-                raw.metadata
-                    .attributes
-                    .get("musubi.local-workspaces")
-                    .expect("owned slash binding needs a private ownership witness"),
-            )
-            .unwrap();
-            assert!(
-                context["names"]
-                    .as_object()
-                    .unwrap()
-                    .contains_key("alpha/default")
-            );
-        }
         if let Some(context) = raw.metadata.attributes.get("musubi.local-workspaces") {
             let context: serde_json::Value = serde_json::from_str(context).unwrap();
             assert!(

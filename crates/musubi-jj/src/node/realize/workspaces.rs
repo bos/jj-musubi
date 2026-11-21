@@ -42,29 +42,15 @@ impl NodeRepo {
         order: &[(CanonicalOp, StoreOperation)],
     ) -> Result<(Arc<BTreeSet<WorkspaceNameBuf>>, Kept), NodeError> {
         let reserved = self.reserved_names()?;
-        if reserved.is_empty() {
-            return Ok((reserved, Kept::new()));
-        }
-        // Only a name one of the machines these views show could be shown under renames them.
-        let mut machines = BTreeSet::new();
-        for (id, op) in order {
-            let view = self.canonical.read_view(&op.view_id)?;
-            machines.extend(self.machines_of(&view, self.presence(id)?.known()));
-        }
-        let renaming: BTreeSet<WorkspaceNameBuf> = reserved
-            .iter()
-            .filter(|name| self.names_other_machine(name, &machines))
-            .cloned()
-            .collect();
         let starts = self.starts_of(order);
-        if renaming.is_empty() || starts.is_empty() {
+        if reserved.is_empty() || starts.is_empty() {
             return Ok((reserved, Kept::new()));
         }
         let mut heads = self.local_heads()?;
         heads.sort();
         // A line of realizations beside the same op heads merges against the same base.
         if let [start] = starts.as_slice()
-            && let Some(kept) = self.realizing.kept(&heads, start, &renaming)
+            && let Some(kept) = self.realizing.kept(&heads, start, &reserved)
         {
             return Ok((reserved, kept));
         }
@@ -78,14 +64,14 @@ impl NodeRepo {
         let mut kept = Kept::new();
         for base in op_walk::closest_common_ancestors(start_ops, head_ops).block_on()? {
             for (name, commit) in base.view().block_on()?.wc_commit_ids() {
-                if renaming.contains(name) {
+                if reserved.contains(name) {
                     kept.entry(name.clone()).or_insert_with(|| commit.clone());
                 }
             }
         }
         if let [start] = starts.as_slice() {
             self.realizing
-                .remember_kept(heads, start.clone(), renaming, kept.clone());
+                .remember_kept(heads, start.clone(), (*reserved).clone(), kept.clone());
         }
         Ok((reserved, kept))
     }
@@ -115,7 +101,10 @@ impl NodeRepo {
     /// wrote for it, as a fix-up's (`write_fixup`), maybe where it had forgotten this machine
     /// and so without its workspaces; only this machine's own operations remove them. A view
     /// that has this machine's workspaces, or where it is otherwise present without any, is
-    /// left as it is. Other machines' workspaces stay named clear of `reserved` too.
+    /// left as it is, but for this machine's workspaces with a `/` in their names, which no
+    /// canonical view has (`view::is_publishable`): those it keeps as the parent has them, as
+    /// it keeps the others while forgotten. Other machines' workspaces stay named clear of
+    /// `reserved` too.
     pub(super) fn with_own_workspaces(
         &mut self,
         canonical_id: &CanonicalOp,
@@ -125,9 +114,7 @@ impl NodeRepo {
         reserved: &BTreeSet<WorkspaceNameBuf>,
         root_own: Option<&BTreeMap<WorkspaceNameBuf, CommitId>>,
     ) -> Result<LocalView, NodeError> {
-        if local.names.keys().any(|key| self.is_own_key(key)) {
-            return Ok(local);
-        }
+        let published = local.names.keys().any(|key| self.is_own_key(key));
         let canonical_parents = CanonicalOp::parents_of(op);
         let source = self.latest_work_parent(&canonical_parents)?;
         let mut own = match (parents.get(source), self.realizing.last_own()) {
@@ -156,12 +143,18 @@ impl NodeRepo {
                 }
             };
         }
+        if own.is_empty() {
+            return Ok(local);
+        }
         let own_work = Kind::of(&op.metadata).work.as_deref() == Some(self.machine.key());
         let fixup = OpAttrs(&op.metadata.attributes).is_fixup();
-        if own.is_empty()
+        if published
             || !own_work && !fixup && self.presence(canonical_id)?.is_present(self.machine.key())
         {
-            return Ok(local);
+            own.retain(|name, _| !super::super::view::is_publishable(name));
+            if own.is_empty() {
+                return Ok(local);
+            }
         }
         workspaces::follow_rewrites(&mut own, op.commit_predecessors.as_ref());
         let LocalView {

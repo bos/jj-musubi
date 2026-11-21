@@ -263,108 +263,73 @@ cache avoids walking the whole history on each sync.
 ### Which workspaces are this machine's own
 
 In a local view, this machine's workspaces have plain names (`default`), and another machine's are
-named `<machine>/<workspace>` (`laptop/default`). But jj allows `/` in a workspace name, so a
-workspace of this machine's own can have that form too, and the name alone doesn't say whose it
-is. Canonicalizing has to tell the two apart, from history alone, so that it stays deterministic.
+named `<machine>/<workspace>` (`laptop/default`). jj allows `/` in a workspace name too, but
+musubi doesn't take a name of that form for one of this machine's own: whatever made it, a local
+name with a `/` is never published under this machine's key (`canonical_view`,
+`is_publishable`). So no other machine's workspace, under any name this machine shows it by now
+or showed it by before, can become this machine's own, whatever `jj undo`, `jj op restore`,
+`jj op revert` or `jj op abandon` bring back (#167). Canonicalizing needs no history to decide it,
+and stays deterministic.
 
 Another machine is shown under its name, or, where two machines share a name, this one included,
-or the name would clash with a workspace of this machine's own, under its name and the start of
-its key's random suffix (`laptop-1a2b`; `local_names`). Where that clashes too, with another
-machine's name or a workspace of this machine's own, it is shown under its name and its whole
-suffix, then that with ever more dashes: each machine in turn takes the first of these that is
-free, and `formal/Musubi/Names.lean` proves that no two workspaces are shown alike. The names are
-chosen among every machine the history has known, present or forgotten (`Presence::known`), so a
-machine keeps its name as others come and go, and a forgotten machine's name is never another's.
-The hub names every machine with workspaces in the hive for `musubi list`, among themselves, so a
-machine shows here as the hub lists it but where a forgotten machine, which only the hub leaves
-out, or a workspace of this machine's own makes its name longer here. `musubi status` names this
-machine among the copies present, as the hub names those with workspaces (`name_in_hive`);
-`musubi list` finds a copy here among the hub's names by its key (`listed_as`); and `musubi
-forget` takes this machine's key and that name for this machine's, and any other name it could
-be shown under, where no other machine could be. This machine's own names as of a canonical
-operation are its workspaces in that view, or, where the hive has forgotten it, those as of its
-latest work, which `Presence` keeps through forgets (`own_names`).
+or the name would clash with a workspace of this machine's, under its name and the start of its
+key's random suffix (`laptop-1a2b`; `local_names`). Where that clashes too, with another
+machine's name or a workspace of this machine's, it is shown under its name and its whole suffix,
+then that with ever more dashes: each machine in turn takes the first of these that is free, and
+`formal/Musubi/Names.lean` proves that no two workspaces are shown alike. The names are chosen
+among every machine the history has known, present or forgotten (`Presence::known`), so a machine
+keeps its name as others come and go, and a forgotten machine's name is never another's. The hub
+names every machine with workspaces in the hive for `musubi list`, among themselves, so a machine
+shows here as the hub lists it but where a forgotten machine, which only the hub leaves out, or a
+workspace of this machine's makes its name longer here. `musubi status` names this machine among
+the copies present, as the hub names those with workspaces (`name_in_hive`); `musubi list` finds a
+copy here among the hub's names by its key (`listed_as`); and `musubi forget` takes this
+machine's key and that name for this machine's, and any other name it could be shown under, where
+no other machine could be. This machine's own names as of a canonical operation are its
+workspaces in that view, or, where the hive has forgotten it, those as of its latest work, which
+`Presence` keeps through forgets (`own_names`).
 
-`jj undo` and `jj op restore` bring back older views, with names the hive no longer gives: a
-forgotten machine's, say, or, as here, one shown plainly before another machine of its name
-joined:
+A workspace of this machine's whose name has a `/`, as `feat/x`, stays here, unpublished, and
+`musubi status` and the daemon's log say so, with the command that renames it
+(`unpublished_workspaces`). Two things keep it here and apart from other machines':
 
-1. This machine, `desk`, shares a hive with a machine named `laptop`, shown here as
-   `laptop/default`.
-2. A second machine named `laptop` joins. The two are now shown as `laptop-1a2b/default` and
-   `laptop-3c4d/default`.
-3. On `desk`, `jj op restore` to an operation from before the second laptop joined brings back
-   a view with a workspace `laptop/default`.
-
-Nothing in that name says it isn't `desk`'s own, but it is the first laptop's, under its old
-name, and taking it for `desk`'s would nest one machine's workspaces in another's. So a name
-whose prefix is one that a known machine other than this one can be shown under (here `laptop`,
-`laptop-1a2b` or `laptop-3c4d`; `names_other_machine`) is this machine's own only if:
-
-- this machine's own names as of a canonical parent have it already; or
-- the operation made it: it is in none of the views of the operation's local parents and, for
-  a `jj` command, the command says it added it. `jj workspace add` and `jj workspace rename` are
-  the only commands that add a name, and jj describes their operations so (`add workspace
-  'laptop/x'`, then `create initial working-copy commit in workspace laptop/x`; `Renamed
-  workspace 'x' to 'laptop/x'`; `adds_workspace`). `jj op abandon` of the
-  `jj op restore` that brought `laptop/default` back, before musubi saw the restore, moves a
-  command run on it, a `jj new` say, onto the restore's parent, whose view lacks the name; the
-  abandon gives the command other parents but not another description, so it still says it
-  added no workspace. The cost: where `jj op abandon` drops both operations of a `jj workspace
-  add` from under a later command before musubi saw them, the command doesn't say it added the
-  workspace either, and `desk` loses it ([races.md](races.md)). An operation that goes back to
-  an older one (an undo, redo, restore or
-  revert) makes no names: a name is its own if it was among this machine's own names as of that
-  older operation or its parents. Nor does a `jj` command make one that it found in the view of
-  an operation `jj op abandon` dropped from under it: its parents are those it had before the
-  abandon moved it ([Publishing an abandon](#publishing-an-abandon)).
-
-Otherwise `canonical_view` doesn't publish it. `show_other_workspaces` also drops it from the
-local view, unless jj's workspace store says this machine has a working copy for it.
+- Realizing, musubi keeps in this machine's view the workspaces it takes for this machine's
+  (`own_of_view`): every one but those the canonical view gives other machines, and those named
+  as a known machine could be shown (`names_other_machine`; `laptop`, `laptop-1a2b` and so on),
+  which `jj undo`, a restore or a trim brings back, unless this machine records the name as its
+  own (`private_workspace_names`). After a full trim the canonical view has no other machine's
+  workspaces to go by, and the namespace context the trim recorded stands for the views the
+  operation started from. `show_other_workspaces` drops the rest.
+- A `/` name this machine has a working copy for (`has_working_copy_here`, from jj's workspace
+  store) is its own, which it doesn't publish, even where the hive shows another machine's
+  workspace by that name: musubi makes no working copies for other machines' workspaces.
+  `own_of_view` keeps such a name too where the canonical view gives it no other machine. The
+  store says what is so now, not what was when an operation ran:
+  [races.md](races.md#copies-that-go-away) lists where that differs. A realization of another
+  machine's operation is merged with this machine's op heads, published or not, so it names other
+  machines' workspaces clear of these names in them (`reserved_names`), and records those names
+  (`RESERVED_WORKSPACES`), by which `canonical_view` names them so again at the merge;
+  `canonical_view` names a parent's workspaces clear of them too. Otherwise the laptop's workspace
+  `x`, which the laptop adds while `desk` adds its `laptop/x`, or that of a machine named `laptop`
+  joining meanwhile, would be `laptop/x` here too, and jj's merge would keep one of the two
+  working copies under the name, so that `desk`'s directory snapshots into the laptop's working
+  copy. Showing the laptop as `laptop-1a2b` drops the names it had here, which jj's merge takes
+  for removals, and a removal wins over `desk`'s workspace of such a name, as after `jj workspace
+  forget laptop/default` and `jj workspace add --name laptop/default`. So a realization keeps such
+  a name as the base of the merge has it (`reserved_for`), which leaves the merge `desk`'s
+  workspace.
 
 Which of another machine's workspaces a name is comes from the operation's local parents: each
-canonical parent's workspaces are named as the local parent standing for it named them. A
-`jj` command that adds a name none of the views it started from had, as after `jj workspace
-forget laptop/default` here, makes a workspace of `desk`'s own, though the hive shows one of the
-laptop's by that name. An operation that goes back to an older one starts from the view it
-brings back, less what was `desk`'s own there, so that `jj undo` of forgetting `desk`'s own
-`laptop/x` brings back `desk`'s workspace. musubi's own operations make no names: they show other
-machines' workspaces again under the names the hive gives them.
-
-A realization of another machine's operation is merged with `desk`'s op heads, published or not,
-so it names other machines' workspaces clear of `desk`'s own names in them too
-(`reserved_names`), and records those names (`RESERVED_WORKSPACES`), by which `canonical_view`
-names them so again at the merge. Otherwise the laptop's workspace `x`, which the laptop adds
-while `desk` adds its `laptop/x`, or that of a machine named `laptop` joining meanwhile, would
-be `laptop/x` here too, and jj's merge would keep one of the two working copies under the name.
-Showing the laptop as `laptop-1a2b` drops the names it had here, which jj's merge takes for
-removals, and a removal wins over `desk`'s own workspace of such a name, as after `jj workspace
-forget laptop/default` and `jj workspace add --name laptop/default`. So a realization keeps such a
-name as the base of the merge has it (`reserved_for`), which leaves the merge `desk`'s own. A
-realization not yet published that was named clear of fewer of `desk`'s names than its op heads
-have now, as one made before a crash or a `jj` command, is realized again before it is merged.
-
-A workspace of `desk`'s own that it named `laptop/x` therefore stays its own, and the laptop is
-shown as `laptop-1a2b`, to keep clear of it:
-
-- whether it was made before a machine named `laptop` joined, while it joins, or after;
-- while the laptop adds a workspace `x` of its own;
-- after `desk` forgot the laptop's `laptop/x` here;
-- while the hive has forgotten `desk`;
-- through `jj undo`.
+canonical parent's workspaces are named as the local parent standing for it named them. A `jj`
+command that adds a name none of the views it started from had, as after `jj workspace forget
+laptop/default` here, never moves the laptop's workspace shown by that name: adding changes
+nothing of another machine's. An operation that goes back to an older one starts from the view it
+brings back. musubi's own operations add no names: they show other machines' workspaces again
+under the names the hive gives them.
 
 [races.md](races.md#copies-that-go-away) says where a `jj` command racing a sync can still put
-the two under one name, and where showing the laptop's workspace under a longer name can undo
-the laptop's move of it meanwhile.
-
-`formal/Musubi/Ownership.lean` proves that `canonical_view` and `own_of_view` agree on whose a
-workspace is, wherever this machine is present; `own_of_view`'s verdict is what this machine
-records as its private names. Over histories of commands, merges, realizations of the hive's
-operations and trims of the whole history, it also proves that an operation's translation never
-makes a name this machine's that the untrimmed history's translation doesn't, and that translating
-a command records no private names, so nothing launders a name into the record both functions
-trust. [conformance.md, "Workspace ownership"](conformance.md#workspace-ownership) says what the
-model leaves out, among it undo, restore and revert, and abandoning a single operation.
+the two under one name, and where showing the laptop's workspace under a longer name can undo the
+laptop's move of it meanwhile.
 
 ### A forgotten copy's working copies
 

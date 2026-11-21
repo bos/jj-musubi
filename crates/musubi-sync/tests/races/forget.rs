@@ -390,27 +390,43 @@ fn undoing_a_forget_brings_back_nothing() {
     hive.assert_converged();
 }
 
-/// A workspace of this machine's own whose name has a `/` is still its own, shown elsewhere
-/// as `alpha/feat/x`: only names that another machine's could have are taken for one.
+/// A workspace of this machine's own whose name has a `/`, as `feat/x`, stays here, but other
+/// machines don't show it: they show this machine's workspaces as `alpha/...`, so names of that
+/// form are kept for other machines' workspaces, and `musubi status` says so. Renamed without
+/// the `/`, it shows everywhere, where it is.
 #[test]
-fn own_workspaces_with_a_slash_are_own() {
+fn own_workspaces_with_a_slash_stay_here_until_renamed() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
-    let path = hive.env.root().join("alpha-feat");
-    let path = path.to_str().unwrap().to_owned();
-    hive.repo(0)
-        .jj(&["workspace", "add", "--name", "feat/x", &path]);
+    let feat = add_workspace(&hive, 0, "feat/x", "alpha-feat");
+    feat.write_file("from-alpha", "alpha's feat/x");
+    feat.jj(&["describe", "-m", "alpha's feat/x"]);
+    let own = hive.workspaces(0)["feat/x"].clone();
     hive.sync();
     hive.sync();
-    assert!(hive.workspace_names(0).contains("feat/x"));
-    assert!(hive.workspace_names(1).contains("alpha/feat/x"));
+    assert_eq!(hive.workspaces(0).get("feat/x"), Some(&own));
+    let beta = hive.workspace_names(1);
+    assert!(!beta.iter().any(|name| name.contains("feat")), "{beta:?}");
+    assert_eq!(
+        hive.node(0).unpublished_workspaces().unwrap(),
+        BTreeSet::from(["feat/x".to_owned()])
+    );
+    hive.assert_converged();
+
+    feat.jj(&["workspace", "rename", "feat-x"]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.workspaces(1).get("alpha/feat-x"), Some(&own));
+    assert!(hive.node(0).unpublished_workspaces().unwrap().is_empty());
+    hive.assert_converged();
 }
 
-/// A workspace of this machine's own named like another machine's is its own all the same,
-/// whether it was made after that machine joined or before: the other machine is shown by
-/// its name and part of its id instead. Nor does the hive forgetting this machine change
-/// that, or undoing a forget of the workspace.
+/// A workspace of this machine's own named like another machine's stays this machine's, and
+/// apart from that machine's, whether it was made after that machine joined or before: the
+/// other machine is shown by its name and part of its id instead. No machine shows it, as it
+/// has a `/`. Nor does the hive forgetting this machine change that, or undoing a forget of the
+/// workspace.
 #[test]
-fn own_workspaces_named_like_another_machine_are_own() {
+fn own_workspaces_named_like_another_machine_stay_apart() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     for name in ["beta/x", "gamma/x"] {
         let path = hive
@@ -443,8 +459,10 @@ fn own_workspaces_named_like_another_machine_are_own() {
     let shared = |hive: &Fixture| {
         for index in [1, 2] {
             let names = hive.workspace_names(index);
-            assert!(names.contains("alpha/beta/x"), "{names:?}");
-            assert!(names.contains("alpha/gamma/x"), "{names:?}");
+            assert!(
+                !names.contains("alpha/beta/x") && !names.contains("alpha/gamma/x"),
+                "{names:?}"
+            );
         }
     };
     shared(&hive);
@@ -492,9 +510,9 @@ fn add_workspace(
     hive.repo(index).another_copy(&path)
 }
 
-/// Checks that alpha's own workspace `name` is at `own`, shown on machine `other` as
-/// `alpha/name`, and that `other`'s workspace `theirs` is at `commit`, shown on alpha under
-/// `other`'s qualified name, as `beta-1a2b/x`.
+/// Checks that alpha's own workspace `name` is at `own`, which machine `other` doesn't show,
+/// and that `other`'s workspace `theirs` is at `commit`, shown on alpha under `other`'s
+/// qualified name, as `beta-1a2b/x`.
 fn assert_kept_apart(
     hive: &Fixture,
     name: &str,
@@ -519,22 +537,18 @@ fn assert_kept_apart(
         Some(commit),
         "{shown:?}"
     );
-    assert_eq!(
-        shown.get(&format!("alpha/{name}")).map(String::as_str),
-        Some(own),
-        "{shown:?}"
-    );
+    assert!(!shown.contains_key(&format!("alpha/{name}")), "{shown:?}");
 }
 
 /// A workspace this machine adds as `beta/x` while beta adds its workspace `x`, before this
-/// machine syncs, is this machine's own all the same: beta is shown as `beta-1a2b` instead,
+/// machine syncs, stays this machine's, unpublished: beta is shown as `beta-1a2b` instead,
 /// and neither working copy moves, then, after this machine's next snapshot in its
 /// workspace, or through `jj undo` of forgetting it. So too where this machine realized
 /// beta's work before the `jj` command that adds its workspace, and merges the two after, in
 /// the same sync, as it would after a crash between; and where beta's work forgets this
 /// machine's copy first, so that this machine realizes it with its own workspaces kept.
 #[test]
-fn own_workspaces_named_like_one_added_meanwhile_are_own() {
+fn own_workspaces_named_like_one_added_meanwhile_stay_apart() {
     use musubi_core::node::LocalRepo as _;
     use musubi_core::node::Step;
 
@@ -591,7 +605,7 @@ fn own_workspaces_named_like_one_added_meanwhile_are_own() {
 /// So too for a workspace added as `gamma/gamma` while a machine named gamma joins: gamma's
 /// shows as `gamma-1a2b/gamma`.
 #[test]
-fn own_workspaces_named_like_one_of_a_machine_joining_meanwhile_are_own() {
+fn own_workspaces_named_like_one_of_a_machine_joining_meanwhile_stay_apart() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     let gamma = hive.env.init_repo("gamma");
     hive.add(gamma);
@@ -606,13 +620,13 @@ fn own_workspaces_named_like_one_of_a_machine_joining_meanwhile_are_own() {
 }
 
 /// A workspace this machine adds, or renames its own to, under the name of another machine's
-/// that it has just forgotten, is its own: forgetting another machine's workspace stays
-/// local, and the next sync shows that one again, as `beta-1a2b/beta`. So too where that
-/// machine meanwhile moves its working copy, before this machine shows it again (for after,
-/// see `a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile`), and this machine
-/// merges the move with its own workspace.
+/// that it has just forgotten, stays this machine's, unpublished: forgetting another machine's
+/// workspace stays local, and the next sync shows that one again, as `beta-1a2b/beta`. So too
+/// where that machine meanwhile moves its working copy, before this machine shows it again
+/// (for after, see `a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile`), and
+/// this machine merges the move with its own workspace.
 #[test]
-fn own_workspaces_named_like_one_forgotten_here_are_own() {
+fn own_workspaces_named_like_one_forgotten_here_stay_apart() {
     for (rename, meanwhile) in [(false, false), (true, false), (false, true)] {
         let mut hive = Fixture::new(&["alpha", "beta"]);
         hive.repo(1).write_file("from-beta", "beta's edit");

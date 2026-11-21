@@ -302,13 +302,16 @@ fn forgotten_workspaces(
 impl NodeRepo {
     /// The canonical form of a local view, of an operation of `kind`: no records of this
     /// machine's `.git`, and the workspaces of every machine present (see `crate::presence`)
-    /// under machine-qualified keys. This machine's come from `view`, if it is present. The
+    /// under machine-qualified keys. This machine's come from `view`, if it is present, those
+    /// with no `/` in their names (`is_publishable`). The
     /// others' come from the canonical parents where their machine is present, except where
     /// this operation moved them: they are workspaces in `view` too, which jj moves when it
     /// rewrites or abandons their commits, or restores an older view. Adding, forgetting or
     /// renaming another machine's workspace here changes nothing: its workspaces are its own.
-    /// Only a forget of the machine removes them. Depends only on its arguments, so
-    /// canonicalizing again after a crash gives the same result. Returns the presence the
+    /// Only a forget of the machine removes them. Depends only on its arguments, and on which
+    /// `/` names this machine has working copies for (`has_working_copy_here`), so
+    /// canonicalizing again after a crash gives the same result, unless such a workspace was
+    /// renamed or removed meanwhile (races.md, "Copies that go away"). Returns the presence the
     /// parents give the operation too, before its own effect.
     pub(super) fn canonical_view(
         &self,
@@ -333,11 +336,18 @@ impl NodeRepo {
             .op_store()
             .read_operation(&local_op.0)
             .block_on()?;
-        let private = if self.joins.is_empty() {
+        let mut private = if self.joins.is_empty() {
             BTreeSet::new()
         } else {
             self.private_workspace_names(&raw, &view.wc_commit_ids)?
         };
+        // This machine's workspaces named as other machines' show, `beta/x`, which it has
+        // working copies for: none of them stands for another machine's workspace, even one the
+        // hive shows by that name, and other machines' are named clear of them, as realizations
+        // name them (`reserved_names`). Otherwise a `jj` command after `jj workspace forget
+        // beta/x` and adding one's own `beta/x` would move beta's workspace to this machine's.
+        private.extend(self.unpublished_of(&view.wc_commit_ids));
+
         // Operations are canonicalized parents first, so the one before is usually the parent:
         // its names are known, and it is no realization.
         let last = self
@@ -381,6 +391,11 @@ impl NodeRepo {
         )?;
         workspaces_by_key.extend(forgotten);
         self.drop_stale_names(local_op, &inherited, &mut local, &mut before)?;
+        // What is left is this machine's, but only a name with no `/` is its own to publish:
+        // other machines' workspaces show here as `beta/x`, so a name of that form, whatever
+        // made it, is never this machine's own (design.md, "Which workspaces are this
+        // machine's own").
+        local.retain(|name, _| is_publishable(name));
         if present(self.machine.key()) {
             for (workspace, commit) in local {
                 workspaces_by_key.insert(
@@ -814,54 +829,29 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// This machine's own workspace names as of its op heads, published or private, that
-    /// could clash with another machine's, having a `/`: a realization, which the heads beside
-    /// it are merged with, names other machines' workspaces clear of them, and records them
-    /// (`RESERVED_WORKSPACES`) for `canonical_view` to name them so again. Otherwise a
-    /// workspace this machine adds as `beta/x`, unpublished yet, and beta's `x`, which beta
-    /// adds meanwhile, or a machine `beta` joining with `x`, would both be `beta/x` here, one
-    /// workspace to jj's merge. A head a `jj` command published since the sync step
-    /// canonicalized the op heads counts as the operations below it that have canonical forms:
-    /// a name it adds isn't among these (races.md, "Copies that go away"). The same for the same
-    /// op heads, so worked out once for them.
+    /// The names of this machine's workspaces in its op heads that could clash with another
+    /// machine's, having a `/` (`unpublished_workspaces`). musubi publishes none of them, but
+    /// leaves them here: a realization, which the heads beside it are merged with, names other
+    /// machines' workspaces clear of them, and records them (`RESERVED_WORKSPACES`) for
+    /// `canonical_view` to name them so again. Otherwise a workspace this machine adds as
+    /// `beta/x` and beta's `x`, which beta adds meanwhile, or a machine `beta` joining with
+    /// `x`, would both be `beta/x` here, one workspace to jj's merge, and the directory of this
+    /// machine's would snapshot into beta's working copy. The same for the same op heads, so
+    /// worked out once for them.
     pub(super) fn reserved_names(&mut self) -> Result<Arc<BTreeSet<WorkspaceNameBuf>>, NodeError> {
         let mut heads = self.local_heads()?;
         heads.sort();
-        let heads: Vec<(LocalOp, Option<CanonicalOp>)> = heads
-            .into_iter()
-            .map(|head| {
-                let canonical = self.canonical_of(&head);
-                (head, canonical)
-            })
-            .collect();
         if let Some(memo) = &self.names.reserved
             && memo.heads == heads
         {
             return Ok(memo.names.clone());
         }
-        let op_store = self.loader.op_store();
-        let mut names = BTreeSet::new();
-        // A head a `jj` command published since the step started has no canonical form yet:
-        // those of the nearest operations below it stand for it, as in `canonical_at_or_below`.
-        let mut stack: Vec<LocalOp> = heads.iter().map(|(head, _)| head.clone()).collect();
-        let mut seen = BTreeSet::new();
-        while let Some(local) = stack.pop() {
-            if !seen.insert(local.clone()) || self.joins.before.contains(&local) {
-                continue;
-            }
-            let op = op_store.read_operation(&local.0).block_on()?;
-            match self.canonical_of(&local) {
-                Some(canonical) if self.canonical.has_operation(&canonical) => {
-                    names.extend(self.own_names(&canonical)?);
-                    let view = op_store.read_view(&op.view_id).block_on()?;
-                    names.extend(self.private_workspace_names(&op, &view.wc_commit_ids)?);
-                }
-                Some(_) => {}
-                None => stack.extend(LocalOp::parents_of(&op)),
-            }
-        }
-        names.retain(|name| name.as_str().contains('/'));
-        let names = Arc::new(names);
+        let names = Arc::new(
+            self.unpublished_workspaces()?
+                .into_iter()
+                .map(WorkspaceNameBuf::from)
+                .collect::<BTreeSet<_>>(),
+        );
         self.names.reserved = Some(ReservedNames {
             heads,
             names: names.clone(),
@@ -963,34 +953,21 @@ impl NodeRepo {
             .is_some_and(|(machine, _)| machine == self.machine.key())
     }
 
-    /// The local name of each workspace in a canonical view, whose operation has `presence`:
-    /// this machine's own keep their names, and another machine's are prefixed with the
-    /// machine's name, as in `beta/default`, or with its name and part or all of its id when
-    /// two machines share a name or the prefix would start a name of this machine's own
-    /// (`workspaces::display_names`; `own_names_in`, which the hive having forgotten this
-    /// machine doesn't change). The
+    /// The local name of each workspace in the view of canonical operation `canonical`: this
+    /// machine's own keep their names, and another machine's are prefixed with the machine's
+    /// name, as in `beta/default`, or with its name and part or all of its id when two
+    /// machines share a name or the prefix would start a name of this machine's
+    /// (`workspaces::display_names`; `machine_prefixes`). The
     /// names are chosen among every machine the view's history has known
     /// (`Presence::known`), so that a machine's name doesn't change as others are forgotten
     /// and come back, and a forgotten machine's is never another's.
     pub(super) fn local_names(
         &self,
+        canonical: &CanonicalOp,
         canonical_view: &View,
-        presence: &Presence<Work>,
     ) -> Result<BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>, NodeError> {
-        let prefixes = self.prefixes(canonical_view, presence)?;
+        let prefixes = self.machine_prefixes(canonical, canonical_view)?;
         Ok(self.names_of(canonical_view, &prefixes))
-    }
-
-    /// The prefix under which this machine shows each other machine a canonical view's
-    /// history has known, as [`Self::local_names`] names them. This machine takes one too,
-    /// which it never shows, so that it shows the others as the hub names them, which names
-    /// every machine: a machine named alike is `laptop-1a2b` to both.
-    fn prefixes(
-        &self,
-        canonical_view: &View,
-        presence: &Presence<Work>,
-    ) -> Result<BTreeMap<String, String>, NodeError> {
-        self.prefixes_with_own(canonical_view, presence, &BTreeSet::new())
     }
 
     pub(super) fn prefixes_with_own(
@@ -1071,13 +1048,43 @@ impl NodeRepo {
         Ok(names)
     }
 
+    /// This machine's workspaces in its op heads that musubi doesn't publish, having a `/` in
+    /// their names, by name (`unpublished_of`): other machines don't show them, and
+    /// `musubi status` says so.
+    pub fn unpublished_workspaces(&self) -> Result<BTreeSet<String>, NodeError> {
+        let op_store = self.loader.op_store();
+        let mut names = BTreeSet::new();
+        for head in self.local_heads()? {
+            let op = op_store.read_operation(&head.0).block_on()?;
+            let view = op_store.read_view(&op.view_id).block_on()?;
+            names.extend(
+                self.unpublished_of(&view.wc_commit_ids)
+                    .map(|name| name.as_str().to_owned()),
+            );
+        }
+        Ok(names)
+    }
+
+    /// The names of this machine's workspaces in `workspaces`, a local view's, that musubi
+    /// doesn't publish: those with a `/` (`is_publishable`) that this machine has working
+    /// copies for (`has_working_copy_here`). Other machines' never have any here.
+    pub(super) fn unpublished_of<'a>(
+        &'a self,
+        workspaces: &'a BTreeMap<WorkspaceNameBuf, CommitId>,
+    ) -> impl Iterator<Item = WorkspaceNameBuf> + 'a {
+        workspaces
+            .keys()
+            .filter(|name| !is_publishable(name) && self.has_working_copy_here(name))
+            .cloned()
+    }
+
     /// Whether `name`, a workspace in this machine's view, is one this machine shows, or
     /// once showed, another machine's under: `<prefix>/<workspace>`, with a prefix one of
     /// `machines` other than this one can be shown under (`workspaces::could_be_shown_as`).
-    /// `jj undo` and `jj op restore` bring back older views, with names the hive no longer
-    /// gives: a forgotten machine's, or one shown by another name since a machine of the same
-    /// name joined. Such a name is this machine's own only if the hive has it so already, or
-    /// this machine just made it (`canonical_view`). Depends only on its arguments.
+    /// `jj undo`, `jj op restore` and trims bring back older views, with names the hive no
+    /// longer gives: a forgotten machine's, or one shown by another name since a machine of
+    /// the same name joined. Such a name is this machine's to keep only if it records it as
+    /// its own (`own_of_view`). Depends only on its arguments.
     pub(super) fn names_other_machine(
         &self,
         name: &WorkspaceName,
@@ -1102,7 +1109,7 @@ impl NodeRepo {
             return Ok(vec![]);
         }
         let view = self.canonical.read_operation_view(&canonical)?;
-        let names = self.local_names(&view, &*self.presence(&canonical)?)?;
+        let names = self.local_names(&canonical, &view)?;
         let mut workspaces: Vec<(bool, String, CommitId)> = view
             .wc_commit_ids
             .iter()
@@ -1280,6 +1287,13 @@ impl NodeRepo {
             prefixes,
         })
     }
+}
+
+/// Whether this machine publishes a workspace of its own named `name`: only if the name has no
+/// `/`. Other machines' workspaces show here as `<machine>/<workspace>`, so a name of that form
+/// is never this machine's own, whatever made it.
+pub(crate) fn is_publishable(name: &WorkspaceName) -> bool {
+    !name.as_str().contains('/')
 }
 
 /// The workspace part of a machine-qualified key.

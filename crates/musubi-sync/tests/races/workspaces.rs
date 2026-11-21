@@ -767,8 +767,9 @@ fn a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs() {
 /// late command, now on the root, takes a context recomputed from that parent, so the
 /// recomputation must read the context too, and keep what it says of other machines: both
 /// halves are needed. Judging the parent's view by the context alone still records one that
-/// drops beta's alias and beta from the machines it knows, and without either the context
-/// recorded gives `beta/beta` to alpha, and beta shows its own workspace as `alpha/beta/beta`.
+/// drops beta's alias and beta from the machines it knows. No machine shows beta's workspace as
+/// alpha's whatever the context says, as its name has a `/`; the context keeps beta's workspace
+/// beta's here.
 #[test]
 fn a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -818,7 +819,8 @@ fn a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs
 /// A merge of two late operations, each left on the root by its own full trim, carrying
 /// contexts from different times: the first from before gamma joined, the second from after.
 /// The merge's context must take what both say of other machines. With the first parent's
-/// alone, it knew no gamma, and gamma's workspace became alpha's own (#167).
+/// alone, it knew no gamma, and gamma's workspace became alpha's own (#167), which no name with
+/// a `/` can be now.
 #[test]
 fn a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -889,9 +891,9 @@ fn a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs() {
 /// then canonicalized on a source parent, the first late command's, whose view has neither
 /// beta's new name nor, in its canonical form, any other machine, while its parents became the
 /// root. The context the command itself records, which the second trim captured, is all that
-/// says `beta/third` is beta's, but the recomputation of its context judged the command's view
-/// by the names of that source parent, found `beta/third` in none, and gave it to alpha: beta
-/// then showed its own workspace as `alpha/beta/third` (#167). The old name `beta` comes back
+/// says `beta/third` is beta's, and the recomputation of its context keeps it: otherwise the
+/// context changed when jj rewrote the command's parents, and alpha could no longer sync. The
+/// old name `beta` comes back
 /// beside `third` on both machines, as jj does on one (races.md, on a whole-history trim while
 /// another machine renames a workspace).
 #[test]
@@ -969,12 +971,10 @@ fn abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs() {
 ///    `beta/beta`, and the new operation records no context of its own; the context the
 ///    trim recorded names `beta-xxxx/beta` and `beta-yyyy/default`, not `beta/beta`.
 ///
-/// Judged by its new parents, `beta/beta` looks made by the new operation. But with two
-/// machines named `beta` known, no machine is shown as `beta`, so the name is an old alias that
-/// no `jj` command makes (design.md, "Which workspaces are this machine's own"), and it stays
-/// the first beta's: no machine shows a workspace of alpha's named `beta/...`, where before the
-/// fix the first beta listed its own workspace as `alpha/beta/beta` (#167), and every machine
-/// agreed on it. See `abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs` for
+/// Judged by its new parents, `beta/beta` looks made by the new operation. But it has a `/`,
+/// so it is never alpha's own (design.md, "Which workspaces are this machine's own"): no machine
+/// shows a workspace of alpha's named `beta/...`, where once the first beta listed its own
+/// workspace as `alpha/beta/beta` (#167), and every machine agreed on it. See `abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs` for
 /// the same without the trim and `--at-op`.
 #[test]
 fn abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
@@ -1042,10 +1042,10 @@ fn abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
 /// trim and the late command: the shortest shape found. alpha restores the operation from
 /// before the second beta joined, runs `jj new` on it, and abandons the restore, with no sync
 /// between, so alpha's node never sees the restore. jj moves the command onto the restore's
-/// parent, whose view has no `beta/beta`, while its own view has it; but `jj new` says it added
-/// no workspace, so it didn't make the name, which stays the first beta's. A workspace alpha
-/// then adds as `beta/x`, and renames to `beta/y`, is alpha's own all the same: every machine
-/// shows it as alpha's, through other machines' work arriving.
+/// parent, whose view has no `beta/beta`, while its own view has it; but the name has a `/`, so
+/// it is never alpha's own, and stays the first beta's. A workspace alpha
+/// then adds as `beta/x`, and renames to `beta/y`, stays alpha's, through other machines' work
+/// arriving, and no other machine shows it, as it has a `/`.
 #[test]
 fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -1112,7 +1112,10 @@ fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
     assert!(names(&hive, 0).contains(&"beta/y".to_owned()));
     for index in 1..3 {
         let shown = names(&hive, index);
-        assert!(shown.contains(&"alpha/beta/y".to_owned()), "{shown:?}");
+        assert!(
+            shown.iter().all(|name| !name.starts_with("alpha/beta")),
+            "{shown:?}"
+        );
     }
 }
 
@@ -1124,9 +1127,9 @@ fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
 /// 3. `jj op restore <old>` brings `beta/beta` back; `jj new`; `jj op abandon` of the restore.
 ///
 /// jj moves the command onto the restore's parent, whose view lacks `beta/beta`, and alpha could
-/// show beta, forgotten but still known, as `beta` again. But `jj new` says it added no
-/// workspace, so `beta/beta` stays beta's, where judged on its new parent alone the command
-/// made it, and beta listed its own workspace as `alpha/beta/beta` (#167).
+/// show beta, forgotten but still known, as `beta` again. But `beta/beta` has a `/`, so it is
+/// never alpha's own, where once, judged on its new parent alone, the command made it, and beta
+/// listed its own workspace as `alpha/beta/beta` (#167).
 #[test]
 fn abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -1171,14 +1174,10 @@ fn abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs() {
 /// alpha adds a workspace `beta/x` of its own, runs a command, and abandons the two operations
 /// of the add (`jj op abandon`), with no sync between. jj moves the command onto the add's
 /// parent, whose view lacks `beta/x`, and keeps the workspace in the command's view, as it does
-/// on one machine. The command says it added no workspace, and musubi never saw the add, so it
-/// takes `beta/x` for a name the abandon left behind, like the restored alias of
-/// `abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs`, and drops it: no other
-/// machine shows it, and alpha's next realization drops it from alpha's view.
+/// on one machine. alpha has a working copy for it, so it stays alpha's, through beta's work
+/// arriving; and no machine shows it, as its name has a `/`.
 #[test]
-#[ignore = "a workspace whose add jj op abandon drops is no longer this machine's; remove once \
-fixed"]
-fn abandoning_the_add_of_an_own_workspace_keeps_it_own() {
+fn abandoning_the_add_of_an_own_workspace_keeps_it_here() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.sync();
     let last_op = |hive: &Fixture| {
@@ -1212,5 +1211,9 @@ fn abandoning_the_add_of_an_own_workspace_keeps_it_own() {
     let shown = names(&hive, 0);
     assert!(shown.contains(&"beta/x".to_owned()), "{shown:?}");
     let shown = names(&hive, 1);
-    assert!(shown.contains(&"alpha/beta/x".to_owned()), "{shown:?}");
+    assert!(
+        shown.iter().all(|name| !name.starts_with("alpha/beta")),
+        "{shown:?}"
+    );
+    hive.assert_converged();
 }

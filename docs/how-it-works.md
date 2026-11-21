@@ -103,7 +103,12 @@ machine, such as `laptop/`. Working-copy changes appear under names such as `lap
 
 That name identifies the laptop's last snapshotted commit. You can [diff it or build on
 it](guides/working-across-machines.md#see-what-other-machines-are-doing) like any change. When
-you leave or forget a machine, jj-musubi will removes those names.
+you leave or forget a machine, jj-musubi removes those names.
+
+A workspace of yours whose name has a `/`, such as `feat/x`, stays on your machine: other
+machines don't show it, because they show each other's workspaces as `laptop/default`. It keeps
+working here, and `musubi status` warns about it. To show it on other machines, run
+`jj workspace rename <new name>` in that workspace, with no `/` in the new name.
 
 Moving a repo will maintain its identity in jj-musubi's eyes, but copying its files makes a
 *duplicate* with the same identity that cannot sync. Use the [move, copy and restore

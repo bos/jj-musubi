@@ -54,6 +54,13 @@ in {
       # Build only the binary crate (crates/musubi) and what it depends on.
       cargoExtraArgs = "--locked --package jj-musubi";
 
+      # zstd-sys (via musubi-jj's zstd): link nixpkgs' libzstd, found through
+      # pkg-config, instead of compiling its bundled copy. Here in commonArgs because
+      # zstd-sys is compiled by the dependency build.
+      nativeBuildInputs = [pkgs.pkg-config];
+      buildInputs = [pkgs.zstd];
+      env.ZSTD_SYS_USE_PKG_CONFIG = "1";
+
       # The test suite drives real git and jj repositories and spawns daemons; run it
       # with `cargo nextest run` in the dev shell rather than inside the Nix sandbox.
       # Off here too, so the dependency build skips dev-dependencies.
@@ -68,11 +75,13 @@ in {
       // {
         inherit cargoArtifacts;
 
-        # Only on the final package: setting it on the dependency build would
-        # rebuild every dependency on every commit.
-        env = lib.optionalAttrs (musubiBuild != null) {MUSUBI_BUILD = musubiBuild;};
+        # `//` is shallow, so extend commonArgs' lists and env rather than replacing
+        # them: the package build must see the same inputs as the dependency build.
+        # MUSUBI_BUILD goes only here: on the dependency build it would rebuild every
+        # dependency on every commit.
+        env = commonArgs.env // lib.optionalAttrs (musubiBuild != null) {MUSUBI_BUILD = musubiBuild;};
 
-        nativeBuildInputs = [pkgs.installShellFiles];
+        nativeBuildInputs = commonArgs.nativeBuildInputs ++ [pkgs.installShellFiles];
 
         # clap's dynamic completions: the same scripts the docs tell users to source.
         postInstall = lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''

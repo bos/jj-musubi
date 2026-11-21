@@ -27,6 +27,7 @@ import Musubi.PacketAcceptance
 import Musubi.SysAcceptance
 import Musubi.NodeSysExec
 import Musubi.NativeLifecycle.Json
+import Musubi.OpHeadsJson
 
 namespace Musubi.Exec.Json
 
@@ -1150,7 +1151,8 @@ def badRequestOps : List (String × (Json → Except String Json)) :=
     ("expected", expectedReply), ("retryFixup", retryFixupReply),
     ("contractedAncestry", contractedAncestryReply), ("retryInbox", retryInboxReply),
     ("retryPublication", retryPublicationReply), ("recordEpoch", recordEpochReply),
-    ("survivorAdvance", survivorAdvanceReply), ("refs", refsReply)]
+    ("survivorAdvance", survivorAdvanceReply), ("refs", refsReply),
+    ("opHeads", OpHeads.Json.reply)]
 
 /-- Requests that need no session, by `op`, whose errors are whole messages, not bad requests. -/
 def wholeMessageOps : List (String × (Json → Except String Json)) :=

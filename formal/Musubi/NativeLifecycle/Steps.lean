@@ -7,7 +7,13 @@ scope, and each is kept in `State.outside` rather than refused or hidden:
   the heads through publication and cleanup (E1, `Outside.publicationOverlap`), during a
   helper's run, from its choice of branch through its load and export (E2,
   `Outside.helperOverlap`), or during recovery, from capture through recovery's own move
-  (`Outside.recoveryOverlap`); the model does not prove a lock that excludes such effects;
+  (`Outside.recoveryOverlap`); the model does not prove a lock that excludes such effects.
+  `OpHeadsRace.lean` narrows E1 to its locked part, as far as the code is read to hold the
+  op-heads lock there: no jj command can publish or merge while it is held
+  (`locked_blocks_commands`), so only a lockless `jj op abandon` or `jj op integrate` landing is
+  left, and a head move that goes through `replace_heads` checks the heads it read
+  (`check_no_event`). The advance's own move and recovery's don't, so neither overlap is
+  discharged (`conformance.md`, "Moving op heads");
 - a source query with no unique answer (`Outside.sources`; see `uniqueSource`);
 - a failed native call (`Outside.failedCall`).
 

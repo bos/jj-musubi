@@ -143,3 +143,9 @@
 {"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":true,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":true,"ok":true,"parents":[[3,[0]],[4,[3]]]}
 {"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":false,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}
 {"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":false,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}
+{"back":[],"kept":[],"look":"retire","ok":true,"out":[2],"rewritten":1}
+{"kept":[{"by":[1],"fp":0,"head":0,"images":[1]}],"look":"nothing","ok":true}
+{"entries":[{"by":[2],"fp":0,"head":0,"images":[1]}],"ok":true}
+{"ok":true,"watch":[{"by":[3,4],"fp":0,"head":0,"images":[3]},{"by":[3,4],"fp":2,"head":2,"images":[3]}]}
+{"ok":true,"same":true}
+{"error":"bad request: an operation's parents must come before it","ok":false}

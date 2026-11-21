@@ -1584,6 +1584,14 @@ forgets it only after a move that saved nothing else. A jj command that merges t
 brings back what the abandon dropped, as it does on one machine where `jj op abandon` races
 another command ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
 
+`OpHeadsRace.lean` models this among jj's commands and the lockless writers, and proves what
+holds: no command's operation lands between musubi's read and its move once the check passes; a
+look finds every op head of musubi's beside a rewrite of what it replaced and still watches, so a
+command can merge the two only where a look is owed, or where what it watches is gone or the
+rewrite is no op head, as in the exceptions above; and what a merge taken out was on is put back.
+It also finds a second window, an abandon that reads the op heads while musubi moves them, which a
+look doesn't cover ([conformance.md, "Moving op heads"](conformance.md#moving-op-heads)).
+
 ## Compatibility
 
 jj's operation format changes every few months, almost always by adding fields, and jj keeps

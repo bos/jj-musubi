@@ -32,3 +32,8 @@ test_cases = 300
 [profiles.refs]
 extends = "slow-cases"
 test_cases = 12
+
+# Each case asks the Lean oracle once, about a graph of up to nine operations.
+[profiles.op-heads]
+extends = "slow-cases"
+test_cases = 600

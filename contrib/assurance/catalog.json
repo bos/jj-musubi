@@ -2098,6 +2098,9 @@
     "copies": [
       "Copies"
     ],
+    "opHeads": [
+      "OpHeads"
+    ],
     "expected": [
       "Expected"
     ],

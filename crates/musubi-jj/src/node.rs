@@ -40,6 +40,10 @@ mod expiry;
 mod git;
 mod git_config;
 mod heads;
+#[cfg(test)]
+mod heads_conformance;
+#[cfg(test)]
+mod heads_laws;
 mod join;
 #[cfg(test)]
 mod native_contract;

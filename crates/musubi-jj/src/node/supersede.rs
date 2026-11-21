@@ -33,6 +33,7 @@ use self::storage::Step;
 use super::NodeError;
 use super::NodeRepo;
 use super::heads::Replaced;
+use super::heads::plan::compose;
 
 use crate::canonical::CanonicalError;
 use crate::canonical::Contraction;
@@ -246,23 +247,7 @@ impl Records {
         if replaced.is_empty() {
             return;
         }
-        let mut watched = self.replaced();
-        for earlier in &mut watched {
-            for now in &replaced {
-                for (ops, with) in [
-                    (&mut earlier.images, &now.images),
-                    (&mut earlier.by, &now.by),
-                ] {
-                    if ops.contains(&now.head) {
-                        ops.retain(|op| *op != now.head);
-                        ops.extend(with.iter().cloned());
-                        *ops = dedup(std::mem::take(ops));
-                    }
-                }
-            }
-        }
-        watched.extend(replaced);
-        self.keep_replaced(watched);
+        self.keep_replaced(compose(self.replaced(), replaced));
     }
 
     /// Whether any op head musubi took out is watched.

@@ -37,4 +37,6 @@ import Musubi.NativeLifecycle
 import Musubi.NativeLifecycleTest
 import Musubi.NativeLifecycle.ConstructionSound
 import Musubi.NativeLifecycle.RunSound
+import Musubi.OpHeads
+import Musubi.OpHeadsRace
 import Musubi.Axioms

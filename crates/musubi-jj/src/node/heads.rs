@@ -8,7 +8,6 @@
 //! musubi replaced them, and wrote after, is noticed, and musubi's replacement taken out again.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -24,21 +23,10 @@ use super::join::fingerprint;
 
 use crate::op_id::LocalOp;
 
-/// An op head musubi took out, with what it put in its place. Kept while one of those is still
-/// an op head, since until then a `jj op abandon` that read the op heads before can still put
-/// its rewrite of this one beside them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Replaced {
-    /// The op head as it was.
-    pub(super) head: LocalOp,
-    /// Its content but for its parents ([`fingerprint`]), which jj's rewrite of it keeps.
-    pub(super) fingerprint: String,
-    /// What musubi rewrote it to, op heads or not.
-    pub(super) images: Vec<LocalOp>,
-    /// The op heads musubi put in its place: those of `images`, and what it put in on them,
-    /// as a merge of them or a realization on one.
-    pub(super) by: Vec<LocalOp>,
-}
+pub(super) mod plan;
+
+pub(super) use plan::Replaced;
+use plan::same;
 
 /// Where a test runs something of its own in the next move of op heads that musubi read
 /// earlier ([`NodeRepo::race_head_move`]).
@@ -73,16 +61,23 @@ impl Drop for HeadsLock<'_> {
     }
 }
 
-/// What [`NodeRepo::retire_overtaken`] takes out and puts back, worked out from the op heads
-/// `heads`.
-struct Retiring {
-    heads: Vec<LocalOp>,
-    out: Vec<LocalOp>,
-    back: Vec<LocalOp>,
-    /// The watch as it is once they move.
-    kept: Vec<Replaced>,
-    /// How many op heads jj rewrote.
-    rewritten: usize,
+/// The operations musubi reads of this repository.
+struct RepoGraph<'a>(&'a NodeRepo);
+
+impl plan::Graph<LocalOp> for RepoGraph<'_> {
+    type Error = NodeError;
+
+    fn read(&self, id: &LocalOp) -> Result<plan::Node<LocalOp>, NodeError> {
+        let op = self.0.loader.op_store().read_operation(&id.0).block_on()?;
+        Ok(plan::Node {
+            parents: LocalOp::parents_of(&op),
+            fingerprint: fingerprint(&op),
+        })
+    }
+
+    fn known(&self, id: &LocalOp) -> bool {
+        self.0.canonical_of(id).is_some() || self.0.joins.before.contains(id)
+    }
 }
 
 impl NodeRepo {
@@ -128,7 +123,7 @@ impl NodeRepo {
             return Ok(same(&self.local_heads()?, read));
         };
         let old: Vec<&LocalOp> = read.iter().filter(|h| !new.contains(h)).collect();
-        let replaced = self.replaced_by(&old, from, new, read)?;
+        let replaced = plan::entries(&old, from, new, read, &RepoGraph(self))?;
         self.race(HeadRace::Unlocked);
         let store = self.loader.op_heads_store().clone();
         let _lock = self.lock_heads(&*store)?;
@@ -153,43 +148,6 @@ impl NodeRepo {
         }
         let out = self.retire_overtaken()?;
         Ok(!new.iter().any(|op| out.contains(op)))
-    }
-
-    /// What `new` puts in place of each of `old`, of the op heads `read`, as `from` rewrote
-    /// them: its images among `new`, and what else of `new` is on them.
-    fn replaced_by(
-        &self,
-        old: &[&LocalOp],
-        from: &HashMap<LocalOp, Vec<LocalOp>>,
-        new: &[LocalOp],
-        read: &[LocalOp],
-    ) -> Result<Vec<Replaced>, NodeError> {
-        let store = self.loader.op_store();
-        let mut parents = HashMap::new();
-        for op in new.iter().filter(|op| !read.contains(op)) {
-            let read = store.read_operation(&op.0).block_on()?;
-            parents.insert(op, LocalOp::parents_of(&read));
-        }
-        let mut replaced = vec![];
-        for head in old {
-            let images = from.get(*head).cloned().unwrap_or_default();
-            let by: Vec<LocalOp> = parents
-                .iter()
-                .filter(|(op, on)| images.contains(op) || on.iter().any(|p| images.contains(p)))
-                .map(|(op, _)| (*op).clone())
-                .collect();
-            if by.is_empty() {
-                continue;
-            }
-            let op = store.read_operation(&head.0).block_on()?;
-            replaced.push(Replaced {
-                head: (*head).clone(),
-                fingerprint: fingerprint(&op),
-                images,
-                by,
-            });
-        }
-        Ok(replaced)
     }
 
     /// Takes out the op heads musubi put in place of one that `jj op abandon` rewrote since: one
@@ -226,7 +184,7 @@ impl NodeRepo {
             if !same(&self.local_heads()?, &retiring.heads) {
                 continue;
             }
-            let Retiring {
+            let plan::Retiring {
                 heads,
                 out,
                 back,
@@ -254,71 +212,15 @@ impl NodeRepo {
 
     /// What [`Self::retire_overtaken`] does with the op heads as they are now, if anything,
     /// forgetting what it watches whose replacements are no longer op heads.
-    fn retiring(&self) -> Result<Option<Retiring>, NodeError> {
+    fn retiring(&self) -> Result<Option<plan::Retiring<LocalOp>>, NodeError> {
         let heads = self.local_heads()?;
-        let mut watched = self.records.replaced();
-        // Gone, once nothing musubi put in its place is an op head: jj's rewrite of it, now,
-        // would be beside a jj command's, as it would be on one machine.
-        watched.retain(|replaced| replaced.by.iter().any(|op| heads.contains(op)));
-        let put: HashSet<&LocalOp> = watched.iter().flat_map(|r| &r.by).collect();
-        let beside: Vec<&LocalOp> = heads.iter().filter(|h| !put.contains(h)).collect();
-        let rewritten = if beside.is_empty() {
-            HashSet::new()
-        } else {
-            self.rewritten(&watched, &beside)?
-        };
-        if rewritten.is_empty() {
-            self.records.keep_replaced(watched);
-            return Ok(None);
-        }
-        let (stale, mut kept): (Vec<Replaced>, Vec<Replaced>) = watched
-            .into_iter()
-            .partition(|replaced| rewritten.contains(&replaced.head));
-        let stale_images: HashSet<&LocalOp> = stale.iter().flat_map(|r| &r.images).collect();
-        let stale_by: HashSet<&LocalOp> = stale.iter().flat_map(|r| &r.by).collect();
-        let out: Vec<LocalOp> = heads
-            .iter()
-            .filter(|head| stale_by.contains(head))
-            .cloned()
-            .collect();
-        // What a merge or realization taken out was on, but for the rewrites of a head jj
-        // rewrote and what is on them.
-        let store = self.loader.op_store();
-        let mut back: Vec<LocalOp> = vec![];
-        for op in out.iter().filter(|op| !stale_images.contains(op)) {
-            let read = store.read_operation(&op.0).block_on()?;
-            for parent in LocalOp::parents_of(&read) {
-                if stale_images.contains(&parent)
-                    || stale_by.contains(&parent)
-                    || heads.contains(&parent)
-                    || back.contains(&parent)
-                {
-                    continue;
-                }
-                let on = store.read_operation(&parent.0).block_on()?;
-                if LocalOp::parents_of(&on)
-                    .iter()
-                    .all(|p| !stale_images.contains(p))
-                {
-                    back.push(parent);
-                }
+        match plan::look(&heads, self.records.replaced(), &RepoGraph(self))? {
+            plan::Look::Nothing { kept } => {
+                self.records.keep_replaced(kept);
+                Ok(None)
             }
+            plan::Look::Retire(retiring) => Ok(Some(retiring)),
         }
-        for replaced in &mut kept {
-            replaced.by.retain(|op| !out.contains(op));
-            replaced.by.extend(
-                back.iter()
-                    .filter(|op| replaced.images.contains(op))
-                    .cloned(),
-            );
-        }
-        Ok(Some(Retiring {
-            heads,
-            out,
-            back,
-            kept,
-            rewritten: stale.len(),
-        }))
     }
 
     /// For tests of races: runs `run` in the next move of op heads that musubi read earlier,
@@ -348,35 +250,4 @@ impl NodeRepo {
             run();
         }
     }
-
-    /// The heads among `watched` that jj rewrote: those an op head in `beside`, which musubi
-    /// didn't put in, is a rewrite of.
-    fn rewritten(
-        &self,
-        watched: &[Replaced],
-        beside: &[&LocalOp],
-    ) -> Result<HashSet<LocalOp>, NodeError> {
-        let mut found = HashSet::new();
-        // jj's rewrite is new: the translation cache knows no operation it just wrote.
-        for head in beside
-            .iter()
-            .filter(|head| self.canonical_of(head).is_none() && !self.joins.before.contains(head))
-        {
-            let op = self.loader.op_store().read_operation(&head.0).block_on()?;
-            let print = fingerprint(&op);
-            for replaced in watched {
-                if replaced.fingerprint == print && replaced.head != **head {
-                    found.insert(replaced.head.clone());
-                }
-            }
-        }
-        Ok(found)
-    }
-}
-
-/// Whether `a` and `b` are the same op heads, in any order.
-fn same(a: &[LocalOp], b: &[LocalOp]) -> bool {
-    let a: HashSet<&LocalOp> = a.iter().collect();
-    let b: HashSet<&LocalOp> = b.iter().collect();
-    a == b
 }

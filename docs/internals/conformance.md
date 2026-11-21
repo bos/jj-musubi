@@ -1763,6 +1763,204 @@ boundary. The convergence search still checks translation after cache loss; this
 immediate checks, not a proof of the complete translation implementation or a new intermediate
 cache-loss check.
 
+## Moving op heads
+
+[design.md, "Moving op heads"](design.md#moving-op-heads) says how musubi replaces the op heads it
+read earlier, under jj's op-heads lock and only while they are still those it read, and takes out
+again what it put in beside a rewrite by a `jj op abandon` that read them before and landed after.
+Two Lean files model it
+([formal/README.md](../../formal/README.md#moving-op-heads-opheadslean-opheadsracelean)):
+
+- `OpHeads.lean` has what musubi decides, as functions of the op heads, what it watches and what
+  it read of the operations: `lookPlan` (`plan::look`, which `retiring` calls: what to take out,
+  what to put back, what to go on watching), `entries` (`plan::entries`, once `replaced_by`: what
+  a move makes to watch), `compose` (`plan::compose`, which `Records::watch_replaced` calls) and
+  `same` (the check before a move, and after it). They compute, so the oracle answers from them.
+  `crates/musubi-jj/src/node/heads/plan.rs` has the same functions in Rust, with no jj and no
+  files, generic over what an operation is, as `heads.rs` calls them with its own repository's
+  operations.
+- `OpHeadsRace.lean` has the op heads among the actors that change them, and its theorems.
+
+**What is checked.** `heads_conformance.rs` runs `plan.rs` and the model on the same operation
+graphs, op heads and watches, and compares what they answer, lists in order. A graph is up to nine
+operations, each after its parents, with fingerprints drawn from two numbers so that operations
+share them as jj's rewrites do, a quarter of them known to the cache. `look_conformance` draws op
+heads, some of which musubi put in, and entries for what it replaced, mostly with the fingerprint
+of the head, so that a rewrite beside a replacement is common, and taking out is, and putting
+back, too, though less. `entries_conformance` draws a move: heads read, the new ones, and what
+each became. `compose_conformance` draws two watches, and `same_conformance` two lists.
+`look_examples` is each way `look` goes, fixed: a rewrite beside a replacement, the replacement
+alone, the replacement gone, a merge of the replacement and other work, and a rewrite the cache
+knows. The test's fake is the graph, which holds what the code reads of an operation; `heads.rs`
+reads them from the op store.
+
+```json
+{"op": "opHeads", "call": "look", "ops": [{"parents": [], "fp": 0, "known": true}, {"parents": [], "fp": 0, "known": false}, {"parents": [], "fp": 2, "known": true}], "heads": [1, 2], "watch": [{"head": 0, "fp": 0, "images": [2], "by": [2]}]}
+{"ok": true, "look": "retire", "out": [2], "back": [], "kept": [], "rewritten": 1}
+```
+
+`call` is `look`, `entries` (`read`, `new`, `from`: what each head became), `compose` (`watch`,
+`replaced`) or `same`. An operation is its place in `ops`, whose parents must come before it; a
+fingerprint is a number.
+
+**What the code is checked to do, by steps of the race model.** The model's steps are what jj and
+musubi do to the op heads. musubi's writes are one file system call each. A landing is one step,
+though jj makes it with two calls, an add and a removal: a read of the op heads between them,
+which sees the rewrite beside the head it replaces, is not a state of the model.
+
+| In the model | In the code |
+| --- | --- |
+| `cmdLoad`, `cmdLoadAt`, `cmdPublish`, `cmdMerge` | A jj command loads the one op head, or any operation run `--at-op`, publishes its operation on it under the lock, or merges several op heads under the lock |
+| `abandonBegin`, `integrateBegin`, `land` | `jj op abandon` writes its rewrite of an op head, and later adds it and removes the head, with no lock; `jj op integrate` the same for an operation on parents it names |
+| `mkOp`, `plan` | `replace_heads`'s caller writes the operations it will put in, and reads the op heads |
+| `lock`, `check` | `lock_heads`, then `same(local_heads, read)`: otherwise it moves nothing |
+| `write`, `written` | The `update_op_heads` calls: each new head in, then the old ones out |
+| `watch` | `watch_replaced` |
+| `recheck`, `lookRead`, `lookFound`, `lookLock`, `lookCheck`, `lookWrite`, `lookWritten` | `same(local_heads, new)`, then `retire_overtaken`: `retiring`, the lock, the check, the heads put back and taken out, the watch kept |
+| `lookStart`, `lookNothing` | The look at the top of `check_abandon` and `notice_abandon`; nothing sits beside a rewrite |
+| `save`, `restart` | `save_records`; the daemon starts again with what `records.json` has |
+
+What the model takes from `heads.rs`, and the conformance test checks, is the functions of
+`plan.rs`. The rest, that the code does these steps in this order, holding the lock as it says, is
+the reading of `heads.rs`, and the race tests of [races.md](races.md) run it: `replace_heads`
+takes the lock, checks, writes the new heads before it removes the old, watches, and rechecks
+before it lets go; `retire_overtaken` works out what to do without the lock and checks again under
+it.
+
+**What is proved.** The theorems are listed in
+[formal/README.md](../../formal/README.md#moving-op-heads-opheadslean-opheadsracelean). That the
+lock and the check keep every command out of a move (`check_no_event`, `locked_blocks_commands`);
+that a look finds exactly what sits beside a rewrite of what musubi watches, an op head with the
+replaced head's fingerprint and not an operation below one, and what it takes out is only what
+musubi put in, with what a merge it takes out was on put back (`lookPlan`'s theorems); and that a
+command merges musubi's replacement with a rewrite of what it replaced, among the replacements
+musubi still watches, only where a look is owed (`bad_merge_owed`), and never while musubi holds
+the lock. Of what it doesn't watch the theorems say nothing. `Trace.regression_trace` is the
+regression the look's walk below the op heads made, which the look now rejects.
+`Trace.remaining_case` is the case that remains for what is watched,
+`Trace.landing_during_the_move` one the recheck takes out, and `Trace.at_op_case`,
+`Trace.abandon_both_case`, `Trace.unsaved_watch_lost` and `Trace.read_during_the_move` more, where
+no look finds the rewrite, below.
+
+**What jj is assumed to do**, pinned against jj by `heads_laws.rs`, as `ref_laws` pins the ref
+laws: `jj op abandon` takes no lock (`jj_op_abandon_takes_no_lock`) and replaces each op head it
+finds, not only one (`jj_op_abandon_rewrites_each_op_head_it_finds`), each by a call of
+`update_op_heads`, whose order the next test pins, but not the order of the abandon's own calls
+(from jj's source); `jj op integrate` adds its operation with no lock and merges under it
+(`jj_op_integrate_lands_with_no_lock_and_merges_under_it`); a command publishes under the lock,
+and merges several op heads under it (`a_jj_command_publishes_and_merges_under_the_lock`), and
+merges them before it writes anything, which is why no command's operation sits on one op head
+with another beside it, unless run `--at-op`
+(`a_command_that_loads_several_op_heads_merges_them_before_it_writes`), the law the look relies on
+to find a rewrite among the op heads alone; `update_op_heads` adds the new head before it removes
+the old, ignores one that is gone, and leaves one it replaces with itself
+(`update_op_heads_adds_before_it_removes_and_ignores_a_head_that_is_gone`); and jj's rewrite of an
+operation keeps its fingerprint and gets another id
+(`a_rewritten_operation_keeps_its_fingerprint_and_gets_another_id`). The tests hold the lock in
+the test, in process, and run the `jj` binary: that no command finishes while it is held takes 400
+ms of watching, three times in all, the only waits on the clock; the rest wait for what they need.
+That the commands wait on the lock is seen by watching: a command that was slower than 400 ms to
+reach its lock would pass, so these tests can miss jj taking no lock, never report that it takes
+one; `jj describe` is waited for until it has written its operation, which it does before the
+lock.
+
+**Evidence that the checks have teeth.** Each of these changes to `plan.rs` is caught by
+`heads_conformance` (every one by `look_conformance` or the test named), and was run by hand:
+
+| Change | Caught by |
+| --- | --- |
+| An op head the cache knows counts as a rewrite | `look_examples`, `look_conformance` |
+| An entry whose replacements are all gone isn't forgotten | `look_conformance`, `look_examples` |
+| What a merge was on goes back though it is an op head already | `look_conformance` |
+| What a merge was on goes back though it is on a rewrite | `look_conformance` |
+| A rewrite is taken for the head itself (the head's own id counts) | `look_conformance` |
+| The look also compares the operations below the op heads (the walk it once made) | `look_examples` |
+| What is kept still names what was taken out | `look_conformance` |
+| `compose` leaves duplicates | `compose_conformance` |
+| `entries` counts the operations that were read | `entries_conformance` |
+| `same` compares counts | `same_conformance` |
+
+**What it doesn't cover, and what it found.**
+
+- A move is a reading of `heads.rs`, not a check of it: a move's writes in the wrong order, or
+  without the lock, are not caught by the conformance test, but by the race tests
+  (`jj_commands_while_the_daemon_rewrites_an_abandon`,
+  `a_second_abandon_while_the_daemon_moves_the_op_heads`, and the others in the
+  [races.md](races.md) rows for #168), which each fail without the part they cover.
+- The model gives musubi's moves one lock of their own. Moves that run inside a lock the caller
+  holds already (publication cleanup, an advance) take no lock again; the model has them hold it
+  the whole way, which is no weaker.
+- **What the look doesn't find, and why it stays.** It compares only the op heads, since a rewrite
+  that lands after the move is an op head itself: a command that loads two op heads merges them
+  before it writes. Below an op head the replaced head's fingerprint may be its pre-image's
+  (`Trace.regression_trace`; `pre_image_older`: what a head was rewritten from is older, and
+  `overtaken_congr`: the look depends on nothing below the op heads), so it isn't evidence. What
+  that leaves is the two exceptions of races.md's row: a command run `--at-op` at the rewrite
+  writes on it with no merge, and its operation, an operation of its own, is the only op head
+  beside the replacement (`Trace.at_op_case`); and another `jj op abandon` reads both op heads and
+  replaces each with its own rewrite, neither of them musubi's (`Trace.abandon_both_case`). In
+  both a command merges the two, as it would on one machine, and a look finds nothing.
+- **A second window.** `jj op abandon` rewrites every op head it reads. One that reads the op
+  heads after musubi has put its new head in and before it has taken the old out
+  (`update_op_heads` writes them one file at a time, and the abandon takes no lock) rewrites both,
+  and lands the two rewrites. musubi watches an op head it took out while its replacement is an op
+  head; the abandon has replaced the replacement, so a look finds nothing, and a command merges
+  the two rewrites. `Trace.read_during_the_move` builds it. Narrowing the look to the op heads
+  doesn't change it: its rewrites were op heads, as before, and neither was musubi's. It is
+  `Trace.abandon_both_case` again, an abandon rewriting both op heads, reached by one that reads
+  them while musubi moves them rather than by a second after the move. It is the same loss as the
+  row in [races.md, "Known jj limitations"](races.md#known-jj-limitations), but a look doesn't
+  cover it: none of musubi's op heads is left to take out, and the remedy would be to take out one
+  of the abandon's two rewrites, as musubi doesn't. No test runs it, since the window is inside
+  one call of jj's.
+- A look after a recheck that took something out ends there: `retire_overtaken` once, not until
+  nothing is left, so the next look, which comes before anything reads the op heads, takes out
+  what `back` put beside a rewrite, if any did (`settle_nothing` says looking again ends).
+- A restart forgets what was watched since `records.json` was last written
+  (`Trace.unsaved_watch_lost`): a move that saved nothing else leaves its watch to go with it. The
+  row for the abandon landing after a restart in [races.md](races.md) is the case that keeps it
+  (`Trace.saved_watch_survives`).
+- What a rewrite is, in jj, is its fingerprint alone: an operation with another's content but its
+  parents. The model has no more of what jj rewrites. An abandon's two rewrites of an op head, one
+  before the other, look alike (the second has the fingerprint of the first), and where both are
+  beside musubi's replacement one is taken for the other's: only a command that loaded the
+  repository before the first, or a second abandon that read the op heads before it, can write
+  that, in a race jj doesn't resolve either.
+
+**Native lifecycle.** [`NativeLifecycle`'s windows](#native-lifecycle-inputs-and-events) are
+narrower than they were, by what is proved here and no further:
+
+- E1, between the final reread of the heads under the publication locks and their release, no jj
+  command can publish or merge: a command needs jj's op-heads lock free (`cmdPublish`,
+  `cmdMerge`), and the publication holds it from its reread, as `cleanup.rs` and
+  `lock_if_unchanged` do (a reading of the code, which `locked_blocks_commands` takes for the
+  model's own lock holder, not a check of it). What can change the op heads there is `jj op
+  abandon` or `jj op integrate` landing, which takes no lock, as
+  `abandon_after_equal_reread_characterization` shows. The part of cleanup after the locks are
+  released is as before: a command can land.
+- The head moves that go through `replace_heads` (publication cleanup, taking records, exporting a
+  merge, reparenting a late command) check the op heads they read under the lock and move nothing
+  otherwise (`check_no_event`), where they had changed them without looking; so a landing between
+  their read and their move is no longer an effect they leave out of scope. An advance writes its
+  own heads without `replace_heads`, with the reread under the lock as its check, and watches
+  nothing, so a landing after its reread is still E1's.
+- Recovery (`recoveryOverlap`) is not narrowed: the native publication's recovery doesn't move
+  heads through `replace_heads`; taking records and `realign_heads` do, and the model of
+  `NativeLifecycle` doesn't have them.
+
+**Refinement of the protocol model.** A command's publish and merge are, on the op heads,
+`EnvStep.userOp` and `EnvStep.merge` (`Safety.lean`'s `advance_merge_refines` composes the second
+with an advance): a merge of every op head into one with those as parents, and a publish that
+replaces the one it loaded. To the commands, which can't run while musubi holds the lock, a move
+by musubi that has passed its check is one replacement of the op heads it read by the ones it puts
+in (`check_no_event`, `locked_blocks_commands`); to a lockless reader it isn't, since between
+adding the new heads and removing the old both are op heads, which is the second window above.
+What `jj op abandon` lands during the move is taken out by the recheck, and what it lands after is
+the case that remains. What isn't proved is the refinement itself: `Node.heads` in the protocol
+model are canonical operations, and what relates them to local op heads is the translation, whose
+model is `NativeLifecycle`'s and whose code `translate.rs` is. Proving that a move refines
+`SyncStep.realize` or `advance` needs that relation, which `OpHeadsRace.lean` leaves abstract.
+
 ## Expected values from history
 
 `formal/Musubi/Expected.lean` models `expected` in `crates/musubi-jj/src/node/git.rs` for one

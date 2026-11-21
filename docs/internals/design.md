@@ -1223,6 +1223,13 @@ standing for the hive's are elsewhere than the hive has them, though none is dro
 then puts its history back as the hive has it, as after a restart partway through a rewrite,
 and publishes nothing: what jj brought back stays, as it does on one machine.
 
+Rewriting local operations after an abandon saves where the op heads and workspaces move, by
+local operation, before any head moves, as taking records does. A restart finishes the move
+from that saved plan alone. Working it out again would need the translation cache, which may
+be gone, and jj may since have removed the only old head that reached an operation the rewrite
+names. Op heads a jj command made in place of all of those the plan moves from are left to the
+ordinary abandon check.
+
 ### The fix-up
 
 musubi works some state out from the history rather than from views: which copies are present,

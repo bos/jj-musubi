@@ -13,6 +13,7 @@ use super::ACCEPTED_PUSH;
 use super::NodeError;
 use super::NodeRepo;
 use super::Realign;
+use super::TakingStop;
 use super::dedup;
 
 use crate::canonical::Contraction;
@@ -49,11 +50,8 @@ impl NodeRepo {
                 continue;
             }
             if let Some(canonical) = self.canonical_of(&id) {
-                // An alias establishes identity, not that a pending physical move finished.
-                if !self.records.moving || self.records.source(&id).is_none() {
-                    mapped.push((id, canonical));
-                    continue;
-                }
+                mapped.push((id, canonical));
+                continue;
             }
             let op = op_store.read_operation(&id.0).block_on()?;
             if OpAttrs(&op.metadata.attributes).canonical().is_none()
@@ -159,7 +157,7 @@ impl NodeRepo {
         if self.abandon.checked(&checked) && self.records.realign.is_none() {
             return Ok(false);
         }
-        self.realign_heads(&checked.heads)?;
+        let moved = self.realign_heads(&checked.heads)?;
         // Inspect both accepted histories together. The push may contain a surviving
         // operation above a base that was dropped in full: treating it as new while
         // inspecting only the base loses its original identity and presence.
@@ -169,7 +167,9 @@ impl NodeRepo {
             .chain(checked.accepted_push.iter())
             .cloned()
             .collect();
-        let noticed = self.notice_abandons(&watched)?;
+        // A move resumed rewrote local history, as noticing an abandon does: what was staged
+        // on it is stale.
+        let noticed = self.notice_abandons(&watched)? || moved;
         self.abandon.found(checked, noticed);
         Ok(noticed)
     }
@@ -226,8 +226,8 @@ impl NodeRepo {
     /// operations the move names stood for even where the translation cache lost it since.
     /// Then moves each op head that stands for an operation a renaming superseded to the
     /// local operation of what it became, as a crash between recording the renaming and
-    /// moving the op heads leaves them.
-    fn realign_heads(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
+    /// moving the op heads leaves them. Returns whether it moved any op head.
+    fn realign_heads(&mut self, heads: &[LocalOp]) -> Result<bool, NodeError> {
         if let Some(realign) = self.records.realign.clone() {
             let now: HashSet<&LocalOp> = heads.iter().collect();
             let to: HashSet<&LocalOp> = realign.to.iter().collect();
@@ -250,7 +250,7 @@ impl NodeRepo {
                 for target in &realign.to {
                     self.canonicalize_unchecked(target)?;
                 }
-                self.move_workspaces(&HashMap::new())?;
+                self.move_workspaces(&realign.rewrites)?;
             }
             // What the operations stood for is kept until none that a renaming superseded is
             // below the op heads, as one a `jj` command wrote on is until it is reparented,
@@ -263,17 +263,15 @@ impl NodeRepo {
             };
             let renamed = !self.superseded_below(&heads, &realign.canonical)?;
             // Written only where it changes: once, then once more, when it goes.
-            let moving = !realign.from.is_empty() || !realign.to.is_empty();
-            if renamed || moving {
+            if renamed || realign.pending() {
                 self.records.realign = (!renamed).then(|| Realign {
-                    from: HashMap::new(),
-                    to: vec![],
                     canonical: realign.canonical,
+                    ..Realign::default()
                 });
                 self.save_records()?;
             }
             if moved {
-                return Ok(());
+                return Ok(true);
             }
         }
         let mut moved = false;
@@ -295,7 +293,7 @@ impl NodeRepo {
         if moved {
             self.move_workspaces(&HashMap::new())?;
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// Notices a `jj op abandon` of operations the hub accepted: `base`, a hub name for an
@@ -304,7 +302,11 @@ impl NodeRepo {
     /// match, and records the drops to publish, with the fix-up that goes first. Returns
     /// whether it noticed one.
     pub fn notice_abandon(&mut self, base: &HubOp) -> Result<bool, NodeError> {
-        self.notice_abandons(std::slice::from_ref(base))
+        // Never on a move a restart left pending: it would be worked out again, from what the
+        // translation cache may have lost.
+        let heads = self.local_heads()?;
+        let moved = self.realign_heads(&heads)?;
+        Ok(self.notice_abandons(std::slice::from_ref(base))? || moved)
     }
 
     fn notice_abandons(&mut self, watched: &[HubOp]) -> Result<bool, NodeError> {
@@ -362,7 +364,7 @@ impl NodeRepo {
                     .is_some_and(|id| self.canonical.has_operation(&id))
             });
         }
-        if reached && !self.records.moving && !has_marked {
+        if reached && !has_marked {
             return Ok(false);
         }
         let frontier: Vec<CanonicalOp> = mapped.iter().map(|(_, c)| c.clone()).collect();
@@ -446,7 +448,7 @@ impl NodeRepo {
             .filter(|op| !stood_for.contains(op))
             .cloned()
             .collect();
-        if !recovered && !self.records.moving && !dropping.is_empty() {
+        if !recovered && !dropping.is_empty() {
             let reached: HashSet<LocalOp> = mapped.iter().map(|(local, _)| local.clone()).collect();
             let sources =
                 self.unpublished_reparented_sources(&unmapped, &reached, &dropping, &counterparts)?;
@@ -455,16 +457,6 @@ impl NodeRepo {
         }
         // Dropped: what this machine had below the base, or below what jj rewrote, that no
         // operation it reaches stands for now.
-        if self.records.moving {
-            // A rewrite recorded before a restart: move the op heads it didn't.
-            let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
-            let locals =
-                self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
-            counterparts.extend(historical_sources);
-            self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
-            self.finish_local_move(&heads, &locals)?;
-            return Ok(true);
-        }
         // jj op abandon rewrites what was above what it abandoned. Where nothing was, the
         // base is out of reach for some other reason, which this doesn't explain: dropping
         // everything below it would drop what the hive keeps.
@@ -494,7 +486,6 @@ impl NodeRepo {
             // identities established here.
             counterparts.extend(historical_sources);
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
-            self.records.moving = true;
             self.finish_local_move(&heads, &locals)?;
             return Ok(true);
         }
@@ -601,22 +592,63 @@ impl NodeRepo {
         }
         counterparts.extend(historical_sources);
         self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
-        self.records.moving = true;
         self.finish_local_move(&heads, &locals)?;
         Ok(true)
     }
 
-    /// Finishes a recorded local rewrite, or resumes it after a restart. Keep its state on
-    /// disk until both the op heads and the workspaces have moved.
+    /// Moves the op heads and the workspaces to the rewrites `locals` of a renaming just
+    /// recorded. Where they go is saved first, by the local operations themselves, as taking
+    /// records saves it: a restart resumes the move from that alone ([`Self::realign_heads`]),
+    /// as the translation cache, which working it out again would need, may be lost by then,
+    /// and jj may have taken out an op head that alone reached an operation it names.
     fn finish_local_move(
         &mut self,
         heads: &[LocalOp],
         locals: &HashMap<LocalOp, Vec<LocalOp>>,
     ) -> Result<(), NodeError> {
+        let to = self.new_heads(heads, locals, None, None)?;
+        let from: HashMap<LocalOp, Vec<LocalOp>> = heads
+            .iter()
+            .map(|head| {
+                let new = locals.get(head).cloned();
+                (head.clone(), new.unwrap_or_else(|| vec![head.clone()]))
+            })
+            .collect();
+        let renamed = locals
+            .iter()
+            .filter(|(old, new)| new.as_slice() != std::slice::from_ref(*old))
+            .flat_map(|(old, new)| std::iter::once(old).chain(new));
+        let mut canonical: HashMap<LocalOp, CanonicalOp> = heads
+            .iter()
+            .chain(&to)
+            .chain(renamed)
+            .filter_map(|local| Some((local.clone(), self.canonical_of(local)?)))
+            .collect();
+        // What an earlier move kept, for operations a renaming superseded still below the op
+        // heads.
+        if let Some(earlier) = self.records.realign.take() {
+            for (local, c) in earlier.canonical {
+                canonical.entry(local).or_insert(c);
+            }
+        }
+        self.records.realign = Some(Realign {
+            from,
+            to: to.clone(),
+            canonical,
+            rewrites: locals.clone(),
+        });
         self.save_records()?;
-        self.move_heads(heads, locals, None, None)?;
+        self.stop_taking(TakingStop::Heads)?;
+        self.publish_heads(heads, &to)?;
+        self.stop_taking(TakingStop::Workspaces)?;
         self.move_workspaces(locals)?;
-        self.records.moving = false;
+        let realign = self.records.realign.take().expect("saved above");
+        let heads = self.local_heads()?;
+        let renamed = !self.superseded_below(&heads, &realign.canonical)?;
+        self.records.realign = (!renamed).then(|| Realign {
+            canonical: realign.canonical,
+            ..Realign::default()
+        });
         self.save_records()?;
         self.forget_local_caches();
         Ok(())

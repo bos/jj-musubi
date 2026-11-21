@@ -233,9 +233,9 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
             .clone();
         drop(node);
         a.jj(&["op", "abandon", &format!("..{}-", source.trim())]);
-        let working_copy = a.path().join(".jj/working_copy");
-        let saved_working_copy = env.root().join("working-copy-before-normalizing");
-        musubi_testutil::copy_tree(&working_copy, &saved_working_copy);
+        let dot_jj = a.path().join(".jj");
+        let saved = env.root().join("before-normalizing");
+        musubi_testutil::copy_tree(&dot_jj, &saved);
         let mut node = open(&a);
         let orphan = node.local_heads().unwrap().pop().unwrap();
         let orphan_op = node
@@ -278,19 +278,18 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
                 .contains_key(jj_lib::ref_name::WorkspaceName::new(&own)),
             own_alias
         );
-        // A power cut can retain the counted source aliases and new heads while losing
-        // the workspace move and final moving=false write.
+        // Again from before, crashing once the new op heads are in, before the workspaces
+        // move, and restarting without the translation cache: the saved move finishes.
         drop(node);
-        std::fs::remove_dir_all(&working_copy).unwrap();
-        musubi_testutil::copy_tree(&saved_working_copy, &working_copy);
-        let records = a.repo_path().join("musubi/records.json");
-        let mut state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&records).unwrap()).unwrap();
-        state["moving"] = true.into();
-        std::fs::write(&records, serde_json::to_vec(&state).unwrap()).unwrap();
+        std::fs::remove_dir_all(&dot_jj).unwrap();
+        musubi_testutil::copy_tree(&saved, &dot_jj);
+        node = open(&a);
+        node.crash_taking_records(true);
+        node.check_abandon().unwrap_err();
+        drop(node);
         std::fs::remove_file(a.repo_path().join("musubi/translation")).unwrap();
         node = open(&a);
-        node.check_abandon().unwrap();
+        assert!(node.check_abandon().unwrap());
         let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
             .create(a.path())
             .unwrap()
@@ -934,23 +933,15 @@ fn a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss() {
     let raw_head =
         LocalOp(jj_lib::op_store::OperationId::try_from_hex(log.lines().next().unwrap()).unwrap());
     assert_ne!(source, middle);
-    assert!(node.notice_abandon(&HubOp(base.clone())).unwrap());
+    // A crash can retain the counted step and the saved move while losing the head move.
+    // The restart, without the translation cache, finishes the move from what was saved.
+    node.crash_taking_records(false);
+    node.notice_abandon(&HubOp(base.clone())).unwrap_err();
+    assert_eq!(node.local_heads().unwrap(), vec![raw_head.clone()]);
     let expected = node.current(&original).unwrap()[0].0.clone();
     let expected_head = node.current(&base).unwrap()[0].0.clone();
     drop(node);
     std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
-    // A power cut can retain the counted step while losing the head move and final
-    // moving=false write. Source aliases must not hide that unfinished physical move.
-    let heads = repo.repo_path().join("op_heads/heads");
-    for head in std::fs::read_dir(&heads).unwrap() {
-        std::fs::remove_file(head.unwrap().path()).unwrap();
-    }
-    std::fs::write(heads.join(raw_head.0.hex()), "").unwrap();
-    let records = repo.repo_path().join("musubi/records.json");
-    let mut state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&records).unwrap()).unwrap();
-    state["moving"] = true.into();
-    std::fs::write(&records, serde_json::to_vec(&state).unwrap()).unwrap();
     let mut node = open(&repo);
     assert!(node.notice_abandon(&HubOp(base)).unwrap());
     assert!(!node.local_heads().unwrap().contains(&raw_head));

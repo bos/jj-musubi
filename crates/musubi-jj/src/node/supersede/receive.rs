@@ -607,6 +607,7 @@ impl NodeRepo {
                 from,
                 to: to.clone(),
                 canonical,
+                rewrites: HashMap::new(),
             };
             self.hold_taken(&mut taking, realign)?;
             self.stop_taking(TakingStop::Heads)?;
@@ -758,6 +759,17 @@ impl NodeRepo {
         self.records.fresh = false;
         self.records.pending = taking.pending.clone();
         self.records.steps += usize::from(step.is_some());
+        // What an earlier move kept, for operations a renaming superseded still below the op
+        // heads, as `finish_local_move` keeps it.
+        let mut realign = realign;
+        if let Some(earlier) = &self.records.realign {
+            for (local, c) in &earlier.canonical {
+                realign
+                    .canonical
+                    .entry(local.clone())
+                    .or_insert_with(|| c.clone());
+            }
+        }
         self.records.realign = Some(realign);
         if let Err(err) = self
             .stop_taking(TakingStop::Hold)

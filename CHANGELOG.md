@@ -5,6 +5,10 @@
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.
 
+- After `jj op abandon`, a daemon that stopped partway through rewriting local history, and
+  lost its translation cache before restarting, finishes the rewrite instead of failing every
+  sync with "its local operation is missing". No action is needed on upgrading.
+
 - Use the [jj-musubi Dev Container Feature](docs/guides/setup.md#use-musubi-in-a-dev-container)
   to install `musubi` and start its daemon in GitHub Codespaces or other dev containers.
 

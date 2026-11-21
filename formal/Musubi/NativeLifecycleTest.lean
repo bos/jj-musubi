@@ -667,7 +667,7 @@ private def stampCodecValue : Stamp :=
 
 private def emptySourceMemory : SourceMemory :=
   { steps := 0, sources := [], superseded := [], dropped := [], realign := none,
-    moving := false, taking := false, fixup := false, recordCount := 0,
+    taking := false, fixup := false, recordCount := 0,
     recordNames := [], joins := [], joinPoints := [], prejoin := [] }
 private def closedSourceRoutes : SourceRoutes :=
   { checkpoint := {}, frames := [], countedSources := [], memory := emptySourceMemory,

@@ -433,7 +433,7 @@ def sourceCheckpoint (ctx : Context) (e : Evidence) (text : Option String) :
   let raw ← Lean.Json.parse text
   let fields := (← raw.getObj?).toList
   let allowed := ["prefix", "applied", "pending", "fixup", "fixup_written", "fixup_from",
-    "moving", "realign", "steps", "fresh", "earlier", "custody"]
+    "realign", "steps", "fresh", "earlier", "custody"]
   for (name, _) in fields do
     if !allowed.contains name || (text.splitOn s!"\"{name}\"").length ≠ 2 then
       throw "unknown or duplicate source checkpoint field"
@@ -450,12 +450,11 @@ def sourceCheckpoint (ctx : Context) (e : Evidence) (text : Option String) :
   let fixupFrom ← fixupFrom.mapM (sourceCanonical ctx e)
   let realign := (get raw "realign").toOption.getD .null
   if realign != .null then
-    for key in ["from", "to", "canonical"] do
+    for key in ["from", "to", "canonical", "rewrites"] do
       if (text.splitOn s!"\"{key}\"").length ≠ 2 then throw "duplicate realign object key"
   return {
     steps := ← sourceDefault raw "steps" 0,
     realign := ← sourceOptionalRealign ctx e realign,
-    moving := ← sourceDefault raw "moving" false,
     fixup := (← raw.getObjValAs? Bool "fixup_written") || fixupFrom.isSome,
     recordCount := records + prefixCount, recordNames := names ++ fixupFrom.toList }
 
@@ -479,7 +478,7 @@ def sourceMemory (ctx : Context) (e : Evidence) (raw : Json) : Except String Sou
     sources := ← sourceAliases ctx e (← rows raw "sources"), superseded,
     dropped := ← sourceNames ctx e (← rows raw "dropped"),
     realign := ← sourceOptionalRealign ctx e (← get raw "realign"),
-    moving := ← raw.getObjValAs? Bool "moving", taking := ← raw.getObjValAs? Bool "taking",
+    taking := ← raw.getObjValAs? Bool "taking",
     fixup := (← get raw "fixup") != .null ||
       (← raw.getObjValAs? Bool "fixupWritten") || fixupFrom.isSome,
     recordCount := records + (← raw.getObjValAs? Nat "prefixCount"),

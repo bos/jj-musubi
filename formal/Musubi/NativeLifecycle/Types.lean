@@ -218,7 +218,6 @@ deriving DecidableEq, Repr
 structure SourceCheckpoint where
   steps : Nat := 0
   realign : Option SourceRealign := none
-  moving : Bool := false
   fixup : Bool := false
   recordCount : Nat := 0
   recordNames : List Canonical := []
@@ -230,7 +229,6 @@ structure SourceMemory where
   superseded : List (Canonical × List Canonical)
   dropped : List Canonical
   realign : Option SourceRealign
-  moving : Bool
   taking : Bool
   fixup : Bool
   recordCount : Nat
@@ -252,15 +250,15 @@ structure SourceRoutes where
 deriving DecidableEq, Repr
 
 /-- Holds when the observations show only the ordinary route by which a native operation gets
-its canonical source: no checkpoint steps or log frames, no realign, move, take or fix-up in
-progress, and no records, joins or renamings. The model handles only this case; any other
+its canonical source: no checkpoint steps or log frames, no realign (a saved move of the heads),
+take or fix-up in progress, and no records, joins or renamings. The model handles only this case; any other
 state is an interpretation gap. -/
 def SourceRoutes.closed (s : SourceRoutes) : Bool :=
   s.checkpoint.steps == 0 && s.frames.isEmpty && s.countedSources.isEmpty &&
-  s.checkpoint.realign.isNone && !s.checkpoint.moving && !s.checkpoint.fixup &&
+  s.checkpoint.realign.isNone && !s.checkpoint.fixup &&
   s.checkpoint.recordCount == 0 && s.checkpoint.recordNames.isEmpty &&
   s.memory.steps == 0 && s.memory.sources.isEmpty && s.memory.superseded.isEmpty &&
-  s.memory.dropped.isEmpty && s.memory.realign.isNone && !s.memory.moving &&
+  s.memory.dropped.isEmpty && s.memory.realign.isNone &&
   !s.memory.taking && !s.memory.fixup && s.memory.recordCount == 0 &&
   s.memory.recordNames.isEmpty && s.memory.joins.isEmpty && s.memory.joinPoints.isEmpty &&
   s.memory.prejoin.isEmpty &&

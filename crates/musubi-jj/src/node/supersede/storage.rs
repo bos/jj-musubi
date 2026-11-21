@@ -40,17 +40,21 @@ struct RealignFile {
     from: Vec<(String, Vec<String>)>,
     to: Vec<String>,
     canonical: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rewrites: Vec<(String, Vec<String>)>,
 }
 
 impl Realign {
     fn to_file(&self) -> RealignFile {
         let hex = |ops: &[LocalOp]| ops.iter().map(|op| op.0.hex()).collect::<Vec<_>>();
-        let mut from: Vec<(String, Vec<String>)> = self
-            .from
-            .iter()
-            .map(|(old, new)| (old.0.hex(), hex(new)))
-            .collect();
-        from.sort();
+        let moves = |map: &HashMap<LocalOp, Vec<LocalOp>>| {
+            let mut moves: Vec<(String, Vec<String>)> = map
+                .iter()
+                .map(|(old, new)| (old.0.hex(), hex(new)))
+                .collect();
+            moves.sort();
+            moves
+        };
         let mut canonical: Vec<(String, String)> = self
             .canonical
             .iter()
@@ -58,9 +62,10 @@ impl Realign {
             .collect();
         canonical.sort();
         RealignFile {
-            from,
+            from: moves(&self.from),
             to: hex(&self.to),
             canonical,
+            rewrites: moves(&self.rewrites),
         }
     }
 
@@ -68,10 +73,13 @@ impl Realign {
         let ops = |hexes: &[String]| -> Result<Vec<LocalOp>, NodeError> {
             Ok(parse_ids(path, hexes)?.into_iter().map(LocalOp).collect())
         };
-        let mut from = HashMap::new();
-        for (old, new) in &file.from {
-            from.insert(ops(std::slice::from_ref(old))?.swap_remove(0), ops(new)?);
-        }
+        let moves = |file: &[(String, Vec<String>)]| -> Result<_, NodeError> {
+            let mut moves = HashMap::new();
+            for (old, new) in file {
+                moves.insert(ops(std::slice::from_ref(old))?.swap_remove(0), ops(new)?);
+            }
+            Ok(moves)
+        };
         let mut canonical = HashMap::new();
         for (local, op) in &file.canonical {
             let [local, op] = [local, op].map(|hex| parse_ids(path, std::slice::from_ref(hex)));
@@ -81,9 +89,10 @@ impl Realign {
             );
         }
         Ok(Self {
-            from,
+            from: moves(&file.from)?,
             to: ops(&file.to)?,
             canonical,
+            rewrites: moves(&file.rewrites)?,
         })
     }
 }
@@ -99,8 +108,6 @@ struct RecordsFile {
     fixup_written: bool,
     #[serde(default)]
     fixup_from: Option<String>,
-    #[serde(default)]
-    moving: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     realign: Option<RealignFile>,
     /// How many renamings of the steps log count: one appended after is from a run cut short.
@@ -414,7 +421,6 @@ impl Records {
                 .as_deref()
                 .and_then(OperationId::try_from_hex)
                 .map(CanonicalOp),
-            moving: file.moving,
             realign: file
                 .realign
                 .as_ref()
@@ -467,7 +473,6 @@ impl NodeRepo {
             fixup: records.fixup.clone(),
             fixup_written: records.fixup_written,
             fixup_from: records.fixup_from.as_ref().map(|op| op.0.hex()),
-            moving: records.moving,
             realign: records.realign.as_ref().map(Realign::to_file),
             steps: records.steps,
             earlier: records

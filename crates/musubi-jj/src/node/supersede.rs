@@ -88,9 +88,6 @@ pub(super) struct Records {
     /// The canonical operation the fix-up restores the state of: the head before the first
     /// abandon not yet published, as that history named it.
     fixup_from: Option<CanonicalOp>,
-    /// Whether this node is moving its op heads to the rewrites of a renaming it recorded,
-    /// as a restart then resumes.
-    moving: bool,
     /// Where records this node took move its op heads and workspaces, until they have: a
     /// restart moves them there (`realign_heads`).
     realign: Option<Realign>,
@@ -134,10 +131,10 @@ enum TakingStop {
     Workspaces,
 }
 
-/// Where taking records moves the op heads and the workspaces, by the local operations
-/// themselves, which, unlike the translation cache, a crash doesn't lose, written with the
-/// records before anything moves.
-#[derive(Clone, Debug)]
+/// Where taking records, or rewriting this node's history after a `jj op abandon`, moves the
+/// op heads and the workspaces, by the local operations themselves, which, unlike the
+/// translation cache, a crash doesn't lose, written with the records before anything moves.
+#[derive(Clone, Debug, Default)]
 struct Realign {
     /// The op heads as they were, each with what it becomes.
     from: HashMap<LocalOp, Vec<LocalOp>>,
@@ -149,6 +146,18 @@ struct Realign {
     /// meanwhile to be canonicalized, and moved where the records name the history, as any
     /// other, even where the translation cache lost them since.
     canonical: HashMap<LocalOp, CanonicalOp>,
+    /// Each local operation a rewrite of this node's history rewrote, with what it became:
+    /// for a workspace that recorded one below the op heads to move as jj's own `jj op
+    /// abandon` moves it ([`NodeRepo::move_workspaces`]). None for taking records, whose
+    /// renaming moves the workspaces.
+    rewrites: HashMap<LocalOp, Vec<LocalOp>>,
+}
+
+impl Realign {
+    /// Whether the op heads or the workspaces have still to move.
+    fn pending(&self) -> bool {
+        !self.from.is_empty() || !self.to.is_empty()
+    }
 }
 
 /// What taking records changes of what `records.json` has: to go back to if writing it
@@ -873,11 +882,16 @@ impl NodeRepo {
                     (old.0.hex(), new.iter().map(|id| id.0.hex()).collect::<Vec<_>>()))
                     .collect::<Vec<_>>();
                 from.sort();
+                let mut rewrites = realign.rewrites.iter().map(|(old, new)|
+                    (old.0.hex(), new.iter().map(|id| id.0.hex()).collect::<Vec<_>>()))
+                    .collect::<Vec<_>>();
+                rewrites.sort();
                 json!({"from": from,
                     "to": realign.to.iter().map(|id| id.0.hex()).collect::<Vec<_>>(),
-                    "canonical": sources(&realign.canonical)})
+                    "canonical": sources(&realign.canonical),
+                    "rewrites": rewrites})
             }),
-            "moving": self.records.moving, "taking": self.records.taking.is_some(),
+            "taking": self.records.taking.is_some(),
             "fixup": self.records.fixup,
             "fixupFrom": self.records.fixup_from.as_ref().map(|id| id.0.hex()),
             "fixupWritten": self.records.fixup_written, "fresh": self.records.fresh,

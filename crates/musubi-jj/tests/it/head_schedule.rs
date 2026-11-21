@@ -8,6 +8,8 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
@@ -781,94 +783,105 @@ fn replay(
     Some((state, None))
 }
 
+/// What the workers of a search share.
+struct Search {
+    agenda: VecDeque<(Schedule, Option<Action>)>,
+    visited: HashMap<State, usize>,
+    longest: Schedule,
+    /// Workers running a branch, which may queue more.
+    active: usize,
+    /// Set once a worker finds a violation or panics: every worker stops.
+    stop: bool,
+    /// The first violation found, with the schedule that reached it.
+    violation: Option<(Schedule, String)>,
+}
+
+#[derive(Default)]
+struct Counts {
+    runs: AtomicUsize,
+    transitions: AtomicUsize,
+    replayed: AtomicUsize,
+    /// Branches a native merge made unreachable this time.
+    dropped: AtomicUsize,
+}
+
+/// How many branches a search runs at once: `MUSUBI_HEAD_SCHEDULE_JOBS`, or half the CPUs,
+/// leaving room on a shared machine.
+fn jobs() -> usize {
+    match std::env::var("MUSUBI_HEAD_SCHEDULE_JOBS") {
+        Ok(jobs) => jobs
+            .parse()
+            .ok()
+            .filter(|jobs| *jobs > 0)
+            .expect("MUSUBI_HEAD_SCHEDULE_JOBS is a positive number"),
+        Err(_) => std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)),
+    }
+}
+
+/// Explores the schedules after `prefix`, the first step after it other than
+/// `different_from` if given, on several workers. Each worker restores its own copy of the
+/// starting repositories for every branch, so branches share nothing but what `Search` holds.
 fn explore(
     fixture: &Fixture<'_>,
     prefix: Schedule,
     different_from: Option<Action>,
 ) -> (Schedule, Option<String>) {
-    let mut agenda = VecDeque::from([(prefix.clone(), None)]);
-    let mut visited = HashMap::new();
-    let mut longest = prefix.clone();
-    let mut runs = 0;
-    let mut transitions = 0;
-    let mut replayed = 0;
-    // Branches a native merge made unreachable this time.
-    let mut dropped = 0;
+    let search = Mutex::new(Search {
+        agenda: VecDeque::from([(prefix.clone(), None)]),
+        visited: HashMap::new(),
+        longest: prefix.clone(),
+        active: 0,
+        stop: false,
+        violation: None,
+    });
+    let ready = Condvar::new();
+    let counts = Counts::default();
     let horizon = fixture.horizon();
-
-    while let Some((mut trace, next)) = agenda.pop_front() {
-        let mut world = fixture.restore();
-        runs += 1;
-        // jj orders the parents of a merge it makes of heads with equal end times as it
-        // pleases, and musubi's rewrites of the merge follow that order: a schedule with a
-        // native merge need not reach the same states again. Continue from where it does.
-        let Some((mut state, mut error)) = replay(&mut world, &trace, !fixture.loader) else {
-            dropped += 1;
-            continue;
-        };
-        replayed += trace.steps.len();
-        let mut following = next;
-        loop {
-            if let Some(violation) = error.take().or_else(|| world.violation(&state)) {
-                eprintln!(
-                    "Found {violation} after {runs} runs and {transitions} explored transitions"
-                );
-                return (trace, Some(violation));
-            }
-            if trace.steps.len() > longest.steps.len() {
-                longest = trace.clone();
-            }
-            let action = if let Some(action) = following.take() {
-                if !world.choices(&state).contains(&action) {
-                    assert!(fixture.loader, "{action:?} is disabled after its prefix");
-                    dropped += 1;
-                    break;
-                }
-                action
-            } else {
-                // Keep the budget in the key so an earlier, deeper visit cannot hide a
-                // continuation that a shorter prefix has room to explore.
-                let remaining = horizon - trace.steps.len();
-                let mut key = state.clone();
-                // Both commands run the same abandon against the same immutable inputs.
-                // Swapping their slots gives the same continuations and head files.
-                if let Some(peer) = &mut key.peer
-                    && fixture.peer.is_abandon()
-                    && *peer < key.native
-                {
-                    std::mem::swap(&mut key.native, peer);
-                }
-                if remaining == 0 || visited.get(&key).is_some_and(|seen| *seen >= remaining) {
-                    break;
-                }
-                visited.insert(key, remaining);
-                let choosing_branch =
-                    different_from.is_some() && trace.steps.len() == prefix.steps.len();
-                let symmetric = !choosing_branch
-                    && fixture.peer.is_abandon()
-                    && state.peer == Some(state.native);
-                let mut choices = world.choices(&state).into_iter().filter(|action| {
-                    !(choosing_branch && Some(*action) == different_from
-                        || symmetric
-                            && matches!(
-                                action,
-                                Action::PublishPeer | Action::FinishPeer | Action::KillPeer
-                            ))
-                });
-                let Some(action) = choices.next() else {
-                    break;
-                };
-                agenda.extend(choices.map(|other| (trace.clone(), Some(other))));
-                action
-            };
-            let (step, failure) = world.attempt(action);
-            state.clone_from(&step.state);
-            error = failure;
-            trace.steps.push(step);
-            transitions += 1;
+    let jobs = jobs();
+    // Joined here, so that a violation one worker found is reported even if another panicked.
+    let panicked = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..jobs)
+            .map(|_| {
+                scope.spawn(|| {
+                    work(
+                        fixture,
+                        &prefix,
+                        different_from,
+                        horizon,
+                        &search,
+                        &ready,
+                        &counts,
+                    );
+                })
+            })
+            .collect();
+        // Join every worker, not just up to the first that panicked.
+        let mut panicked = false;
+        for worker in workers {
+            panicked |= worker.join().is_err();
         }
+        panicked
+    });
+    let Search {
+        visited,
+        longest,
+        violation,
+        ..
+    } = search
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let [runs, transitions, replayed, dropped] = [
+        &counts.runs,
+        &counts.transitions,
+        &counts.replayed,
+        &counts.dropped,
+    ]
+    .map(|count| count.load(Ordering::Relaxed));
+    if let Some((trace, violation)) = violation {
+        eprintln!("Found {violation} after {runs} runs and {transitions} explored transitions");
+        return (trace, Some(violation));
     }
-
+    assert!(!panicked, "a search worker panicked");
     assert!(
         different_from.is_none() || longest.steps.len() > prefix.steps.len(),
         "no alternative is enabled at that prefix"
@@ -925,10 +938,148 @@ fn explore(
     }
     eprintln!(
         "Explored {transitions} transitions across {runs} runs and {} observed states \
-         (replayed {replayed} prefix steps, dropped {dropped} branches, horizon {horizon})",
+         (replayed {replayed} prefix steps, dropped {dropped} branches, horizon {horizon}, \
+         {jobs} jobs)",
         visited.len()
     );
     (longest, None)
+}
+
+/// Decrements the active workers when a branch ends, even by a panic, which stops the search.
+struct Running<'a> {
+    search: &'a Mutex<Search>,
+    ready: &'a Condvar,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut search = self
+            .search
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        search.active -= 1;
+        search.stop |= std::thread::panicking();
+        self.ready.notify_all();
+    }
+}
+
+fn work(
+    fixture: &Fixture<'_>,
+    prefix: &Schedule,
+    different_from: Option<Action>,
+    horizon: usize,
+    search: &Mutex<Search>,
+    ready: &Condvar,
+    counts: &Counts,
+) {
+    loop {
+        let (mut trace, next) = {
+            let mut shared = search.lock().unwrap();
+            loop {
+                if shared.stop {
+                    return;
+                }
+                if let Some(branch) = shared.agenda.pop_front() {
+                    shared.active += 1;
+                    break branch;
+                }
+                if shared.active == 0 {
+                    return;
+                }
+                shared = ready.wait(shared).unwrap();
+            }
+        };
+        let _running = Running { search, ready };
+        let mut world = fixture.restore();
+        counts.runs.fetch_add(1, Ordering::Relaxed);
+        // jj orders the parents of a merge it makes of heads with equal end times as it
+        // pleases, and musubi's rewrites of the merge follow that order: a schedule with a
+        // native merge need not reach the same states again. Continue from where it does.
+        let Some((mut state, mut error)) = replay(&mut world, &trace, !fixture.loader) else {
+            counts.dropped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        counts
+            .replayed
+            .fetch_add(trace.steps.len(), Ordering::Relaxed);
+        let mut following = next;
+        loop {
+            if let Some(violation) = error.take().or_else(|| world.violation(&state)) {
+                let mut shared = search.lock().unwrap();
+                shared.stop = true;
+                if shared.violation.is_none() {
+                    shared.violation = Some((trace, violation));
+                }
+                return;
+            }
+            let action = if let Some(action) = following.take() {
+                if !world.choices(&state).contains(&action) {
+                    assert!(fixture.loader, "{action:?} is disabled after its prefix");
+                    counts.dropped.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                action
+            } else {
+                // Keep the budget in the key so an earlier, deeper visit cannot hide a
+                // continuation that a shorter prefix has room to explore.
+                let remaining = horizon - trace.steps.len();
+                let mut key = state.clone();
+                // Both commands run the same abandon against the same immutable inputs.
+                // Swapping their slots gives the same continuations and head files.
+                if let Some(peer) = &mut key.peer
+                    && fixture.peer.is_abandon()
+                    && *peer < key.native
+                {
+                    std::mem::swap(&mut key.native, peer);
+                }
+                let choosing_branch =
+                    different_from.is_some() && trace.steps.len() == prefix.steps.len();
+                let symmetric = !choosing_branch
+                    && fixture.peer.is_abandon()
+                    && state.peer == Some(state.native);
+                let mut choices = world.choices(&state).into_iter().filter(|action| {
+                    !(choosing_branch && Some(*action) == different_from
+                        || symmetric
+                            && matches!(
+                                action,
+                                Action::PublishPeer | Action::FinishPeer | Action::KillPeer
+                            ))
+                });
+                let mut shared = search.lock().unwrap();
+                if shared.stop {
+                    break;
+                }
+                if trace.steps.len() > shared.longest.steps.len() {
+                    shared.longest = trace.clone();
+                }
+                if remaining == 0
+                    || shared
+                        .visited
+                        .get(&key)
+                        .is_some_and(|seen| *seen >= remaining)
+                {
+                    break;
+                }
+                shared.visited.insert(key, remaining);
+                let Some(action) = choices.next() else {
+                    break;
+                };
+                let before = shared.agenda.len();
+                shared
+                    .agenda
+                    .extend(choices.map(|other| (trace.clone(), Some(other))));
+                if shared.agenda.len() > before {
+                    ready.notify_all();
+                }
+                action
+            };
+            let (step, failure) = world.attempt(action);
+            state.clone_from(&step.state);
+            error = failure;
+            trace.steps.push(step);
+            counts.transitions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 fn load(path: &Path) -> Schedule {

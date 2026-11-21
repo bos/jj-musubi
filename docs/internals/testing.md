@@ -877,7 +877,8 @@ operation, `--concurrent` to race two native abandons, and `--out PATH` to retai
 schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
 `jj describe` on the same old head instead of another abandon, and `--loader` adds a third,
 `jj op log`, which merges the heads it finds. `--steps N` sets the most actions a schedule
-may take: 8 by default, 14 with `--concurrent` and 18 with `--loader`.
+may take: 8 by default, 14 with `--concurrent` and 18 with `--loader`. `--jobs N` runs that
+many branches at once, half the CPUs by default.
 
 ```sh
 just head-schedule search
@@ -885,7 +886,7 @@ just head-schedule replay target/head-schedule.json
 just head-schedule branch target/head-schedule.json --at 1
 ```
 
-Search continues one alternative in the current process and queues other enabled actions.
+Each worker continues one alternative and queues the other enabled actions for any worker.
 It skips revisiting an equivalent observed state with no more steps left to spend. The
 observation includes the head IDs, pending drops, whether jj is paused, and the state of the
 abandon check. Each branch restores the saved starting repositories and replays only the
@@ -947,9 +948,12 @@ does, and a failure it saved may take several replays to happen again.
 Without `--loader`, each search reaches every state it can within the default horizon: a
 deeper `--steps` finds no new ones. The single command has 20 states, two abandons 358 and an
 abandon with a write 482, with or without unpublished work, each found in seconds. With
-`--loader`, two abandons reach about 4,400 states and an abandon with a write about 3,000, in
-six and four minutes on one core, and a deeper horizon adds none; the counts vary by a few
-states from run to run, as native merges do.
+`--loader`, two abandons reach about 4,400 states and an abandon with a write about 3,000, and
+a deeper horizon adds none; the counts vary by a few states from run to run, as native merges
+do. Each takes one to two minutes with 14 jobs on an otherwise idle 16-core machine, and four
+to six with one. On a shared machine, pass a `--jobs` that leaves room for others. A command
+that misses its pause for 30 seconds under load is reported as a failed step; replay the saved
+schedule before believing it.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:

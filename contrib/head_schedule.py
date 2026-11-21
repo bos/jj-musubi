@@ -73,6 +73,11 @@ def main():
     branch.add_argument("input", type=Path)
     branch.add_argument("--at", type=int, required=True, help="number of actions to keep")
     branch.add_argument("--out", type=Path, default=ROOT / "target/head-schedule-branch.json")
+    for mode in (search, branch):
+        mode.add_argument(
+            "--jobs", type=int, metavar="N",
+            help="branches to run at once (default: half the CPUs)",
+        )
     for mode in (search, replay, branch):
         mode.add_argument(
             "--steps", type=int, metavar="N",
@@ -90,6 +95,8 @@ def main():
         parser.error("--peer requires --concurrent")
     if getattr(args, "loader", False) and not args.concurrent:
         parser.error("--loader requires --concurrent")
+    if getattr(args, "jobs", None) is not None and args.jobs < 1:
+        parser.error("--jobs must be positive")
     if args.steps is not None and args.steps < 1:
         parser.error("--steps must be positive")
     rr = getattr(args, "rr", None)
@@ -121,6 +128,8 @@ def main():
             settings["MUSUBI_HEAD_SCHEDULE_LOADER"] = "1"
     if args.steps is not None:
         settings["MUSUBI_HEAD_SCHEDULE_STEPS"] = str(args.steps)
+    if getattr(args, "jobs", None) is not None:
+        settings["MUSUBI_HEAD_SCHEDULE_JOBS"] = str(args.jobs)
     if getattr(args, "actions_only", False):
         settings["MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY"] = "1"
 

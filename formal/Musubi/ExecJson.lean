@@ -595,17 +595,19 @@ def encodeKey (k : Names.Key) : Json :=
 def encodeWKey (k : Ownership.WKey) : Json :=
   Json.mkObj [("machine", encodeKey k.owner), ("workspace", Json.str (String.ofList k.ws))]
 
-/-- Decode an `ownership` request: one translation's evidence and what its canonical operation
-gets besides this machine's names. Answer with the names `canonical_view` puts under this
-machine's key (`owned`), the canonical operation's keys, and what `own_of_view` owns reading
-it, as fixed for #167 and as before. A request outside `agreement`'s hypotheses is refused. -/
+/-- Decode an `ownership` request: one translation's evidence, with the names a `jj` command says
+it added (`adds`), and what its canonical operation gets besides this machine's names. Answer
+with the names `canonical_view` puts under this machine's key (`owned`), the canonical
+operation's keys, and what `own_of_view` owns reading it, as fixed for #167 and as before. A
+request outside `agreement`'s hypotheses is refused. -/
 def ownershipReply (j : Json) : Except String Json := do
   let me ← j.getObjVal? "me" >>= decodeKey
   let parents ← (← j.getObjValAs? (Array Json) "parents").toList.mapM decodeParent
   let ev : Ownership.Ev :=
     { me, view := ← decodeNames j "view", priv := ← decodeNames j "private", parents,
       start := ← decodeNames j "start", source := ← j.getObjVal? "source" >>= decodeSource,
-      command := ← j.getObjValAs? Bool "command", fixup := ← j.getObjValAs? Bool "fixup",
+      command := ← j.getObjValAs? Bool "command", adds := ← decodeNames j "adds",
+      fixup := ← j.getObjValAs? Bool "fixup",
       context := ← getOpt j "context" decodeContext }
   let fj ← j.getObjVal? "facts"
   let f : Ownership.Facts :=

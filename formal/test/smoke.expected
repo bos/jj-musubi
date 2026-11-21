@@ -41,6 +41,8 @@
 {"keys":[{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"}],"ok":true,"ownOfView":["alpha"],"owned":["alpha"],"unfixed":["alpha","beta/beta"]}
 {"keys":[{"machine":{"name":"beta","suffix":"bbbb2222"},"workspace":"x"},{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"},{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"beta/beta"}],"ok":true,"ownOfView":["alpha","beta/beta"],"owned":["alpha","beta/beta"],"unfixed":["alpha","beta/beta"]}
 {"error":"bad request: the parents' machines must be known at the operation, and no key may have a /","ok":false}
+{"keys":[{"machine":{"name":"beta","suffix":"bbbb2222"},"workspace":"beta"},{"machine":{"name":"beta","suffix":"bbbb9999"},"workspace":"default"},{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"}],"ok":true,"ownOfView":["alpha"],"owned":["alpha"],"unfixed":["alpha"]}
+{"keys":[{"machine":{"name":"beta","suffix":"bbbb2222"},"workspace":"beta"},{"machine":{"name":"beta","suffix":"bbbb9999"},"workspace":"default"},{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"},{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"beta/beta"}],"ok":true,"ownOfView":["alpha","beta/beta"],"owned":["alpha","beta/beta"],"unfixed":["alpha","beta/beta"]}
 {"context":{"known":[{"name":"alpha","suffix":"aaaa1111"},{"name":"alpha","suffix":"aaaa1111"},{"name":"beta","suffix":"bbbb2222"}],"names":[{"key":{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"},"name":"alpha"},{"key":{"machine":{"name":"beta","suffix":"bbbb2222"},"workspace":"third"},"name":"beta/third"}],"source":{"name":"alpha","suffix":"aaaa1111"}},"ok":true}
 {"ok":true,"slot":{"K":1,"L":4,"R":1,"tr":true}}
 {"g":2,"ok":true,"slot":{"K":2,"L":2,"R":2,"tr":true}}

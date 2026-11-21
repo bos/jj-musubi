@@ -23,6 +23,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::ReservedNames;
 use super::is_visible;
+use super::translate::adds_workspace;
 use super::translate::target_of;
 use crate::canonical::Work;
 use crate::canonical::namespace::Namespace;
@@ -518,10 +519,10 @@ impl NodeRepo {
 
     /// Moves other machines' workspaces that this operation moved from `local` to
     /// `workspaces_by_key`, returning their keys. A `jj` command here that adds a name none
-    /// of the views it started from has makes a workspace of this machine's own, even one
-    /// named as another machine's shows here, as after forgetting that one here: judged
-    /// here, it never moves the other machine's. musubi's own operations make none, but show
-    /// the others' again under their names.
+    /// of the views it started from has never moves the other machine's workspace shown
+    /// under it; the name is a workspace of this machine's own, as after forgetting that one
+    /// here, if the command says it added it, and is otherwise dropped (`drop_stale_names`).
+    /// musubi's own operations make none, but show the others' again under their names.
     fn move_others_here(
         &self,
         raw: &StoreOperation,
@@ -623,8 +624,11 @@ impl NodeRepo {
     /// Removes from `local` other machines' workspaces under names the hive no longer gives
     /// them, as `jj undo` brings back. They are not this machine's to publish. A name this
     /// machine's own already had stays its own; and so does one this operation made, there
-    /// in none of its parents' views. An operation that restores an older view makes none:
-    /// its names are its own if they were in the view it restores, or, for a revert, in that
+    /// in none of its parents' views and, for a `jj` command, one it says it added
+    /// (`adds_workspace`): `jj op abandon` of a restore that brought the name back moves a
+    /// command run on it onto the restore's parent, whose view lacks it, but leaves what the
+    /// command says it did. An operation that restores an older view makes none: its names
+    /// are its own if they were in the view it restores, or, for a revert, in that
     /// operation's parents'.
     fn drop_stale_names(
         &self,
@@ -657,7 +661,11 @@ impl NodeRepo {
         for name in stale {
             let own = match &restored {
                 Some(restored) => restored.contains(&name),
-                None => !names.contains(&name),
+                None => {
+                    !names.contains(&name)
+                        && (op.metadata.workspace_name.is_none()
+                            || adds_workspace(&op.metadata.description, &name))
+                }
             };
             if !own {
                 local.remove(&name);

@@ -11,6 +11,7 @@ use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
+use jj_lib::ref_name::WorkspaceName;
 use pollster::FutureExt as _;
 
 use super::NodeError;
@@ -1138,4 +1139,24 @@ pub(super) fn target_of(description: &str) -> Option<(&'static str, OperationId)
         let target = OperationId::try_from_hex(description.strip_prefix(prefix)?)?;
         Some((*prefix, target))
     })
+}
+
+/// Whether jj's description of an operation says that it added workspace `name` to the view:
+/// one of the two operations of `jj workspace add`, which jj describes as `add workspace
+/// '<name>'` and `create initial working-copy commit in workspace <name>`, the second in case
+/// `jj op abandon` drops the first from under it, or `jj workspace rename` to it, `Renamed
+/// workspace '<old>' to '<name>'`. These are the only `jj` commands that make a workspace name,
+/// other than those that go back to an older view (`target_of`). `jj op abandon` gives an
+/// operation other parents, but not another description, so a name the operation found in a
+/// view the abandon dropped from under it is one it doesn't say it added. The race tests that
+/// add and rename workspaces named like other machines'
+/// (`own_workspaces_named_like_another_machine_are_own`) fail if jj describes these commands
+/// otherwise.
+pub(super) fn adds_workspace(description: &str, name: &WorkspaceName) -> bool {
+    let name = name.as_symbol();
+    description == format!("add workspace '{name}'")
+        || description == format!("create initial working-copy commit in workspace {name}")
+        || description
+            .strip_prefix("Renamed workspace '")
+            .is_some_and(|rest| rest.ends_with(&format!("' to '{name}'")))
 }

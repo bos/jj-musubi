@@ -996,7 +996,9 @@ A name in a local view is this machine's unless either (`Owns`):
 
 - the evidence shows another machine's workspace under it, and the operation didn't make it;
 - it is shown as a known other machine's, nothing in the evidence makes it this machine's, and
-  the operation didn't make it.
+  the operation didn't make it: a `jj` command makes only a name in none of the views it started
+  from that it says it added (`adds`: `jj workspace add`, or `jj workspace rename` to it). Over
+  histories a command may say it added any names, the same in both translations.
 
 The evidence is the canonical parents, as this machine named their workspaces, the private names,
 the namespace context with its basis and the views the operation started from ([conformance.md,
@@ -1018,7 +1020,8 @@ the namespace context with its basis and the views the operation started from ([
 - `recompute`, `takeOthers`: the context `canonical_form` recomputes for an operation whose
   parents jj rewrote after a trim, taking the context it records over names it would give this
   machine; `#guard`s show the route the search found, before and after its fix, and an old alias
-  the fix doesn't cover.
+  brought back by a restore that `jj op abandon` then drops, which the command run on the restore
+  doesn't say it added.
 
 ### Native preparation and publication (`NativeLifecycle/`)
 

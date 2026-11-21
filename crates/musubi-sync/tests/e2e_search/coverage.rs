@@ -458,6 +458,20 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
             "op_abandon",
         ]),
     ),
+    // The search has no operation-restore rule.
+    (
+        "abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs",
+        None,
+    ),
+    (
+        "abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs",
+        None,
+    ),
+    (
+        "abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs",
+        None,
+    ),
+    ("abandoning_the_add_of_an_own_workspace_keeps_it_own", None),
     (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),

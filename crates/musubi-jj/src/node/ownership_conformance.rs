@@ -21,6 +21,7 @@ use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::OperationMetadata;
 use jj_lib::op_store::View;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use musubi_testutil::TestEnv;
 use pollster::FutureExt as _;
@@ -274,6 +275,10 @@ struct Scenario {
     parents: Vec<Parent>,
     view: BTreeSet<&'static str>,
     command: bool,
+    /// A name of the view that the operation's description says it added, and whether as
+    /// `jj workspace rename` rather than `jj workspace add` says it, where it goes back to no
+    /// older view.
+    adds: Option<(&'static str, bool)>,
     fixup: bool,
     source: Source,
     context: Option<Context>,
@@ -417,6 +422,17 @@ fn scenario(tc: &TestCase, me: &str) -> Scenario {
             known,
         }
     });
+    // Mostly a name shown, or once shown, as another machine's, the only kind it decides.
+    let slashed: Vec<&str> = view
+        .iter()
+        .copied()
+        .filter(|name| name.contains('/'))
+        .collect();
+    let adds = if slashed.is_empty() || !tc.draw(gs::weighted_booleans(0.6)) {
+        None
+    } else {
+        Some((tc.draw(gs::sampled_from(slashed)), tc.draw(gs::booleans())))
+    };
     Scenario {
         trimmed,
         known,
@@ -425,6 +441,7 @@ fn scenario(tc: &TestCase, me: &str) -> Scenario {
         parents,
         view,
         command: tc.draw(gs::booleans()),
+        adds,
         fixup: tc.draw(gs::weighted_booleans(1.0 / 8.0)),
         source,
         context,
@@ -545,7 +562,18 @@ fn check(fx: &mut Fixture, s: &Scenario) -> Value {
 
     // The target of an undo, restore or revert, on the first local parent.
     let (description, source_json, private) = match &s.source {
-        Source::Parents => (None, json!({"kind": "parents"}), private),
+        Source::Parents => (
+            s.adds.map(|(name, renamed)| {
+                let name = WorkspaceName::new(name).as_symbol();
+                if renamed {
+                    format!("Renamed workspace 'default' to '{name}'")
+                } else {
+                    format!("add workspace '{name}'")
+                }
+            }),
+            json!({"kind": "parents"}),
+            private,
+        ),
         Source::Collected => {
             let gone = OperationId::new(vec![0xab; 64]);
             (
@@ -717,6 +745,10 @@ fn check(fx: &mut Fixture, s: &Scenario) -> Value {
         "start": start,
         "source": source_json,
         "command": s.command,
+        "adds": match s.source {
+            Source::Parents => s.adds.map(|(name, _)| name).into_iter().collect::<Vec<_>>(),
+            _ => vec![],
+        },
         "fixup": s.fixup,
         "context": s.context.as_ref().map(|context| json!({
             "source": key(&context.source),
@@ -807,6 +839,7 @@ fn a_trimmed_command_leaves_what_its_context_gives_others() {
             }],
             view: BTreeSet::from(["alpha", "beta/x"]),
             command: true,
+            adds: None,
             fixup: false,
             source: Source::Parents,
             context: Some(Context {
@@ -846,6 +879,7 @@ fn a_context_against_the_parents_gives_others_only_their_names() {
             }],
             view: BTreeSet::from(["alpha", "default"]),
             command: false,
+            adds: None,
             fixup: false,
             source: Source::Parents,
             context: Some(Context {
@@ -856,5 +890,39 @@ fn a_context_against_the_parents_gives_others_only_their_names() {
         };
         let reply = check(fx, &s);
         assert_eq!(reply["owned"], json!(["alpha", "default"]));
+    });
+}
+
+/// A command that says it added one workspace makes only that one: `jj workspace add --name
+/// beta/x`, whose view also has `beta-bbbb/x`, as `jj op abandon` of a restore that brought it
+/// back can leave, keeps `beta/x` this machine's and drops `beta-bbbb/x`.
+#[test]
+fn a_command_makes_only_the_workspace_it_says_it_added() {
+    with_fixture(|fx| {
+        let me = fx.me.clone();
+        let s = Scenario {
+            trimmed: false,
+            known: BTreeSet::from([OTHERS[0]]),
+            absent: false,
+            worked: BTreeSet::new(),
+            parents: vec![Parent {
+                extra: Extra::Nothing,
+                keys: vec![
+                    (me.clone(), "alpha".to_owned()),
+                    (OTHERS[0].to_owned(), "default".to_owned()),
+                ],
+                view: BTreeSet::from(["alpha", "beta/default"]),
+                private: BTreeSet::new(),
+                reserved: BTreeSet::new(),
+            }],
+            view: BTreeSet::from(["alpha", "beta/default", "beta/x", "beta-bbbb/x"]),
+            command: true,
+            adds: Some(("beta/x", false)),
+            fixup: false,
+            source: Source::Parents,
+            context: None,
+        };
+        let reply = check(fx, &s);
+        assert_eq!(reply["owned"], json!(["alpha", "beta/x"]));
     });
 }

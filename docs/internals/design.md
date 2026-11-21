@@ -302,12 +302,22 @@ whose prefix is one that a known machine other than this one can be shown under 
 `laptop-1a2b` or `laptop-3c4d`; `names_other_machine`) is this machine's own only if:
 
 - this machine's own names as of a canonical parent have it already; or
-- the operation made it: it is in none of the views of the operation's local parents. An
-  operation that goes back to an older one (an undo, redo, restore or revert) makes no names: a
-  name is its own if it was among this machine's own names as of that older operation or its
-  parents. Nor does a `jj` command make one that it found in the view of an operation `jj op
-  abandon` dropped from under it: its parents are those it had before the abandon moved it
-  ([Publishing an abandon](#publishing-an-abandon)).
+- the operation made it: it is in none of the views of the operation's local parents and, for
+  a `jj` command, the command says it added it. `jj workspace add` and `jj workspace rename` are
+  the only commands that add a name, and jj describes their operations so (`add workspace
+  'laptop/x'`, then `create initial working-copy commit in workspace laptop/x`; `Renamed
+  workspace 'x' to 'laptop/x'`; `adds_workspace`). `jj op abandon` of the
+  `jj op restore` that brought `laptop/default` back, before musubi saw the restore, moves a
+  command run on it, a `jj new` say, onto the restore's parent, whose view lacks the name; the
+  abandon gives the command other parents but not another description, so it still says it
+  added no workspace. The cost: where `jj op abandon` drops both operations of a `jj workspace
+  add` from under a later command before musubi saw them, the command doesn't say it added the
+  workspace either, and `desk` loses it ([races.md](races.md)). An operation that goes back to
+  an older one (an undo, redo, restore or
+  revert) makes no names: a name is its own if it was among this machine's own names as of that
+  older operation or its parents. Nor does a `jj` command make one that it found in the view of
+  an operation `jj op abandon` dropped from under it: its parents are those it had before the
+  abandon moved it ([Publishing an abandon](#publishing-an-abandon)).
 
 Otherwise `canonical_view` doesn't publish it. `show_other_workspaces` also drops it from the
 local view, unless jj's workspace store says this machine has a working copy for it.

@@ -82,7 +82,9 @@ deriving Repr
 /-- What translating one local operation reads: this machine's key, the names in the local
 view, those this machine keeps privately (`private_workspace_names`), the canonical parents,
 the names in the views of the local parents, where it started from, whether a `jj` command
-made it (one that records a workspace name), whether it is a fix-up, and its context. -/
+made it (one that records a workspace name), the names such a command says it added to the view
+(`jj workspace add`, or `jj workspace rename` to it: `adds_workspace`), whether it is a fix-up,
+and its context. -/
 structure Ev where
   me : Key
   view : List Name
@@ -91,6 +93,7 @@ structure Ev where
   start : List Name
   source : Source := .parents
   command : Bool
+  adds : List Name := []
   fixup : Bool := false
   context : Option Context := none
 deriving Repr
@@ -281,11 +284,13 @@ def removed (n : Name) : Bool :=
 def stale (n : Name) : Bool :=
   !ev.inheritedOwn.contains n && namesOther ev.me n ev.inheritedMachines
 
-/-- A stale name this operation made after all: one in none of its parents' views, or, for an
-operation that goes back to an older one, one that was this machine's there. -/
+/-- A stale name this operation made after all: one in none of its parents' views that, for a
+`jj` command, the command says it added (`adds_workspace`), where `jj op abandon` of the restore
+that brought it back can leave it in a view whose parents lack it; or, for an operation that
+goes back to an older one, one that was this machine's there. -/
 def keepStale (n : Name) : Bool :=
   match ev.source with
-  | .parents => !ev.start.contains n
+  | .parents => !ev.start.contains n && (!ev.command || ev.adds.contains n)
   | .collected => false
   | .restore _ own | .revert _ own => own.contains n
 
@@ -344,10 +349,11 @@ def LooksOther (n : Name) : Prop :=
     ∃ m, ev.Knows m ∧ m ≠ ev.me ∧ couldBeShownAs m (n.takeWhile (· != '/')) = true
 
 /-- A name shown as another machine's that this operation made all the same: one in none of
-its parents' views, or, going back to an older operation, one this machine owned there. -/
+its parents' views that a `jj` command says it added, or, going back to an older operation, one
+this machine owned there. -/
 def MadeStale (n : Name) : Prop :=
   match ev.source with
-  | .parents => n ∉ ev.start
+  | .parents => n ∉ ev.start ∧ (ev.command = true → n ∈ ev.adds)
   | .collected => False
   | .restore _ own | .revert _ own => n ∈ own
 
@@ -357,7 +363,9 @@ end Ev
 
 - the evidence shows another machine's workspace under it, and the operation didn't make it;
 - it is shown as a known other machine's, nothing in the evidence makes it this machine's, and
-  the operation didn't make it. -/
+  the operation didn't make it: a `jj` command makes only a name in none of its parents' views
+  that it says it added, not one `jj op abandon` of the restore that brought it back leaves in a
+  view whose parents lack it. -/
 def Owns (ev : Ev) (n : Name) : Prop :=
   n ∈ ev.view ∧ (ev.ShownOther n → ev.Made n) ∧
     (¬ ev.OwnClaim n → ev.LooksOther n → ev.MadeStale n)
@@ -784,7 +792,9 @@ theorem stale_iff {ev : Ev} {n : Name} : ev.stale n = true ↔ ¬ ev.OwnClaim n 
 
 theorem keepStale_iff {ev : Ev} {n : Name} : ev.keepStale n = true ↔ ev.MadeStale n := by
   unfold Ev.keepStale Ev.MadeStale
-  split <;> simp
+  split
+  · cases ev.command <;> simp
+  all_goals simp
 
 /-- `owned` computes `Owns`. -/
 theorem mem_owned_iff {ev : Ev} {n : Name} : n ∈ owned ev ↔ Owns ev n := by
@@ -825,13 +835,15 @@ theorem ownOfView_owns (ev : Ev) (f : Facts) (hp : f.present = true) (hw : WF ev
 
 /-- A command whose own context gives no name to another machine where a canonical parent
 already did, judged against its parents (`Basis.parents`): it owns a name in its view that the
-evidence makes its own, that isn't shown as a known other machine's, or that it made. -/
+evidence makes its own, that isn't shown as a known other machine's, or that it made and says it
+added. -/
 theorem owns_simple {ev : Ev} (hc : ev.command = true) (hs : ev.source = .parents)
     (hb : ev.basis = .parents)
     (hshown : ∀ n ∈ ev.view, ev.ShownOther n → ¬ ev.OwnClaim n ∧ ev.LooksOther n) (n : Name) :
-    Owns ev n ↔ n ∈ ev.view ∧ (ev.OwnClaim n ∨ ¬ ev.LooksOther n ∨ n ∉ ev.start) := by
+    Owns ev n ↔ n ∈ ev.view ∧
+      (ev.OwnClaim n ∨ ¬ ev.LooksOther n ∨ (n ∉ ev.start ∧ n ∈ ev.adds)) := by
   have hsf : ev.startedFrom = ev.start := by simp [Ev.startedFrom, hs]
-  have hms : ev.MadeStale n ↔ n ∉ ev.start := by simp [Ev.MadeStale, hs]
+  have hms : ev.MadeStale n ↔ n ∉ ev.start ∧ n ∈ ev.adds := by simp [Ev.MadeStale, hs, hc]
   have hmade : ev.Made n ↔ (∃ m ∈ ev.view, ev.ShownOther m) ∧ n ∉ ev.start := by
     simp [Ev.Made, hc, hsf, hb]
   rw [Owns, hms, hmade]
@@ -844,10 +856,10 @@ theorem owns_simple {ev : Ev} (hc : ev.command = true) (hs : ev.source = .parent
       · exact Or.inr (Or.inr (h ho hl))
       · exact Or.inr (Or.inl hl)
   · rintro ⟨hv, h⟩
-    have hstart : ¬ ev.OwnClaim n → ev.LooksOther n → n ∉ ev.start := fun ho hl =>
-      (h.resolve_left ho).resolve_left (fun h' => h' hl)
+    have hstart : ¬ ev.OwnClaim n → ev.LooksOther n → n ∉ ev.start ∧ n ∈ ev.adds :=
+      fun ho hl => (h.resolve_left ho).resolve_left (fun h' => h' hl)
     refine ⟨hv, fun hsh => ⟨⟨n, hv, hsh⟩, ?_⟩, hstart⟩
-    exact hstart (hshown n hv hsh).1 (hshown n hv hsh).2
+    exact (hstart (hshown n hv hsh).1 (hshown n hv hsh).2).1
 
 theorem basis_root {ev : Ev} (h : ev.parents = [.root]) : ev.basis = .initial := by
   simp [Ev.basis, h]
@@ -860,13 +872,15 @@ theorem not_parentOthers_root {ev : Ev} (h : ev.parents = [.root]) (n : Name) :
 
 /-- A command on the root alone, judged by its context (`Basis.initial`): it owns a name in its
 view that the context doesn't give another machine, and that the evidence makes its own, that
-isn't shown as a known other machine's, or that it made. -/
+isn't shown as a known other machine's, or that it made and, if a `jj` command, says it added. -/
 theorem owns_initial {ev : Ev} (hs : ev.source = .parents)
     (hp : ev.parents = [.root]) (n : Name) :
     Owns ev n ↔ n ∈ ev.view ∧ ¬ ev.CtxGives n ∧
-      (ev.OwnClaim n ∨ ¬ ev.LooksOther n ∨ n ∉ ev.start) := by
+      (ev.OwnClaim n ∨ ¬ ev.LooksOther n ∨
+        (n ∉ ev.start ∧ (ev.command = true → n ∈ ev.adds))) := by
   have hb := basis_root hp
-  have hms : ev.MadeStale n ↔ n ∉ ev.start := by simp [Ev.MadeStale, hs]
+  have hms : ev.MadeStale n ↔ n ∉ ev.start ∧ (ev.command = true → n ∈ ev.adds) := by
+    simp [Ev.MadeStale, hs]
   have hshown : ev.ShownOther n ↔ ev.CtxGives n := by
     simp only [Ev.ShownOther]
     constructor
@@ -954,8 +968,9 @@ def Node.privAt (x : Node) : List Name :=
   | none => x.priv
 
 inductive Step where
-  /-- A `jj` command on the nodes `parents`, leaving the local view `view` (jj's effect). -/
-  | command (parents : List Nat) (view : List Name)
+  /-- A `jj` command on the nodes `parents`, leaving the local view `view` (jj's effect), that
+  says it added the names `adds`. -/
+  | command (parents : List Nat) (view adds : List Name)
   /-- A trim: every canonical form so far is taken away. -/
   | trim
   /-- A realization of `c`, a canonical operation from the hive, with local view `view` and the
@@ -963,8 +978,9 @@ inductive Step where
   workspace renamed. -/
   | realize (c : Canon) (view : List Name) (record : Option (List Name))
 
-/-- A command on `ps` with view `view`, translated on canonical `parents` with `context`. -/
-def commandEv (me : Key) (ps : List Node) (view : List Name) (parents : List Parent)
+/-- A command on `ps` with view `view`, saying it added `adds`, translated on canonical `parents`
+with `context`. -/
+def commandEv (me : Key) (ps : List Node) (view adds : List Name) (parents : List Parent)
     (context : Option Context) : Ev where
   me := me
   view := view
@@ -972,6 +988,7 @@ def commandEv (me : Key) (ps : List Node) (view : List Name) (parents : List Par
   parents := parents
   start := ps.flatMap (·.view)
   command := true
+  adds := adds
   context := context
 
 def onParents (cs : List Canon) : List Parent := cs.map fun c => .op c []
@@ -1090,7 +1107,7 @@ def stepNodes (me : Key) (nodes : List Node) : Step → List Node
       nodes ++ [{ view, priv := [], record, canon := c, ref := c, trimmed := false,
                   realized := true }]
     else nodes
-  | .command is view =>
+  | .command is view adds =>
     match is.mapM (nodes[·]?) with
     | none => nodes
     | some ps =>
@@ -1099,16 +1116,16 @@ def stepNodes (me : Key) (nodes : List Node) : Step → List Node
       let priv := (ps.flatMap Node.privAt).filter (view.contains ·)
       if ps.isEmpty || !clashFree me priv view cs || !clashFree me priv view rs then nodes
       else
-        let ref := canonView (commandEv me ps view (onParents rs) none) (mergeFacts me rs)
+        let ref := canonView (commandEv me ps view adds (onParents rs) none) (mergeFacts me rs)
         if ps.all (·.trimmed) then
-          let ctx := capture me cs (commandEv me ps view (onParents cs) (carriedOf me cs))
-          let a := commandEv me ps view [.root] (some ctx)
+          let ctx := capture me cs (commandEv me ps view adds (onParents cs) (carriedOf me cs))
+          let a := commandEv me ps view adds [.root] (some ctx)
           let canon := canonView a (rootFacts me)
           nodes ++ [{ view, priv := a.priv, record := some (recordOf me view a.priv canon),
                       canon, ref, trimmed := false }]
         else if ps.any (·.trimmed) then nodes
         else
-          let a := commandEv me ps view (onParents cs) (carriedKept me cs)
+          let a := commandEv me ps view adds (onParents cs) (carriedKept me cs)
           nodes ++ [{ view, priv := a.priv, record := none,
                       canon := canonView a (mergeFacts me cs), ref, trimmed := false }]
 
@@ -1158,7 +1175,7 @@ theorem exists_mem_map' {α β : Type} {f : α → β} {l : List α} {P : β →
 
 section Steps
 
-variable {me : Key} {ps : List Node} {view : List Name}
+variable {me : Key} {ps : List Node} {view adds : List Name}
 
 theorem mem_onParents {c : Canon} {r : List Name} {cs : List Canon} :
     Parent.op c r ∈ onParents cs ↔ c ∈ cs ∧ r = [] := by
@@ -1168,7 +1185,7 @@ theorem mem_onParents {c : Canon} {r : List Name} {cs : List Canon} :
   · rintro ⟨hc, rfl⟩; exact ⟨c, hc, rfl, rfl⟩
 
 theorem basis_onParents {cs : List Canon} {o : Option Context} :
-    (commandEv me ps view (onParents cs) o).basis = .parents := by
+    (commandEv me ps view adds (onParents cs) o).basis = .parents := by
   unfold Ev.basis
   split
   · next h =>
@@ -1178,7 +1195,7 @@ theorem basis_onParents {cs : List Canon} {o : Option Context} :
   · rfl
 
 theorem knows_iff {cs : List Canon} {o : Option Context} {m : Key} :
-    (commandEv me ps view (onParents cs) o).Knows m ↔
+    (commandEv me ps view adds (onParents cs) o).Knows m ↔
       (∃ c ∈ cs, m ∈ machinesOf c) ∨ m ∈ knownOf (ctxFor me o) := by
   simp only [Ev.Knows, Ev.ctxKnown, Ev.ctx, commandEv]
   constructor
@@ -1190,8 +1207,8 @@ theorem knows_iff {cs : List Canon} {o : Option Context} {m : Key} :
     · exact Or.inr hm
 
 theorem claim_iff {cs : List Canon} {o : Option Context} {n : Name} :
-    (commandEv me ps view (onParents cs) o).OwnClaim n ↔
-      n ∈ (commandEv me ps view (onParents cs) o).priv ∨ ∃ c ∈ cs, n ∈ ownNamesIn me c := by
+    (commandEv me ps view adds (onParents cs) o).OwnClaim n ↔
+      n ∈ (commandEv me ps view adds (onParents cs) o).priv ∨ ∃ c ∈ cs, n ∈ ownNamesIn me c := by
   simp only [Ev.OwnClaim, basis_onParents, reduceCtorEq, false_and, or_false]
   constructor
   · rintro (h | ⟨c, r, hc, h⟩)
@@ -1209,14 +1226,14 @@ theorem shown_ok {cs : List Canon} {o : Option Context} (hme : NoSlash me)
     (hcf : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view cs = true)
     (hal : ∀ e ∈ ctxNames (ctxFor me o), e.2.owner ≠ me →
       namesOther me e.1 (knownOf (ctxFor me o)) = true) :
-    ∀ n ∈ view, (commandEv me ps view (onParents cs) o).ShownOther n →
-      ¬ (commandEv me ps view (onParents cs) o).OwnClaim n ∧
-        (commandEv me ps view (onParents cs) o).LooksOther n := by
+    ∀ n ∈ view, (commandEv me ps view adds (onParents cs) o).ShownOther n →
+      ¬ (commandEv me ps view adds (onParents cs) o).OwnClaim n ∧
+        (commandEv me ps view adds (onParents cs) o).LooksOther n := by
   intro n hv hsh
   rcases hsh with ⟨c, r, hc, k, hk, hne, rfl⟩ | ⟨⟨x, hx, k, hk, hne⟩, hno, -⟩
   · obtain ⟨hcs, rfl⟩ := mem_onParents.mp hc
-    have hmem : nameOf me c ((commandEv me ps view (onParents cs) o).priv ++ []) k ∈
-        othersOf me c ((commandEv me ps view (onParents cs) o).priv ++ []) :=
+    have hmem : nameOf me c ((commandEv me ps view adds (onParents cs) o).priv ++ []) k ∈
+        othersOf me c ((commandEv me ps view adds (onParents cs) o).priv ++ []) :=
       mem_othersOf.mpr ⟨k, hk, hne, rfl⟩
     refine ⟨fun hown => ?_, ?_⟩
     · rcases claim_iff.mp hown with hp | ⟨c', hc', ho⟩
@@ -1246,8 +1263,8 @@ theorem shown_ok {cs : List Canon} {o : Option Context} (hme : NoSlash me)
 theorem priv_owns_ref (hme : NoSlash me) (hs : ∀ p ∈ ps, ∀ m ∈ machinesOf p.ref, NoSlash m)
     (hcf : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.ref)) = true) {n : Name}
-    (h : n ∈ (commandEv me ps view (onParents (ps.map (·.ref))) none).priv) :
-    Owns (commandEv me ps view (onParents (ps.map (·.ref))) none) n := by
+    (h : n ∈ (commandEv me ps view adds (onParents (ps.map (·.ref))) none).priv) :
+    Owns (commandEv me ps view adds (onParents (ps.map (·.ref))) none) n := by
   have hs' : ∀ c ∈ ps.map (·.ref), ∀ m ∈ machinesOf c, NoSlash m := by
     intro c hc m hm
     obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hc
@@ -1271,8 +1288,8 @@ theorem merge_owns {bases : List Node} {o : Option Context} (hme : NoSlash me)
       ∃ p ∈ ps, m ∈ machinesOf p.ref))
     (hal : ∀ e ∈ ctxNames (ctxFor me o), e.2.owner ≠ me →
       namesOther me e.1 (knownOf (ctxFor me o)) = true) (n : Name) :
-    Owns (commandEv me ps view (onParents (ps.map (·.canon))) o) n ↔
-      Owns (commandEv me ps view (onParents (ps.map (·.ref))) none) n := by
+    Owns (commandEv me ps view adds (onParents (ps.map (·.canon))) o) n ↔
+      Owns (commandEv me ps view adds (onParents (ps.map (·.ref))) none) n := by
   have hsc : ∀ c ∈ ps.map (·.canon), ∀ m ∈ machinesOf c, NoSlash m := by
     intro c hc m hm
     obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hc
@@ -1284,8 +1301,8 @@ theorem merge_owns {bases : List Node} {o : Option Context} (hme : NoSlash me)
   rw [owns_simple rfl rfl basis_onParents (shown_ok hme hsc hcfc hal) n,
     owns_simple rfl rfl basis_onParents
       (shown_ok hme hsr hcfr (by simp [ctxNames, ctxFor])) n]
-  have hclaim : (commandEv me ps view (onParents (ps.map (·.canon))) o).OwnClaim n ↔
-      (commandEv me ps view (onParents (ps.map (·.ref))) none).OwnClaim n := by
+  have hclaim : (commandEv me ps view adds (onParents (ps.map (·.canon))) o).OwnClaim n ↔
+      (commandEv me ps view adds (onParents (ps.map (·.ref))) none).OwnClaim n := by
     rw [claim_iff, claim_iff]
     simp only [commandEv, exists_mem_map']
     constructor
@@ -1295,17 +1312,17 @@ theorem merge_owns {bases : List Node} {o : Option Context} (hme : NoSlash me)
     · rintro (h | ⟨p, hp, h⟩)
       · exact Or.inl h
       · exact Or.inr ⟨p, hp, ((hok p hp).own n).mpr h⟩
-  have hknows : ∀ m, m ≠ (commandEv me ps view (onParents (ps.map (·.canon))) o).me →
-      ((commandEv me ps view (onParents (ps.map (·.canon))) o).Knows m ↔
-        (commandEv me ps view (onParents (ps.map (·.ref))) none).Knows m) := by
+  have hknows : ∀ m, m ≠ (commandEv me ps view adds (onParents (ps.map (·.canon))) o).me →
+      ((commandEv me ps view adds (onParents (ps.map (·.canon))) o).Knows m ↔
+        (commandEv me ps view adds (onParents (ps.map (·.ref))) none).Knows m) := by
     intro m hne
     rw [knows_iff, knows_iff]
     simp only [exists_mem_map']
     rw [hko m hne]
     simp [ctxFor, knownOf]
   have hl := looksOther_congr
-    (a := commandEv me ps view (onParents (ps.map (·.canon))) o)
-    (b := commandEv me ps view (onParents (ps.map (·.ref))) none) rfl hknows n
+    (a := commandEv me ps view adds (onParents (ps.map (·.canon))) o)
+    (b := commandEv me ps view adds (onParents (ps.map (·.ref))) none) rfl hknows n
   rw [hclaim, hl]
   rfl
 
@@ -1435,7 +1452,7 @@ end Steps
 
 section Fits
 
-variable {me : Key} {ps : List Node} {view : List Name} {bases : List Node}
+variable {me : Key} {ps : List Node} {view adds : List Name} {bases : List Node}
 
 /-- With the contexts its parents carry folded together, a command knows exactly the other
 machines its untrimmed parents know. -/
@@ -1508,7 +1525,7 @@ end Fits
 
 section Late
 
-variable {me : Key} {ps : List Node} {view : List Name} {bases : List Node}
+variable {me : Key} {ps : List Node} {view adds : List Name} {bases : List Node}
 
 theorem capture_source {cs : List Canon} {src : Ev} : (capture me cs src).source = me := by
   unfold capture
@@ -1565,15 +1582,16 @@ theorem ownOf_capture {cs : List Canon} {src : Ev} {n : Name} :
     · simp at hkn
 
 theorem claim_root {o : Option Context} {n : Name} :
-    (commandEv me ps view [.root] o).OwnClaim n ↔
-      n ∈ (commandEv me ps view [.root] o).priv ∨ n ∈ ownOf me (ctxFor me o) := by
-  simp only [Ev.OwnClaim, basis_root (show (commandEv me ps view [.root] o).parents = [.root]
+    (commandEv me ps view adds [.root] o).OwnClaim n ↔
+      n ∈ (commandEv me ps view adds [.root] o).priv ∨ n ∈ ownOf me (ctxFor me o) := by
+  simp only [Ev.OwnClaim, basis_root (show (commandEv me ps view adds [.root] o).parents = [.root]
     from rfl), true_and]
-  have hp : ¬ ∃ c r, Parent.op c r ∈ (commandEv me ps view [.root] o).parents ∧
+  have hp : ¬ ∃ c r, Parent.op c r ∈ (commandEv me ps view adds [.root] o).parents ∧
       n ∈ ownNamesIn me c := by
     rintro ⟨c, r, hc, -⟩
     simp [commandEv] at hc
-  have hc : (∃ x ∈ (commandEv me ps view [.root] o).ctx, ∃ k, (n, k) ∈ x.names ∧ k.owner = me) ↔
+  have hc : (∃ x ∈ (commandEv me ps view adds [.root] o).ctx,
+      ∃ k, (n, k) ∈ x.names ∧ k.owner = me) ↔
       n ∈ ownOf me (ctxFor me o) := by
     simp only [Ev.ctx, commandEv]
     cases ctxFor me o with
@@ -1737,28 +1755,31 @@ theorem late_owns (hme : NoSlash me) (hok : ∀ p ∈ ps, NodeOK me bases p)
       (ps.map (·.canon)) = true)
     (hcfr : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.ref)) = true) (n : Name) :
-    Owns (commandEv me ps view [.root] (some (capture me (ps.map (·.canon))
-        (commandEv me ps view (onParents (ps.map (·.canon)))
+    Owns (commandEv me ps view adds [.root] (some (capture me (ps.map (·.canon))
+        (commandEv me ps view adds (onParents (ps.map (·.canon)))
           (carriedOf me (ps.map (·.canon))))))) n ↔
-      Owns (commandEv me ps view (onParents (ps.map (·.ref))) none) n := by
+      Owns (commandEv me ps view adds (onParents (ps.map (·.ref))) none) n := by
   have hsr : ∀ c ∈ ps.map (·.ref), ∀ m ∈ machinesOf c, NoSlash m := by
     intro c hc m hm
     obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hc
     exact (hok p hp).slashRef m hm
-  have hsrc := merge_owns (o := carriedOf me (ps.map (·.canon))) hme hok hcfc hcfr
+  have hsrc := merge_owns (adds := adds) (o := carriedOf me (ps.map (·.canon))) hme hok hcfc hcfr
     (carried_knows hok) (carried_aliases hok)
   have hown : ∀ n, n ∈ ownOf me (ctxFor me (some (capture me (ps.map (·.canon))
-      (commandEv me ps view (onParents (ps.map (·.canon))) (carriedOf me (ps.map (·.canon))))))) ↔
-      Owns (commandEv me ps view (onParents (ps.map (·.ref))) none) n := by
+      (commandEv me ps view adds (onParents (ps.map (·.canon)))
+        (carriedOf me (ps.map (·.canon))))))) ↔
+      Owns (commandEv me ps view adds (onParents (ps.map (·.ref))) none) n := by
     intro n
     rw [ctxFor_capture, ownOf_capture]
     exact (ownKeys_canonView
-      (ev := commandEv me ps view (onParents (ps.map (·.canon))) (carriedOf me (ps.map (·.canon))))
+      (ev := commandEv me ps view adds (onParents (ps.map (·.canon)))
+        (carriedOf me (ps.map (·.canon))))
       (f := mergeFacts me (ps.map (·.canon))) rfl mergeFacts_others_ne).trans
         (mem_owned_iff.trans (hsrc n))
-  have hshr : ∀ n ∈ view, (commandEv me ps view (onParents (ps.map (·.ref))) none).ShownOther n →
-      ¬ (commandEv me ps view (onParents (ps.map (·.ref))) none).OwnClaim n ∧
-        (commandEv me ps view (onParents (ps.map (·.ref))) none).LooksOther n :=
+  have hshr : ∀ n ∈ view,
+      (commandEv me ps view adds (onParents (ps.map (·.ref))) none).ShownOther n →
+      ¬ (commandEv me ps view adds (onParents (ps.map (·.ref))) none).OwnClaim n ∧
+        (commandEv me ps view adds (onParents (ps.map (·.ref))) none).LooksOther n :=
     shown_ok hme hsr hcfr (by simp [ctxNames, ctxFor])
   have hsimple := owns_simple rfl rfl basis_onParents hshr n
   constructor
@@ -1780,7 +1801,7 @@ theorem late_owns (hme : NoSlash me) (hok : ∀ p ∈ ps, NodeOK me bases p)
         · simp [ctxFor, knownOf] at hk
       simpa [Ev.ctxKnown, Ev.ctx, commandEv, ctxFor_capture, knownOf] using
         capture_knows hok m hne hk'
-    · exact hsimple.mpr ⟨hv, Or.inr (Or.inr hs)⟩
+    · exact hsimple.mpr ⟨hv, Or.inr (Or.inr ⟨hs.1, hs.2 rfl⟩)⟩
   · intro hr
     have ho := (hown n).mpr hr
     rw [owns_initial rfl rfl n]
@@ -1844,39 +1865,40 @@ theorem ownNamesIn_canonView {ev : Ev} {f : Facts} (hp : f.present = true)
   rw [ownNamesIn_present hp]
   exact (ownKeys_canonView hp ho).trans mem_owned_iff
 
-theorem machines_merge_cmd {ps : List Node} {view : List Name} {pars : List Parent}
+theorem machines_merge_cmd {ps : List Node} {view adds : List Name} {pars : List Parent}
     {o : Option Context} {cs : List Canon} {m : Key} (hne : m ≠ me) :
-    m ∈ machinesOf (canonView (commandEv me ps view pars o) (mergeFacts me cs)) ↔
+    m ∈ machinesOf (canonView (commandEv me ps view adds pars o) (mergeFacts me cs)) ↔
       ∃ c ∈ cs, m ∈ machinesOf c :=
   machines_merge rfl hne
 
-theorem machines_root_cmd {ps : List Node} {view : List Name} {pars : List Parent}
+theorem machines_root_cmd {ps : List Node} {view adds : List Name} {pars : List Parent}
     {o : Option Context} {m : Key}
-    (h : m ∈ machinesOf (canonView (commandEv me ps view pars o) (rootFacts me))) : m = me :=
+    (h : m ∈ machinesOf (canonView (commandEv me ps view adds pars o) (rootFacts me))) : m = me :=
   machines_root rfl h
 
-theorem own_merge_cmd {ps : List Node} {view : List Name} {pars : List Parent}
+theorem own_merge_cmd {ps : List Node} {view adds : List Name} {pars : List Parent}
     {o : Option Context} {cs : List Canon} {n : Name} :
-    n ∈ ownNamesIn me (canonView (commandEv me ps view pars o) (mergeFacts me cs)) ↔
-      Owns (commandEv me ps view pars o) n :=
-  ownNamesIn_canonView (ev := commandEv me ps view pars o) (f := mergeFacts me cs) rfl
+    n ∈ ownNamesIn me (canonView (commandEv me ps view adds pars o) (mergeFacts me cs)) ↔
+      Owns (commandEv me ps view adds pars o) n :=
+  ownNamesIn_canonView (ev := commandEv me ps view adds pars o) (f := mergeFacts me cs) rfl
     mergeFacts_others_ne
 
-theorem own_root_cmd {ps : List Node} {view : List Name} {pars : List Parent}
+theorem own_root_cmd {ps : List Node} {view adds : List Name} {pars : List Parent}
     {o : Option Context} {n : Name} :
-    n ∈ ownNamesIn me (canonView (commandEv me ps view pars o) (rootFacts me)) ↔
-      Owns (commandEv me ps view pars o) n :=
-  ownNamesIn_canonView (ev := commandEv me ps view pars o) (f := rootFacts me) rfl
+    n ∈ ownNamesIn me (canonView (commandEv me ps view adds pars o) (rootFacts me)) ↔
+      Owns (commandEv me ps view adds pars o) n :=
+  ownNamesIn_canonView (ev := commandEv me ps view adds pars o) (f := rootFacts me) rfl
     (by simp [rootFacts])
 
 /-- The untrimmed form a command gets keeps the invariant's facts about machines. -/
-theorem ref_machines {ps : List Node} {view : List Name} (hok : ∀ p ∈ ps, NodeOK me bases p)
+theorem ref_machines {ps : List Node} {view adds : List Name} (hok : ∀ p ∈ ps, NodeOK me bases p)
     (hme : NoSlash me) :
-    (∀ m, m ≠ me → (m ∈ machinesOf (canonView (commandEv me ps view (onParents (ps.map (·.ref)))
+    (∀ m, m ≠ me → (m ∈ machinesOf (canonView
+      (commandEv me ps view adds (onParents (ps.map (·.ref)))
         none) (mergeFacts me (ps.map (·.ref)))) ↔ ∃ p ∈ ps, m ∈ machinesOf p.ref)) ∧
-      ∀ m ∈ machinesOf (canonView (commandEv me ps view (onParents (ps.map (·.ref))) none)
+      ∀ m ∈ machinesOf (canonView (commandEv me ps view adds (onParents (ps.map (·.ref))) none)
         (mergeFacts me (ps.map (·.ref)))), NoSlash m := by
-  have h : ∀ m, m ≠ me → (m ∈ machinesOf (canonView (commandEv me ps view
+  have h : ∀ m, m ≠ me → (m ∈ machinesOf (canonView (commandEv me ps view adds
       (onParents (ps.map (·.ref))) none) (mergeFacts me (ps.map (·.ref)))) ↔
         ∃ p ∈ ps, m ∈ machinesOf p.ref) := by
     intro m hne
@@ -1888,18 +1910,18 @@ theorem ref_machines {ps : List Node} {view : List Name} (hok : ∀ p ∈ ps, No
     exact (hok p hp).slashRef m h
 
 /-- A command on parents whose canonical forms survive keeps the invariant. -/
-theorem command_ok {ps : List Node} {view : List Name} (hme : NoSlash me)
+theorem command_ok {ps : List Node} {view adds : List Name} (hme : NoSlash me)
     (hok : ∀ p ∈ ps, NodeOK me bases p)
     (hcfc : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.canon)) = true)
     (hcfr : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.ref)) = true) :
     NodeOK me bases
-      { view, priv := (commandEv me ps view (onParents (ps.map (·.canon)))
+      { view, priv := (commandEv me ps view adds (onParents (ps.map (·.canon)))
           (carriedKept me (ps.map (·.canon)))).priv, record := none,
-        canon := canonView (commandEv me ps view (onParents (ps.map (·.canon)))
+        canon := canonView (commandEv me ps view adds (onParents (ps.map (·.canon)))
           (carriedKept me (ps.map (·.canon)))) (mergeFacts me (ps.map (·.canon))),
-        ref := canonView (commandEv me ps view (onParents (ps.map (·.ref))) none)
+        ref := canonView (commandEv me ps view adds (onParents (ps.map (·.ref))) none)
           (mergeFacts me (ps.map (·.ref))),
         trimmed := false } := by
   obtain ⟨hrk, hrs⟩ := ref_machines (view := view) hok hme
@@ -1919,25 +1941,26 @@ theorem command_ok {ps : List Node} {view : List Name} (hme : NoSlash me)
       exact (hok p hp).slashCanon m h
 
 /-- A command on parents a trim took away keeps the invariant, and records nothing private. -/
-theorem late_ok {ps : List Node} {view : List Name} (hme : NoSlash me)
+theorem late_ok {ps : List Node} {view adds : List Name} (hme : NoSlash me)
     (hok : ∀ p ∈ ps, NodeOK me bases p)
     (hcfc : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.canon)) = true)
     (hcfr : clashFree me ((ps.flatMap Node.privAt).filter (view.contains ·)) view
       (ps.map (·.ref)) = true) :
     let ctx := capture me (ps.map (·.canon))
-      (commandEv me ps view (onParents (ps.map (·.canon))) (carriedOf me (ps.map (·.canon))))
-    let a := commandEv me ps view [.root] (some ctx)
+      (commandEv me ps view adds (onParents (ps.map (·.canon))) (carriedOf me (ps.map (·.canon))))
+    let a := commandEv me ps view adds [.root] (some ctx)
     NodeOK me bases
       { view, priv := a.priv,
         record := some (recordOf me view a.priv (canonView a (rootFacts me))),
         canon := canonView a (rootFacts me),
-        ref := canonView (commandEv me ps view (onParents (ps.map (·.ref))) none)
+        ref := canonView (commandEv me ps view adds (onParents (ps.map (·.ref))) none)
           (mergeFacts me (ps.map (·.ref))),
         trimmed := false } := by
   intro ctx a
   obtain ⟨hrk, hrs⟩ := ref_machines (view := view) hok hme
-  have hown : ∀ n, Owns a n ↔ Owns (commandEv me ps view (onParents (ps.map (·.ref))) none) n :=
+  have hown : ∀ n, Owns a n ↔
+      Owns (commandEv me ps view adds (onParents (ps.map (·.ref))) none) n :=
     late_owns hme hok hcfc hcfr
   have hctx : ctxFor me (canonView a (rootFacts me)).context = some ctx := ctxFor_capture
   refine ⟨fun n => ?_, fun m hne => ?_, fun e he hne => ?_, fun m hm => ?_, hrs,
@@ -2181,7 +2204,7 @@ private def recordedA : Context :=
 private def viewA : List Name := ["alpha".toList, "beta/beta".toList, "beta/third".toList]
 
 /-- `d3` judged on `d1`, as `canonical_form`'s source translation judges it: `beta/third` is in
-no view it now starts from, so it looks made by `d3`. -/
+no view it now starts from. -/
 private def sourceA : Ev where
   me := alpha
   view := viewA
@@ -2191,16 +2214,26 @@ private def sourceA : Ev where
   command := true
   context := some recordedA
 
-/-- `d3` on the root, with the context the recomputation leaves it. -/
-private def onRootA (context : Context) : Ev :=
-  { sourceA with parents := [.root], context := some context }
+/-- An operation judged as translation judged a `jj` command before it read what the command
+says it added: as if it added every name in its view, so that one in none of its parents' views
+looks made by it. -/
+private def asAdding (ev : Ev) : Ev := { ev with adds := ev.view }
 
-#guard owned sourceA == ["alpha".toList, "beta/third".toList]
--- Before the fix, the recomputed context gives `beta/third` to alpha, and so does `d3`.
-#guard owned (onRootA (recompute alpha [d1] sourceA none)) ==
+/-- `src` on the root, with the context the recomputation leaves it. -/
+private def onRoot (src : Ev) (context : Context) : Ev :=
+  { src with parents := [.root], context := some context }
+
+-- Judged as adding every name, the recomputed context gives `beta/third` to alpha, and so does
+-- `d3`; with the context `d3` records taken over it, `beta/third` stays beta's.
+#guard owned (asAdding sourceA) == ["alpha".toList, "beta/third".toList]
+#guard owned (onRoot (asAdding sourceA) (recompute alpha [d1] (asAdding sourceA) none)) ==
   ["alpha".toList, "beta/third".toList]
--- With the context `d3` records taken over it, `beta/third` stays beta's.
-#guard owned (onRootA (recompute alpha [d1] sourceA (some recordedA))) == ["alpha".toList]
+#guard owned
+    (onRoot (asAdding sourceA) (recompute alpha [d1] (asAdding sourceA) (some recordedA))) ==
+  ["alpha".toList]
+-- `d3` says it added no workspace, so it didn't make `beta/third` either way.
+#guard owned sourceA == ["alpha".toList]
+#guard owned (onRoot sourceA (recompute alpha [d1] sourceA none)) == ["alpha".toList]
 
 /-- An old alias, as `jj undo` brings back: two machines named beta now show as `beta-bbbb` and
 `beta-bbbb9999`, but `d3`'s view still names the first one's workspace `beta/x`, as when it was
@@ -2238,13 +2271,71 @@ private def beforeB : Ev where
   start := ["alpha".toList, "beta/x".toList]
   command := true
 
-private def onRootB (context : Context) : Ev :=
-  { sourceB with parents := [.root], context := some context }
-
 #guard owned beforeB == ["alpha".toList]
--- After the abandon, even with the fix, the recomputed context gives the old alias to alpha:
--- the context `d3` records doesn't mention it.
-#guard owned (onRootB (recompute alpha [d1B] sourceB (some recordedB))) ==
+-- After the abandon, judged as adding every name, the recomputed context gives the old alias to
+-- alpha even with the context `d3` records taken over it, which doesn't mention `beta/x`.
+#guard owned
+    (onRoot (asAdding sourceB) (recompute alpha [d1B] (asAdding sourceB) (some recordedB))) ==
   ["alpha".toList, "beta/x".toList]
+-- `d3` says it added no workspace, so it didn't make `beta/x`, which stays beta's.
+#guard owned sourceB == ["alpha".toList]
+#guard owned (onRoot sourceB (recompute alpha [d1B] sourceB (some recordedB))) == ["alpha".toList]
+
+/-- The shortest shape (`abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs`):
+alpha shows beta's workspace as `beta/beta` until a second machine named beta joins, which shows
+the two as `beta-bbbb` and `beta-bbbb9999`. `jj op restore` of an operation from before then
+brings `beta/beta` back, alpha runs `jj new` on it, and `jj op abandon` of the restore moves the
+command onto the restore's parent, whose view lacks the old alias. Judged on that parent, the
+command looks as if it made `beta/beta`, but it says it added no workspace. -/
+private def joined : Canon where
+  keys := [⟨alpha, "alpha".toList⟩, ⟨beta, "beta".toList⟩, ⟨beta9, "default".toList⟩]
+  known := [alpha, beta, beta9]
+  present := true
+
+private def restoredOn (c : Canon) : Ev where
+  me := alpha
+  view := ["alpha".toList, "beta/beta".toList]
+  priv := []
+  parents := onParents [c]
+  start := "alpha".toList :: othersOf alpha c []
+  command := true
+
+private def joinedFacts : Facts := ⟨true, [alpha, beta, beta9], none,
+  [⟨beta, "beta".toList⟩, ⟨beta9, "default".toList⟩]⟩
+
+#guard wfB (restoredOn joined) joinedFacts
+#guard othersOf alpha joined [] == ["beta-bbbb/beta".toList, "beta-bbbb9999/default".toList]
+#guard !(restoredOn joined).start.contains "beta/beta".toList
+#guard owned (asAdding (restoredOn joined)) == ["alpha".toList, "beta/beta".toList]
+#guard owned (restoredOn joined) == ["alpha".toList]
+#guard ownOfView alpha (restoredOn joined).view [] (canonView (restoredOn joined) joinedFacts) ==
+  ["alpha".toList]
+
+/-- The same where alpha has forgotten beta
+(`abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs`): beta's workspaces are
+gone from the view, but the history still knows beta, which keeps its prefix. -/
+private def forgot : Canon where
+  keys := [⟨alpha, "alpha".toList⟩]
+  known := [alpha, beta]
+  present := true
+
+#guard owned (asAdding (restoredOn forgot)) == ["alpha".toList, "beta/beta".toList]
+#guard owned (restoredOn forgot) == ["alpha".toList]
+
+/-- The late form (`abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs`):
+the command is on the root after a trim, with the context recomputed from its translation on
+`joined`, which names the two machines' workspaces as `beta-bbbb/beta` and
+`beta-bbbb9999/default`, not `beta/beta`. -/
+private def lateRestored (src : Ev) : Ev := onRoot src (recompute alpha [joined] src none)
+
+#guard owned (lateRestored (asAdding (restoredOn joined))) == ["alpha".toList, "beta/beta".toList]
+#guard owned (lateRestored (restoredOn joined)) == ["alpha".toList]
+
+-- A command that says it added `beta/beta`, as `jj workspace add --name beta/beta` does, makes a
+-- workspace of alpha's own, whichever machines are known.
+#guard owned { restoredOn joined with adds := ["beta/beta".toList] } ==
+  ["alpha".toList, "beta/beta".toList]
+#guard owned { restoredOn forgot with adds := ["beta/beta".toList] } ==
+  ["alpha".toList, "beta/beta".toList]
 
 end Musubi.Ownership

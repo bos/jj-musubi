@@ -23,6 +23,16 @@
   The same holds when another machine renamed one of its workspaces meanwhile and an
   operation from before the second abandon was then abandoned itself.
 
+- `jj op restore` to an operation from before a second machine named `laptop` joined, or
+  before you ran `musubi forget` on the laptop, brings back `laptop/default`. If you then ran a
+  `jj` command and `jj op abandon` of the restore before the next sync, every machine showed the
+  laptop's workspace as this machine's too, as `desk/laptop/default` on a machine named `desk`.
+  It now stays the laptop's. Upgrading doesn't remove such a workspace: run
+  `jj workspace forget laptop/default` on `desk`. In return, if you abandon both operations of
+  `jj workspace add --name laptop/x`, or any name that starts with a machine's, with `jj op
+  abandon` before the next sync, keeping a `jj` command run after them, the workspace stops
+  being listed; add it again.
+
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.
 

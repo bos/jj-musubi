@@ -149,6 +149,27 @@ impl Config {
 #[hegel::standalone_function(config.settings())]
 fn search(tc: TestCase, config: Config) {
     let case = coverage::start_case();
+    let setup = draw_setup(&tc);
+    walk(tc, config, setup, |_, _| {});
+    case.passed();
+}
+
+/// The search from full trims and late commands on what they left
+/// (`late_commands_after_trims`), which every case starts with, then a walk, as the
+/// search's, and convergence: the shapes of #167 need several of its draws to line up, and
+/// it is one rule among many.
+#[hegel::standalone_function(config.settings())]
+fn late_trims_search(tc: TestCase, config: Config) {
+    let case = coverage::start_case();
+    let setup = draw_setup(&tc);
+    walk(tc, config, setup, |tc, world| {
+        Search::new(world).late_trims(tc);
+    });
+    case.passed();
+}
+
+/// The hive a case of `search` starts from.
+fn draw_setup(tc: &TestCase) -> Setup {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
     let naming = tc.draw(gs::sampled_from(&NAMINGS[..]));
     let prejoin = tc.draw(gs::booleans());
@@ -176,8 +197,7 @@ fn search(tc: TestCase, config: Config) {
             fired(event);
         }
     }
-    walk(tc, config, setup, |_, _| {});
-    case.passed();
+    setup
 }
 
 /// A case: the hive `setup` makes, which `prefix` takes further, a generated walk from there,
@@ -260,6 +280,13 @@ fn e2e_dropped_merge() {
 fn e2e_search_shard_4() {
     let _report = coverage::Report::new("shard-4-dropped-merge");
     dropped_merge_search(Config::shard(4));
+}
+
+/// The sixth shard searches from `late_trims_search`'s full trims and late commands.
+#[test]
+fn e2e_search_shard_5() {
+    let _report = coverage::Report::new("shard-5-late-trims");
+    late_trims_search(Config::shard(5));
 }
 
 #[test]

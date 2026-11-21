@@ -256,6 +256,33 @@ pub struct PastOp {
     pub back: usize,
 }
 
+/// An operation a full trim to the root left on a machine, from before the node handled the
+/// trim, or a late command or merge written on one: jj can still load it by its id, though no
+/// op head reaches it (`World::late_ops`).
+#[derive(Clone)]
+pub struct LateOp {
+    pub id: String,
+    /// The first line of the operation's description.
+    pub description: String,
+    /// How many full trims the machine had made when it was written.
+    pub trim: usize,
+    /// Whether it has more than one parent.
+    pub merge: bool,
+}
+
+impl std::fmt::Debug for LateOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let merge = if self.merge { ", a merge" } else { "" };
+        write!(
+            f,
+            "{:?}, after trim {}{merge} (op {})",
+            self.description,
+            self.trim,
+            &self.id[..12]
+        )
+    }
+}
+
 impl std::fmt::Debug for PastOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -461,6 +488,14 @@ pub struct World {
     change_of: BTreeMap<String, String>,
     /// Whether the hub has restarted since it last pruned, for coverage.
     restarted_since_prune: bool,
+    /// Per machine, newest first, the operations its full trims to the root left, and the
+    /// late commands and merges written on them: a command can still run `--at-op` any of
+    /// them (`World::late_ops`).
+    late_ops: Vec<Vec<LateOp>>,
+    /// Per machine, how many full trims to the root it has made.
+    trims: Vec<usize>,
+    /// The late operations written with the clock stepped back, each at a time of its own.
+    stepped_back: BTreeSet<String>,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -585,6 +620,9 @@ impl World {
             integrated_history: BTreeSet::new(),
             change_of: BTreeMap::new(),
             restarted_since_prune: false,
+            late_ops: vec![vec![]; setup.nodes],
+            trims: vec![0; setup.nodes],
+            stepped_back: BTreeSet::new(),
             counter: 0,
             trace: vec![],
         };

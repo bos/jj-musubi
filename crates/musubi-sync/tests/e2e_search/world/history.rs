@@ -14,6 +14,7 @@ use musubi_sync::OpId;
 use crate::identity::{HistoryKey, SourceKey};
 
 use super::AbandonedOperation;
+use super::LateOp;
 use super::MERGE_KEY_TEMPLATE;
 use super::OP_KEY_TEMPLATE;
 use super::OperationHistory;
@@ -212,13 +213,149 @@ impl World {
         let description = self.message(m);
         self.jj(m, &["new", "-m", &description]);
         self.abandon_ops(m, &format!("..{base}"), &dropped);
-        match &self.op_heads(m)[..] {
+        let head = match &self.op_heads(m)[..] {
             [head] => head.clone(),
             heads => self.fail(&format!(
                 "{} has op heads {heads:?} after a trim",
                 self.machine(m)
             )),
+        };
+        self.trims[m] += 1;
+        self.remember_late_op(m, &head);
+        head
+    }
+
+    /// The operations machine `m`'s full trims to the root left, before its node handled
+    /// them, and the late commands and merges written on those, newest first. No op head
+    /// reaches one once the node has handled its trim, or once a later trim has dropped it,
+    /// but jj still loads it by its id: a command that loaded the repository then, or one run
+    /// `--at-op` it, writes on it.
+    pub fn late_ops(&self, m: usize) -> Vec<LateOp> {
+        self.late_ops[m].clone()
+    }
+
+    /// How many full trims to the root machine `m` has made (`trim_to_unpublished_root`).
+    pub fn trims(&self, m: usize) -> usize {
+        self.trims[m]
+    }
+
+    /// Whether operation `id` was written with the clock stepped back (`late_command`).
+    pub fn stepped_back(&self, id: &str) -> bool {
+        self.stepped_back.contains(id)
+    }
+
+    fn remember_late_op(&mut self, m: usize, id: &str) {
+        if self.late_ops[m].iter().any(|op| op.id == id) {
+            return;
         }
+        let described = self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "--at-op",
+                id,
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                r#"parents.len() ++ " " ++ description.first_line()"#,
+            ],
+        );
+        let (parents, description) = described.split_once(' ').unwrap();
+        let op = LateOp {
+            id: id.to_owned(),
+            description: description.to_owned(),
+            trim: self.trims[m],
+            merge: parents != "1",
+        };
+        self.late_ops[m].insert(0, op);
+    }
+
+    /// Runs a command at machine `m`'s late operation `op` (`late_ops`), as `jj_at_op` does,
+    /// and remembers what it wrote as late operations too. With `stepped_back`, the machine's
+    /// clock has stepped back, as an NTP correction or a reset clock can: the command's
+    /// operation ends before every other of the case, so jj puts it first among the parents
+    /// of a merge, which it orders by when they ended. Each such command gets a time of its
+    /// own, all of them before the tests' epoch, where every other operation's time is: two
+    /// operations at one time are ordered by their ids, which differ between runs of a case.
+    pub fn late_command(&mut self, m: usize, op: &str, args: &[&str], stepped_back: bool) {
+        let heads_before = self.op_heads(m);
+        if stepped_back {
+            let second = self.stepped_back.len();
+            let time = format!(
+                "2000-12-31T{:02}:{:02}:{:02}.000+00:00",
+                second / 3600,
+                second / 60 % 60,
+                second % 60
+            );
+            let config = format!("debug.operation-timestamp=\"{time}\"");
+            let mut full = vec!["--config", config.as_str()];
+            full.extend_from_slice(args);
+            self.jj_at_op(m, op, &full);
+        } else {
+            self.jj_at_op(m, op, args);
+        }
+        // At most one, since a command writes one operation, or none if it changed nothing:
+        // the pool's order mustn't depend on the order of operation ids, which differ between
+        // runs.
+        let new: Vec<String> = self
+            .op_heads(m)
+            .into_iter()
+            .filter(|head| !heads_before.contains(head))
+            .collect();
+        if new.len() > 1 {
+            self.fail(&format!(
+                "{}'s late command left new op heads {new:?}",
+                self.machine(m)
+            ));
+        }
+        for head in new {
+            if stepped_back {
+                self.stepped_back.insert(head.clone());
+            }
+            self.remember_late_op(m, &head);
+        }
+    }
+
+    /// Has machine `m`, if it has several op heads, run a `jj` command, which merges them
+    /// first, and remembers the merge as a late operation. Returns the heads it merged.
+    pub fn merge_late_heads(&mut self, m: usize) -> Vec<String> {
+        let heads = self.op_heads(m);
+        if heads.len() < 2 {
+            return vec![];
+        }
+        self.jj(m, &["status"]);
+        // The merge, below whatever the command wrote after it: snapshots and imports.
+        let ops = self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "8",
+                "-T",
+                r#"id ++ " " ++ parents.map(|p| p.id()).join(" ") ++ "\n""#,
+            ],
+        );
+        let merge = ops.lines().find_map(|line| {
+            let mut ids = line.split(' ');
+            let id = ids.next()?;
+            let mut parents: Vec<&str> = ids.collect();
+            parents.sort_unstable();
+            (parents == heads).then(|| id.to_owned())
+        });
+        let Some(merge) = merge else {
+            self.fail(&format!(
+                "{} merged its op heads {heads:?} without a merge",
+                self.machine(m)
+            ));
+        };
+        self.remember_late_op(m, &merge);
+        heads
     }
 
     pub(super) fn trim_range(&self, m: usize) -> (String, Vec<String>) {

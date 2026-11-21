@@ -361,3 +361,35 @@ fn e2e_reparenting_a_merge_keeps_one_realization_per_operation() {
     world.restart(0);
     world.converge();
 }
+
+/// Reduced by hand from a failure the search found (#167), with `late_commands_after_trims`
+/// and then `op_abandon`, with every fix for #167 so far in place. After a full trim, which
+/// its node takes, alpha runs a late command on its trim's op head; beta renames its
+/// workspace and syncs; alpha trims again and syncs, runs a late command on the first late
+/// one, which brings it back, and abandons that first late operation. The hive then gives
+/// alpha beta's renamed workspace as its own: alpha lists `beta/third` as its own, and beta
+/// lists `alpha/beta/third`. Without the rename, the second trim or the abandon, it passed;
+/// the search's stepped-back clock, merges and third machine weren't needed.
+#[test]
+#[ignore = "#167: alpha takes beta's renamed workspace for its own; remove once fixed"]
+fn e2e_abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    let first = world.trim_to_unpublished_root(0);
+    world.sync(0);
+    let message = world.message(0);
+    world.late_command(0, &first, &["new", "-m", &message], false);
+    let late = world.late_ops(0)[0].id.clone();
+    world.rename_workspace(1, 0, "third");
+    world.sync(1);
+    world.trim_to_unpublished_root(0);
+    world.sync(0);
+    let message = world.message(0);
+    world.late_command(0, &late, &["new", "-m", &message], false);
+    world.op_abandon(0, &late);
+    world.converge();
+}

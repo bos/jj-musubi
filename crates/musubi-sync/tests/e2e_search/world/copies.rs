@@ -339,6 +339,11 @@ impl World {
         self.evidence.join_inputs[m] = join_input;
         self.logical_extras.resize_with(self.nodes(), BTreeSet::new);
         self.logical_extras[m].clear();
+        // A new copy has none of the operations the one it replaces left behind.
+        self.late_ops.resize_with(self.nodes(), Vec::new);
+        self.late_ops[m].clear();
+        self.trims.resize(self.nodes(), 0);
+        self.trims[m] = 0;
         for ws in &self.workspaces[m] {
             let key = format!("{}/{}", self.fx.machine_key(m), ws.name);
             self.evidence.workspace_births.insert(key.clone());

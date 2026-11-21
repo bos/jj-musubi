@@ -133,7 +133,8 @@ enum Rewrite {
     Rebase,
 }
 
-/// The command `at_op` and `late_command_after_trim` run at an older operation.
+/// The command `at_op`, `late_command_after_trim` and `late_commands_after_trims` run at an
+/// older operation.
 #[derive(Clone, Copy, Debug)]
 enum AtOpCommand {
     Describe,
@@ -148,6 +149,29 @@ enum AtOpCommand {
 enum Handling {
     Steps(usize),
     Whole,
+}
+
+/// The clock a late command of `late_commands_after_trims` runs with: as every other
+/// command's, or stepped back, so that a merge puts the command first (`World::late_command`).
+#[derive(Clone, Copy, Debug)]
+enum Clock {
+    Kept,
+    SteppedBack,
+}
+
+/// What another machine does between two of `late_commands_after_trims`' trims, as the
+/// shapes of #167 need: a third machine joining, or another changing its workspaces, and its
+/// syncs.
+#[derive(Clone, Copy, Debug)]
+enum Meanwhile {
+    Nothing,
+    Sync,
+    Commit,
+    WorkspaceAdd,
+    WorkspaceRename,
+    WorkspaceForget,
+    ForgetCopy,
+    Join,
 }
 
 impl<'a> Search<'a> {
@@ -219,6 +243,219 @@ impl<'a> Search<'a> {
     fn found_nothing(&mut self, tc: &TestCase, m: usize, what: &str) {
         self.note(tc);
         tc.note(&format!("{}: looked, and found {what}", MACHINES[m]));
+    }
+
+    /// How far machine `m`'s node gets with the trim that left `head` before a late command,
+    /// and that far. Returns whether the copy is still the one that trimmed: a sync that finds
+    /// it behind records the hub pruned replaces it (`World::recover`), and the new copy has
+    /// none of the old one's operations to run a command at.
+    fn handle_trim(&mut self, tc: &TestCase, m: usize, head: &str) -> bool {
+        let handling = tc.draw(gs::sampled_from(vec![
+            Handling::Steps(0),
+            Handling::Steps(1),
+            Handling::Steps(2),
+            Handling::Whole,
+        ]));
+        match handling {
+            Handling::Steps(steps) => self.world.sync_partial(m, steps, None),
+            Handling::Whole => self.world.sync(m),
+        }
+        let kept = self.world.late_ops(m).iter().any(|op| op.id == head);
+        if !kept {
+            self.found_nothing(tc, m, "a new copy, which has no late operation");
+        }
+        kept
+    }
+
+    /// One to three full trims to the root on one machine, each handled as far as a drawn
+    /// point and followed by one or two late commands, each `--at-op` any operation a trim of
+    /// the machine's left, or a late command or merge wrote on one (`World::late_ops`),
+    /// perhaps with the clock stepped back, and then perhaps by a merge of the op heads, as
+    /// any command makes. Before each trim but the first, another machine may join, sync,
+    /// commit, change its workspaces, or forget a copy. So the late command can be after a
+    /// second or third trim, on a merge, on the earlier trims' late commands, or first in a
+    /// merge, and a third machine's workspaces can be at stake, as in #167's shapes
+    /// (`a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs`,
+    /// `a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs`). No merge
+    /// it makes has more than two op heads: the import check models no more (`imports`).
+    pub fn late_trims(&mut self, tc: &TestCase) {
+        let m = self.machine(tc);
+        let trims = tc.draw_named("trims", gs::integers::<usize>().min_value(1).max_value(3));
+        fired("late_commands_after_trims");
+        for round in 0..trims {
+            if round > 0 {
+                self.meanwhile(tc, m);
+            }
+            let head = self.world.trim_to_unpublished_root(m);
+            if !self.handle_trim(tc, m, &head) {
+                return;
+            }
+            let commands = tc.draw_named(
+                "late commands",
+                gs::integers::<usize>().min_value(1).max_value(2),
+            );
+            for _ in 0..commands {
+                // A merge of three op heads, several of which changed jj's record of a git
+                // ref, is beyond what the import check models (`imports`), so a late command
+                // never makes a third: the machine merges the two it has first.
+                if self.world.op_heads(m).len() > 1 {
+                    self.merge_late_heads(m);
+                }
+                // This trim's own, which a failure shrinks to, then the newest first.
+                let mut ops = self.world.late_ops(m);
+                ops.sort_by_key(|op| op.id != head);
+                let op = tc.draw_named("op", gs::sampled_from(ops));
+                let clock = tc.draw(gs::sampled_from(vec![Clock::Kept, Clock::SteppedBack]));
+                let Some(args) = self.at_op_command(tc, m, &op.id) else {
+                    self.found_nothing(tc, m, "nothing to do at that operation");
+                    continue;
+                };
+                let trims = self.world.trims(m);
+                for (event, happened) in [
+                    ("late:earlier_trim", op.trim < trims),
+                    ("late:two_trims_earlier", op.trim + 2 <= trims),
+                    ("late:on_merge", op.merge),
+                    ("late:clock_back", matches!(clock, Clock::SteppedBack)),
+                    ("late:three_machines", self.world.nodes() == 3),
+                ] {
+                    if happened {
+                        fired(event);
+                    }
+                }
+                let stepped_back = matches!(clock, Clock::SteppedBack);
+                self.world
+                    .late_command(m, &op.id, &strs(&args), stepped_back);
+            }
+            if tc.draw_named("merge", gs::booleans()) {
+                self.merge_late_heads(m);
+            }
+        }
+        self.note(tc);
+    }
+
+    /// Machine `m` merges its op heads, if it has several (`World::merge_late_heads`).
+    fn merge_late_heads(&mut self, m: usize) {
+        let merged = self.world.merge_late_heads(m);
+        if !merged.is_empty() {
+            fired("late:merge");
+        }
+        if merged.iter().any(|head| self.world.stepped_back(head)) {
+            fired("late:merge_after_clock_back");
+        }
+    }
+
+    /// What another machine than `m` does between two of `late_commands_after_trims`' trims.
+    fn meanwhile(&mut self, tc: &TestCase, m: usize) {
+        let nodes = self.world.nodes();
+        let others: Vec<usize> = (0..nodes).filter(|&o| o != m).collect();
+        let world = &*self.world;
+        let adders: Vec<usize> = others
+            .iter()
+            .copied()
+            .filter(|&o| world.workspaces[o].len() < 3 && !world.free_workspace_names(o).is_empty())
+            .collect();
+        let renamers: Vec<usize> = others
+            .iter()
+            .copied()
+            .filter(|&o| !world.free_workspace_names(o).is_empty())
+            .collect();
+        let forgetters: Vec<usize> = others
+            .iter()
+            .copied()
+            .filter(|&o| world.workspaces[o].len() > 1)
+            .collect();
+        let possible: Vec<Meanwhile> = [
+            (Meanwhile::Nothing, true),
+            (Meanwhile::Sync, true),
+            (Meanwhile::Commit, true),
+            (Meanwhile::WorkspaceAdd, !adders.is_empty()),
+            (Meanwhile::WorkspaceRename, !renamers.is_empty()),
+            (Meanwhile::WorkspaceForget, !forgetters.is_empty()),
+            (Meanwhile::ForgetCopy, true),
+            (Meanwhile::Join, nodes < SEARCH_MACHINES),
+        ]
+        .into_iter()
+        .filter_map(|(what, possible)| possible.then_some(what))
+        .collect();
+        let what = tc.draw_named("meanwhile", gs::sampled_from(possible));
+        let o = match what {
+            Meanwhile::Nothing => return,
+            Meanwhile::Sync => {
+                let o = draw_machine(tc, "other", others);
+                fired("late:meanwhile_sync");
+                self.world.sync(o);
+                return;
+            }
+            Meanwhile::Commit => {
+                let o = draw_machine(tc, "other", others);
+                let file = draw_file(tc);
+                fired("late:meanwhile_commit");
+                self.world.commit(o, 0, file);
+                o
+            }
+            Meanwhile::WorkspaceAdd => {
+                let o = draw_machine(tc, "other", adders);
+                let name = draw_from(tc, "name", self.world.free_workspace_names(o));
+                fired("late:meanwhile_workspace_add");
+                self.world.add_workspace(o, &name);
+                o
+            }
+            Meanwhile::WorkspaceRename => {
+                let o = draw_machine(tc, "other", renamers);
+                let workspaces = &self.world.workspaces[o];
+                let ws = draw_named_index(
+                    tc,
+                    "workspace",
+                    workspaces
+                        .iter()
+                        .enumerate()
+                        .map(|(ws, workspace)| (ws, workspace.name.clone())),
+                );
+                let name = draw_from(tc, "name", self.world.free_workspace_names(o));
+                fired("late:meanwhile_workspace_rename");
+                self.world.rename_workspace(o, ws, &name);
+                o
+            }
+            Meanwhile::WorkspaceForget => {
+                let o = draw_machine(tc, "other", forgetters);
+                let workspaces = &self.world.workspaces[o];
+                let ws = draw_named_index(
+                    tc,
+                    "workspace",
+                    (1..workspaces.len()).map(|ws| (ws, workspaces[ws].name.clone())),
+                );
+                fired("late:meanwhile_workspace_forget");
+                self.world.forget_workspace(o, ws);
+                o
+            }
+            Meanwhile::ForgetCopy => {
+                let o = draw_machine(tc, "other", others);
+                let forgotten =
+                    draw_machine(tc, "forgotten", (0..nodes).filter(|&x| x != o).collect());
+                fired("late:meanwhile_forget_copy");
+                self.world.forget_copy(o, forgotten);
+                o
+            }
+            Meanwhile::Join => {
+                // As `join`, and then the new machine works, so that its workspace is at
+                // stake too.
+                let o = nodes;
+                if tc.draw(gs::booleans()) {
+                    self.world.join_existing_copy(o);
+                } else {
+                    self.world.clone_copy(o);
+                }
+                fired("late:meanwhile_join");
+                self.world.sync(o);
+                let file = draw_file(tc);
+                self.world.commit(o, 0, file);
+                self.world.sync(o);
+                return;
+            }
+        };
+        if tc.draw_named("then sync", gs::booleans()) {
+            self.world.sync(o);
+        }
     }
 
     /// The arguments of a command to run at machine `m`'s operation `op`, drawn from what
@@ -652,21 +889,15 @@ impl Search<'_> {
     #[rule]
     fn late_command_after_trim(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
-        let handling = tc.draw(gs::sampled_from(vec![
-            Handling::Steps(0),
-            Handling::Steps(1),
-            Handling::Steps(2),
-            Handling::Whole,
-        ]));
         fired("late_command_after_trim");
+        // The trim draws nothing, so the handling is drawn where it was, after the machine.
         let op = self.world.trim_to_unpublished_root(m);
-        match handling {
-            Handling::Steps(steps) => self.world.sync_partial(m, steps, None),
-            Handling::Whole => self.world.sync(m),
+        if !self.handle_trim(&tc, m, &op) {
+            return;
         }
         // The trim's change is at that operation, so there is always a command to run.
         let args = self.at_op_command(&tc, m, &op).unwrap();
-        self.world.jj_at_op(m, &op, &strs(&args));
+        self.world.late_command(m, &op, &strs(&args), false);
         self.note(&tc);
     }
 
@@ -1017,6 +1248,16 @@ impl Search<'_> {
         let lost = tc.draw(gs::integers::<usize>().max_value(4));
         self.world.sync_partial(m, steps, Some(lost));
         self.note(&tc);
+    }
+
+    // Late commands after trims. Last, so that adding it left every other rule's index, and
+    // so the stored examples, as they were.
+
+    /// Repeated full trims, late commands on what each left and what earlier ones wrote, and
+    /// merges of them, with another machine's work between (`Search::late_trims`).
+    #[rule]
+    fn late_commands_after_trims(&mut self, tc: TestCase) {
+        self.late_trims(&tc);
     }
 
     #[invariant(always_run)]

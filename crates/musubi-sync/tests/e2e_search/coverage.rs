@@ -80,6 +80,7 @@ pub const RULES: &[&str] = &[
     "an_hour_passes",
     "lose_reply",
     "join",
+    "late_commands_after_trims",
 ];
 
 /// Events that are not rules: how the hive was set up, and outcomes some rows need.
@@ -114,6 +115,26 @@ pub const EVENTS: &[&str] = &[
     "remake_hub:joiner_with_prefix",
     // A forgotten copy's sync rebased a hidden working copy of its own.
     "forgotten:working_copy_rebased",
+    // The shapes `late_commands_after_trims` reached: a late command on an operation from
+    // before the machine's latest full trim, or two trims before it; on a merge; with the
+    // clock stepped back; among three machines. A merge of op heads after late commands, and
+    // one where a head is a command with the clock stepped back, which ends before every other
+    // operation, so that jj puts a stepped-back head first. What another machine did between
+    // trims.
+    "late:earlier_trim",
+    "late:two_trims_earlier",
+    "late:on_merge",
+    "late:clock_back",
+    "late:three_machines",
+    "late:merge",
+    "late:merge_after_clock_back",
+    "late:meanwhile_sync",
+    "late:meanwhile_commit",
+    "late:meanwhile_workspace_add",
+    "late:meanwhile_workspace_rename",
+    "late:meanwhile_workspace_forget",
+    "late:meanwhile_forget_copy",
+    "late:meanwhile_join",
 ];
 
 /// Approximate exploration guidance for each race-catalogue test. These rule combinations
@@ -415,6 +436,18 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "e2e_late_command_after_trim",
         Some(&["late_command_after_trim"]),
+    ),
+    (
+        "a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs",
+        Some(&["late_commands_after_trims", "late:earlier_trim"]),
+    ),
+    (
+        "a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs",
+        Some(&[
+            "late_commands_after_trims",
+            "late:meanwhile_join",
+            "late:merge_after_clock_back",
+        ]),
     ),
     (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",

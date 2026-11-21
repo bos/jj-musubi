@@ -10,6 +10,8 @@
 
     import-tree.url = "github:vic/import-tree";
 
+    crane.url = "github:ipetkov/crane";
+
     flake-compat.url = "github:NixOS/flake-compat";
     flake-compat.flake = false;
   };

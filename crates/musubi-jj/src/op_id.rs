@@ -3,11 +3,10 @@
 //! keep a local id from being taken for a canonical one, or the reverse. jj-lib hands out
 //! bare ids, which are wrapped where they come from.
 //!
-//! A canonical id can name an operation in more than one way, which [`HubOp`] and [`NodeOp`]
-//! tell apart.
+//! A canonical id names an operation as the hub's history does, which [`HubOp`] says where the
+//! protocol still speaks of records.
 //!
 //! [`HubOp`]: crate::records::HubOp
-//! [`NodeOp`]: crate::node::NodeOp
 
 use jj_lib::op_store::Operation;
 use jj_lib::op_store::OperationId;

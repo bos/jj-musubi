@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
 
 use crate::canonical::namespace;
 use crate::canonical::origin;
@@ -67,13 +66,6 @@ impl<'a> OpAttrs<&'a BTreeMap<String, String>> {
         self.get(CANONICAL_ATTRIBUTE)
     }
 
-    /// The canonical operation this local one realizes, where its mark is an id.
-    pub fn canonical_op(&self) -> Option<CanonicalOp> {
-        self.canonical()
-            .and_then(OperationId::try_from_hex)
-            .map(CanonicalOp)
-    }
-
     /// The commits this declares it retains on purpose, decoded one at a time so that a
     /// caller checking each stops at the first that fails, or `None` without a declaration.
     pub fn intent(
@@ -110,14 +102,6 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
 
     pub fn set_canonical(&mut self, id: &CanonicalOp) {
         self.set(CANONICAL_ATTRIBUTE, id.0.hex());
-    }
-
-    /// Distinguishes a restored local realization from the head jj may still be removing.
-    pub fn set_reconciled_from(&mut self, source: &OperationId, replaced: &OperationId) {
-        self.set(
-            RECONCILED_FROM,
-            format!("{} {}", source.hex(), replaced.hex()),
-        );
     }
 
     pub fn remove_reconciled_from(&mut self) {

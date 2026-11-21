@@ -16,7 +16,6 @@ use std::path::PathBuf;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
-use musubi_jj::node::NodeError;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
 use musubi_sync::OpId;
@@ -380,7 +379,6 @@ fn retained_sources_do_not_infer_native_ownership_from_a_shared_hostname() {
 /// Why a published carrier may preserve an independently observed Git frontier.
 #[derive(Debug, PartialEq, Eq)]
 enum GitRecordAuthorization {
-    RootTransition,
     /// The carrier must retain one of these independently witnessed private names.
     PrivateWorkspaces(BTreeSet<String>),
 }
@@ -455,7 +453,6 @@ pub struct World {
     /// Those operations, and the ones reverting them wrote, which reverting again would
     /// only undo the recovery: hex ids.
     recovery_ops: BTreeSet<String>,
-    integrated_history: BTreeSet<(String, String)>,
     /// The change of every commit seen so far, for `fingerprint`.
     change_of: BTreeMap<String, String>,
     /// Whether the hub has restarted since it last pruned, for coverage.
@@ -581,7 +578,6 @@ impl World {
             touched: BTreeSet::new(),
             recovery_actions: 0,
             recovery_ops: BTreeSet::new(),
-            integrated_history: BTreeSet::new(),
             change_of: BTreeMap::new(),
             restarted_since_prune: false,
             counter: 0,
@@ -743,7 +739,6 @@ fn private_git_inputs_require_a_known_birth_and_a_retained_name() {
     world.evidence.workspace_births.insert(birth);
 
     let before = world.observer_state();
-    assert_eq!(world.root_record_transition(1), Some(false));
     let initial = world.git_record_input(1).unwrap();
     assert_eq!(
         initial.authorization,
@@ -1353,161 +1348,4 @@ fn raw_source_collectors_leave_pending_and_known_native_operations_untouched() {
         (world.fingerprint(), world.next_actor_randomness())
     };
     assert_eq!(run(false), run(true));
-}
-
-/// `musubi forget` refuses as a sync does where jj's reparenting recreated an abandoned
-/// operation's exact id, so that which of the hive's operations was dropped can't be told:
-/// abandoning the snapshot below a commit rewrites the commit, a stale working copy brings
-/// the original back, and abandoning that puts the rewrite on the snapshot, the original's
-/// bytes. The search follows the refusal's hint, as a user would, and forgets again.
-#[test]
-fn forget_follows_an_ambiguous_abandon_hint() {
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Own,
-        prejoin: false,
-        secondary: false,
-    });
-    world.commit(0, 0, 1);
-    let commit = world.latest_op_head(0);
-    let store = world.fx.node(0).loader().op_store().clone();
-    let id = OpId::try_from_hex(&commit).unwrap();
-    let snapshot = futures::executor::block_on(store.read_operation(&id))
-        .unwrap()
-        .parents[0]
-        .hex();
-    world.forget_copy(0, 1);
-    world.op_abandon(0, &snapshot);
-    world.sync(0);
-    world.sync(0);
-    world.commit(0, 0, 0);
-    world.op_abandon(0, &commit);
-    world.commit(0, 0, 2);
-    let (trace, credit) = (world.trace.len(), world.recovery_actions);
-    world.forget_copy(0, 1);
-    assert_eq!(world.recovery_actions, credit + 1);
-    let [(copy, target)] = Vec::from_iter(world.integrated_history.clone())
-        .try_into()
-        .unwrap();
-    assert_eq!(copy, world.fx.machine_key(0));
-    assert_eq!(
-        &world.trace[trace..],
-        &[
-            "alpha: musubi forget beta".to_owned(),
-            format!("alpha: jj op integrate {target}"),
-            "alpha: musubi forget beta".to_owned(),
-        ]
-    );
-}
-
-#[test]
-fn ambiguous_abandon_recovery_integrates_the_real_hint_once() {
-    use std::path::Path;
-
-    let mut fingerprints = vec![];
-    for _ in 0..2 {
-        let mut world = World::new(Setup {
-            nodes: 2,
-            naming: Naming::Own,
-            prejoin: false,
-            secondary: false,
-        });
-        let target = native_head(world.fx.repo(0));
-        // The pinned native regression: two restores with identical metadata/views,
-        // separated by real work, become indistinguishable after native contraction.
-        let restore = |world: &mut World| {
-            crate::coverage::interrupt_races();
-            let history = world.command_history(0);
-            let before = world.seen(0);
-            let present = world.abandoned_present(0);
-            let stale = world.is_stale(0, 0);
-            world.record(format!(
-                "alpha: jj op restore {} (fixed native timestamp)",
-                target.hex()
-            ));
-            let output = world
-                .fx
-                .repo(0)
-                .program(Path::new("jj"))
-                .args(["--ignore-working-copy", "op", "restore", &target.hex()])
-                .env("JJ_OP_TIMESTAMP", "2001-02-03T04:05:06Z")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            world.record_commands(0, &history, CommandOutcome::Succeeded);
-            let after = world.seen(0);
-            let what = world.trace.last().unwrap().clone();
-            world.ledger.record(0, &what, &before, &after, stale);
-            world.forgive_jj_returns(0, present);
-            native_head(world.fx.repo(0))
-        };
-        world.jj(0, &["describe", "-m", "before"]);
-        let a = restore(&mut world);
-        world.jj(0, &["describe", "-m", "between"]);
-        let x = restore(&mut world);
-        assert_ne!(a, x);
-        world.sync(0);
-        world.jj(
-            0,
-            &[
-                "--ignore-working-copy",
-                "op",
-                "abandon",
-                &format!("{}-..{}-", a.hex(), x.hex()),
-            ],
-        );
-        assert_eq!(native_head(world.fx.repo(0)), a);
-        let err = world
-            .try_sync_partial(0, 100, None, None)
-            .unwrap_err()
-            .context("native restore/abandon prefix");
-        let hint = err
-            .chain()
-            .find_map(|err| match err.downcast_ref::<NodeError>() {
-                Some(NodeError::AmbiguousAbandon(target)) => Some(target.clone()),
-                _ => None,
-            })
-            .expect("context must retain the typed ambiguous-abandon hint");
-        assert_eq!(hint, x.hex());
-        let trace = world.trace.len();
-        let credit = world.recovery_actions;
-        world.recover(0, "sync", &err);
-        assert_eq!(world.recovery_actions, credit + 1);
-        assert_eq!(
-            &world.trace[trace..],
-            &[format!("alpha: jj op integrate {hint}")]
-        );
-        assert_eq!(
-            world.integrated_history,
-            BTreeSet::from([(world.fx.machine_key(0), hint.clone())])
-        );
-        world.try_sync_partial(0, 100, None, None).unwrap();
-        // These are driver-negative inputs reusing the captured real error, not a
-        // claim that the repaired native repository produces it again.
-        for exhausted in [false, true] {
-            if exhausted {
-                world.integrated_history.clear();
-                world.recovery_actions = MAX_RECOVERIES;
-            }
-            let before = world.observer_state();
-            let trace = world.trace.clone();
-            let credit = world.recovery_actions;
-            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                world.recover(0, "replayed driver hint", &err);
-            }));
-            assert!(stopped.is_err());
-            assert_eq!(world.trace, trace);
-            assert_eq!(world.recovery_actions, credit);
-            world.assert_observer_state(&before);
-        }
-        // The general trace normalizer masks bare ids, not the trailing parent
-        // selectors in this fixed range. Normalize these two captured ids explicitly.
-        let range = format!("{}-..{}-", a.hex(), x.hex());
-        fingerprints.push(world.fingerprint().replace(&range, "<id>-..<id>-"));
-    }
-    assert_eq!(fingerprints[0], fingerprints[1]);
 }

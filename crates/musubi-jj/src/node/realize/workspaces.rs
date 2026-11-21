@@ -98,7 +98,7 @@ impl NodeRepo {
     /// (`latest_work_parent`), following the operation's rewrites. They are still its working
     /// copies, and the hive shows them again with its next work. So too at work by this
     /// machine, where it is present: such an operation, realized here, is one another machine
-    /// wrote for it, as a fix-up's (`write_fixup`), maybe where it had forgotten this machine
+    /// wrote for it, as an earlier release's fix-up, maybe where it had forgotten this machine
     /// and so without its workspaces; only this machine's own operations remove them. A view
     /// that has this machine's workspaces, or where it is otherwise present without any, is
     /// left as it is, but for this machine's workspaces with a `/` in their names, which no
@@ -139,7 +139,7 @@ impl NodeRepo {
                 Some(own) => own.clone(),
                 None => {
                     let heads = self.local_heads()?;
-                    self.own_for_root(&heads)?
+                    self.own_at_heads(&heads)?
                 }
             };
         }
@@ -196,16 +196,6 @@ impl NodeRepo {
             names,
             prefixes,
         })
-    }
-
-    pub(super) fn own_for_root(
-        &mut self,
-        heads: &[LocalOp],
-    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        match self.own_before_taking(heads) {
-            Some(own) => Ok(own.clone()),
-            None => self.own_at_heads(heads),
-        }
     }
 
     /// Which of a canonical operation's parents has this machine's latest work in its history:

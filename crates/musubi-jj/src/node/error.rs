@@ -178,11 +178,6 @@ pub enum NodeError {
     Lock(#[from] FileLockError),
     #[error("I/O error on {path}")]
     Io { path: PathBuf, source: io::Error },
-    /// `jj op abandon` or `jj op integrate`, which take no lock, changed the op heads while
-    /// musubi moved them, after it had made what it moved them to. The sync step stops there,
-    /// as a crash would, and the next one moves them from where they are.
-    #[error("jj changed the operation heads while musubi moved them; the next sync tries again")]
-    HeadsMoved,
     /// An op head whose history is from before this repository joined, as a `jj` command
     /// makes that loaded the repository before `musubi join` and wrote after it: the hive
     /// takes its work only once a merge with this machine's other op heads does.
@@ -229,18 +224,8 @@ pub enum NodeError {
     /// as after `jj op abandon`. Which, the log says.
     #[error("{HISTORY_GONE}")]
     RewrittenRealization,
-    /// A log of how this machine renamed history lacks what `records.json` counts on, as a
-    /// power cut can leave it. Which, the daemon's log says.
-    #[error("{HISTORY_GONE}")]
-    DamagedLog,
-    /// jj can reparent an operation into another one's exact bytes and id. There is then
-    /// no way to recover which identical operation the user meant to retain.
-    #[error(
-        "cannot tell which operations jj abandoned\nHint: run `jj op integrate {0}` to restore the missing history before syncing"
-    )]
-    AmbiguousAbandon(String),
-    /// The hub pruned records of dropped operations that this machine never took, as when
-    /// the hive forgot this copy: it can't tell which of its operations they drop.
+    /// The hub pruned records of dropped operations that this machine never took. A node takes
+    /// no records now, so none raises this: it goes with the records in the protocol.
     #[error("{HISTORY_GONE}")]
     PrunedRecords,
     /// The hub accepts an operation only with everything it requires, which a shallow or

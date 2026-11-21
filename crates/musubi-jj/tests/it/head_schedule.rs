@@ -14,8 +14,7 @@ use std::sync::{Condvar, Mutex};
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{OpStore, OperationId, ViewId};
-use musubi_jj::node::{HeadRace, NodeError, NodeRepo};
-use musubi_jj::op_id::LocalOp;
+use musubi_jj::node::{HeadRace, NodeRepo};
 use musubi_testutil::{TestEnv, TestRepo};
 use pollster::FutureExt as _;
 use serde::{Deserialize, Serialize};
@@ -29,7 +28,7 @@ const MAX_STEPS: usize = 8;
 const CONCURRENT_STEPS: usize = 14;
 /// A native merge widens the search: it reaches every state by this many actions.
 const LOADER_STEPS: usize = 22;
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,8 +43,6 @@ enum Action {
     KillAbandon,
     KillPeer,
     Check,
-    InterruptBeforePublication,
-    InterruptPublication,
     Reopen,
     ReopenWithoutCache,
     MergeHeads,
@@ -134,9 +131,6 @@ struct State {
     stopped_before_publication: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     lost_cache: bool,
-    #[serde(default)]
-    put_back: bool,
-    pending_drops: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -230,7 +224,6 @@ impl<'a> Fixture<'a> {
         let [old_head] = heads.try_into().unwrap();
         let store = node.loader().op_store().clone();
         let old_id = OperationId::try_from_hex(&old_head).unwrap();
-        let old_view = store.read_operation(&old_id).block_on().unwrap().view_id;
         // The history the fixture starts with is the same on every run: only operations a
         // schedule writes need keys other than their ids.
         let mut keys = HashMap::new();
@@ -259,7 +252,6 @@ impl<'a> Fixture<'a> {
             interrupted: false,
             stopped_before_publication: false,
             lost_cache: false,
-            put_back: false,
             keys: RefCell::new(keys),
             write_published: false,
             second: None,
@@ -267,7 +259,6 @@ impl<'a> Fixture<'a> {
             second_published: false,
             second_put_back: false,
             store,
-            old_view,
             repo,
             env,
         }
@@ -327,7 +318,6 @@ struct World<'a> {
     interrupted: bool,
     stopped_before_publication: bool,
     lost_cache: bool,
-    put_back: bool,
     /// Each operation's key, as `key` works it out.
     keys: RefCell<HashMap<OperationId, OperationId>>,
     /// Whether the write peer added its head: jj merges it later even if the write is killed
@@ -344,7 +334,6 @@ struct World<'a> {
     /// have put back what it dropped, as for the first, or merged them, which brings it back.
     second_put_back: bool,
     store: Arc<dyn OpStore>,
-    old_view: ViewId,
     repo: TestRepo,
     env: TestEnv,
 }
@@ -434,14 +423,6 @@ impl World<'_> {
     }
 
     fn state(&self) -> State {
-        let mut pending_drops = self.node.as_ref().map_or_else(Vec::new, |node| {
-            node.pending_drops()
-                .ops()
-                .iter()
-                .map(|op| op.0.0.hex())
-                .collect()
-        });
-        pending_drops.sort_unstable();
         State {
             native: self.native[0],
             peer: self.concurrent.then_some(self.native[1]),
@@ -457,8 +438,6 @@ impl World<'_> {
             interrupted: self.interrupted,
             stopped_before_publication: self.stopped_before_publication,
             lost_cache: self.lost_cache,
-            put_back: self.put_back,
-            pending_drops,
         }
     }
 
@@ -533,17 +512,6 @@ impl World<'_> {
             choices.push(Action::CheckWhileLocked);
         } else if state.checked_heads.as_ref() != Some(&state.heads) {
             choices.push(Action::Check);
-            if self.abandon_paused()
-                && !state.interrupted
-                && !state.put_back
-                && state.heads.len() == 2
-                && state.heads.binary_search(&self.old_head).is_ok()
-            {
-                choices.push(Action::InterruptPublication);
-                if self.concurrent {
-                    choices.push(Action::InterruptBeforePublication);
-                }
-            }
         } else if self.concurrent && state.heads.len() > 1 && !self.locked() {
             choices.push(Action::MergeHeads);
         }
@@ -585,12 +553,6 @@ impl World<'_> {
     /// publication of heads don't.
     fn write_locked(&self) -> bool {
         self.peer == Peer::Write && matches!(self.native[1], Native::Prepared | Native::Paused)
-    }
-
-    /// Whether a native abandon is paused before its unlink, so the daemon may see both heads.
-    fn abandon_paused(&self) -> bool {
-        self.native[0] == Native::Paused
-            || (self.peer.is_abandon() && self.native[1] == Native::Paused)
     }
 
     /// Whether the op head the second abandon started from is among `heads`.
@@ -766,45 +728,17 @@ impl World<'_> {
                 self.children[slot].take().unwrap().kill();
                 self.native[slot] = Native::Killed;
             }
-            Action::Check | Action::InterruptPublication | Action::InterruptBeforePublication => {
+            Action::Check => {
                 let heads = read_heads(&self.repo);
-                let both = self.abandon_paused()
-                    && heads.len() == 2
-                    && heads.contains(&self.old_head)
-                    && !self.put_back;
                 // The same for the second abandon: its old and new op heads side by side.
                 let second_both = self.native[1] == Native::Paused && self.second_start_in(&heads);
                 let node = self.node.as_mut().unwrap();
-                if action != Action::Check {
-                    let before = action == Action::InterruptBeforePublication;
-                    let expected = if before {
-                        node.crash_taking_records(false);
-                        "stopped for a test: Heads"
-                    } else {
-                        node.crash_publishing_taken_heads();
-                        "stopped for a test: Publishing"
-                    };
-                    let error = node.check_abandon().unwrap_err();
-                    assert!(
-                        matches!(&error, NodeError::Io { source, .. }
-                            if source.to_string() == expected),
-                        "expected the publication interruption, got {error}"
-                    );
-                    self.node = None;
-                    self.checked_heads = None;
-                    self.interrupted = true;
-                    self.stopped_before_publication = before;
-                    self.put_back |= both;
-                    self.second_put_back |= second_both;
-                } else {
-                    let noticed = node.check_abandon().unwrap();
-                    self.checked_heads = (!noticed).then(|| self.head_keys(&heads));
-                    self.put_back |= both && noticed;
-                    // Only a notice that took out the second abandon's old op head: another, as
-                    // of the first abandon, leaves it there.
-                    self.second_put_back |=
-                        second_both && noticed && !self.second_start_in(&read_heads(&self.repo));
-                }
+                let noticed = node.retire_overtaken_moves().unwrap();
+                self.checked_heads = (!noticed).then(|| self.head_keys(&heads));
+                // Only a look that took out the second abandon's old op head: another, as of
+                // the first abandon, leaves it there.
+                self.second_put_back |=
+                    second_both && noticed && !self.second_start_in(&read_heads(&self.repo));
             }
             Action::CheckSecondUnlocked | Action::CheckSecondLocked => {
                 let at = if action == Action::CheckSecondLocked {
@@ -831,7 +765,7 @@ impl World<'_> {
                         }
                     });
                 }
-                let noticed = node.check_abandon().unwrap();
+                let noticed = node.retire_overtaken_moves().unwrap();
                 self.second_put_back |=
                     second_both && noticed && !self.second_start_in(&read_heads(&self.repo));
                 // Not moved: the command waits where it was, and a later move finds none.
@@ -881,7 +815,7 @@ impl World<'_> {
                         }
                     });
                 }
-                let noticed = node.check_abandon().unwrap();
+                let noticed = node.retire_overtaken_moves().unwrap();
                 let back = holder.lock().unwrap().take();
                 if finished.load(Ordering::Relaxed) {
                     if loader {
@@ -988,11 +922,6 @@ impl World<'_> {
             {
                 return Some(error);
             }
-            // A second abandon that added its op head drops more than the put-back restored,
-            // even killed before it took the old one out.
-            if self.put_back && !self.second_published {
-                return self.check_restored_head().err();
-            }
         }
         None
     }
@@ -1055,39 +984,6 @@ impl World<'_> {
             if output.stdout.is_empty() {
                 return Err(format!("op head {head} lost {what}"));
             }
-        }
-        Ok(())
-    }
-
-    fn check_restored_head(&mut self) -> Result<(), String> {
-        let heads = read_heads(&self.repo);
-        let [head] = heads.as_slice() else {
-            return Err("put-back left multiple heads after settling".into());
-        };
-        let head = LocalOp(OperationId::try_from_hex(head).unwrap());
-        let old = LocalOp(OperationId::try_from_hex(&self.old_head).unwrap());
-        let restored = self.store.read_operation(&head.0).block_on().unwrap();
-        // A published write or received work changes the view; `check_kept` checks what they
-        // added.
-        if !self.write_published && !self.received && restored.view_id != self.old_view {
-            return Err("put-back changed the original view".into());
-        }
-        let node = self.node.as_mut().unwrap();
-        let id_before = node.canonicalize(&old).map_err(|error| error.to_string())?;
-        let id_after = node
-            .canonicalize(&head)
-            .map_err(|error| error.to_string())?;
-        // A second native publisher can put the rewritten head back after the daemon
-        // retired it. jj may merge that alias with the restored head on the next sync.
-        // As can work received on top of it.
-        let kept = id_before == id_after
-            || ((self.concurrent || self.received)
-                && node
-                    .canonical_store()
-                    .is_ancestor_of(&id_before, &id_after)
-                    .map_err(|error| error.to_string())?);
-        if !kept || !node.pending_drops().is_empty() {
-            return Err("put-back lost the original canonical history".into());
         }
         Ok(())
     }

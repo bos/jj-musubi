@@ -4330,8 +4330,7 @@ fn settings_stay_local_and_the_daemon_reloads_them() {
 /// `jj op abandon` of history the hive has stops that copy syncing, where jj can tell what it
 /// abandoned: the error says how to carry on, `musubi status`, reading what the daemon
 /// recorded, says that retrying won't help, and joining again doesn't either. The other
-/// machine keeps the abandoned operations, and syncs on. Where jj can't tell, the error says
-/// how to restore the history.
+/// machine keeps the abandoned operations, and syncs on.
 #[test]
 fn status_says_when_retrying_cannot_help() {
     let env = TestEnv::with_real_op_times();
@@ -4363,9 +4362,6 @@ fn status_says_when_retrying_cannot_help() {
 
     `jj op abandon` of operations the hive already has stops this copy syncing for good, since other
     machines keep them. To discard operations not yet sent, use --prune.
-
-    If jj made the result of an operation abandon ambiguous, syncing stops and gives a `jj op integrate`
-    command to restore the missing history before trying again.
 
     Usage: musubi sync [OPTIONS]
 
@@ -4435,14 +4431,8 @@ fn status_says_when_retrying_cannot_help() {
         "abandon",
         &format!("{}-..{}-", first.trim(), last.trim()),
     ]);
-    let mut settings = insta::Settings::clone_current();
-    settings.add_filter(&regex_escape(last.trim()), "<operation>");
-    let checks = settings.bind_to_scope();
-    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @"
-    Error: cannot tell which operations jj abandoned
-    Hint: run `jj op integrate <operation>` to restore the missing history before syncing
-    ");
-    drop(checks);
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
+    // Restoring what was abandoned, before anything else changes, puts the copy back.
     alpha.jj(&["--ignore-working-copy", "op", "integrate", last.trim()]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     for repo in [&alpha, &beta] {

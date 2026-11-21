@@ -5,62 +5,21 @@
 use std::collections::BTreeMap;
 
 use jj_lib::object_id::ObjectId as _;
-use musubi_core::hub::HubStorage as _;
 use musubi_jj::node::NodeError;
-
-use crate::coverage::fired;
 
 use super::MAX_RECOVERIES;
 use super::OperationHistory;
 use super::World;
 
 impl World {
-    /// Integrates on machine `m` the history `target` that an ambiguous-abandon refusal of
-    /// `what` names, as its hint says, once for each copy and history: asked again, the
-    /// recovery didn't help, and the case fails, saying `err`.
-    pub(super) fn integrate_named_history(
-        &mut self,
-        m: usize,
-        what: &str,
-        target: &str,
-        err: &str,
-    ) {
-        if self.recovery_actions >= MAX_RECOVERIES
-            || !self
-                .integrated_history
-                .insert((self.fx.machine_key(m), target.to_owned()))
-        {
-            self.fail(&format!(
-                "{what} keeps asking to restore the same history: {err}"
-            ));
-        }
-        self.recovery_actions += 1;
-        self.jj(m, &["op", "integrate", target]);
-    }
-
-    /// Recovers from a sync of node `m` that failed, as a user would from what it says: from
-    /// a stop behind records the hub pruned, by making a new copy (`stopped_behind_prune`);
-    /// by integrating the history named by an ambiguous-abandon hint; or from a known jj
-    /// limitation (docs/internals/races.md), where jj can't merge this machine's operations
+    /// Recovers from a sync of node `m` that failed, as a user would from what it says: from a
+    /// known jj limitation (docs/internals/races.md), where jj can't merge this machine's operations
     /// with the hive's, so musubi pauses, by reverting the operation the
     /// error names, or where it names none, as a user given its list would: the newest, other
     /// than the recovery's own. Fails the case on any other error, or if the operation to
     /// revert is one already reverted, or a revert the recovery made: reverting it would put
     /// back what it reverted.
     pub(super) fn recover(&mut self, m: usize, what: &str, err: &anyhow::Error) {
-        if self.stopped_behind_prune(m, what, err) {
-            return;
-        }
-        if let Some(target) = err
-            .chain()
-            .find_map(|e| match e.downcast_ref::<NodeError>() {
-                Some(NodeError::AmbiguousAbandon(target)) => Some(target.clone()),
-                _ => None,
-            })
-        {
-            self.integrate_named_history(m, what, &target, &format!("{err:#}"));
-            return;
-        }
         let found = err
             .chain()
             .find_map(|e| match e.downcast_ref::<NodeError>() {
@@ -133,59 +92,6 @@ impl World {
             Some((id.to_owned(), (parents, fields.next()?.to_owned())))
         })
         .collect()
-    }
-
-    /// If `err`, from node `m`'s `what`, is its stop behind records the hub pruned, checks
-    /// that it is expected, and recovers from it as a user would, and returns true. It is
-    /// expected only of a copy the hub did not wait for at the actual prune and which lacks
-    /// that exact count and digest. A later indirect push can make that copy present again.
-    /// The user makes a new copy with `musubi clone`,
-    /// and runs `musubi leave --force` in this one, which tells the hive nothing and keeps all
-    /// it has (docs/troubleshooting.md): this one stays on its machine, out of the hive, and
-    /// out of the checks. Whatever it did since its last sync never reached the hive, and the
-    /// user brings none of it across.
-    fn stopped_behind_prune(&mut self, m: usize, what: &str, err: &anyhow::Error) -> bool {
-        let stopped = err.chain().any(|e| {
-            matches!(
-                e.downcast_ref::<NodeError>(),
-                Some(NodeError::PrunedRecords)
-            )
-        });
-        if !stopped {
-            return false;
-        }
-        let pruned = self.fx.hive.hub.pruned();
-        let key = self.fx.machine_key(m);
-        let observation = self
-            .fx
-            .hive
-            .prunes
-            .iter()
-            .rev()
-            .find(|prune| prune.records == pruned);
-        let excluded = observation.is_some_and(|prune| {
-            !prune.present.contains(&key)
-                && (prune.known.contains(&key) || !prune.reported.contains_key(&key))
-        });
-        let prefix = musubi_jj::records::RecordPrefix {
-            count: pruned.count,
-            digest: musubi_jj::records::RecordDigest::from_bytes(&pruned.digest),
-        };
-        let repo = self.fx.hive.members[m].adapter.repo();
-        let missing = repo.held_records(&prefix).is_none();
-        if !excluded || !missing {
-            self.fail(&format!(
-                "{what} of {} refused pruned records {pruned:?}: excluded at prune={excluded}, lacks exact chain={missing}: {err:#}",
-                self.machine(m),
-            ));
-        }
-        fired("prune:stopped");
-        self.record(format!(
-            "{}: {what} stopped behind records the hub pruned; musubi leave --force",
-            self.machine(m)
-        ));
-        self.clone_copy(m);
-        true
     }
 
     /// Takes an abandoned operation that a `jj` command on machine `m` brought back into its

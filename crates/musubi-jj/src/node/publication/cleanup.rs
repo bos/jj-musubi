@@ -309,10 +309,10 @@ impl NodeRepo {
         &mut self,
     ) -> Result<(CanonicalOp, Vec<CanonicalOp>), NodeError> {
         self.settle()?;
-        self.check_abandon()?;
+        self.retire_overtaken_moves()?;
         let base = self
             .stored_base()
-            .map_or_else(|| self.canonical.root_operation_id().clone(), |op| op.0);
+            .unwrap_or_else(|| self.canonical.root_operation_id().clone());
         let known: HashSet<_> = self
             .canonical
             .ancestors_until(std::slice::from_ref(&base), |_| false)?
@@ -824,7 +824,6 @@ impl NodeRepo {
             }
         }
         self.heads_mapped = false;
-        self.abandon.recheck();
         self.invalidate_published_history();
         let approval = self.repo_path.join("musubi").join(super::APPROVAL_FILE);
         if let Err(err) = std::fs::remove_file(approval)

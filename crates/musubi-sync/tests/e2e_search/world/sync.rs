@@ -70,14 +70,7 @@ impl World {
         self.record_merges(m);
         // A fully driven sync also finishes an unpublished-only trim, which produces
         // no shared drop or fix-up at all.
-        if self.fx.hive.members[m]
-            .adapter
-            .repo()
-            .pending_drops()
-            .is_empty()
-        {
-            self.evidence.workspace_trim_inputs.remove(&m);
-        }
+        self.evidence.workspace_trim_inputs.remove(&m);
         self.note_shown_again();
         steps
     }
@@ -157,14 +150,7 @@ impl World {
         deliver(self, poll)?;
         self.fx.hive.members[m].adapter.before_sync()?;
         self.observe_workspace_fixups(m);
-        if self.fx.hive.members[m]
-            .adapter
-            .repo()
-            .pending_drops()
-            .is_empty()
-        {
-            self.evidence.workspace_trim_inputs.remove(&m);
-        }
+        self.evidence.workspace_trim_inputs.remove(&m);
         let mut realized = 0;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];
@@ -294,15 +280,6 @@ impl World {
         if self.fx.hive.hub.store().pruned() > 0 {
             fired("remake_hub:after_prune");
         }
-        if self
-            .fx
-            .hive
-            .members
-            .iter()
-            .any(|member| member.adapter.repo().record_prefix().count > 0)
-        {
-            fired("remake_hub:joiner_with_prefix");
-        }
         self.record("hub: made again".to_owned());
         if let Err(err) = self.fx.hive.remake_hub() {
             self.fail(&format!("making the hive again: {err:#}"));
@@ -326,16 +303,10 @@ impl World {
             }
             self.trace
                 .push(format!("hub: pruned the first {pruned} records"));
-            for (m, key) in keys.iter().enumerate() {
-                if shown.contains(key) {
-                    continue;
+            for key in &keys {
+                if !shown.contains(key) {
+                    fired("prune:forgotten_behind");
                 }
-                let (taken, _) = self.fx.hive.members[m].adapter.repo().record_state();
-                fired(if taken < pruned as u64 {
-                    "prune:forgotten_behind"
-                } else {
-                    "prune:forgotten_took"
-                });
             }
         } else if !hub.store().records().is_empty() {
             let records = hub.records();

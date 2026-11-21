@@ -45,13 +45,11 @@ mod heads_conformance;
 #[cfg(test)]
 mod heads_laws;
 mod join;
-#[cfg(test)]
-mod native_contract;
-mod originals;
+mod legacy;
 mod presence;
 mod publication;
 mod realize;
-mod supersede;
+mod rewrites;
 mod translate;
 mod view;
 mod working_copies;
@@ -65,7 +63,6 @@ use git::NodeGit;
 pub use heads::HeadRace;
 pub use join::JoinSummary;
 use join::Joins;
-use originals::Originals;
 pub use publication::APPROVAL_FILE;
 pub use publication::CHECKPOINT_ATTRIBUTE;
 pub(crate) use publication::INTENT_ATTRIBUTE;
@@ -85,16 +82,18 @@ use realize::MergeDiagnosis;
 use realize::PublishedHistoryCache;
 pub use realize::REALIZE_AT_ONCE;
 use realize::State as RealizationState;
-pub use supersede::ACCEPTED_PUSH;
-pub(crate) use supersede::FIXUP_ATTRIBUTE;
-pub use supersede::NodeOp;
-use supersede::Records;
-pub use supersede::WORKED_AT_ATTRIBUTE;
 pub(crate) use view::LOCAL_WORKSPACES;
 pub(crate) use view::RESERVED_WORKSPACES;
 
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
+
+/// The attribute that marks a fix-up, which earlier releases wrote on an operation to restore
+/// what `jj op abandon` dropped. Hives keep their operations, so they still carry it.
+pub(crate) const FIXUP_ATTRIBUTE: &str = "musubi.fixup";
+
+/// Where the sync adapter keeps the head this machine pushed that the hub took, once it knows.
+pub const ACCEPTED_PUSH: &str = "accepted_push";
 
 /// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
 struct ReservedNames {
@@ -129,70 +128,6 @@ struct NameMemos {
     working_copies: Mutex<presence::WorkingCopies>,
 }
 
-/// The op heads, base and accepted push an abandon was last looked for at, and not found.
-#[derive(PartialEq, Eq)]
-struct AbandonObservation {
-    heads: Vec<LocalOp>,
-    base: Option<crate::records::HubOp>,
-    accepted_push: Option<crate::records::HubOp>,
-}
-
-/// What `check_abandon` found when it last looked for a `jj op abandon`. It needn't look
-/// again while the op heads, base and accepted push are those it checked, unless
-/// [`Self::recheck`] forgot them, as rewriting local history does.
-#[derive(Default)]
-struct AbandonWatch {
-    /// The op heads, base and accepted push `check_abandon` last checked.
-    checked: Option<AbandonObservation>,
-    /// Whether `check_abandon` noticed a `jj op abandon` since [`NodeRepo::take_abandon_noticed`]
-    /// last said so.
-    noticed: bool,
-    /// Whether a move of the op heads found them other than they were read since the last
-    /// look for an abandon began, and left the move to work out again.
-    overtaken: bool,
-}
-
-impl AbandonWatch {
-    /// Whether an abandon was last looked for at `observation`, and not found.
-    fn checked(&self, observation: &AbandonObservation) -> bool {
-        self.checked.as_ref() == Some(observation)
-    }
-
-    /// Records whether looking for an abandon at `observation` `noticed` one.
-    fn found(&mut self, observation: AbandonObservation, noticed: bool) {
-        // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
-        // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
-        // checked again next time.
-        if noticed {
-            self.noticed = true;
-        } else {
-            self.checked = Some(observation);
-        }
-    }
-
-    /// Whether an abandon was noticed since this last said so.
-    fn take_noticed(&mut self) -> bool {
-        std::mem::take(&mut self.noticed)
-    }
-
-    /// Makes the next check look again, whatever it finds, keeping an abandon noticed.
-    fn recheck(&mut self) {
-        self.checked = None;
-    }
-
-    /// Says that a move of the op heads found them changed since they were read, and moved
-    /// nothing, or took its move out again: the look for an abandon under way looks again.
-    fn overtaken(&mut self) {
-        self.overtaken = true;
-        self.checked = None;
-    }
-
-    /// Whether a move of the op heads was overtaken since this last said so.
-    fn take_overtaken(&mut self) -> bool {
-        std::mem::take(&mut self.overtaken)
-    }
-}
-
 /// A local jj repository's identities, translation, and publication state.
 ///
 /// Open with [`Self::open_as`] when joining under a chosen machine identity, or
@@ -215,7 +150,6 @@ pub struct NodeRepo {
     local_root: LocalOp,
     canonical: CanonicalStore,
     map: TranslationMap,
-    originals: Originals,
     /// The repository's git repository, if its backend is git; otherwise it is simple.
     git: Option<NodeGit>,
     /// Whether every operation reachable from the op heads has been mapped since opening.
@@ -235,15 +169,16 @@ pub struct NodeRepo {
     presences: Arc<crate::canonical::PresenceMemo>,
     /// Merge diagnosis retained across retries and reopening the same repository.
     merge_diagnosis: MergeDiagnosis,
-    /// The hive's records this machine took, what it dropped beyond them, and the renamings
-    /// they made (docs/internals/design.md, "Abandoning operations").
-    records: Records,
     /// Local operations canonicalized on operations a renaming superseded, as a `jj` command
     /// writes that loaded the repository before it, parents first: to reparent onto the
     /// rewrites.
     late: Vec<LocalOp>,
-    /// What looking for a `jj op abandon` last found.
-    abandon: AbandonWatch,
+    /// The op heads musubi took out lately, while what it put in their place is still an op
+    /// head (`NodeRepo::retire_overtaken`).
+    replaced: Mutex<Vec<heads::Replaced>>,
+    /// Whether an earlier release left drops recorded here that it hadn't published
+    /// (`legacy`).
+    legacy_drops: bool,
     /// Whether this handle holds jj's op-heads lock (`heads::HeadsLock`).
     heads_locked: Arc<std::sync::atomic::AtomicBool>,
     /// For tests of races: what to run in the next move of op heads.
@@ -312,18 +247,13 @@ impl NodeRepo {
             path: map_path,
             source,
         })?;
-        let originals_path = musubi_dir.join("originals");
-        let originals = Originals::open(&originals_path).map_err(|source| NodeError::Io {
-            path: originals_path,
-            source,
-        })?;
+        let legacy_drops = legacy::remove_records(&musubi_dir)?;
         let mut node = Self {
             repo_path: repo_path.to_owned(),
             local_root: LocalOp(loader.op_store().root_operation_id().clone()),
             loader,
             canonical,
             map,
-            originals,
             git,
             heads_mapped: false,
             realizing: RealizationState::default(),
@@ -334,9 +264,9 @@ impl NodeRepo {
             joins: Joins::default(),
             repo_config: None,
             machine,
-            records: Records::load(&musubi_dir)?,
             late: vec![],
-            abandon: AbandonWatch::default(),
+            replaced: Mutex::default(),
+            legacy_drops,
             heads_locked: Arc::default(),
             head_races: heads::HeadRaces::default(),
         };
@@ -353,6 +283,13 @@ impl NodeRepo {
     pub fn with_repo_config(mut self, path: Option<PathBuf>) -> Self {
         self.repo_config = path;
         self
+    }
+
+    /// The operation the hub accepted that this machine fetches from (the sync adapter's
+    /// `accepted_base`), if it has one.
+    pub(in crate::node) fn stored_base(&self) -> Option<CanonicalOp> {
+        let hex = std::fs::read_to_string(self.repo_path.join("musubi/accepted_base")).ok()?;
+        jj_lib::op_store::OperationId::try_from_hex(hex.trim()).map(CanonicalOp)
     }
 
     /// The machine whose key the repository whose `.jj/repo` directory is `repo_path` has, if
@@ -484,8 +421,7 @@ impl NodeRepo {
     }
 
     /// Lets jj merge the op heads if there are several, as any `jj` command would. Returns
-    /// the resulting single head. A `jj op abandon` is noticed first: what jj rewrote, musubi
-    /// rewrites again, moving the op heads.
+    /// the resulting single head.
     ///
     /// The merge can move bookmarks as jj rebases descendants of rewritten commits. In a
     /// colocated repository musubi merges and exports under jj's import/export lock. The
@@ -494,21 +430,13 @@ impl NodeRepo {
         Ok(LocalOp(self.merged_repo()?.op_id().clone()))
     }
 
-    /// The repository at the single head [`Self::merge_heads`] leaves, an abandon noticed
-    /// first.
+    /// The repository at the single head [`Self::merge_heads`] leaves, after the look at the op
+    /// heads ([`Self::retire_overtaken_moves`]).
     fn merged_repo(&mut self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        self.check_abandon()?;
-        self.merged_repo_unchecked()
-    }
-
-    /// [`Self::merged_repo`] without noticing an abandon first: for musubi's own operations
-    /// written one on another, an abandon noticed between which would rewrite those written.
-    fn merged_repo_unchecked(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
+        self.retire_overtaken_moves()?;
         let repo = match self.colocation() {
             Some(colocation) => {
                 let heads = self.local_heads()?;
-                #[cfg(test)]
-                native_contract::emit(native_contract::Event::HelperHeads(heads.clone()));
                 // A head can arrive after the first read. Reread as jj's loader would,
                 // but load that exact operation on the fast path so a later arrival
                 // cannot trigger a merge without the Git export lock.
@@ -522,8 +450,6 @@ impl NodeRepo {
             }
             None => self.load_head(None),
         }?;
-        #[cfg(test)]
-        native_contract::emit(native_contract::Event::HelperComplete);
         Ok(repo)
     }
 
@@ -539,7 +465,6 @@ impl NodeRepo {
                 &LocalOp(merged.op_id().clone()),
                 &|op| self.is_join_point(op),
                 &[],
-                &self.pending_expected(),
             )?;
             if exported.0 == *merged.op_id() {
                 return Ok(merged);
@@ -576,13 +501,7 @@ impl NodeRepo {
             })
         });
         match loaded {
-            Ok(Ok(repo)) => {
-                #[cfg(test)]
-                native_contract::emit(native_contract::Event::Loaded(LocalOp(
-                    repo.op_id().clone(),
-                )));
-                Ok(repo)
-            }
+            Ok(Ok(repo)) => Ok(repo),
             Ok(Err(err)) => Err(err),
             Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
         }
@@ -597,22 +516,6 @@ impl NodeRepo {
             .insert(local, canonical)
             .map_err(|source| NodeError::Io {
                 path: self.repo_path.join("musubi/translation"),
-                source,
-            })
-    }
-
-    fn remember_original(
-        &mut self,
-        canonical: &CanonicalOp,
-        op: &jj_lib::op_store::Operation,
-    ) -> Result<(), NodeError> {
-        self.originals
-            .record(
-                self.canonical.original_id(canonical)?,
-                join::fingerprint(op),
-            )
-            .map_err(|source| NodeError::Io {
-                path: self.repo_path.join("musubi/originals"),
                 source,
             })
     }

@@ -14,6 +14,18 @@
 - A copy that was away before its first sync finished, or that the hive forgot, no longer
   stops syncing because other machines abandoned operations meanwhile.
 
+- When `jj op abandon` leaves a copy unable to tell which of the hive's operations it dropped,
+  `musubi sync` no longer asks you to run `jj op integrate`. Such a copy now stops syncing
+  with "this repository lost history the hive has", as any copy that lost history the hive
+  has does. If you restore what you abandoned with `jj op integrate` before syncing again,
+  the copy syncs on.
+
+- musubi removes the files that earlier releases kept in a copy's `musubi` directory to pass
+  `jj op abandon` on (`records.json`, `superseded`, `hub-renamings` and `originals`) the
+  first time it opens the copy, and ignores the records an older hub still announces: nothing
+  needs doing on upgrading. A copy that held drops it hadn't sent, or was
+  taking records, keeps `records.json` and stops syncing, until a release after 2027-02-21, which no longer looks for the file.
+
 - Upgrade the hub and every machine together: machines and hubs from before and after this
   release refuse each other ([Upgrade jj-musubi](docs/guides/upgrading.md)). Run `musubi sync`
   on every machine first, so that its work reaches the hub. A copy that ran `jj op abandon`

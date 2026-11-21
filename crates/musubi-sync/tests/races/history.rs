@@ -707,55 +707,6 @@ fn a_push_to_a_hive_made_again_is_rejected() {
     assert_eq!(hive.hive.hub_head(), root);
 }
 
-/// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
-/// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
-/// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came
-/// back onto other parents, so that two of the machine's operations stand for each of the
-/// hive's, neither where the hive has it, and nothing is dropped: musubi puts its history back
-/// as the hive has it, rather than stopping as if the history the hub accepted were gone, and
-/// the operation jj brought back stays everywhere.
-#[test]
-fn an_abandon_a_stale_workspace_brought_back_stays() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    let second = hive.repo(0).path().with_file_name("alpha-second");
-    let second = second.to_str().unwrap();
-    hive.repo(0).jj(&["workspace", "add", second]);
-    hive.commit(0, "a", "first");
-    hive.commit(0, "b", "second");
-    hive.sync();
-    // The second working copy records an operation above the one alpha abandons.
-    hive.repo(0).jj(&["-R", second, "status"]);
-    let abandoned = commit_op(hive.repo(0));
-    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
-    hive.commit(0, "z", "z");
-    let below = op_log(hive.repo(0))[0].clone();
-    assert!(below.1.starts_with("commit "), "{below:?}");
-    hive.commit(0, "w", "w");
-    std::fs::write(Path::new(second).join("s"), "edit").unwrap();
-    hive.repo(0).jj(&["-R", second, "status"]);
-    assert!(has_operation(hive.repo(0), &abandoned.1));
-    hive.repo(0).jj(&["op", "abandon", &below.0]);
-    hive.sync();
-    hive.assert_converged();
-    // Settled: a `jj` command everywhere and another sync change nothing.
-    hive.assert_converged();
-    for machine in 0..2 {
-        assert!(has_operation(hive.repo(machine), &abandoned.1), "{machine}");
-        assert!(!has_operation(hive.repo(machine), &below.1), "{machine}");
-        let visible = hive.visible(machine);
-        for work in [" first", " second", " z", " w"] {
-            assert!(
-                visible.iter().any(|c| c.ends_with(work)),
-                "{machine}: {work}"
-            );
-        }
-    }
-    assert_eq!(
-        std::fs::read_to_string(Path::new(second).join("s")).unwrap(),
-        "edit"
-    );
-}
-
 /// Where the operation a machine last fetched from is out of reach though jj rewrote
 /// nothing, which no abandon explains, the machine stops syncing rather than tell the hive
 /// to drop what it has.
@@ -803,7 +754,6 @@ fn op_abandon_of_published_history_stops_that_copy() {
             "the stop changed alpha's history"
         );
     }
-    assert!(hive.node(0).pending_drops().is_empty());
     assert_eq!(hive.hive.hub.store().record_count(), 0);
 
     hive.commit(1, "c", "beta's");
@@ -871,30 +821,126 @@ fn abandoning_everything_before_the_first_sync_syncs_on() {
 }
 
 /// A copy that recorded drops to publish, after `jj op abandon` under a release that passed it
-/// on, and was upgraded before publishing them, stops as any other copy that lost history the
-/// hive has does, publishing nothing. Nothing in this release records drops, so the test
-/// writes them into `records.json` as that release did.
+/// on, and was upgraded before publishing them, or that was taking the hub's records, stops as
+/// any other copy that lost history the hive has does, publishing nothing, and keeps what that
+/// release recorded. Nothing in this release records either, so the test writes them into
+/// `records.json` as that release did.
 ///
-/// Compatibility until 2027-02-21: remove with `refuse_pending_drops`.
+/// Compatibility until 2027-02-21: remove with `NodeRepo::refuse_legacy_drops`.
 #[test]
 fn drops_recorded_before_upgrading_stop_that_copy() {
+    for case in ["pending", "custody", "realign"] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(0, "a", "first");
+        hive.sync();
+        let head = hive.hive.hub_head();
+        let hex = jj_lib::object_id::ObjectId::hex(&head);
+        let path = hive.repo(0).repo_path().join("musubi/records.json");
+        let mut records = serde_json::json!({
+            "applied": [],
+            "pending": [],
+            "fixup": null,
+            "fixup_written": false,
+        });
+        match case {
+            "pending" => records["pending"] = serde_json::json!([hex]),
+            "custody" => records["custody"] = serde_json::json!([["a", [hex]]]),
+            _ => {
+                records["realign"] =
+                    serde_json::json!({"from": [[hex, [hex]]], "to": [hex], "canonical": []});
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+        hive.reopen(0);
+        hive.commit(0, "b", "second");
+        let err = hive.hive.sync(0).unwrap_err();
+        assert!(history_lost(&err), "{case}: {err:#}");
+        assert!(path.exists(), "{case}");
+        assert_eq!(hive.hive.hub_head(), head, "{case}");
+        assert_eq!(hive.hive.hub.store().record_count(), 0, "{case}");
+        hive.commit(1, "c", "beta's");
+        hive.hive.sync(1).unwrap();
+    }
+}
+
+/// What earlier releases kept in a copy's `musubi` directory to replicate `jj op abandon` is
+/// removed when the copy opens, if it records no drops it hadn't published, and the copy syncs
+/// on as before.
+///
+/// Compatibility until 2027-02-21: remove with `legacy::remove_records`.
+#[test]
+fn files_an_earlier_release_kept_for_abandons_are_removed() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "first");
     hive.sync();
-    let head = hive.hive.hub_head();
-    let path = hive.repo(0).repo_path().join("musubi/records.json");
-    let mut records: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    records["pending"] = serde_json::json!([jj_lib::object_id::ObjectId::hex(&head)]);
-    std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+    let dir = hive.repo(0).repo_path().join("musubi");
+    let files = ["records.json", "superseded", "hub-renamings", "originals"];
+    for name in files {
+        std::fs::write(dir.join(name), "{\"pending\": []}").unwrap();
+    }
     hive.reopen(0);
+    for name in files {
+        assert!(!dir.join(name).exists(), "{name}");
+    }
     hive.commit(0, "b", "second");
-    let err = hive.hive.sync(0).unwrap_err();
-    assert!(history_lost(&err), "{err:#}");
-    assert_eq!(hive.hive.hub_head(), head);
-    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    hive.sync();
+    hive.assert_converged();
+}
+
+/// The hub of an earlier release keeps announcing the records it took, which dropped operations
+/// the hive's other history still names. A copy that joins it ignores them: it syncs without
+/// stopping, and goes on syncing, rather than asking the hub for them again.
+///
+/// Compatibility until 2027-02-21: remove with the records in the protocol.
+#[test]
+fn records_an_earlier_hub_announces_are_ignored() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_hub::store::HubStore;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+    use std::io::Write as _;
+
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let mut hive = Fixture::join(env, vec![alpha]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    // The hub takes a record that drops the head's parent, as a 0.47 hub did for an abandon.
+    let dir = hive.env.root().join("hub");
+    let store = HubStore::open(&dir).unwrap();
+    let head = store.head().1.clone();
+    let seq = store.head().0 + 1;
+    let dropped = store
+        .canonical()
+        .parents(&CanonicalOp(head.clone()))
+        .unwrap()[0]
+        .clone();
+    let contracted = store.contract(&[HubOp(dropped)]).unwrap();
+    let image = contracted.images[&head][0].clone();
+    let mut line = format!("{seq} {}", image.hex());
+    for op in &contracted.dropped {
+        line.push(' ');
+        line.push_str(&op.hex());
+    }
+    line.push('\n');
+    drop(store);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("heads"))
+        .unwrap()
+        .write_all(line.as_bytes())
+        .unwrap();
+    hive.hive.restart_hub().unwrap();
+    assert_eq!(hive.hive.hub.store().record_count(), 1);
+    hive.add(beta);
+    hive.hive.sync(1).unwrap();
+    assert_eq!(hive.hive.sync(1).unwrap(), 0, "beta syncs on");
+    assert!(hive.visible(1).iter().any(|c| c.ends_with(" second")));
     hive.commit(1, "c", "beta's");
     hive.hive.sync(1).unwrap();
+    assert_eq!(hive.hive.sync(1).unwrap(), 0, "beta syncs on");
 }
 
 /// Abandoning only history from before a machine joined rewrites the operations since

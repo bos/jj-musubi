@@ -28,6 +28,10 @@ use crate::workspaces;
 /// The jj config key for how long a copy may go unused before a daemon forgets it.
 pub const FORGET_AFTER_KEY: &str = "musubi.forget-after";
 
+/// The attribute of an earlier release's fix-up saying when the work it stands for was done,
+/// in milliseconds since the epoch: the copy's latest work, which an abandon dropped.
+const WORKED_AT_ATTRIBUTE: &str = "musubi.worked-at";
+
 /// A copy present in the hive, as `musubi list` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Activity {
@@ -209,8 +213,8 @@ impl NodeRepo {
     }
 
     /// When a present copy last worked: the latest end of its latest work's operations, or
-    /// when a fix-up says that work was done. Work an abandon dropped, which the fix-up
-    /// replaces, counts as just done: it is never a reason to forget a copy.
+    /// when a fix-up an earlier release wrote says that work was done. Work an abandon dropped,
+    /// which the fix-up replaces, counts as just done: it is never a reason to forget a copy.
     fn last_work(&self, presence: &Presence<Work>, copy: &str) -> Result<SystemTime, NodeError> {
         let mut last = SystemTime::UNIX_EPOCH;
         for work in presence.latest(copy).into_iter().flatten() {
@@ -224,6 +228,18 @@ impl NodeRepo {
             last = last.max(time);
         }
         Ok(last)
+    }
+
+    /// When the work a canonical operation stands for was done, in milliseconds since the
+    /// epoch: the end of the operation, or what a fix-up an earlier release wrote recorded.
+    fn work_time(&self, op: &CanonicalOp) -> Result<i64, NodeError> {
+        let operation = self.canonical.read_operation(op)?;
+        Ok(operation
+            .metadata
+            .attributes
+            .get(WORKED_AT_ATTRIBUTE)
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(operation.metadata.time.end.timestamp.0))
     }
 
     /// This machine's name in the hive: its plain name, unless another copy present has that

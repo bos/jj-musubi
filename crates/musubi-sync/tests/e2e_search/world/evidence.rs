@@ -178,11 +178,7 @@ impl World {
         if m >= self.imports.preserved_heads.len() {
             return None;
         }
-        let authorization = if self.root_record_transition(m)? {
-            GitRecordAuthorization::RootTransition
-        } else {
-            GitRecordAuthorization::PrivateWorkspaces(self.private_git_names(m)?)
-        };
+        let authorization = GitRecordAuthorization::PrivateWorkspaces(self.private_git_names(m)?);
         let node = self.fx.hive.members[m].adapter.repo();
         let heads: Vec<_> = self
             .op_heads(m)
@@ -205,56 +201,6 @@ impl World {
             before,
             authorization,
         })
-    }
-
-    /// Whether receipt can discard the accepted base. An opaque prefix alone cannot.
-    pub(super) fn root_record_transition(&self, m: usize) -> Option<bool> {
-        let node = self.fx.hive.members[m].adapter.repo();
-        let hub = self.fx.hive.hub.store();
-        let count = usize::try_from(node.record_state().0).ok()?;
-        if count < hub.pruned() {
-            return None;
-        }
-        let same_prefix = node.record_prefix().count == hub.pruned() as u64
-            && Some(&node.record_prefix().digest) == hub.digest(hub.pruned());
-        if same_prefix && node.applied_records() == hub.records() && !node.has_record_custody() {
-            return Some(false);
-        }
-        let common = if same_prefix {
-            node.applied_records()
-                .iter()
-                .zip(hub.records())
-                .take_while(|(old, new)| old == new)
-                .count()
-        } else {
-            0
-        };
-        // Losing an opaque prefix alone does not reset the accepted base. An actual
-        // applied suffix must be lost, or the exact saved base must be entirely dropped.
-        let lost = common < node.applied_records().len();
-        if !lost {
-            let base = fs::read_to_string(node.repo_path().join("musubi/accepted_base")).ok()?;
-            let base = CanonicalOp(OpId::try_from_hex(base.trim())?);
-            let dropped: BTreeSet<_> = hub.records()[common..]
-                .iter()
-                .flat_map(|record| record.ops())
-                .map(|op| hub.canonical().original_id(&op.0))
-                .collect::<Result<_, _>>()
-                .ok()?;
-            let store = node.canonical_store();
-            let mut todo = vec![base];
-            let mut visited = BTreeSet::new();
-            while let Some(op) = todo.pop() {
-                if op == *store.root_operation_id() || !visited.insert(op.clone()) {
-                    continue;
-                }
-                if !dropped.contains(&store.original_id(&op).ok()?) {
-                    return Some(false);
-                }
-                todo.extend(CanonicalOp::parents_of(&store.read_operation(&op).ok()?));
-            }
-        }
-        Some(true)
     }
 
     /// The search creates plain workspace names, recording their births independently.
@@ -316,17 +262,16 @@ impl World {
                 .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
                 .is_some_and(|target| *target == input.target.hex())
             {
-                if let GitRecordAuthorization::PrivateWorkspaces(names) = &input.authorization {
-                    let Ok(view) = futures::executor::block_on(store.read_view(&op.view_id)) else {
-                        continue;
-                    };
-                    if !view
-                        .wc_commit_ids
-                        .keys()
-                        .any(|name| names.contains(name.as_str()))
-                    {
-                        continue;
-                    }
+                let GitRecordAuthorization::PrivateWorkspaces(names) = &input.authorization;
+                let Ok(view) = futures::executor::block_on(store.read_view(&op.view_id)) else {
+                    continue;
+                };
+                if !view
+                    .wc_commit_ids
+                    .keys()
+                    .any(|name| names.contains(name.as_str()))
+                {
+                    continue;
                 }
                 self.imports.preserved_heads[m]
                     .entry(id)
@@ -622,11 +567,6 @@ impl World {
             .workspace_trim_inputs
             .get(&m)
             .is_some_and(|trim| trim.wrote_fixup)
-            && self.fx.hive.members[m]
-                .adapter
-                .repo()
-                .pending_drops()
-                .is_empty()
         {
             self.evidence.workspace_trim_inputs.remove(&m);
         }

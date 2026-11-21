@@ -101,7 +101,6 @@ impl NodeRepo {
         local_op: &StoreOperation,
         canonical: CanonicalOp,
     ) -> Result<(), NodeError> {
-        self.remember_original(&canonical, local_op)?;
         let path = self.joins_path();
         let io_err = |source| NodeError::Io {
             path: path.clone(),
@@ -193,9 +192,6 @@ impl NodeRepo {
         if carried.is_some() {
             return self.mark_joined_with_remotes(description, hive, remotes);
         }
-        // A join on the root brings nothing of the hive's: so far, this node may take the
-        // hub's records from those it pruned.
-        self.mark_fresh()?;
         let op = self.loader.op_store().read_operation(&head.0).block_on()?;
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
@@ -378,8 +374,8 @@ fn parse_joins(bytes: &[u8]) -> Vec<(LocalOp, CanonicalOp, String)> {
 }
 
 /// This repository's join points, the canonical join operations they stand for, and the
-/// history from before them. `ancestors` is kept until a join point is recorded or local
-/// operations are rewritten ([`Self::forget_ancestors`]); `before` is never forgotten.
+/// history from before them. `ancestors` is kept until a join point is recorded; `before` is
+/// never forgotten.
 #[derive(Default)]
 pub(super) struct Joins {
     /// The canonical join operation each join point maps to, by the join point's
@@ -421,18 +417,6 @@ impl Joins {
     /// Whether `canonical` is a join operation a join point here stands for.
     pub(super) fn is_join(&self, canonical: &CanonicalOp) -> bool {
         self.by_fingerprint.values().any(|join| join == canonical)
-    }
-
-    /// The canonical join operation each join point maps to, by its fingerprint.
-    #[cfg(test)]
-    pub(super) fn by_fingerprint(&self) -> impl Iterator<Item = (&String, &CanonicalOp)> {
-        self.by_fingerprint.iter()
-    }
-
-    /// Forgets the ancestors of the join points, which rewriting local operations makes
-    /// stale.
-    pub(super) fn forget_ancestors(&mut self) {
-        self.ancestors = None;
     }
 }
 

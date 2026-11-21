@@ -305,9 +305,6 @@ pub enum Command {
     ///
     /// `jj op abandon` of operations the hive already has stops this copy syncing for good,
     /// since other machines keep them. To discard operations not yet sent, use --prune.
-    ///
-    /// If jj made the result of an operation abandon ambiguous, syncing stops and gives a
-    /// `jj op integrate` command to restore the missing history before trying again.
     Sync {
         /// Inspect the snapshot content waiting to be sent, without sending or snapshotting.
         #[arg(long, conflicts_with_all = ["approve", "prune", "dry_run"])]

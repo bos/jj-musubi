@@ -225,25 +225,6 @@
       ]
     },
     {
-      "id": "abandonfetch",
-      "area": "history",
-      "title": "Abandonment preserves a concurrent fetch",
-      "detail": "The contracted survivor graph and saved expected ref values meet at realization.",
-      "code": [
-        "crates/musubi-jj/src/node/supersede.rs",
-        "crates/musubi-jj/src/node/realize.rs",
-        "crates/musubi-jj/src/node/supersede/abandon.rs",
-        "crates/musubi-jj/src/node/supersede/receive.rs",
-        "crates/musubi-jj/src/node/supersede/rewrite.rs",
-        "crates/musubi-jj/src/node/supersede/fixup.rs",
-        "crates/musubi-jj/src/node/supersede/normalize.rs",
-        "crates/musubi-jj/src/node/supersede/storage.rs"
-      ],
-      "evidence": [
-        "e20"
-      ]
-    },
-    {
       "id": "revert",
       "area": "refs",
       "title": "Imports do not spuriously revert work",
@@ -762,16 +743,6 @@
       "detail": "Observes published canonical heads in real repositories and compares them with the oracle.",
       "needs": [],
       "provenance": "documented"
-    },
-    {
-      "id": "e20",
-      "claim": "abandonfetch",
-      "mechanism": "conformance",
-      "source": "formal/Musubi/AbandonRefs.lean",
-      "detail": "A boundary theorem connects contracted heads and one-ref realization.",
-      "needs": [],
-      "provenance": "documented",
-      "kind": "proof"
     },
     {
       "id": "e22",

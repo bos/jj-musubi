@@ -216,7 +216,7 @@ fn compare_model(node: &mut NodeRepo, selected: &[String]) -> ModelCleanup {
     let heads = node.canonical_heads().unwrap();
     let base = node
         .stored_base()
-        .map_or_else(|| node.canonical.root_operation_id().clone(), |op| op.0);
+        .unwrap_or_else(|| node.canonical.root_operation_id().clone());
     let known_ops = node
         .canonical
         .ancestors_until(std::slice::from_ref(&base), |_| false)

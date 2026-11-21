@@ -13,10 +13,16 @@ use std::collections::HashSet;
 use jj_lib::backend::CommitId;
 use jj_lib::op_store::Operation;
 use jj_lib::op_store::View;
+use jj_lib::repo::ReadonlyRepo;
+use jj_lib::repo::Repo as _;
 
 use super::NodeError;
 use super::NodeRepo;
+use super::git;
 use crate::op_id::CanonicalOp;
+use crate::presence::FORGET_AFTER_ATTRIBUTE;
+use crate::presence::WORK_ATTRIBUTE;
+use crate::presence::format_forget_after;
 
 mod accounting;
 mod approval;
@@ -64,7 +70,7 @@ struct Checkpoint {
 }
 
 impl NodeRepo {
-    /// Namespace and ownership declarations shared by publication checkpoints and fix-ups.
+    /// Namespace and ownership declarations of publication checkpoints.
     pub(in crate::node) fn publication_namespace_facts(
         &self,
         head: &CanonicalOp,
@@ -89,6 +95,41 @@ impl NodeRepo {
             (crate::canonical::namespace::ATTRIBUTE.to_owned(), namespace),
             (super::view::LOCAL_WORKSPACES.to_owned(), own.encode()),
         ]))
+    }
+
+    /// A cleanup is new local activity, retaining Git expectations, namespace and this
+    /// copy's lease. Other copies' complete causal presence is checked before publication;
+    /// recreating their work under new identities would change later concurrent merges.
+    pub(in crate::node) fn publication_state_attributes(
+        &self,
+        repo: &ReadonlyRepo,
+        head: &CanonicalOp,
+    ) -> Result<Vec<BTreeMap<String, String>>, NodeError> {
+        let known = git::Expected::default();
+        let history = git::History {
+            known: &known,
+            roots: std::slice::from_ref(&self.root_op_id().0),
+            is_join: &|op| self.is_join_point(op),
+            parents: &|_| Ok(None),
+        };
+        let expected = git::format_expected(&git::expected_values(
+            repo.store(),
+            repo.operation(),
+            &history,
+        )?);
+        let presence = self.presence(head)?;
+        let mut attrs = self.publication_namespace_facts(head)?;
+        // Cleanup is genuine activity by this copy. It must not invent new activity by
+        // other copies: their causal work/forget identities are checked before publishing.
+        attrs.insert(WORK_ATTRIBUTE.to_owned(), self.machine.key().to_owned());
+        attrs.insert(
+            FORGET_AFTER_ATTRIBUTE.to_owned(),
+            format_forget_after(presence.forget_after(self.machine.key())),
+        );
+        if let Some(expected) = expected {
+            attrs.insert(git::EXPECTED_ATTRIBUTE.to_owned(), expected);
+        }
+        Ok(vec![attrs])
     }
 
     fn publication_intent_is_uncertain(
@@ -150,10 +191,10 @@ impl NodeRepo {
         cache: &mut PublicationCache,
     ) -> Result<PublicationReport, NodeError> {
         self.settle()?;
-        self.check_abandon()?;
+        self.retire_overtaken_moves()?;
         let base = self
             .stored_base()
-            .map_or_else(|| self.canonical.root_operation_id().clone(), |op| op.0);
+            .unwrap_or_else(|| self.canonical.root_operation_id().clone());
         let heads = self.canonical_heads()?;
         let excluded: HashSet<_> = self
             .canonical

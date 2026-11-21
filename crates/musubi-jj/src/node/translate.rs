@@ -15,9 +15,7 @@ use pollster::FutureExt as _;
 
 use super::NodeError;
 use super::NodeRepo;
-use super::join::fingerprint;
 use crate::canonical::CanonicalError;
-use crate::canonical::CanonicalStore;
 use crate::canonical::Work;
 use crate::format_guard;
 use crate::format_guard::FormatError;
@@ -29,18 +27,11 @@ use crate::presence::Presence;
 use crate::remote_url::without_credentials;
 use crate::workspaces;
 
-#[derive(Default)]
-pub(super) struct RecoveredSources {
-    pub(super) roots: HashMap<LocalOp, CanonicalOp>,
-    pub(super) twins: HashMap<LocalOp, CanonicalOp>,
-}
-
 impl NodeRepo {
     /// The canonical form of each local op head, but for one from before this repository
-    /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]). A `jj op
-    /// abandon` is noticed first, as in [`Self::merge_heads`].
+    /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]).
     pub fn canonical_heads(&mut self) -> Result<Vec<CanonicalOp>, NodeError> {
-        self.check_abandon()?;
+        self.retire_overtaken_moves()?;
         let heads = self.local_heads()?;
         let mut canonical = vec![];
         for head in &heads {
@@ -62,10 +53,10 @@ impl NodeRepo {
         Ok(canonical)
     }
 
-    /// Reparents the local operations canonicalized on operations a renaming superseded
-    /// onto the rewrites, as their canonical operations have them, and moves the op heads
-    /// among them there: before anything merges them with the renamed history, which would
-    /// merge against an older common ancestor.
+    /// Reparents the local operations canonicalized on a local operation that isn't the
+    /// preferred realization of its canonical parent onto that realization, as their canonical
+    /// operations have them, and moves the op heads among them there: before anything merges
+    /// them, which would merge against an older common ancestor.
     fn reparent_late(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
         let mut tips: Vec<_> = heads
             .iter()
@@ -73,10 +64,7 @@ impl NodeRepo {
             .collect();
         let mut late: HashMap<CanonicalOp, Vec<LocalOp>> = HashMap::new();
         for local in &self.late {
-            // A record received since queuing an operation can already have replaced it.
-            if let Some(canonical) = self.canonical_of(local)
-                && self.current_ids(&canonical)? == [canonical.clone()]
-            {
+            if let Some(canonical) = self.canonical_of(local) {
                 late.entry(canonical.clone())
                     .or_insert_with(|| {
                         tips.push(canonical);
@@ -190,342 +178,9 @@ impl NodeRepo {
         self.move_workspaces(&rewrites)
     }
 
-    /// Recover a command jj reparented to root after its accepted basis was already dropped.
-    /// Only its immutable native twin supplies the erased input, never an older hive view.
-    pub(super) fn unpublished_root_sources(
-        &mut self,
-        unmapped: &[(LocalOp, StoreOperation)],
-    ) -> Result<RecoveredSources, NodeError> {
-        let mut roots = HashMap::new();
-        for (id, op) in unmapped {
-            if op.parents == [self.root_op_id().0.clone()]
-                && op.metadata.workspace_name.is_some()
-                && OpAttrs(&op.metadata.attributes).canonical().is_none()
-                && !OpAttrs(&op.metadata.attributes).has_namespace()
-                && self.records.source(id).is_none()
-                && !self.is_before_join(id, op)?
-                && roots.insert(fingerprint(op), id.clone()).is_some()
-            {
-                return Err(NodeError::AmbiguousAbandon(id.0.hex()));
-            }
-        }
-        if roots.is_empty() {
-            return Ok(RecoveredSources::default());
-        }
-        let sources = self.native_twins(&roots)?;
-        let mut found = RecoveredSources::default();
-        let mut historical = HashMap::new();
-        for (root, twins) in sources {
-            let mut target = None;
-            let mut authenticated = vec![];
-            let mut unanchored = false;
-            for twin in &twins {
-                let Some(original) = self.historical_native_source(twin, &mut historical)? else {
-                    unanchored = true;
-                    continue;
-                };
-                let images = self.current_ids(&original)?;
-                let [now] = images.as_slice() else {
-                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
-                };
-                if self.canonical.original_id(now)? != self.canonical.original_id(&original)?
-                    || target.as_ref().is_some_and(|old| old != now)
-                {
-                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
-                }
-                target = Some(now.clone());
-                authenticated.push((twin.clone(), original));
-            }
-            if let Some(target) = target {
-                if unanchored {
-                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
-                }
-                found.roots.insert(root, target);
-                found.twins.extend(authenticated);
-            }
-        }
-        Ok(found)
-    }
-
-    /// Recover the sources of commands jj reparented when `jj op abandon` dropped what they
-    /// were on (`dropping`, operations the hub accepted), onto operations still reached
-    /// (`reached`), and that stand for nothing the hive has (`counterparts`): each one's
-    /// pre-abandon twin, on operations it has canonical forms of, one of them dropped, given a
-    /// canonical form there, so that what the command made is judged against the views it
-    /// started from, not those jj put under it. Otherwise a name an abandoned operation showed,
-    /// as one where a sync showed another machine's workspace again, would be one the command
-    /// added, and so this machine's own. Returns, for each command recovered, the current image
-    /// of its twin's canonical operation, and for that twin, the operation. Where abandons
-    /// moved a command more than once, the twin furthest up the history is the one jj first
-    /// moved. A command whose twins can't be ordered so, or whose twin can't be translated, is
-    /// left as it is.
-    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
-    #[allow(dead_code)]
-    pub(super) fn unpublished_reparented_sources(
-        &mut self,
-        unmapped: &[(LocalOp, StoreOperation)],
-        reached: &HashSet<LocalOp>,
-        dropping: &HashSet<CanonicalOp>,
-        counterparts: &HashMap<LocalOp, CanonicalOp>,
-    ) -> Result<RecoveredSources, NodeError> {
-        let mut commands: HashMap<String, Option<LocalOp>> = HashMap::new();
-        for (id, op) in unmapped {
-            let parents = LocalOp::parents_of(op);
-            if !counterparts.contains_key(id)
-                && parents != [self.root_op_id().clone()]
-                && parents.iter().all(|parent| reached.contains(parent))
-                && op.metadata.workspace_name.is_some()
-                && OpAttrs(&op.metadata.attributes).canonical().is_none()
-                && !OpAttrs(&op.metadata.attributes).has_namespace()
-                && self.records.source(id).is_none()
-                && !self.is_before_join(id, op)?
-            {
-                // Two commands alike but for their parents: neither says which was moved.
-                commands
-                    .entry(fingerprint(op))
-                    .and_modify(|found| *found = None)
-                    .or_insert_with(|| Some(id.clone()));
-            }
-        }
-        let commands: HashMap<String, LocalOp> = commands
-            .into_iter()
-            .filter_map(|(key, id)| Some((key, id?)))
-            .collect();
-        if commands.is_empty() {
-            return Ok(RecoveredSources::default());
-        }
-        let mut found = RecoveredSources::default();
-        let mut memo = HashMap::new();
-        let store = self.loader.op_store().clone();
-        for (command, mut twins) in self.native_twins(&commands)? {
-            twins.sort();
-            // A twin still reached is matched as any other operation is. Only one on what this
-            // abandon drops is what the command was before it: one on what an earlier abandon or
-            // trim rewrote, as a `jj --at-op` command can be, started from other views.
-            let mut rebuilt: Vec<(LocalOp, CanonicalOp, CanonicalOp)> = vec![];
-            for twin in twins {
-                if reached.contains(&twin) || unmapped.iter().any(|(id, _)| *id == twin) {
-                    continue;
-                }
-                let op = store.read_operation(&twin.0).block_on()?;
-                let mut known = true;
-                let mut on_dropped = false;
-                for parent in LocalOp::parents_of(&op) {
-                    match self.canonical_of(&parent) {
-                        Some(canonical) => on_dropped |= dropping.contains(&canonical),
-                        None => known = false,
-                    }
-                }
-                if !known || !on_dropped {
-                    continue;
-                }
-                let source = self.historical_native_source(&twin, &mut memo);
-                let original = match source {
-                    Ok(Some(original)) => original,
-                    Ok(None)
-                    | Err(NodeError::RewrittenRealization | NodeError::AmbiguousAbandon(_)) => {
-                        continue;
-                    }
-                    Err(err) => return Err(err),
-                };
-                if let [now] = self.current_ids(&original)?.as_slice()
-                    && self.canonical.original_id(now)? == self.canonical.original_id(&original)?
-                {
-                    rebuilt.push((twin, original, now.clone()));
-                }
-            }
-            // By the twins' own parents, as jj moved them: their images can share parents.
-            let mut first = None;
-            for (index, (_, original, _)) in rebuilt.iter().enumerate() {
-                if self.above_all(original, rebuilt.iter().map(|(_, other, _)| other))? {
-                    first = Some(index);
-                    break;
-                }
-            }
-            // Twins that can't be ordered so, but judged alike, say the same of the command.
-            if first.is_none() && !rebuilt.is_empty() {
-                let mut views = HashSet::new();
-                for (_, original, _) in &rebuilt {
-                    views.insert(self.canonical.read_operation(original)?.view_id);
-                }
-                if views.len() == 1 {
-                    first = Some(0);
-                }
-            }
-            if let Some(index) = first {
-                let (twin, original, now) = rebuilt.swap_remove(index);
-                found.roots.insert(command, now);
-                found.twins.insert(twin, original);
-            }
-        }
-        Ok(found)
-    }
-
-    /// Whether every parent of each of `others` is below a parent of `op`: `op` is as far up
-    /// the history as any of them.
-    fn above_all<'a>(
-        &self,
-        op: &CanonicalOp,
-        others: impl Iterator<Item = &'a CanonicalOp>,
-    ) -> Result<bool, NodeError> {
-        let parents = self.canonical.parents(op)?;
-        for other in others {
-            for below in self.canonical.parents(other)? {
-                let mut found = false;
-                for parent in &parents {
-                    if self.canonical.is_ancestor_of(&below, parent)? {
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
-
-    /// Every other operation in the op store with the full nonparent content of one of
-    /// `commands`, by fingerprint: what jj's reparenting left of each.
-    fn native_twins(
-        &self,
-        commands: &HashMap<String, LocalOp>,
-    ) -> Result<HashMap<LocalOp, Vec<LocalOp>>, NodeError> {
-        let path = self.repo_path.join("op_store/operations");
-        let files = fs::read_dir(&path).map_err(|source| NodeError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let store = self.loader.op_store().clone();
-        let mut sources: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
-        for file in files {
-            let file = file.map_err(|source| NodeError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            let Some(id) = file
-                .file_name()
-                .to_str()
-                .and_then(OperationId::try_from_hex)
-            else {
-                continue;
-            };
-            let op = match store.read_operation(&id).block_on() {
-                Ok(op) => op,
-                Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => continue,
-                Err(err) => return Err(err.into()),
-            };
-            if let Some(command) = commands.get(&fingerprint(&op))
-                && command.0 != id
-            {
-                sources
-                    .entry(command.clone())
-                    .or_default()
-                    .push(LocalOp(id));
-            }
-        }
-        Ok(sources)
-    }
-
-    /// Rebuild an unpublished source on its actual historical inputs before dropping them.
-    /// A marked realization, join point or established source must anchor the native history.
-    fn historical_native_source(
-        &mut self,
-        local: &LocalOp,
-        memo: &mut HashMap<LocalOp, Option<CanonicalOp>>,
-    ) -> Result<Option<CanonicalOp>, NodeError> {
-        let store = self.loader.op_store().clone();
-        let mut active = HashSet::new();
-        let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
-        while let Some((id, expanded)) = stack.pop() {
-            if memo.contains_key(&id) {
-                continue;
-            }
-            if id == *self.root_op_id() || self.joins.before.contains(&id) {
-                memo.insert(id, None);
-                continue;
-            }
-            let Some(op) = expanded else {
-                if !active.insert(id.clone()) {
-                    return Err(NodeError::AmbiguousAbandon(id.0.hex()));
-                }
-                let op = store.read_operation(&id.0).block_on()?;
-                // Durable aliases establish identity, not a completed ancestry walk.
-                if self.records.source(&id).is_some() && self.map.canonical_of(&id).is_none() {
-                    self.canonicalize_unchecked(&id)?;
-                }
-                let known = self
-                    .records
-                    .source(&id)
-                    .cloned()
-                    .or_else(|| self.map.canonical_of(&id).cloned())
-                    .or_else(|| self.joins.join_of(&op).cloned());
-                if let Some(named) = OpAttrs(&op.metadata.attributes).canonical() {
-                    for parent in LocalOp::parents_of(&op) {
-                        self.canonicalize_unchecked(&parent)?;
-                    }
-                    let named = OperationId::try_from_hex(named)
-                        .map(CanonicalOp)
-                        .filter(|id| self.canonical.has_operation(id))
-                        .ok_or_else(|| NodeError::DanglingAttribute {
-                            op: id.0.hex(),
-                            canonical: named.to_owned(),
-                        })?;
-                    if !self.original_realization(&named, &LocalOp::parents_of(&op))? {
-                        return Err(NodeError::RewrittenRealization);
-                    }
-                    self.insert_map(id.clone(), named.clone())?;
-                    memo.insert(id.clone(), Some(named));
-                    active.remove(&id);
-                    continue;
-                }
-                if let Some(known) = known {
-                    memo.insert(id.clone(), Some(known));
-                    active.remove(&id);
-                    continue;
-                }
-                let parents = LocalOp::parents_of(&op);
-                stack.push((id, Some(op)));
-                stack.extend(
-                    parents
-                        .into_iter()
-                        .filter(|parent| !memo.contains_key(parent))
-                        .map(|parent| (parent, None)),
-                );
-                continue;
-            };
-            let mut parents = vec![];
-            let mut anchored = false;
-            let mut complete = true;
-            for parent in LocalOp::parents_of(&op) {
-                if parent == *self.root_op_id() {
-                    parents.push(self.canonical.root_operation_id().clone());
-                } else if let Some(Some(canonical)) = memo.get(&parent) {
-                    anchored = true;
-                    if !parents.contains(canonical) {
-                        parents.push(canonical.clone());
-                    }
-                } else if !self.joins.before.contains(&parent) {
-                    complete = false;
-                }
-            }
-            let result = if anchored && complete {
-                let canonical = self.write_canonical(&id, &op, parents)?;
-                self.insert_map(id.clone(), canonical.clone())?;
-                Some(canonical)
-            } else {
-                None
-            };
-            memo.insert(id.clone(), result);
-            active.remove(&id);
-        }
-        Ok(memo.get(local).cloned().flatten())
-    }
-
-    /// The canonical parents of a local operation, as they are now: what renamings
-    /// superseded, renamed. Also whether a name or preferred local realization changed.
-    fn current_parents(&self, parents: &[LocalOp]) -> Result<(Vec<CanonicalOp>, bool), NodeError> {
+    /// The canonical parents of a local operation. Also whether a preferred local realization
+    /// of one of them is another local operation than the parent.
+    fn current_parents(&self, parents: &[LocalOp]) -> (Vec<CanonicalOp>, bool) {
         let mut renamed = false;
         let mut current = vec![];
         for parent in parents {
@@ -535,31 +190,24 @@ impl NodeRepo {
             let canonical = self
                 .canonical_of(parent)
                 .expect("parents canonicalized first");
-            let now = self.current_ids(&canonical)?;
-            // A warm cache can know an old source and its normalized realization under
-            // the same canonical id. New children must use the preferred physical parent.
-            let moved = self
+            // A warm cache can know an old source and its realization under the same
+            // canonical id. New children must use the preferred physical parent.
+            renamed |= self
                 .map
                 .local_of(&canonical)
                 .is_some_and(|preferred| preferred != parent);
-            renamed |= now != [canonical] || moved;
-            for op in now {
-                if !current.contains(&op) {
-                    current.push(op);
-                }
+            if !current.contains(&canonical) {
+                current.push(canonical);
             }
         }
-        Ok((current, renamed))
+        (current, renamed)
     }
 
     pub fn canonical_of(&self, local: &LocalOp) -> Option<CanonicalOp> {
         if local == self.root_op_id() {
             return Some(self.canonical.root_operation_id().clone());
         }
-        self.map
-            .canonical_of(local)
-            .or_else(|| self.records.source(local))
-            .cloned()
+        self.map.canonical_of(local).cloned()
     }
 
     pub fn local_of(&self, canonical: &CanonicalOp) -> Option<LocalOp> {
@@ -581,12 +229,12 @@ impl NodeRepo {
     /// out of its canonical form.
     pub fn canonicalize(&mut self, local: &LocalOp) -> Result<CanonicalOp, NodeError> {
         if self.canonical_of(local).is_none() {
-            self.check_abandon()?;
+            self.retire_overtaken_moves()?;
         }
         self.canonicalize_unchecked(local)
     }
 
-    /// Canonicalizes inside an abandon already being processed, before its heads move.
+    /// [`Self::canonicalize`], which was once separate from this.
     pub(super) fn canonicalize_unchecked(
         &mut self,
         local: &LocalOp,
@@ -595,8 +243,6 @@ impl NodeRepo {
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
-            // A durable source alias establishes identity, not that its ancestors have
-            // been walked. Only an actual cache entry lets realization skip that walk.
             if id == *self.root_op_id()
                 || self.map.canonical_of(&id).is_some()
                 || self.joins.before.contains(&id)
@@ -632,25 +278,14 @@ impl NodeRepo {
                 continue;
             }
             let late = parents.iter().any(|parent| self.late.contains(parent));
-            let canonical_id = if let Some(source) = self.records.source(&id).cloned() {
-                // Keep the established identity. An unchanged alias becomes an
-                // explicitly marked realization on its canonical parents; a dropped
-                // or renamed one instead makes its descendants late below.
-                if self.current_ids(&source)? == [source.clone()] {
-                    self.late.push(id.clone());
-                }
-                source
-            } else if let Some(canonical) = OpAttrs(&op.metadata.attributes).canonical() {
+            let canonical_id = if let Some(canonical) = OpAttrs(&op.metadata.attributes).canonical()
+            {
                 self.realized_canonical(&id, &op, canonical)?
             } else if self.is_before_join(&id, &op)? {
                 self.joins.before.insert(id);
                 continue;
             } else {
-                let (parents, renamed) = self.current_parents(&parents)?;
-                if renamed && let Some(original) = self.existing_original(&id, &op)? {
-                    self.insert_map(id, original)?;
-                    continue;
-                }
+                let (parents, renamed) = self.current_parents(&parents);
                 if renamed || late {
                     self.late.push(id.clone());
                 }
@@ -724,11 +359,11 @@ impl NodeRepo {
         Ok(ancestors)
     }
 
-    /// The canonical operation a realization names in its `musubi.canonical` attribute, as
-    /// renamings have it now. `jj op abandon` rewrites the operations above the ones it
-    /// abandons, keeping their metadata, so a rewritten realization still names its canonical
-    /// operation, but has other parents: musubi notices the abandon, and rewrites it again,
-    /// before canonicalizing anything (`NodeRepo::notice_abandon`). Its parents must already
+    /// The canonical operation a realization names in its `musubi.canonical` attribute.
+    /// `jj op abandon` rewrites the operations above the ones it abandons, keeping their
+    /// metadata, so a rewritten realization still names its canonical operation, but has other
+    /// parents: it is the hive's operation on parents that are not its own, which stops this
+    /// copy syncing where the abandon dropped operations the hive has. Its parents must already
     /// be canonicalized.
     fn realized_canonical(
         &mut self,
@@ -744,15 +379,8 @@ impl NodeRepo {
                 canonical: canonical.to_owned(),
             })?;
         let local_parents = LocalOp::parents_of(op);
-        let current = self.current_ids(&named)?;
-        if current != [named.clone()] && self.original_realization(&named, &local_parents)? {
-            return Ok(named);
-        }
-        let canonical_id = match current.as_slice() {
-            [now] => now.clone(),
-            _ => named,
-        };
-        let (parents, renamed) = self.current_parents(&local_parents)?;
+        let canonical_id = named;
+        let (parents, renamed) = self.current_parents(&local_parents);
         if renamed
             || local_parents
                 .iter()
@@ -760,7 +388,13 @@ impl NodeRepo {
         {
             self.late.push(id.clone());
         }
-        if parents != self.canonical.parents(&canonical_id)? {
+        let wanted = self.canonical.parents(&canonical_id)?;
+        if parents != wanted && self.reaches_all(&parents, &wanted)? && !self.late.contains(id) {
+            // Put back on the parents it names, with what is above it, before anything else
+            // reads the op heads (`reparent_late`).
+            self.late.push(id.clone());
+        }
+        if parents != wanted && !self.reaches_all(&parents, &wanted)? {
             // For the daemon's log: the error says what a user needs.
             tracing::info!(
                 "operation {} realizes canonical operation {} but no longer has its parents",
@@ -772,16 +406,25 @@ impl NodeRepo {
         Ok(canonical_id)
     }
 
-    /// An obsolete marked ancestor can remain below a delayed command. Its unchanged
-    /// physical body still establishes the old identity, even if contraction now drops it
-    /// entirely. Its children apply the renaming; validating it as its image would instead
-    /// compare the old body with a different operation (possibly the root).
-    fn original_realization(
-        &self,
-        named: &CanonicalOp,
-        parents: &[LocalOp],
-    ) -> Result<bool, NodeError> {
-        Ok(self.raw_parents(parents) == self.canonical.parents(named)?)
+    /// Whether every one of `wanted` is one of `have` or below one. `jj op abandon` of an
+    /// operation this copy hasn't sent puts a realization that was beside it on the abandoned
+    /// operation's parent, and so on more history than the hive's operation has, but not on
+    /// less: nothing the hive's operation stands on is gone, and `reparent_late` puts it back.
+    /// Where an abandon cut off something it stands on, `wanted` is not all reached.
+    fn reaches_all(&self, have: &[CanonicalOp], wanted: &[CanonicalOp]) -> Result<bool, NodeError> {
+        for want in wanted {
+            let mut found = false;
+            for parent in have {
+                if parent == want || self.canonical.is_ancestor_of(want, parent)? {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The context this machine captured that `parents` carry: the first parent's, with what
@@ -808,40 +451,6 @@ impl NodeRepo {
         Ok(carried)
     }
 
-    fn raw_parents(&self, parents: &[LocalOp]) -> Vec<CanonicalOp> {
-        let mut raw = vec![];
-        for parent in parents {
-            if self.joins.before.contains(parent) {
-                continue;
-            }
-            let parent = self
-                .canonical_of(parent)
-                .expect("parents canonicalized first");
-            if !raw.contains(&parent) {
-                raw.push(parent);
-            }
-        }
-        raw
-    }
-
-    /// Reconstruct an unchanged native ancestor's already stored original before applying
-    /// renamings to a new child. This runs only when a parent has moved, not for ordinary
-    /// new operations. No canonical operation or view is written speculatively.
-    fn existing_original(
-        &self,
-        id: &LocalOp,
-        op: &StoreOperation,
-    ) -> Result<Option<CanonicalOp>, NodeError> {
-        let (original, _, _) =
-            self.canonical_form(id, op, self.raw_parents(&LocalOp::parents_of(op)), |view| {
-                self.canonical.view_id(view)
-            })?;
-        let original = CanonicalStore::operation_id(&original);
-        Ok((self.canonical.has_operation(&original)
-            && self.current_ids(&original)? != [original.clone()])
-        .then_some(original))
-    }
-
     fn write_canonical(
         &mut self,
         id: &LocalOp,
@@ -851,78 +460,9 @@ impl NodeRepo {
         let (canonical_op, presence, kind) =
             self.canonical_form(id, op, parents, |view| self.canonical.write_view(view))?;
         let canonical = self.canonical.write_operation(&canonical_op)?;
-        self.remember_original(&canonical, op)?;
         let work = Work::of(&self.canonical, &canonical)?;
         self.remember_presence(canonical.clone(), presence.apply(&work, &kind));
         Ok(canonical)
-    }
-
-    /// The canonical operation canonicalizing would map a local operation to, where the hive
-    /// has it already, and not a join point. Its parents must be in the translation map, or
-    /// from before the join, as canonicalizing would give them first; otherwise None. So too
-    /// where its canonical form isn't stored, which this doesn't store, as for jj's rewrite
-    /// of an operation, or a realization whose parents jj changed. Notes, as canonicalizing
-    /// does, an operation from before the join, and one found on parents a record renamed.
-    pub(super) fn exact_canonical(
-        &mut self,
-        id: &LocalOp,
-        op: &StoreOperation,
-    ) -> Result<Option<CanonicalOp>, NodeError> {
-        // Canonicalizing must walk an identity-only source alias before caching a child
-        // above it too, even when the hive already has that child's canonical body.
-        let local_parents = LocalOp::parents_of(op);
-        if local_parents.iter().any(|parent| {
-            parent != self.root_op_id()
-                && self.map.canonical_of(parent).is_none()
-                && !self.joins.before.contains(parent)
-        }) {
-            return Ok(None);
-        }
-        if let Some(source) = self.records.source(id).cloned() {
-            if self.current_ids(&source)? == [source.clone()] {
-                self.late.push(id.clone());
-            }
-            return Ok(Some(source));
-        }
-        let (parents, renamed) = self.current_parents(&local_parents)?;
-        let late = renamed
-            || local_parents
-                .iter()
-                .any(|parent| self.late.contains(parent));
-        let found = if let Some(named) = OpAttrs(&op.metadata.attributes).canonical() {
-            let Some(named) = OperationId::try_from_hex(named)
-                .map(CanonicalOp)
-                .filter(|c| self.canonical.has_operation(c))
-            else {
-                return Ok(None);
-            };
-            let current = self.current_ids(&named)?;
-            if current != [named.clone()] && self.original_realization(&named, &local_parents)? {
-                return Ok(Some(named));
-            }
-            let canonical = match current.as_slice() {
-                [now] => now.clone(),
-                _ => named,
-            };
-            (self.canonical.parents(&canonical)? == parents).then_some(canonical)
-        } else if self.is_before_join(id, op)? {
-            self.joins.before.insert(id.clone());
-            None
-        } else {
-            if renamed && let Some(original) = self.existing_original(id, op)? {
-                return Ok(Some(original));
-            }
-            let (canonical_op, _, _) =
-                self.canonical_form(id, op, parents, |view| self.canonical.view_id(view))?;
-            let canonical = CanonicalStore::operation_id(&canonical_op);
-            self.canonical
-                .has_operation(&canonical)
-                .then_some(canonical)
-        };
-        if found.is_some() && late {
-            self.late.push(id.clone());
-        }
-        Ok(found)
     }
 
     /// The canonical form of local operation `id`, `op`, on `parents`, its view given an id by
@@ -974,56 +514,13 @@ impl NodeRepo {
         {
             OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
         }
-        // Parent contraction changes which workspaces are present, but must not change which
-        // other machines' workspaces a fresh native command's names stand for. Recover that
-        // namespace from the original canonical parents before interpreting its view on the
-        // new frontier. Do not publish those parents or inherit their membership into the
-        // result.
-        let source_parents = self.raw_parents(&LocalOp::parents_of(op));
-        let changed_parents = source_parents != parents;
-        if changed_parents {
-            // A source parent written after an earlier trim carries a context for the names
-            // its own view and history have lost. The source view is judged by it, so it
-            // goes into the metadata passed here, and into the recomputed context: its other
-            // machines' names and the machines it knows stay.
-            let carried = self.carried_context(&source_parents)?;
-            let recorded = crate::canonical::namespace::Namespace::read(&op.metadata)?
-                .filter(|context| context.source == self.machine.key());
-            let mut source_metadata = metadata.clone();
-            if let Some(carried) = &carried
-                && !OpAttrs(&source_metadata.attributes).has_namespace()
-            {
-                OpAttrs(&mut source_metadata.attributes).set_namespace(carried.encode());
-            }
-            let (source_view, source_presence) = self.canonical_view(
-                id,
-                view.clone(),
-                &source_parents,
-                commit_predecessors.as_ref(),
-                &Kind::of(&metadata),
-                &source_metadata,
-            )?;
-            let mut context: crate::canonical::namespace::Namespace = serde_json::from_str(
-                &self.workspace_context_of_view(&source_view, &source_presence)?,
-            )
-            .expect("a context this machine just encoded");
-            // What a context this operation records itself says of other machines stays too:
-            // musubi wrote it onto the operation when a trim left it on the root
-            // (`rewrite_locals`), and a rewrite of its parents since, as jj's abandon of an
-            // operation it was on, has lost the views it stood for.
-            for earlier in [recorded, carried].into_iter().flatten() {
-                context.keep_others_of(earlier);
-            }
-            OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
-        }
         if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
             let mut known = std::collections::BTreeSet::new();
             for parent in &parents {
                 known.extend(self.presence(parent)?.known().iter().cloned());
             }
             let mut attributes = OpAttrs(&mut metadata.attributes);
-            if !changed_parents
-                && context.known.is_subset(&known)
+            if context.known.is_subset(&known)
                 && !attributes.is_checkpoint()
                 && !attributes.has_intent()
             {
@@ -1031,29 +528,15 @@ impl NodeRepo {
             }
         }
         let kind = Kind::of(&metadata);
-        // A fix-up changes no view: it restores what musubi works out from history alone.
-        let (view_id, presence) = match parents.as_slice() {
-            [parent]
-                if OpAttrs(&metadata.attributes).is_fixup()
-                    && !OpAttrs(&metadata.attributes).has_namespace() =>
-            {
-                (
-                    self.canonical.read_operation(parent)?.view_id,
-                    (*self.presence(parent)?).clone(),
-                )
-            }
-            _ => {
-                let (view, presence) = self.canonical_view(
-                    id,
-                    view,
-                    &parents,
-                    commit_predecessors.as_ref(),
-                    &kind,
-                    &metadata,
-                )?;
-                (view_id(&view)?, presence)
-            }
-        };
+        let (view, presence) = self.canonical_view(
+            id,
+            view,
+            &parents,
+            commit_predecessors.as_ref(),
+            &kind,
+            &metadata,
+        )?;
+        let view_id = view_id(&view)?;
         let canonical_op = StoreOperation {
             view_id,
             parents: parents.into_iter().map(|parent| parent.0).collect(),

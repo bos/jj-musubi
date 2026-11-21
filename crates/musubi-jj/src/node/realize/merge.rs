@@ -160,42 +160,33 @@ impl NodeRepo {
     }
 
     /// Refuses to publish a realization that jj cannot merge with this machine's own
-    /// concurrent operations, the op heads `heads`, and, where there are several, with each
-    /// other. Published, it would be merged by every `jj` command here, and each would fail,
-    /// or for some jj bugs panic, until someone reverted an operation by hand. Unpublished, jj
-    /// keeps working, and the error says which operations to revert. Returns the op heads the
-    /// realizations descend from, beyond their parents, which are not concurrent with them:
-    /// after a catch-up of several operations, the previous head; and those that are.
+    /// concurrent operations, the op heads `heads`. Published, it would be merged by every `jj`
+    /// command here, and each would fail, or for some jj bugs panic, until someone reverted an
+    /// operation by hand. Unpublished, jj keeps working, and the error says which operations to
+    /// revert. Returns the op heads the realization descends from, beyond its parents, which
+    /// are not concurrent with it, as the previous head is after a catch-up;
+    /// and those that are.
     pub(super) fn check_mergeable(
         &self,
-        canonicals: &[CanonicalOp],
-        realized: &[LocalOp],
+        canonical: &CanonicalOp,
+        realized: &LocalOp,
         heads: &[LocalOp],
     ) -> Result<(Vec<LocalOp>, Vec<Operation>), NodeError> {
-        let realized_ops: Vec<Operation> = realized
-            .iter()
-            .map(|op| self.loader.load_operation(&op.0).block_on())
-            .collect::<Result<_, _>>()?;
-        let realized_op = realized_ops.first().expect("something to advance to");
+        let realized_op = self.loader.load_operation(&realized.0).block_on()?;
         let mut heads = heads.to_vec();
         let others: Vec<LocalOp> = heads
             .iter()
-            .filter(|head| {
-                !realized.contains(head)
-                    && !realized_ops
-                        .iter()
-                        .any(|op| op.parent_ids().contains(&head.0))
-            })
+            .filter(|head| *head != realized && !realized_op.parent_ids().contains(&head.0))
             .cloned()
             .collect();
         let mut theirs = vec![];
         let mut superseded = vec![];
         for head in others {
             let op = self.loader.load_operation(&head.0).block_on()?;
-            // Nothing of its own that the realizations lack: an ancestor.
+            // Nothing of its own that the realization lacks: an ancestor.
             let beyond = std::pin::pin!(op_walk::walk_ancestors_range(
                 std::slice::from_ref(&op),
-                &realized_ops,
+                std::slice::from_ref(&realized_op),
             ))
             .try_next()
             .block_on()?;
@@ -204,31 +195,18 @@ impl NodeRepo {
                 Some(_) => theirs.push(op),
             }
         }
-        if theirs.is_empty() && realized_ops.len() == 1 {
+        if theirs.is_empty() {
             return Ok((superseded, theirs));
         }
         // This machine's operations that the hive doesn't have: one of them conflicts.
-        let mut roots: Vec<Operation> = vec![];
-        for op in &realized_ops {
-            for parent in op.parents().block_on()? {
-                if !roots.contains(&parent) {
-                    roots.push(parent);
-                }
-            }
-        }
+        let roots = realized_op.parents().block_on()?;
         let ours: Vec<LocalOp> = op_walk::walk_ancestors_range(&theirs, &roots)
             .map_ok(|op| LocalOp(op.id().clone()))
             .try_collect()
             .block_on()?;
         let mut operations = theirs.clone();
-        operations.extend(realized_ops.iter().cloned());
+        operations.push(realized_op.clone());
         if let Err(reason) = self.try_merge(operations) {
-            // The search for the one to revert goes by a single realization: with several,
-            // the advice lists this machine's operations instead.
-            if realized_ops.len() > 1 {
-                return Err(self.unmergeable(&ours, None, reason));
-            }
-            let canonical = &canonicals[0];
             // The same heads and the hive's same operation, as when the sync is retried,
             // give the same result. Failing to find it leaves the advice to list them.
             heads.sort();
@@ -246,10 +224,10 @@ impl NodeRepo {
                     // An error, as reading the store, is no answer to keep.
                     // Failing a single revert that will do, one that will help.
                     let culprit = self
-                        .op_to_revert(&theirs, &ours, realized_op)
+                        .op_to_revert(&theirs, &ours, &realized_op)
                         .and_then(|found| match found {
                             Some(op) => Ok(Some(op)),
-                            None => self.first_unmergeable(&ours, realized_op),
+                            None => self.first_unmergeable(&ours, &realized_op),
                         })
                         .ok();
                     if let Some(culprit) = &culprit {
@@ -276,21 +254,11 @@ impl NodeRepo {
         let reversed: Vec<_> = operations.iter().rev().cloned().collect();
         for order in [operations, reversed] {
             catch_jj_panic(|| {
-                #[cfg(test)]
-                let probe = super::super::native_contract::probe_before(self, &order);
-                let outcome = self
-                    .loader
+                self.loader
                     .merge_operations(order, None, Some("reconcile divergent operations"), [])
-                    .block_on();
-                #[cfg(test)]
-                if let Some(inputs) = probe {
-                    let observed = outcome
-                        .as_ref()
-                        .map(|(repo, rebased)| (LocalOp(repo.operation().id().clone()), *rebased))
-                        .map_err(|error| format!("{error:#}"));
-                    super::super::native_contract::probe_after(self, &inputs, &observed);
-                }
-                outcome.map(|_| ()).map_err(|err| format!("{err:#}"))
+                    .block_on()
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:#}"))
             })?;
         }
         Ok(())

@@ -9,7 +9,6 @@ use std::fs;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
-use musubi_jj::node::NodeError;
 use musubi_jj::op_id::LocalOp;
 
 use crate::coverage::fired;
@@ -40,14 +39,6 @@ impl World {
                 self.forgot.insert(key, forget);
             }
             Ok(false) => {}
-            // As its hint says: restore the history it names, then forget again. jj's
-            // reparenting can recreate an abandoned operation's exact id, so musubi can't tell
-            // which of the hive's operations was dropped (races.md, "Known jj limitations").
-            Err(NodeError::AmbiguousAbandon(target)) => {
-                let err = NodeError::AmbiguousAbandon(target.clone()).to_string();
-                self.integrate_named_history(m, &format!("musubi forget {name}"), &target, &err);
-                return self.forget_copy(m, o);
-            }
             Err(err) => self.fail(&format!(
                 "musubi forget {name} failed on {}: {err}",
                 self.machine(m)

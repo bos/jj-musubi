@@ -401,12 +401,10 @@ impl NodeRepo {
             if !reserved.is_empty()
                 && let Some(canonical) = self.canonical_of(&LocalOp(parent.clone()))
             {
-                for current in self.current_ids(&canonical)? {
-                    reserved_at
-                        .entry(current)
-                        .or_default()
-                        .extend(reserved.iter().cloned());
-                }
+                reserved_at
+                    .entry(canonical)
+                    .or_default()
+                    .extend(reserved.iter().cloned());
             }
             ops.push(parent_op);
         }

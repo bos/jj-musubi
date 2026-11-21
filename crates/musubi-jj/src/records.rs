@@ -9,8 +9,7 @@ use jj_lib::object_id::ObjectId as _;
 use crate::op_id::CanonicalOp;
 
 /// A canonical operation as the hub's history names it, with the hub's records dropped, and
-/// nothing else: what the protocol speaks of. A machine that dropped operations it has yet to
-/// publish names some of the history otherwise (`NodeOp`).
+/// nothing else: what the protocol speaks of.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HubOp(pub CanonicalOp);
 

@@ -116,8 +116,55 @@ impl World {
             .collect();
         older
             .into_iter()
-            .filter(|op| !merges.contains(&op.id) && !self.hive_has(m, &op.id))
+            .filter(|op| {
+                !merges.contains(&op.id)
+                    && !self.hive_has(m, &op.id)
+                    && !self.abandon_rewrites_the_hives(m, &op.id)
+            })
             .collect()
+    }
+
+    /// Whether `jj op abandon` of `op` rewrites an operation the hive has. It rewrites every
+    /// operation reachable from the op heads that isn't below the abandoned one's parents, so
+    /// the operations of the hive on another branch of the history, as one `--at-op` command or
+    /// a second workspace leaves, are put on other parents. musubi can't tell its own such
+    /// operation from one that is new, so a copy where that happens stops syncing as it does
+    /// for one that abandoned operations the hive has.
+    fn abandon_rewrites_the_hives(&mut self, m: usize, op: &str) -> bool {
+        use jj_lib::object_id::ObjectId as _;
+        let store = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let ancestors = |starts: Vec<OpId>| {
+            let mut seen = BTreeSet::new();
+            let mut stack = starts;
+            while let Some(id) = stack.pop() {
+                if id == *store.root_operation_id() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let body = futures::executor::block_on(store.read_operation(&id)).unwrap();
+                stack.extend(body.parents);
+            }
+            seen
+        };
+        let id = OpId::try_from_hex(op).unwrap();
+        let heads: Vec<OpId> = self
+            .op_heads(m)
+            .iter()
+            .map(|head| OpId::try_from_hex(head).unwrap())
+            .collect();
+        let parents = futures::executor::block_on(store.read_operation(&id))
+            .unwrap()
+            .parents;
+        let below = ancestors(parents);
+        let rewritten: Vec<OpId> = ancestors(heads)
+            .into_iter()
+            .filter(|other| *other != id && !below.contains(other))
+            .collect();
+        rewritten.iter().any(|other| self.hive_has(m, &other.hex()))
     }
 
     /// Whether the hive has machine `m`'s operation `op`, as published, or as below an

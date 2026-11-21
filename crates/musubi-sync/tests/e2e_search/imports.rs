@@ -1336,8 +1336,6 @@ fn a_forgotten_nonroot_publication_keeps_its_observed_git_frontier() {
         base.trim(),
         node.canonical_store().root_operation_id().0.hex()
     );
-    assert!(!node.has_record_custody());
-    assert!(node.applied_records().is_empty());
     let presence = world.fx.hive.hub.store().presence().unwrap();
     assert!(presence.known().contains(&world.fx.machine_key(1)));
     assert!(!presence.is_present(&world.fx.machine_key(1)));

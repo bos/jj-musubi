@@ -140,7 +140,7 @@ impl NodeRepo {
         }
         let old: Vec<OperationId> = old.iter().map(|h| h.0.clone()).collect();
         store.update_op_heads(&old, &last.0).block_on()?;
-        self.records.watch_replaced(replaced);
+        self.watch_replaced(replaced);
         // `jj op abandon` may have read the op heads before this took them out, and put its
         // rewrite of one beside those this put in meanwhile.
         if same(&self.local_heads()?, new) {
@@ -148,6 +148,19 @@ impl NodeRepo {
         }
         let out = self.retire_overtaken()?;
         Ok(!new.iter().any(|op| out.contains(op)))
+    }
+
+    /// The look at the op heads that precedes every other read of them: takes out, until none is
+    /// left, what musubi put in place of op heads that a `jj op abandon` rewrote since
+    /// (`retire_overtaken`). Returns whether it took any out, which leaves the op heads
+    /// as the abandon left them. What the abandon dropped is then for canonicalizing and the
+    /// sync to find: one of operations the hive has stops this copy syncing.
+    pub fn retire_overtaken_moves(&mut self) -> Result<bool, NodeError> {
+        let mut retired = false;
+        while !self.retire_overtaken()?.is_empty() {
+            retired = true;
+        }
+        Ok(retired)
     }
 
     /// Takes out the op heads musubi put in place of one that `jj op abandon` rewrote since: one
@@ -172,7 +185,7 @@ impl NodeRepo {
     /// It works that out without jj's op-heads lock, which every jj command waits for, and
     /// takes the lock only to act, if the op heads are still those it read.
     pub(super) fn retire_overtaken(&self) -> Result<Vec<LocalOp>, NodeError> {
-        if !self.records.watching_replaced() {
+        if !self.watching_replaced() {
             return Ok(vec![]);
         }
         let store = self.loader.op_heads_store().clone();
@@ -205,7 +218,7 @@ impl NodeRepo {
             // removes, and a head already there stays.
             let ids: Vec<OperationId> = out.iter().map(|op| op.0.clone()).collect();
             store.update_op_heads(&ids, &stay.0).block_on()?;
-            self.records.keep_replaced(kept);
+            self.keep_replaced(kept);
             return Ok(out);
         }
     }
@@ -214,13 +227,44 @@ impl NodeRepo {
     /// forgetting what it watches whose replacements are no longer op heads.
     fn retiring(&self) -> Result<Option<plan::Retiring<LocalOp>>, NodeError> {
         let heads = self.local_heads()?;
-        match plan::look(&heads, self.records.replaced(), &RepoGraph(self))? {
+        match plan::look(&heads, self.replaced(), &RepoGraph(self))? {
             plan::Look::Nothing { kept } => {
-                self.records.keep_replaced(kept);
+                self.keep_replaced(kept);
                 Ok(None)
             }
             plan::Look::Retire(retiring) => Ok(Some(retiring)),
         }
+    }
+
+    /// Watches the op heads `replaced` names, which musubi has just taken out. Where one is
+    /// itself what musubi put in place of one it watches already, what replaced it takes its
+    /// place there too.
+    fn watch_replaced(&self, replaced: Vec<Replaced>) {
+        if replaced.is_empty() {
+            return;
+        }
+        self.keep_replaced(plan::compose(self.replaced(), replaced));
+    }
+
+    /// Whether any op head musubi took out is watched.
+    fn watching_replaced(&self) -> bool {
+        !self.replaced_lock().is_empty()
+    }
+
+    /// The op heads musubi took out that are watched.
+    fn replaced(&self) -> Vec<Replaced> {
+        self.replaced_lock().clone()
+    }
+
+    /// Watches only `replaced`.
+    fn keep_replaced(&self, replaced: Vec<Replaced>) {
+        *self.replaced_lock() = replaced;
+    }
+
+    fn replaced_lock(&self) -> std::sync::MutexGuard<'_, Vec<Replaced>> {
+        self.replaced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// For tests of races: runs `run` in the next move of op heads that musubi read earlier,

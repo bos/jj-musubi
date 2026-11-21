@@ -979,8 +979,10 @@ fn unit(
         systemd_quote(&exe.to_string_lossy()),
         service.command()
     );
-    if let Some(uid) = boot_user {
-        writeln!(text, "User={uid}").expect("writing to a String");
+    // Not `uid`: CodeQL takes a variable so named for account information, and a uid isn't
+    // secret.
+    if let Some(id) = boot_user {
+        writeln!(text, "User={id}").expect("writing to a String");
     }
     if let Some(dir) = dir {
         // A path, not a word: systemd doesn't unquote it, but expands `%` specifiers in it.

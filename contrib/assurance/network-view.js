@@ -49,7 +49,7 @@
           "'": "&#39;",
         })[c],
     );
-  const color = (id) => `var(--viz-series-${mechanisms[id].series})`;
+  const color = (id) => `var(--viz-series-${esc(mechanisms[id].series)})`;
   const measured = data.measured,
     events = measured?.events || [],
     duration = measured?.duration || 1;
@@ -2090,7 +2090,7 @@
     data.roles
       .map(
         (r) =>
-          `<span class="role-item"><span class="role-key" data-role="${r.id}" style="background:${r.series ? `var(--viz-series-${r.series})` : "var(--muted-foreground)"}" aria-hidden="true"></span>${esc(r.name)}</span>`,
+          `<span class="role-item"><span class="role-key" data-role="${esc(r.id)}" style="background:${r.series ? `var(--viz-series-${esc(r.series)})` : "var(--muted-foreground)"}" aria-hidden="true"></span>${esc(r.name)}</span>`,
       )
       .join("");
   $("#ng-expansions").innerHTML = components
@@ -2102,7 +2102,7 @@
   $("#ng-mechanisms").innerHTML = data.mechanisms
     .map(
       (m) =>
-        `<div class="method" data-tooltip="${esc(m.description)} ${m.tests} ${m.id === "fuzz" ? "coverage checkpoints" : m.id === "mutation" ? "mutations" : "recorded tests"}.">${swatch(m.id)}<label class="form-check"><input class="form-check-input" type="checkbox" data-mechanism="${m.id}" checked><span class="form-check-label">${esc(m.name)}</span></label>${m.status !== "recorded" ? '<span class="text-small text-muted">no data</span>' : ""}</div>`,
+        `<div class="method" data-tooltip="${esc(m.description)} ${esc(m.tests)} ${m.id === "fuzz" ? "coverage checkpoints" : m.id === "mutation" ? "mutations" : "recorded tests"}.">${swatch(m.id)}<label class="form-check"><input class="form-check-input" type="checkbox" data-mechanism="${esc(m.id)}" checked><span class="form-check-label">${esc(m.name)}</span></label>${m.status !== "recorded" ? '<span class="text-small text-muted">no data</span>' : ""}</div>`,
     )
     .join("");
   root.addEventListener("pointerdown", (e) => {

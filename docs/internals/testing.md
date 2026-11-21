@@ -875,8 +875,9 @@ family and removing the old one through `unlink` and `unlinkat`. Run the search 
 `just head-schedule search`. Add `--unpublished` to start with local work above the synced
 operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
 schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
-`jj describe` on the same old head instead of another abandon. `--steps N` sets the most
-actions a schedule may take, 8 by default or 14 with `--concurrent`.
+`jj describe` on the same old head instead of another abandon, and `--loader` adds a third,
+`jj op log`, which merges the heads it finds. `--steps N` sets the most actions a schedule
+may take: 8 by default, 14 with `--concurrent` and 18 with `--loader`.
 
 ```sh
 just head-schedule search
@@ -919,12 +920,36 @@ head and holds until the old one is gone. `jj op abandon` and the daemon's own p
 heads don't take it, but loading the repository at several heads does, to merge them. With
 `--peer write`, the search lets the daemon check and publish while the write holds the lock,
 and merges heads only once it has let go. Once everything has settled, every op head must
-still have the finished write's commit in its view.
+still have the write's commit in its view if the write added its head, even if it was killed
+before removing the old one.
 
-Each search reaches every state it can within the default horizon: a deeper `--steps` finds no
-new ones. The single command has 20 states, two abandons 358 and an abandon with a write 482,
-with or without unpublished work. A search takes seconds, so widening the model with more
-commands and more pause points is what extends its reach.
+With `--loader`, once there are several heads and no command holds the lock, the search can
+start a `jj op log`. Loading the repository, it takes the lock and merges the heads, or, where
+one is an ancestor of another, as a paused write's is of the old head, finishes that command's
+unlink for it. The shim pauses it before it adds a head and again before it removes the first
+one; it doesn't stop between removing one and the next. Where the heads have settled by the
+time it holds the lock, it exits without either. While it holds the lock, the daemon merges no
+heads.
+
+A native merge is not reproducible. jj orders the parents of a merge by their end times, and
+an abandon's rewrite has the end time of the operation it rewrote, so jj puts them in whatever
+order its hash set gives, which changes from run to run. musubi's rewrites of the merge, and
+the canonical forms it gives them, follow that order. States name each operation by a key:
+its id for the starting history, and otherwise a hash of its body with its parents' keys, a
+merge's sorted, and ids in its metadata replaced by their keys. That makes a merge and what is
+written on it comparable across runs, but not musubi's rewrites of a merge. So a search with
+`--loader` replays a prefix without comparing its states, continues from the state it reaches,
+and drops the branch if a step of the prefix is no longer enabled there, counting the branches
+it drops. Such a search is best effort: it may miss a state a different merge order reaches.
+`replay` of such a schedule checks only that its actions are enabled, as `--actions-only`
+does, and a failure it saved may take several replays to happen again.
+
+Without `--loader`, each search reaches every state it can within the default horizon: a
+deeper `--steps` finds no new ones. The single command has 20 states, two abandons 358 and an
+abandon with a write 482, with or without unpublished work, each found in seconds. With
+`--loader`, two abandons reach about 4,400 states and an abandon with a write about 3,000, in
+six and four minutes on one core, and a deeper horizon adds none; the counts vary by a few
+states from run to run, as native merges do.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:

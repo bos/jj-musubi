@@ -56,6 +56,26 @@ impl Gate {
         old_head: &Path,
         socket: &Path,
     ) -> PausedCommand {
+        let mut paused = self.start(command, old_head, socket);
+        paused.wait_for(Phase::BeforeCreate);
+        paused
+    }
+
+    /// Starts a command that may add and remove any head, as loading the repository at
+    /// several heads does, pausing before it adds one; or `None` once it has exited without
+    /// adding any, as it does when the heads settled before it took jj's op-heads lock.
+    pub(super) fn spawn_loader(
+        &self,
+        command: &mut Command,
+        old_head: &Path,
+        socket: &Path,
+    ) -> Option<PausedCommand> {
+        command.env("MUSUBI_TEST_HEAD_GATE_ANY", "1");
+        let mut paused = self.start(command, old_head, socket);
+        paused.try_wait_for(Phase::BeforeCreate).then_some(paused)
+    }
+
+    fn start(&self, command: &mut Command, old_head: &Path, socket: &Path) -> PausedCommand {
         let old_head = old_head
             .parent()
             .unwrap()
@@ -84,15 +104,13 @@ impl Gate {
             .stderr(output.try_clone().unwrap())
             .spawn()
             .expect("start jj with the operation-head gate");
-        let mut paused = PausedCommand {
+        PausedCommand {
             child,
             listener,
             pause: None,
             old_head,
             output,
-        };
-        paused.wait_for(Phase::BeforeCreate);
-        paused
+        }
     }
 }
 
@@ -121,23 +139,35 @@ impl PausedCommand {
     }
 
     fn wait_for(&mut self, phase: Phase) {
+        assert!(
+            self.try_wait_for(phase),
+            "jj exited while waiting for {phase:?} at {:?}: {}",
+            self.old_head,
+            self.diagnostics()
+        );
+    }
+
+    /// Waits until jj pauses at `phase`: true, or false if it exited successfully first.
+    fn try_wait_for(&mut self, phase: Phase) -> bool {
         let mut backoff = Backoff::new();
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     self.receive_phase(phase, stream);
-                    return;
+                    return true;
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => panic!("accept the jj operation-head gate: {err}"),
             }
             if let Some(status) = self.child.try_wait().unwrap() {
-                panic!(
+                assert!(
+                    status.success(),
                     "jj exited with {status} while waiting for {phase:?} at {:?}: {}",
                     self.old_head,
                     self.diagnostics()
                 );
+                return false;
             }
             assert!(
                 backoff.wait(),
@@ -187,6 +217,13 @@ impl PausedCommand {
     pub(super) fn publish(&mut self) {
         self.resume(Phase::BeforeCreate);
         self.wait_for(Phase::BeforeUnlink);
+    }
+
+    /// As [`Self::publish`], for a command that may add a head and remove none: true if it
+    /// paused before an unlink, false if it exited.
+    pub(super) fn publish_or_exit(&mut self) -> bool {
+        self.resume(Phase::BeforeCreate);
+        self.try_wait_for(Phase::BeforeUnlink)
     }
 
     pub(super) fn kill(mut self) {

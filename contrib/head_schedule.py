@@ -50,6 +50,10 @@ def main():
         help="race a second native command: an abandon, or what --peer says",
     )
     search.add_argument(
+        "--loader", action="store_true",
+        help="with --concurrent, also load the repository once at several heads, merging them",
+    )
+    search.add_argument(
         "--peer", choices=["abandon", "write"], default="abandon",
         help="with --concurrent, what the second command does (default abandon)",
     )
@@ -72,7 +76,7 @@ def main():
     for mode in (search, replay, branch):
         mode.add_argument(
             "--steps", type=int, metavar="N",
-            help="the most actions a schedule may take (default 8, or 14 with --concurrent)",
+            help="most actions a schedule may take (8; 14 with --concurrent; 18 with --loader)",
         )
     args = parser.parse_args()
 
@@ -84,6 +88,8 @@ def main():
         parser.error("--at must be nonnegative")
     if getattr(args, "peer", "abandon") != "abandon" and not args.concurrent:
         parser.error("--peer requires --concurrent")
+    if getattr(args, "loader", False) and not args.concurrent:
+        parser.error("--loader requires --concurrent")
     if args.steps is not None and args.steps < 1:
         parser.error("--steps must be positive")
     rr = getattr(args, "rr", None)
@@ -111,6 +117,8 @@ def main():
     if getattr(args, "concurrent", False):
         settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
         settings["MUSUBI_HEAD_SCHEDULE_PEER"] = args.peer
+        if args.loader:
+            settings["MUSUBI_HEAD_SCHEDULE_LOADER"] = "1"
     if args.steps is not None:
         settings["MUSUBI_HEAD_SCHEDULE_STEPS"] = str(args.steps)
     if getattr(args, "actions_only", False):

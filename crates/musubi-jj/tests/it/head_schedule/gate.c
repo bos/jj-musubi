@@ -25,13 +25,16 @@ static bool matches_head(int dir, const char *path, enum phase phase)
     const char *slash = strrchr(path, '/');
     const char *name = slash == NULL ? path : slash + 1;
     const char *old_name = head_slash + 1;
+    // jj also creates a lock in this directory. Head names are hex operation IDs.
+    size_t length = strlen(name);
+    bool hex = length == strlen(old_name) && strspn(name, "0123456789abcdef") == length;
+    // A command that merges heads, or finishes another's unlink, adds and removes heads
+    // other than the old one.
+    bool any = getenv("MUSUBI_TEST_HEAD_GATE_ANY") != NULL;
     if (phase == BEFORE_CREATE) {
-        // jj also creates a lock in this directory. Head names are hex operation IDs.
-        size_t length = strlen(name);
-        if (length != strlen(old_name) || strspn(name, "0123456789abcdef") != length
-            || strcmp(old_name, name) == 0)
+        if (!hex || (!any && strcmp(old_name, name) == 0))
             return false;
-    } else if (strcmp(old_name, name) != 0) {
+    } else if (any ? !hex : strcmp(old_name, name) != 0) {
         return false;
     }
 

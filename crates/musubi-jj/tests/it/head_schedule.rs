@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -24,6 +25,8 @@ use crate::translation::abandon_put_back_fixture;
 
 const MAX_STEPS: usize = 8;
 const CONCURRENT_STEPS: usize = 14;
+/// A native merge widens the search: it reaches every state by this many actions.
+const LOADER_STEPS: usize = 18;
 const VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -44,6 +47,10 @@ enum Action {
     Reopen,
     ReopenWithoutCache,
     MergeHeads,
+    StartLoader,
+    PublishLoader,
+    FinishLoader,
+    KillLoader,
 }
 
 /// What the second native command does in a concurrent search: the same `jj op abandon`, or
@@ -81,6 +88,9 @@ struct State {
     native: Native,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer: Option<Native>,
+    /// A native command that loads the repository at several heads, merging them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loader: Option<Native>,
     heads: Vec<String>,
     checked_heads: Option<Vec<String>>,
     online: bool,
@@ -111,6 +121,8 @@ struct Schedule {
     concurrent: bool,
     #[serde(default, skip_serializing_if = "Peer::is_abandon")]
     peer: Peer,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    loader: bool,
     steps: Vec<Step>,
 }
 
@@ -121,10 +133,18 @@ struct Fixture<'a> {
     unpublished: bool,
     concurrent: bool,
     peer: Peer,
+    loader: bool,
 }
 
 impl<'a> Fixture<'a> {
-    fn load(gate: &'a Gate, cache: &Path, unpublished: bool, concurrent: bool, peer: Peer) -> Self {
+    fn load(
+        gate: &'a Gate,
+        cache: &Path,
+        unpublished: bool,
+        concurrent: bool,
+        peer: Peer,
+        loader: bool,
+    ) -> Self {
         let case = if unpublished {
             "unpublished"
         } else {
@@ -144,6 +164,7 @@ impl<'a> Fixture<'a> {
             unpublished,
             concurrent,
             peer,
+            loader,
         }
     }
 
@@ -156,6 +177,16 @@ impl<'a> Fixture<'a> {
         let store = node.loader().op_store().clone();
         let old_id = OperationId::try_from_hex(&old_head).unwrap();
         let old_view = store.read_operation(&old_id).block_on().unwrap().view_id;
+        // The history the fixture starts with is the same on every run: only operations a
+        // schedule writes need keys other than their ids.
+        let mut keys = HashMap::new();
+        let mut pending = vec![old_id];
+        while let Some(id) = pending.pop() {
+            if !keys.contains_key(&id) {
+                pending.extend(store.read_operation(&id).block_on().unwrap().parents);
+                keys.insert(id.clone(), id);
+            }
+        }
         World {
             gate: self.gate,
             parent: &self.parent,
@@ -163,6 +194,8 @@ impl<'a> Fixture<'a> {
             node: Some(node),
             native: [Native::Ready; 2],
             children: [None, None],
+            loader: self.loader.then_some(Native::Ready),
+            loader_child: None,
             concurrent: self.concurrent,
             peer: self.peer,
             checked_heads: None,
@@ -170,7 +203,7 @@ impl<'a> Fixture<'a> {
             stopped_before_publication: false,
             lost_cache: false,
             put_back: false,
-            merge_ids: HashMap::new(),
+            keys: RefCell::new(keys),
             write_published: false,
             store,
             old_view,
@@ -185,22 +218,24 @@ impl<'a> Fixture<'a> {
             unpublished: self.unpublished,
             concurrent: self.concurrent,
             peer: self.peer,
+            loader: self.loader,
             steps: vec![],
         }
     }
 
     fn horizon(&self) -> usize {
-        horizon(self.concurrent)
+        horizon(self.concurrent, self.loader)
     }
 }
 
 /// The most actions a schedule may take: `MUSUBI_HEAD_SCHEDULE_STEPS` if set, to search
 /// deeper, or else the default for the kind of search.
-fn horizon(concurrent: bool) -> usize {
+fn horizon(concurrent: bool, loader: bool) -> usize {
     match std::env::var("MUSUBI_HEAD_SCHEDULE_STEPS") {
         Ok(steps) => steps
             .parse()
             .expect("MUSUBI_HEAD_SCHEDULE_STEPS is a number of actions"),
+        Err(_) if loader => LOADER_STEPS,
         Err(_) if concurrent => CONCURRENT_STEPS,
         Err(_) => MAX_STEPS,
     }
@@ -214,6 +249,8 @@ struct World<'a> {
     native: [Native; 2],
     // Reap the commands before removing the environment's directory.
     children: [Option<PausedCommand>; 2],
+    loader: Option<Native>,
+    loader_child: Option<PausedCommand>,
     concurrent: bool,
     peer: Peer,
     checked_heads: Option<Vec<String>>,
@@ -221,7 +258,8 @@ struct World<'a> {
     stopped_before_publication: bool,
     lost_cache: bool,
     put_back: bool,
-    merge_ids: HashMap<OperationId, OperationId>,
+    /// Each operation's key, as `key` works it out.
+    keys: RefCell<HashMap<OperationId, OperationId>>,
     /// Whether the write peer added its head: jj merges it later even if the write is killed
     /// before its unlink.
     write_published: bool,
@@ -246,15 +284,73 @@ impl World<'_> {
     fn head_keys(&self, heads: &[String]) -> Vec<String> {
         let mut keys: Vec<_> = heads
             .iter()
-            .map(|head| {
-                let id = OperationId::try_from_hex(head).unwrap();
-                self.merge_ids
-                    .get(&id)
-                    .map_or_else(|| head.clone(), OperationId::hex)
-            })
+            .map(|head| self.key(&OperationId::try_from_hex(head).unwrap()).hex())
             .collect();
         keys.sort_unstable();
         keys
+    }
+
+    /// What identifies `id` across runs of the same schedule. jj orders a merge's parents by
+    /// end time, and can put equal ones either way, as a rewrite and the operation it
+    /// rewrote have: so a merge a schedule writes, and every operation written on one, gets
+    /// a different id on another run. The key hashes the body with each parent replaced by
+    /// its key, the parents of a merge sorted. Any other operation, and all the history the
+    /// fixture starts with, keeps its id.
+    fn key(&self, id: &OperationId) -> OperationId {
+        if let Some(key) = self.keys.borrow().get(id) {
+            return key.clone();
+        }
+        let mut body = self.store.read_operation(id).block_on().unwrap();
+        let parents: Vec<OperationId> = body.parents.iter().map(|p| self.key(p)).collect();
+        // Key what the metadata names first. A body names only operations written before
+        // it, so this ends.
+        for text in body
+            .metadata
+            .attributes
+            .values()
+            .chain([&body.metadata.description])
+        {
+            for word in text.split(|c: char| !c.is_ascii_hexdigit()) {
+                if word.len() == id.hex().len()
+                    && let Some(named) = OperationId::try_from_hex(word)
+                    && self.store.read_operation(&named).block_on().is_ok()
+                {
+                    self.key(&named);
+                }
+            }
+        }
+        // musubi's metadata can name another operation, as a stamp of what a rewrite was
+        // reconciled from does: name it by its key too.
+        let renamed: Vec<(String, String)> = self
+            .keys
+            .borrow()
+            .iter()
+            .filter(|(id, key)| id != key)
+            .map(|(id, key)| (id.hex(), key.hex()))
+            .collect();
+        let mut named = false;
+        for text in body
+            .metadata
+            .attributes
+            .values_mut()
+            .chain([&mut body.metadata.description])
+        {
+            for (from, to) in &renamed {
+                if text.contains(from.as_str()) {
+                    *text = text.replace(from.as_str(), to);
+                    named = true;
+                }
+            }
+        }
+        let key = if body.parents.len() <= 1 && parents == body.parents && !named {
+            id.clone()
+        } else {
+            body.parents = parents;
+            body.parents.sort_unstable();
+            OperationId::new(blake2b_hash(&body).to_vec())
+        };
+        self.keys.borrow_mut().insert(id.clone(), key.clone());
+        key
     }
 
     fn state(&self) -> State {
@@ -269,6 +365,7 @@ impl World<'_> {
         State {
             native: self.native[0],
             peer: self.concurrent.then_some(self.native[1]),
+            loader: self.loader,
             heads: self.head_keys(&read_heads(&self.repo)),
             checked_heads: self.checked_heads.clone(),
             online: self.node.is_some(),
@@ -338,10 +435,31 @@ impl World<'_> {
                     choices.push(Action::InterruptBeforePublication);
                 }
             }
-        } else if self.concurrent && state.heads.len() > 1 && !self.write_locked() {
+        } else if self.concurrent && state.heads.len() > 1 && !self.locked() {
             choices.push(Action::MergeHeads);
         }
+        match self.loader {
+            // Loading at one head takes no lock and changes nothing.
+            Some(Native::Ready) if state.heads.len() > 1 && !self.locked() => {
+                choices.push(Action::StartLoader);
+            }
+            Some(Native::Prepared) => {
+                choices.push(Action::PublishLoader);
+                choices.push(Action::KillLoader);
+            }
+            Some(Native::Paused) => {
+                choices.push(Action::FinishLoader);
+                choices.push(Action::KillLoader);
+            }
+            _ => {}
+        }
         choices
+    }
+
+    /// Whether a native command holds jj's op-heads lock, which loading at several heads
+    /// waits for.
+    fn locked(&self) -> bool {
+        self.write_locked() || matches!(self.loader, Some(Native::Prepared | Native::Paused))
     }
 
     /// Whether the write peer holds jj's op-heads lock: an ordinary command takes it before
@@ -399,6 +517,46 @@ impl World<'_> {
 
     fn act(&mut self, action: Action) -> State {
         match action {
+            Action::StartLoader => {
+                let old = self
+                    .repo
+                    .repo_path()
+                    .join("op_heads/heads")
+                    .join(&self.old_head);
+                let mut command = self.repo.program(Path::new("jj"));
+                command
+                    .args(["--ignore-working-copy", "op", "log", "-n1", "--no-graph"])
+                    .args(["-T", "id"])
+                    .env("COLUMNS", "80")
+                    .env("RAYON_NUM_THREADS", "1");
+                self.loader_child = self.gate.spawn_loader(
+                    &mut command,
+                    &old,
+                    &self.env.root().join("gate-loader"),
+                );
+                self.loader = Some(if self.loader_child.is_some() {
+                    Native::Prepared
+                } else {
+                    Native::Finished
+                });
+            }
+            Action::PublishLoader => {
+                let paused = self.loader_child.as_mut().unwrap().publish_or_exit();
+                self.loader = Some(if paused {
+                    Native::Paused
+                } else {
+                    self.loader_child.take();
+                    Native::Finished
+                });
+            }
+            Action::FinishLoader => {
+                self.loader_child.take().unwrap().release();
+                self.loader = Some(Native::Finished);
+            }
+            Action::KillLoader => {
+                self.loader_child.take().unwrap().kill();
+                self.loader = Some(Native::Killed);
+            }
             Action::StartAbandon => {
                 self.prepare(0);
                 self.publish(0);
@@ -476,20 +634,7 @@ impl World<'_> {
             Action::MergeHeads => {
                 let node = self.node.as_mut().unwrap();
                 node.settle().unwrap();
-                let head = node.merge_heads().unwrap();
-                let mut body = self.store.read_operation(&head.0).block_on().unwrap();
-                if body.parents.len() > 1 {
-                    // The native merge orders by end time. Equal-time parents can come
-                    // out in either order. Compare its whole body modulo that order.
-                    for parent in &mut body.parents {
-                        if let Some(key) = self.merge_ids.get(parent) {
-                            parent.clone_from(key);
-                        }
-                    }
-                    body.parents.sort_unstable();
-                    self.merge_ids
-                        .insert(head.0, OperationId::new(blake2b_hash(&body).to_vec()));
-                }
+                node.merge_heads().unwrap();
                 self.checked_heads = None;
             }
         }
@@ -604,14 +749,21 @@ impl World<'_> {
     }
 }
 
-fn replay(world: &mut World<'_>, trace: &Schedule, verify: bool) -> (State, Option<String>) {
+/// Replays `trace`, checking each recorded state if `verify`. Returns where it ended, with any
+/// error; or, for a schedule with a native merge, `None` if a step is disabled, as when jj
+/// merged the heads otherwise this time.
+fn replay(
+    world: &mut World<'_>,
+    trace: &Schedule,
+    verify: bool,
+) -> Option<(State, Option<String>)> {
     let mut state = world.state();
     for (index, step) in trace.steps.iter().enumerate() {
         let index = index + 1;
-        assert!(
-            world.choices(&state).contains(&step.action),
-            "step {index} is disabled"
-        );
+        if !world.choices(&state).contains(&step.action) {
+            assert!(trace.loader, "step {index} ({:?}) is disabled", step.action);
+            return None;
+        }
         let (actual, error) = world.attempt(step.action);
         state = actual.state;
         if verify {
@@ -623,10 +775,10 @@ fn replay(world: &mut World<'_>, trace: &Schedule, verify: bool) -> (State, Opti
             );
         }
         if error.is_some() {
-            return (state, error);
+            return Some((state, error));
         }
     }
-    (state, None)
+    Some((state, None))
 }
 
 fn explore(
@@ -640,12 +792,20 @@ fn explore(
     let mut runs = 0;
     let mut transitions = 0;
     let mut replayed = 0;
+    // Branches a native merge made unreachable this time.
+    let mut dropped = 0;
     let horizon = fixture.horizon();
 
     while let Some((mut trace, next)) = agenda.pop_front() {
         let mut world = fixture.restore();
         runs += 1;
-        let (mut state, mut error) = replay(&mut world, &trace, true);
+        // jj orders the parents of a merge it makes of heads with equal end times as it
+        // pleases, and musubi's rewrites of the merge follow that order: a schedule with a
+        // native merge need not reach the same states again. Continue from where it does.
+        let Some((mut state, mut error)) = replay(&mut world, &trace, !fixture.loader) else {
+            dropped += 1;
+            continue;
+        };
         replayed += trace.steps.len();
         let mut following = next;
         loop {
@@ -659,6 +819,11 @@ fn explore(
                 longest = trace.clone();
             }
             let action = if let Some(action) = following.take() {
+                if !world.choices(&state).contains(&action) {
+                    assert!(fixture.loader, "{action:?} is disabled after its prefix");
+                    dropped += 1;
+                    break;
+                }
                 action
             } else {
                 // Keep the budget in the key so an earlier, deeper visit cannot hide a
@@ -741,10 +906,26 @@ fn explore(
                 }),
             "the search must finish both commands after a restart that lost the cache"
         );
+        assert!(
+            !fixture.loader
+                || visited
+                    .keys()
+                    .any(|state| state.loader == Some(Native::Paused)),
+            "the search must pause a native merge between adding and removing heads"
+        );
+        for (loader, what) in [
+            (Native::Killed, "kill a native merge"),
+            (Native::Finished, "finish a native merge"),
+        ] {
+            assert!(
+                !fixture.loader || visited.keys().any(|state| state.loader == Some(loader)),
+                "the search must {what}"
+            );
+        }
     }
     eprintln!(
         "Explored {transitions} transitions across {runs} runs and {} observed states \
-         (replayed {replayed} prefix steps, horizon {horizon})",
+         (replayed {replayed} prefix steps, dropped {dropped} branches, horizon {horizon})",
         visited.len()
     );
     (longest, None)
@@ -757,7 +938,7 @@ fn load(path: &Path) -> Schedule {
         "unsupported schedule version"
     );
     assert!(
-        trace.steps.len() <= horizon(trace.concurrent),
+        trace.steps.len() <= horizon(trace.concurrent, trace.loader),
         "schedule exceeds the search horizon; pass a larger --steps"
     );
     trace
@@ -801,14 +982,23 @@ fn run() {
         concurrent || peer.is_abandon(),
         "a write peer needs a concurrent search"
     );
-    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent, peer);
+    let loader = trace.as_ref().map_or_else(
+        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_LOADER").is_some(),
+        |trace| trace.loader,
+    );
+    assert!(concurrent || !loader, "a loader needs a concurrent search");
+    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent, peer, loader);
     let (trace, violation) = match mode.as_str() {
         "search" => explore(&fixture, fixture.empty_schedule(), None),
         "replay" => {
             let trace = trace.unwrap();
             let mut world = fixture.restore();
-            let verify = std::env::var_os("MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY").is_none();
-            let (state, error) = replay(&mut world, &trace, verify);
+            // As in a search, a native merge need not reach the recorded states again.
+            let verify =
+                std::env::var_os("MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY").is_none() && !trace.loader;
+            let (state, error) = replay(&mut world, &trace, verify).expect(
+                "a step is disabled: jj merged the heads otherwise this time; replay it again",
+            );
             (trace, error.or_else(|| world.violation(&state)))
         }
         "branch" => {

@@ -1025,10 +1025,25 @@ branch jj hasn't imported, a node can stop halfway through a sync.
   the independent import and history checks. `trim_below_accepted_forget` instead leaves
   unpublished work above an accepted forget and trims both watched accepted frontiers;
   `e2e_trim_below_accepted_forget` runs that rule through the same independent checks.
-  The reference captures recipient merges before
-  receipt, including setup and pre-sync local merges: a trim published elsewhere may
-  reparent them while keeping their views. Only an independently captured operation with
-  unchanged nonparent content qualifies; a replacement copy starts its capture afresh.
+  The reference captures recipient merges before receipt, including setup and pre-sync local
+  merges: a trim published elsewhere may reparent them while keeping their views. Only an
+  independently captured operation with unchanged nonparent content qualifies; a replacement copy
+  starts its capture afresh.
+  `late_command_after_trim` publishes a machine's work, makes a change the hub hasn't accepted,
+  and trims everything below it to the root. It lets the node handle the trim in a sync of up to
+  two policy steps, perhaps none past noticing it, or in a whole sync. Then it runs a command
+  `--at-op` the op head the trim left, from before the node handled it, as a command that had
+  loaded the repository then would write on it. `at_op` can't: the handling replaces that
+  operation, and it takes its operations from the op log as it is. `e2e_late_command_after_trim`
+  runs the rule through the same checks. `late_commands_after_trims` makes one to three full trims
+  to the root on one machine, each handled by its node as far as a drawn point and followed by one
+  or two late commands `--at-op` any operation a trim of that machine left before the node handled
+  it, or a late command or merge written on one, which jj still loads though no op head reaches
+  it. A late command may run with the clock stepped back, to a time of its own before the tests'
+  epoch, so that jj puts it first in a merge. Before a late command the machine merges its op
+  heads if it has several, since the import check models merges of two heads only. Between trims
+  another machine syncs, commits, adds, renames or forgets a workspace, or forgets a copy, or a
+  third machine joins and works. Every case of `e2e_search_shard_5` starts with this rule.
 - **Workspaces**: add, rename and forget them; forget another machine's; and rewrite or abandon
   another machine's working-copy commit.
 - **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused
@@ -1096,6 +1111,17 @@ HEAD, and jj writes HEAD only as it records it, so such an import may change the
 after such a move, or where jj's merge of two op heads that both changed the record left it
 differing from `.git`, as after a command at an older operation (`--at-op`), which still writes
 HEAD ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+jj writes HEAD unborn, and records it absent, where a command leaves the working copy's parent the
+root commit, so such a command is a physical writer of the absent HEAD; one that drops the
+workspace, or an undo, redo, restore or revert, is not
+(`imports::an_absent_head_is_written_only_where_the_workspace_remains`). Importing an unborn HEAD,
+jj records it absent and checks nothing out; finishing the command then resets HEAD to the working
+copy's parent and records that, so the import's record is a value `.git` didn't hold a moment
+before. The checker judges such an import as taking the unborn HEAD, recognising it by a working
+copy left unchanged or rewritten, where taking a commit always checks out a new one with no
+predecessor. A working copy jj replaces because it is immutable isn't recognised.
+`imports::jj_resets_an_unborn_head_it_imports` pins jj's behaviour in a plain repository, and
+`e2e_late_command_then_import_of_an_unborn_head` reaches it through musubi.
 
 For an operation whose parents a trim changed, the record checker uses its independently
 observed native body and original parents only when the rest of that body, including its
@@ -1149,6 +1175,13 @@ export of the same target still uses its own valid physical history.
 a different body, a wrong value and an invalid source ancestor, including a carrier whose
 metadata names a local command. It also accepts a valid physical record differing from
 the earlier captured frontier.
+A realization of a received trim carries the records of `.git`, refs as well as HEAD, that its
+machine's native op heads had when it was received. The ref check judges such a carrier's record
+by that captured frontier too (`Log::ref_operation`): the record must be its one head's, or jj's
+merge of its two over closest bases that agree, and the frontier's own history must validate.
+`imports::preserved_ref_records_require_the_captured_frontier` rejects a carrier without the
+frontier, with one that records the ref otherwise, with one whose own record nothing explains, and
+one recording either of two heads' records rather than jj's merge.
 `world::git_record_inputs_distinguish_lost_work_from_an_opaque_prefix` checks the actual
 lost-record transition and rejects loss of only an opaque pruned prefix.
 
@@ -1174,6 +1207,8 @@ and the test checks that:
   operation of the hive's history a realization that translates back to it. Reconstructing
   an alias's parent mappings must not move the already settled op heads;
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote bookmarks;
+- no copy has a workspace whose name has a `/` in the hub's head: no rule makes one, so such a
+  name is another machine's workspace, as this machine shows it, taken for its own;
 - in every colocated repository, `refs/heads` matches the local bookmarks that are neither
   conflicted nor on the root commit (which git can't hold), and a further `jj status` imports
   nothing;

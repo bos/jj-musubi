@@ -20,8 +20,10 @@
 //! With no git move, the only allowed explanation is jj's merge of concurrent op heads
 //! that both changed `git_refs`, even if one changed it back (`concurrent_records_revert`).
 //! Every record along that history must come from a native import, export or fetch, or a
-//! merge of those records. For Git refs, merges of more heads at once or with differing
-//! closest bases aren't modeled, and fail as unexplained.
+//! merge of those records, or, for a realization of a received trim, the records of the
+//! native frontier captured before it was received, which it carries (`Log::ref_operation`).
+//! For Git refs, merges of more heads at once or with differing closest bases aren't modeled,
+//! and fail as unexplained.
 //!
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
@@ -37,7 +39,8 @@
 //! new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
 //! only where it is still a symbolic ref to the branch git moves, as it is in a new repository
 //! until jj first writes it; the import then takes that move, as for a ref. Otherwise jj writes
-//! HEAD only as it records it, in the same operation (`reset_head` in jj-lib's `git.rs`), so
+//! HEAD only as it records it, in the same operation (`reset_head` in jj-lib's `git.rs`),
+//! unborn, and recorded absent, where the working copy's parent is the root commit, so
 //! the record matches `.git` but where jj's merge of two op heads that both changed it made it
 //! something else, `.git` having one head's: as after a command at an older operation
 //! (`--at-op`), which still writes HEAD, without checking it where the older operation has no
@@ -390,7 +393,14 @@ impl Log {
                         .workspace_name
                         .as_ref()
                         .is_some_and(|name| name.as_str() == ws)
-                    && (!now.is_absent() || own_head_import(&self.owner, &op))
+                    // jj writes HEAD unborn, and records it absent, where the working
+                    // copy's parent is the root commit. A command that drops the workspace
+                    // drops its record without writing `.git`, and an undo or restore writes
+                    // HEAD only where it differs from the record it restores.
+                    && (!now.is_absent()
+                        || own_head_import(&self.owner, &op)
+                        || !restore(&op)
+                            && self.view(id).wc_commit_ids.contains_key(WorkspaceName::new(ws)))
                     && (own_head_import(&self.owner, &op) || self.head(&op.parents[0], ws) != now));
             if now.is_resolved()
                 && (setup.contains(id) || writes || id == self.store.root_operation_id())
@@ -422,18 +432,58 @@ impl Log {
         Ok(self.head_writers[&wanted].clone())
     }
 
-    fn head_operation(&mut self, id: &OperationId, ws: &str) -> op_store::Operation {
-        let mut op = self.captured_operation(id);
-        let inputs: Vec<_> = match self.preserved_heads.get(id) {
+    /// The independently captured native frontiers that `op`, at `id`, may have carried: its
+    /// own, or, for a later version of the same publication, each with the same body.
+    fn preserved_inputs(
+        &self,
+        id: &OperationId,
+        op: &op_store::Operation,
+    ) -> Vec<PreservedHeadInput> {
+        match self.preserved_heads.get(id) {
             Some(input) => vec![input.clone()],
             None if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) => self
                 .preserved_heads
                 .values()
-                .filter(|input| crate::world::same_source_body(&input.carrier, &op))
+                .filter(|input| crate::world::same_source_body(&input.carrier, op))
                 .cloned()
                 .collect(),
             None => vec![],
-        };
+        }
+    }
+
+    /// [`Self::head_operation`], for the record of `r`: a publication carries the records of
+    /// the native frontier captured before it was received (`races.md`, "a received trim
+    /// replaces every local op head with the root"), so where its record is that frontier's
+    /// one head's, or jj's merge of its two over closest bases that agree, it is judged on
+    /// those heads, whose own history must then validate. Otherwise, on its source parents.
+    fn ref_operation(&mut self, id: &OperationId, r: &Ref) -> op_store::Operation {
+        let op = self.record_operation(id);
+        let now = self.record(id, r);
+        for input in self.preserved_inputs(id, &op) {
+            let explained = match input.heads.as_slice() {
+                [head] => self.record(head, r) == now,
+                [left, right] => {
+                    let bases = self.bases(&input.heads);
+                    let base = bases.first().map(|b| self.record(b, r));
+                    base.is_some_and(|base| {
+                        bases.iter().all(|b| self.record(b, r) == base)
+                            && self.merge(id, r, left, &base, right) == now
+                    })
+                }
+                _ => false,
+            };
+            if explained {
+                let mut captured = op.clone();
+                captured.parents = input.heads;
+                return captured;
+            }
+        }
+        op
+    }
+
+    fn head_operation(&mut self, id: &OperationId, ws: &str) -> op_store::Operation {
+        let mut op = self.captured_operation(id);
+        let inputs = self.preserved_inputs(id, &op);
         for input in inputs {
             // A publication can carry the captured observation, but a later merge or
             // export of the same canonical target can legitimately change its record.
@@ -499,7 +549,7 @@ impl Log {
             }
             let op = match record {
                 RecordKind::Head(ws) => self.head_operation(&id, ws),
-                RecordKind::Ref(_) => self.record_operation(&id),
+                RecordKind::Ref(r) => self.ref_operation(&id, r),
             };
             pending.push((id, true));
             pending.extend(op.parents.into_iter().rev().map(|p| (p, false)));
@@ -561,7 +611,7 @@ impl Log {
     /// parent's record or jj's merge of two. The remote's conflicts are exported by musubi
     /// instead.
     fn plausible(&mut self, id: &OperationId, r: &Ref) -> Result<(), String> {
-        let op = self.record_operation(id);
+        let op = self.ref_operation(id, r);
         let now = self.record(id, r);
         let local = r.local(self.view(id));
         // As an export that wrote the ref leaves it: in step with `git_refs` and the bookmark,
@@ -1343,6 +1393,236 @@ fn a_forgotten_nonroot_publication_keeps_its_observed_git_frontier() {
         native
     );
     world.assert_observer_state(&before);
+}
+
+/// jj writes `.git`'s HEAD unborn, and records it absent, where a command leaves the working
+/// copy on the root commit: that command wrote the absent HEAD (`Log::possible_heads`). A
+/// command that drops the workspace drops its record too, writing nothing to `.git`, which keeps
+/// what the last writer left.
+#[test]
+fn an_absent_head_is_written_only_where_the_workspace_remains() {
+    use crate::world::{Naming, Setup};
+
+    let world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let store = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .op_store()
+        .clone();
+    let native = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let template = block_on(store.read_operation(&native)).unwrap();
+    let base_view = block_on(store.read_view(&template.view_id)).unwrap();
+    let a = base_view.wc_commit_ids[WorkspaceName::DEFAULT].clone();
+    // A command of this machine's in the default workspace, recording `record`, keeping the
+    // workspace or not, on `parent`.
+    let make = |description: &str, record: RefTarget, keep: bool, parent: OperationId| {
+        let mut op = template.clone();
+        op.metadata.attributes.clear();
+        op.metadata.workspace_name = Some(WorkspaceName::DEFAULT.to_owned());
+        op.metadata.description = description.to_owned();
+        op.metadata.time.end.timestamp.0 += 1000;
+        let mut view = base_view.clone();
+        view.git_heads
+            .insert(WorkspaceName::DEFAULT.to_owned(), record);
+        if !keep {
+            view.git_heads.remove(WorkspaceName::DEFAULT);
+            view.wc_commit_ids.remove(WorkspaceName::DEFAULT);
+        }
+        op.view_id = block_on(store.write_view(&view)).unwrap();
+        op.parents = vec![parent];
+        block_on(store.write_operation(&op)).unwrap()
+    };
+    let wrote_a = make(
+        "import git head",
+        RefTarget::normal(a.clone()),
+        true,
+        store.root_operation_id().clone(),
+    );
+    let unborn = make("abandon commit", RefTarget::absent(), true, wrote_a.clone());
+    let dropped = make(
+        "forget workspace",
+        RefTarget::absent(),
+        false,
+        wrote_a.clone(),
+    );
+    let restored = make(
+        &format!("restore to operation {}", store.root_operation_id().hex()),
+        RefTarget::absent(),
+        true,
+        wrote_a,
+    );
+    let mut log = Log {
+        owner: world.owner(0),
+        source_root: world.fx.repo(0).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
+        store: store.clone(),
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        captured_sources: BTreeMap::new(),
+        preserved_heads: BTreeMap::new(),
+        native_rewrites: BTreeMap::new(),
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let setup = &world.imports.setup[0];
+    let written = |log: &mut Log, id: &OperationId| {
+        log.possible_heads(id, "default", setup)
+            .unwrap()
+            .as_ref()
+            .clone()
+    };
+    assert_eq!(written(&mut log, &unborn), HashSet::from([None]));
+    assert_eq!(
+        written(&mut log, &dropped),
+        HashSet::from([Some(a.clone())])
+    );
+    assert_eq!(written(&mut log, &restored), HashSet::from([Some(a)]));
+}
+
+/// A publication carries the records of `.git` its machine's native frontier had when it
+/// received it (`Log::ref_operation`), as HEAD's (`Log::head_operation`): with that frontier,
+/// the carrier's record of a ref is explained; without it, or with a frontier that records the
+/// ref otherwise, the carrier changed the record as no import or export does.
+#[test]
+fn preserved_ref_records_require_the_captured_frontier() {
+    use crate::world::{Naming, Setup};
+
+    let world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: true,
+        secondary: false,
+    });
+    let store = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .op_store()
+        .clone();
+    let original = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let template = block_on(store.read_operation(&original)).unwrap();
+    let view = block_on(store.read_view(&template.view_id)).unwrap();
+    let main = Ref {
+        kind: Kind::Bookmark,
+        name: "main".to_owned(),
+    };
+    let recorded = main.record(&view);
+    assert!(!recorded.1.is_absent(), "the setup exported main");
+    let elsewhere = RefTarget::normal(
+        view.wc_commit_ids
+            .values()
+            .find(|id| recorded.1.as_normal() != Some(*id))
+            .unwrap()
+            .clone(),
+    );
+    // A realization, as musubi marks one, of `view` changed by `change`, on `parent`.
+    let make = |description: &str, parent: OperationId, change: &dyn Fn(&mut View)| {
+        let mut op = template.clone();
+        op.parents = vec![parent];
+        op.metadata.description = description.to_owned();
+        op.metadata.workspace_name = None;
+        op.metadata.attributes.clear();
+        op.metadata
+            .attributes
+            .insert(CANONICAL_ATTRIBUTE.to_owned(), description.to_owned());
+        let mut v = view.clone();
+        change(&mut v);
+        op.view_id = block_on(store.write_view(&v)).unwrap();
+        block_on(store.write_operation(&op)).unwrap()
+    };
+    let unrecorded = make("received trim", store.root_operation_id().clone(), &|v| {
+        v.git_refs.remove(GitRefName::new("refs/heads/main"));
+        if let Some(git) = v.remote_views.get_mut(REMOTE_NAME_FOR_LOCAL_GIT_REPO) {
+            git.bookmarks.remove(RefName::new("main"));
+        }
+    });
+    // The carrier records main as the frontier does, with the bookmark elsewhere, so that
+    // it is no export's record either.
+    let carrier = make("carrier", unrecorded.clone(), &|v| {
+        v.local_bookmarks
+            .insert(RefName::new("main").to_owned(), elsewhere.clone());
+    });
+    let log = |carrier: &OperationId, heads: Vec<OperationId>| Log {
+        owner: world.owner(0),
+        source_root: world.fx.repo(0).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
+        store: store.clone(),
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        captured_sources: BTreeMap::new(),
+        preserved_heads: (!heads.is_empty())
+            .then(|| {
+                let input = PreservedHeadInput {
+                    carrier: block_on(store.read_operation(carrier)).unwrap(),
+                    heads,
+                };
+                (carrier.clone(), input)
+            })
+            .into_iter()
+            .collect(),
+        native_rewrites: BTreeMap::new(),
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let setup = &world.imports.setup[0];
+    let record = RecordKind::Ref(main);
+    assert!(
+        log(&carrier, vec![])
+            .validate_record(&carrier, setup, &record)
+            .is_err()
+    );
+    log(&carrier, vec![original.clone()])
+        .validate_record(&carrier, setup, &record)
+        .unwrap();
+    assert!(
+        log(&carrier, vec![unrecorded.clone()])
+            .validate_record(&carrier, setup, &record)
+            .is_err(),
+        "a frontier that records the ref otherwise doesn't explain the carrier's record"
+    );
+    // A frontier head with the carrier's record, but one no import or export explains: the
+    // frontier's own history must validate too.
+    let unexplained = make("unexplained frontier", unrecorded.clone(), &|v| {
+        v.local_bookmarks
+            .insert(RefName::new("main").to_owned(), elsewhere.clone());
+    });
+    assert!(
+        log(&carrier, vec![unexplained])
+            .validate_record(&carrier, setup, &record)
+            .is_err(),
+        "a frontier whose own record no import or export explains explains nothing"
+    );
+    // Of two heads, the carrier records jj's merge, which here is the one that records the
+    // ref, not either head's record as such: one that drops it, as the other head does, is
+    // no carrier of that frontier.
+    let frontier = vec![original.clone(), unrecorded.clone()];
+    log(&carrier, frontier.clone())
+        .validate_record(&carrier, setup, &record)
+        .unwrap();
+    let dropping = make("dropping carrier", original, &|v| {
+        v.git_refs.remove(GitRefName::new("refs/heads/main"));
+        if let Some(git) = v.remote_views.get_mut(REMOTE_NAME_FOR_LOCAL_GIT_REPO) {
+            git.bookmarks.remove(RefName::new("main"));
+        }
+        v.local_bookmarks
+            .insert(RefName::new("main").to_owned(), elsewhere.clone());
+    });
+    assert!(
+        log(&dropping, frontier)
+            .validate_record(&dropping, setup, &record)
+            .is_err(),
+        "a carrier records jj's merge of its two frontier heads, not either head's record"
+    );
 }
 
 #[test]

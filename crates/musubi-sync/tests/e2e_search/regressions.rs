@@ -392,3 +392,106 @@ fn e2e_abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs()
     world.op_abandon(0, &late);
     world.converge();
 }
+
+/// The commit of the workspace that machine `m` shows as `name` at its operation `op`.
+fn working_copy_at(world: &World, m: usize, op: &str, name: &str) -> crate::view::Commit {
+    world
+        .view_at(m, op)
+        .commits
+        .into_iter()
+        .find(|commit| commit.working_copies.iter().any(|shown| shown == name))
+        .unwrap_or_else(|| panic!("no working copy {name} at {op}"))
+}
+
+/// Reduced from a failure of `late_commands_after_trims`. Each machine starts with work
+/// bookmarked `main`, which conflicts once they join. Beta trims to the root; alpha takes the
+/// trim, whose realization carries the record of `main` alpha's `.git` has (the sync captures
+/// that native frontier), trims too, and, before its node handles that (it only notices the
+/// trim), abandons its own first commit at the trim's op head. The
+/// next command merges, and imports `main` from `.git`, as jj does where both heads changed
+/// the record. The import check judges the realization's record by the native frontier
+/// captured before alpha took the trim (`Log::ref_operation`): judged by its source parents,
+/// which record nothing, it changed the record as no import or export does.
+#[test]
+fn e2e_late_command_after_taking_a_trim() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: true,
+        secondary: true,
+    });
+    world.trim_to_unpublished_root(1);
+    world.sync(1);
+    let op = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    let first = working_copy_at(&world, 0, &op, "second").parents[0].clone();
+    world.late_command(0, &op, &["abandon", &first], false);
+    world.merge_late_heads(0);
+    for m in 0..2 {
+        world.check_imports(m);
+    }
+    world.converge();
+}
+
+/// Reduced from a failure of `late_commands_after_trims`. After a full trim, alpha runs late
+/// commands with its clock stepped back: one puts its working copy on beta's, and, after
+/// another trim, one on the merge abandons beta's commit, which leaves alpha's working copy on
+/// the root, so jj writes `.git`'s HEAD unborn. The next command merges, the late head first,
+/// and its record of HEAD is the other head's, so it imports HEAD from `.git`, as jj does where
+/// both heads wrote HEAD. The import check counts that late command as writing HEAD unborn.
+#[test]
+fn e2e_late_command_leaving_head_unborn() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    let op = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    let beta = working_copy_at(&world, 0, &op, "beta/beta").id;
+    world.late_command(0, &op, &["new", &beta], true);
+    world.merge_late_heads(0);
+    let merge = world.late_ops(0)[0].id.clone();
+    world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    world.late_command(0, &merge, &["abandon", &beta], true);
+    world.jj(0, &["status"]);
+    for m in 0..2 {
+        world.check_imports(m);
+    }
+    world.converge();
+}
+
+/// Reduced from a failure of `late_commands_after_trims`: a gap in the reference, not a bug in
+/// musubi, which this pins until the reference can witness the case. Beta renames its secondary
+/// workspace without syncing; alpha trims to the root and, before its node handles that,
+/// describes beta's working-copy commit twice at the trim's op head, merging between. beta's
+/// old name comes back at alpha's later rewrite, beside the new one, as jj's merge of views
+/// gives it (checked by hand). The reference can't witness that name: after alpha's trim the
+/// canonical views leave out the absent beta's working copies, two rewrites of one commit make
+/// the bindings it follows ambiguous at a merge, and certifying them needs jj's replay of
+/// alpha's native merges for an absent copy's working copies. Once it can, this fails: make it
+/// a plain regression.
+#[test]
+#[should_panic(expected = "beta lists workspaces")]
+fn e2e_late_rewrites_of_a_renamed_workspace() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: true,
+    });
+    world.rename_workspace(1, 1, "default");
+    let op = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    let second = working_copy_at(&world, 0, &op, "beta/second").id;
+    for _ in 0..2 {
+        if world.op_heads(0).len() > 1 {
+            world.merge_late_heads(0);
+        }
+        let message = world.message(0);
+        world.late_command(0, &op, &["describe", &second, "-m", &message], false);
+    }
+    world.converge();
+}

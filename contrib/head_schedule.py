@@ -45,6 +45,7 @@ def main():
     modes = parser.add_subparsers(dest="mode", required=True)
     search = modes.add_parser("search", help="explore schedules from the initial repository")
     search.add_argument("--unpublished", action="store_true", help="start with unpublished work")
+    search.add_argument("--concurrent", action="store_true", help="race two native abandons")
     search.add_argument("--out", type=Path, default=ROOT / "target/head-schedule.json")
     replay = modes.add_parser("replay", help="replay a saved schedule and verify its states")
     replay.add_argument("input", type=Path)
@@ -91,6 +92,8 @@ def main():
         settings["MUSUBI_HEAD_SCHEDULE_AT"] = str(args.at)
     if getattr(args, "unpublished", False):
         settings["MUSUBI_HEAD_SCHEDULE_UNPUBLISHED"] = "1"
+    if getattr(args, "concurrent", False):
+        settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
     if getattr(args, "actions_only", False):
         settings["MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY"] = "1"
 

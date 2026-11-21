@@ -862,14 +862,18 @@ runs, can take all a machine's memory on a proof it can't finish, and macOS enfo
 A Linux operation-head scheduler complements this search at a finer boundary. It pauses a
 real `jj op abandon` immediately before unlinking its old head, after jj has written its new
 head. Its other actor runs the same `NodeRepo::check_abandon` as the daemon, including an
-interruption after publishing a replacement and a reopen of the local store.
+interruption after publishing a replacement and a reopen of the local store. With
+`--concurrent`, two such commands race from the same old head, and the daemon can also stop
+before moving any head and restart without its translation cache.
 
 ### Search and replay operation-head schedules
 
 Use the pinned jj built with dynamic Linux libraries and a C compiler named `cc`. A static
-jj binary cannot load the test shim that gates `unlink` and `unlinkat`. Run the search with
+jj binary cannot load the test shim, which gates creating a new head file through the `open`
+family and removing the old one through `unlink` and `unlinkat`. Run the search with
 `just head-schedule search`. Add `--unpublished` to start with local work above the synced
-operation, and `--out PATH` to retain a separate schedule.
+operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
+schedule.
 
 ```sh
 just head-schedule search
@@ -895,6 +899,17 @@ step. Where the abandon check put the history back, the settled head also has th
 view and canonical identity, with no pending drops. Disabling the fresh-head stamping for
 [#166](https://github.com/bos/jj-musubi/issues/166) makes the search rediscover the empty
 head store by choosing a daemon check while jj waits, then letting jj finish its unlink.
+
+The concurrent search lets each command pause before it creates its new head as well as
+before its unlink, so both can read the same old head before either publishes. It adds
+actions to kill either command, to stop the daemon after it saves a move but before any head
+moves, to restart it without the translation cache, and to settle and merge the remaining
+heads. jj can order the parents of a merge with equal timestamps either way, so states compare
+a merge by its body with its parents sorted, and the search treats the two commands as
+interchangeable. It found that resuming a saved local move after that restart, once jj had
+unlinked the old head, could not find the local operation for a parent that only the old head
+reached. Recovery now replays the head and workspace moves saved before the crash, as it does
+for taking records, instead of working them out again from the translation cache.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:

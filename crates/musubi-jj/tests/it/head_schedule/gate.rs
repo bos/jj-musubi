@@ -1,7 +1,7 @@
-//! Stop a jj subprocess just before unlinking one operation head.
+//! Stop a jj subprocess just before creating its new operation head and unlinking its old one.
 
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::linux::net::SocketAddrExt as _;
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -56,7 +56,12 @@ impl Gate {
         old_head: &Path,
         socket: &Path,
     ) -> PausedCommand {
-        let old_head = old_head.canonicalize().unwrap();
+        let old_head = old_head
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(old_head.file_name().unwrap());
         // Abstract sockets leave no file in the repository and fit even when a fixture path
         // exceeds Linux's limit on Unix socket names.
         let mut hasher = DefaultHasher::new();
@@ -69,63 +74,140 @@ impl Gate {
         let address = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
         let listener = UnixListener::bind_addr(&address).expect("bind the jj operation-head gate");
         listener.set_nonblocking(true).unwrap();
+        let output = tempfile::tempfile_in(socket.parent().unwrap())
+            .expect("capture jj diagnostics at the gate");
         let child = command
             .env("LD_PRELOAD", &self.library)
             .env("MUSUBI_TEST_HEAD_GATE_PATH", &old_head)
             .env("MUSUBI_TEST_HEAD_GATE_SOCKET", name)
+            .stdout(Stdio::null())
+            .stderr(output.try_clone().unwrap())
             .spawn()
             .expect("start jj with the operation-head gate");
         let mut paused = PausedCommand {
             child,
-            stream: None,
+            listener,
+            pause: None,
             old_head,
+            output,
         };
+        paused.wait_for(Phase::BeforeCreate);
+        paused
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    BeforeCreate,
+    BeforeUnlink,
+}
+
+pub(super) struct PausedCommand {
+    child: Child,
+    listener: UnixListener,
+    pause: Option<(Phase, UnixStream)>,
+    old_head: PathBuf,
+    output: std::fs::File,
+}
+
+impl PausedCommand {
+    fn diagnostics(&self) -> String {
+        use std::io::{Seek as _, SeekFrom};
+        let mut output = &self.output;
+        output.seek(SeekFrom::Start(0)).unwrap();
+        let mut text = String::new();
+        output.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    fn wait_for(&mut self, phase: Phase) {
         let mut backoff = Backoff::new();
         loop {
-            match listener.accept() {
+            match self.listener.accept() {
                 Ok((stream, _)) => {
-                    paused.stream = Some(stream);
-                    return paused;
+                    self.receive_phase(phase, stream);
+                    return;
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => panic!("accept the jj operation-head gate: {err}"),
             }
-            if let Some(status) = paused.child.try_wait().unwrap() {
+            if let Some(status) = self.child.try_wait().unwrap() {
                 panic!(
-                    "{command:?} exited with {status} before unlinking {:?}",
-                    paused.old_head
+                    "jj exited with {status} while waiting for {phase:?} at {:?}: {}",
+                    self.old_head,
+                    self.diagnostics()
                 );
             }
             assert!(
                 backoff.wait(),
-                "{command:?} did not reach unlink of {:?} within {TIMEOUT:?}",
-                paused.old_head
+                "jj did not reach {phase:?} at {:?} within {TIMEOUT:?}",
+                self.old_head
             );
         }
     }
-}
 
-pub(super) struct PausedCommand {
-    child: Child,
-    stream: Option<UnixStream>,
-    old_head: PathBuf,
-}
+    fn receive_phase(&mut self, expected: Phase, mut stream: UnixStream) {
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let mut message = [0];
+        stream.read_exact(&mut message).unwrap_or_else(|err| {
+            panic!(
+                "read the jj operation-head gate phase while waiting for {expected:?} at {:?}: {err}",
+                self.old_head
+            )
+        });
+        let phase = match message[0] {
+            b'C' => Phase::BeforeCreate,
+            b'U' => Phase::BeforeUnlink,
+            byte => panic!("invalid jj operation-head gate phase byte {byte}"),
+        };
+        assert_eq!(
+            phase, expected,
+            "jj operation-head gate at {:?}",
+            self.old_head
+        );
+        self.pause = Some((phase, stream));
+    }
 
-impl PausedCommand {
-    pub(super) fn release(mut self) {
-        self.stream
+    fn resume(&mut self, expected: Phase) {
+        let (phase, mut stream) = self
+            .pause
             .take()
-            .unwrap()
+            .expect("jj is paused at the operation-head gate");
+        assert_eq!(
+            phase, expected,
+            "jj operation-head gate at {:?}",
+            self.old_head
+        );
+        stream
             .write_all(&[1])
             .expect("release the jj operation-head gate");
+    }
+
+    pub(super) fn publish(&mut self) {
+        self.resume(Phase::BeforeCreate);
+        self.wait_for(Phase::BeforeUnlink);
+    }
+
+    pub(super) fn kill(mut self) {
+        self.child
+            .kill()
+            .expect("kill jj at the operation-head gate");
+        self.child
+            .wait()
+            .expect("reap jj at the operation-head gate");
+    }
+
+    pub(super) fn release(mut self) {
+        self.resume(Phase::BeforeUnlink);
         let mut backoff = Backoff::new();
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 assert!(
                     status.success(),
-                    "jj failed with {status} after reaching unlink of {:?}",
-                    self.old_head
+                    "jj failed with {status} after reaching unlink of {:?}: {}",
+                    self.old_head,
+                    self.diagnostics()
                 );
                 return;
             }

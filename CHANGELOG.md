@@ -15,6 +15,8 @@
   up as that machine's, as `m3/m1/default`, when a `jj` command run on the history from
   before the abandon (with `--at-op`, or one already running) finishes afterwards, or when
   a second abandon of the whole history came between, or when jj merged two such commands.
+  The same holds when another machine renamed one of its workspaces meanwhile and an
+  operation from before the second abandon was then abandoned itself.
 
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.

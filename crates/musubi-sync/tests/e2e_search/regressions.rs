@@ -371,7 +371,6 @@ fn e2e_reparenting_a_merge_keeps_one_realization_per_operation() {
 /// lists `alpha/beta/third`. Without the rename, the second trim or the abandon, it passed;
 /// the search's stepped-back clock, merges and third machine weren't needed.
 #[test]
-#[ignore = "#167: alpha takes beta's renamed workspace for its own; remove once fixed"]
 fn e2e_abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs() {
     let mut world = World::new(Setup {
         nodes: 2,

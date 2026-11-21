@@ -276,7 +276,8 @@ impl<'a> Search<'a> {
     /// second or third trim, on a merge, on the earlier trims' late commands, or first in a
     /// merge, and a third machine's workspaces can be at stake, as in #167's shapes
     /// (`a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs`,
-    /// `a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs`). No merge
+    /// `a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs`,
+    /// `abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs`). No merge
     /// it makes has more than two op heads: the import check models no more (`imports`).
     pub fn late_trims(&mut self, tc: &TestCase) {
         let m = self.machine(tc);

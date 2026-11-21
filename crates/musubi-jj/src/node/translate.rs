@@ -1003,6 +1003,8 @@ impl NodeRepo {
             // machines' names and the machines it knows stay, but a name the source view
             // gives this machine stays this machine's own.
             let carried = self.carried_context(&source_parents)?;
+            let recorded = crate::canonical::namespace::Namespace::read(&op.metadata)?
+                .filter(|context| context.source == self.machine.key());
             let mut source_metadata = metadata.clone();
             if let Some(carried) = &carried
                 && !OpAttrs(&source_metadata.attributes).has_namespace()
@@ -1021,6 +1023,15 @@ impl NodeRepo {
                 &self.workspace_context_of_view(&source_view, &source_presence)?,
             )
             .expect("a context this machine just encoded");
+            // A context this operation itself records is one musubi wrote onto it when a trim
+            // left it on the root (`rewrite_locals`), standing for the views it started from
+            // as `canonical_view` takes it for a command on the root. A rewrite of its
+            // parents since, as jj's abandon of an operation it was on, has lost those views:
+            // the source view, judged by its parents' names, takes a name beyond them for one
+            // this operation made.
+            if let Some(recorded) = recorded {
+                context.take_others_of(recorded);
+            }
             if let Some(carried) = carried {
                 context.keep_others_of(carried);
             }

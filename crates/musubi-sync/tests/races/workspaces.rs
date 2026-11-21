@@ -882,3 +882,71 @@ fn a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs() {
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta", "gamma/gamma"]);
     assert_eq!(names(&hive, 2), ["alpha/alpha", "beta/beta", "gamma"]);
 }
+
+/// As `a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs`, but
+/// beta renames its workspace between the trims, and alpha then abandons the first late
+/// command, which a later one brought back. The command alpha ran after the second trim is
+/// then canonicalized on a source parent, the first late command's, whose view has neither
+/// beta's new name nor, in its canonical form, any other machine, while its parents became the
+/// root. The context the command itself records, which the second trim captured, is all that
+/// says `beta/third` is beta's, but the recomputation of its context judged the command's view
+/// by the names of that source parent, found `beta/third` in none, and gave it to alpha: beta
+/// then showed its own workspace as `alpha/beta/third` (#167). The old name `beta` comes back
+/// beside `third` on both machines, as jj does on one (races.md, on a whole-history trim while
+/// another machine renames a workspace).
+#[test]
+fn abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+
+    // The newest operation whose command ran `jj ... new -m <message>`.
+    let made = |hive: &Fixture, message: &str| {
+        let ids = hive.repo(0).jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            &format!(r#"if(tags.contains("-m {message}"), id ++ "\n")"#),
+        ]);
+        ids.lines().next().expect(message).to_owned()
+    };
+    let trim = |hive: &mut Fixture, off: &str| {
+        let alpha = hive.repo(0);
+        alpha.jj(&["new", "-m", "y"]);
+        alpha.jj(&["undo"]);
+        alpha.jj(&["op", "abandon", "..@-"]);
+        alpha.jj(&["new", "-m", off]);
+        let before = made(hive, off);
+        hive.node(0).settle().unwrap();
+        assert!(hive.node(0).check_abandon().unwrap());
+        before
+    };
+    let before = trim(&mut hive, "off1");
+    hive.repo(0).jj(&["--at-op", &before, "new", "-m", "late1"]);
+    // The operation of the command itself, not jj's reset of the git head after it.
+    let late1 = hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        r#"if(description.first_line() == "new empty commit" && tags.contains("-m late1"), id ++ "\n")"#,
+    ]);
+    let late1 = late1.lines().next().expect("late1").to_owned();
+
+    hive.repo(1).jj(&["workspace", "rename", "third"]);
+    hive.sync();
+
+    trim(&mut hive, "off2");
+    hive.sync();
+    hive.repo(0).jj(&["--at-op", &late1, "new", "-m", "late2"]);
+    hive.repo(0).jj(&["op", "abandon", &late1]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta", "beta/third"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta", "third"]);
+}

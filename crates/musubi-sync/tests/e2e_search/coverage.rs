@@ -450,6 +450,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         ]),
     ),
     (
+        "abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs",
+        Some(&[
+            "late_commands_after_trims",
+            "late:earlier_trim",
+            "late:meanwhile_workspace_rename",
+            "op_abandon",
+        ]),
+    ),
+    (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),
     ),

@@ -1,0 +1,82 @@
+{
+  lib,
+  self,
+  ...
+}: let
+  # The root Cargo.toml is a workspace; the shared version lives in [workspace.package].
+  cargoToml = lib.importTOML ../../Cargo.toml;
+  version = cargoToml.workspace.package.version;
+
+  fs = lib.fileset;
+
+  # Everything except Nix files and build output, so editing Nix code
+  # doesn't trigger a rebuild of the Rust code.
+  src = fs.toSource {
+    root = ../../.;
+    fileset = fs.difference ../../. (
+      fs.unions [
+        ../../nix
+        ../../flake.nix
+        ../../default.nix
+        ../../shell.nix
+        (fs.maybeMissing ../../flake.lock)
+        (fs.maybeMissing ../../target)
+        (fs.maybeMissing ../../result)
+      ]
+    );
+  };
+
+  # crates/musubi-sync/build.rs appends MUSUBI_BUILD to the release as semver build
+  # metadata (e.g. 0.47.1+20261102153012.4a0db20), so a daemon treats a newer build
+  # from source as newer. Taken from the flake's git info when it's available.
+  rev = self.shortRev or self.dirtyShortRev or null;
+  musubiBuild =
+    if rev != null && self ? lastModifiedDate
+    then "${self.lastModifiedDate}.${rev}"
+    else null;
+in {
+  perSystem = {
+    pkgs,
+    self',
+    ...
+  }: {
+    packages.jj-musubi = pkgs.rustPlatform.buildRustPackage {
+      pname = "jj-musubi";
+      inherit version src;
+
+      cargoLock.lockFile = ../../Cargo.lock;
+
+      # Build only the binary crate (crates/musubi), not every workspace member.
+      cargoBuildFlags = [
+        "--package"
+        "jj-musubi"
+      ];
+
+      env = lib.optionalAttrs (musubiBuild != null) {MUSUBI_BUILD = musubiBuild;};
+
+      nativeBuildInputs = [pkgs.installShellFiles];
+
+      # The test suite drives real git and jj repositories and spawns daemons; run it
+      # with `cargo nextest run` in the dev shell rather than inside the Nix sandbox.
+      doCheck = false;
+
+      # clap's dynamic completions: the same scripts the docs tell users to source.
+      postInstall = lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+        installShellCompletion --cmd musubi \
+          --bash <(COMPLETE=bash $out/bin/musubi) \
+          --zsh <(COMPLETE=zsh $out/bin/musubi) \
+          --fish <(COMPLETE=fish $out/bin/musubi)
+      '';
+
+      meta = {
+        description = "Replicate jj repositories between machines";
+        homepage = "https://www.serpentine.com/software/jj-musubi";
+        changelog = "https://github.com/bos/jj-musubi/blob/main/CHANGELOG.md";
+        license = lib.licenses.asl20;
+        mainProgram = "musubi";
+      };
+    };
+
+    packages.default = self'.packages.jj-musubi;
+  };
+}

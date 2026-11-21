@@ -2,11 +2,13 @@
 
 import os
 from pathlib import Path
+import selectors
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import unittest
 
 
@@ -91,43 +93,71 @@ class SeedTargetTest(unittest.TestCase):
             '[package]\nname="cache-lock-test"\nversion="0.0.0"\nedition="2021"\n'
         )
         (app / "src/main.rs").write_text("fn main() {}\n")
+        # Cargo holds its profile locks while build.rs runs. It connects to the test to say so,
+        # then waits for the test to hang up.
         (app / "build.rs").write_text(
-            'fn main() {\n'
-            '    std::fs::write(std::env::var("CACHE_READY").unwrap(), "ready").unwrap();\n'
-            '    let gate = std::env::var("CACHE_GATE").unwrap();\n'
-            '    while !std::path::Path::new(&gate).exists() {\n'
-            '        std::thread::sleep(std::time::Duration::from_millis(10));\n'
-            '    }\n'
-            '}\n'
+            "use std::io::Read;\n"
+            "use std::os::unix::net::UnixStream;\n"
+            "fn main() {\n"
+            '    let path = std::env::var("CACHE_SOCKET").unwrap();\n'
+            "    let mut test = UnixStream::connect(path).unwrap();\n"
+            "    test.read_to_end(&mut Vec::new()).unwrap();\n"
+            "}\n"
         )
-        ready, gate = self.root / "ready", self.root / "gate"
+        socket_path = self.root / "build.sock"
         env = dict(
             os.environ,
             CARGO_TARGET_DIR=str(self.source),
             CARGO_BUILD_JOBS="2",
-            CACHE_READY=str(ready),
-            CACHE_GATE=str(gate),
+            CACHE_SOCKET=str(socket_path),
         )
         env.pop("CARGO_BUILD_BUILD_DIR", None)
-        with (self.root / "build.log").open("w+") as log:
-            cargo = subprocess.Popen(
-                ["cargo", "build", "--offline"], cwd=app, env=env, stdout=log, stderr=log
-            )
-            try:
-                deadline = time.monotonic() + 30
-                while not ready.exists() and cargo.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                log.seek(0)
-                self.assertTrue(ready.exists(), log.read())
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(socket_path))
+        listener.listen()
+        log = (self.root / "build.log").open("a+b")
+        self.addCleanup(log.close)
+        cargo = subprocess.Popen(
+            ["cargo", "build", "--offline"], cwd=app, env=env, stdout=log, stderr=log
+        )
+        try:
+            with self.accept_build_script(listener, cargo, log):
                 result = self.seed()
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("seed between builds", result.stderr)
                 self.assertFalse(self.destination.exists())
                 self.assertFalse(self.destination.with_suffix(".partial").exists())
-            finally:
-                gate.touch()
-                cargo.wait(timeout=30)
-            self.assertEqual(cargo.returncode, 0)
+        finally:
+            # Closing the listener also refuses a build script that connects only now.
+            listener.close()
+            cargo.wait()
+        self.assertEqual(cargo.returncode, 0, self.read_log(log))
+
+    def accept_build_script(self, listener, cargo, log):
+        """Wait for build.rs to connect, failing with Cargo's output if Cargo exits first."""
+        # Wait for Cargo itself, not for its output to end: a process Cargo starts can outlive it.
+        exited, exiting = socket.socketpair()
+
+        def wait_for_cargo():
+            with exiting:
+                cargo.wait()
+
+        threading.Thread(target=wait_for_cargo, daemon=True).start()
+        with exited, selectors.DefaultSelector() as events:
+            events.register(listener, selectors.EVENT_READ)
+            events.register(exited, selectors.EVENT_READ)
+            # Cargo can't exit while build.rs is connected and alive.
+            if not any(key.fileobj is exited for key, _ in events.select()):
+                return listener.accept()[0]
+        self.fail(
+            f"Cargo exited with {cargo.returncode} before build.rs connected:\n"
+            + self.read_log(log)
+        )
+
+    def read_log(self, log):
+        log.seek(0)
+        return log.read().decode(errors="replace")
 
 
 if __name__ == "__main__":

@@ -70,12 +70,16 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-nextest,just
+      - name: Install workspace cache tool
+        if: runner.os != 'Windows'
+        run: just workspace-cache-install
+        env:
+          CARGO_BUILD_JOBS: 2
+      # The test waits for a Cargo build with no deadline of its own.
       - name: Check workspace cache helper
         if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          just workspace-cache-install
-          just workspace-cache-test
+        timeout-minutes: 5
+        run: just workspace-cache-test
         env:
           CARGO_BUILD_JOBS: 2
       # The lint job runs on Linux, which compiles none of the code for macOS or Windows.

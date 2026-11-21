@@ -50,6 +50,7 @@ pub const RULES: &[&str] = &[
     "op_abandon",
     "trim_below_accepted_push",
     "trim_below_accepted_forget",
+    "late_command_after_trim",
     "abandon_while_forgotten",
     "status",
     "workspace_add",
@@ -407,6 +408,14 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     // This requires a native command inside one adapter advance, between policy calls.
     ("a_command_inside_a_full_trim_keeps_workspace_owners", None),
+    (
+        "a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs",
+        Some(&["late_command_after_trim"]),
+    ),
+    (
+        "e2e_late_command_after_trim",
+        Some(&["late_command_after_trim"]),
+    ),
     (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),

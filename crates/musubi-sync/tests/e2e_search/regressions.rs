@@ -105,6 +105,28 @@ fn e2e_trim_below_accepted_forget() {
     world.converge();
 }
 
+/// `late_command_after_trim` at its simplest: the node only notices the trim before a `jj
+/// new` lands on jj's op head from before it, as in
+/// `a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs`. The checks must
+/// still find each machine's workspaces its own.
+#[test]
+fn e2e_late_command_after_trim() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.commit(0, 0, 0);
+    world.commit(1, 0, 1);
+    world.sync(1);
+    let op = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    let message = world.message(0);
+    world.jj_at_op(0, &op, &["new", "-m", &message]);
+    world.converge();
+}
+
 #[test]
 fn e2e_git_change_while_taking_a_trim() {
     for forward in [false, true] {

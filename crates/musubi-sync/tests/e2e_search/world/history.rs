@@ -202,6 +202,25 @@ impl World {
         self.sync(m);
     }
 
+    /// Publishes machine `m`'s work, makes a change the hub hasn't accepted, and trims all
+    /// history below it, as `jj op abandon ..@-` does, leaving it alone on the root. Returns
+    /// jj's id of the op head the trim left, from before the node handles the trim: a command
+    /// that loaded the repository then, or runs `--at-op` that id, writes on it.
+    pub fn trim_to_unpublished_root(&mut self, m: usize) -> String {
+        self.sync(m);
+        let (base, dropped) = self.trim_range(m);
+        let description = self.message(m);
+        self.jj(m, &["new", "-m", &description]);
+        self.abandon_ops(m, &format!("..{base}"), &dropped);
+        match &self.op_heads(m)[..] {
+            [head] => head.clone(),
+            heads => self.fail(&format!(
+                "{} has op heads {heads:?} after a trim",
+                self.machine(m)
+            )),
+        }
+    }
+
     pub(super) fn trim_range(&self, m: usize) -> (String, Vec<String>) {
         let history = self.op_ids_and_keys(m, None);
         let base = history[0].0.clone();

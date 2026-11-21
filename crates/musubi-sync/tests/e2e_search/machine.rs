@@ -133,13 +133,21 @@ enum Rewrite {
     Rebase,
 }
 
-/// The command `at_op` runs at an older operation.
+/// The command `at_op` and `late_command_after_trim` run at an older operation.
 #[derive(Clone, Copy, Debug)]
 enum AtOpCommand {
     Describe,
     Abandon,
     New,
     BookmarkSet,
+}
+
+/// How far `late_command_after_trim`'s node gets with the trim before the late command: some
+/// policy steps of a sync, perhaps none past noticing the trim, or a whole sync.
+#[derive(Clone, Copy, Debug)]
+enum Handling {
+    Steps(usize),
+    Whole,
 }
 
 impl<'a> Search<'a> {
@@ -211,6 +219,49 @@ impl<'a> Search<'a> {
     fn found_nothing(&mut self, tc: &TestCase, m: usize, what: &str) {
         self.note(tc);
         tc.note(&format!("{}: looked, and found {what}", MACHINES[m]));
+    }
+
+    /// The arguments of a command to run at machine `m`'s operation `op`, drawn from what
+    /// its view there allows, or `None` if it allows none.
+    fn at_op_command(&mut self, tc: &TestCase, m: usize, op: &str) -> Option<Vec<String>> {
+        let view = self.world.view_at(m, op);
+        let mutable = view.mutable();
+        let bases = view.bases();
+        let targets = view.targets();
+        let commands: Vec<AtOpCommand> = [
+            (AtOpCommand::Describe, !mutable.is_empty()),
+            (AtOpCommand::Abandon, !mutable.is_empty()),
+            (AtOpCommand::New, !bases.is_empty()),
+            (AtOpCommand::BookmarkSet, !targets.is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(command, possible)| possible.then_some(command))
+        .collect();
+        if commands.is_empty() {
+            return None;
+        }
+        let command = tc.draw(gs::sampled_from(commands));
+        Some(match command {
+            AtOpCommand::Describe => {
+                let commit = draw_from(tc, "commit", mutable);
+                let message = self.world.message(m);
+                vec!["describe".into(), commit, "-m".into(), message]
+            }
+            AtOpCommand::Abandon => vec!["abandon".into(), draw_from(tc, "commit", mutable)],
+            AtOpCommand::New => vec!["new".into(), draw_from(tc, "parent", bases)],
+            AtOpCommand::BookmarkSet => {
+                let name = tc.draw(gs::sampled_from(&BOOKMARKS[..]));
+                let target = draw_from(tc, "target", targets);
+                vec![
+                    "bookmark".into(),
+                    "set".into(),
+                    name.into(),
+                    "-r".into(),
+                    target,
+                    "--allow-backwards".into(),
+                ]
+            }
+        })
     }
 }
 
@@ -551,43 +602,8 @@ impl Search<'_> {
         let Some(op) = choose_op(&tc, ops) else {
             return self.found_nothing(&tc, m, "no older operation to run a command at");
         };
-        let view = self.world.view_at(m, &op);
-        let mutable = view.mutable();
-        let bases = view.bases();
-        let targets = view.targets();
-        let commands: Vec<AtOpCommand> = [
-            (AtOpCommand::Describe, !mutable.is_empty()),
-            (AtOpCommand::Abandon, !mutable.is_empty()),
-            (AtOpCommand::New, !bases.is_empty()),
-            (AtOpCommand::BookmarkSet, !targets.is_empty()),
-        ]
-        .into_iter()
-        .filter_map(|(command, possible)| possible.then_some(command))
-        .collect();
-        if commands.is_empty() {
+        let Some(args) = self.at_op_command(&tc, m, &op) else {
             return self.found_nothing(&tc, m, "nothing to do at that operation");
-        }
-        let command = tc.draw(gs::sampled_from(commands));
-        let args: Vec<String> = match command {
-            AtOpCommand::Describe => {
-                let commit = draw_from(&tc, "commit", mutable);
-                let message = self.world.message(m);
-                vec!["describe".into(), commit, "-m".into(), message]
-            }
-            AtOpCommand::Abandon => vec!["abandon".into(), draw_from(&tc, "commit", mutable)],
-            AtOpCommand::New => vec!["new".into(), draw_from(&tc, "parent", bases)],
-            AtOpCommand::BookmarkSet => {
-                let name = tc.draw(gs::sampled_from(&BOOKMARKS[..]));
-                let target = draw_from(&tc, "target", targets);
-                vec![
-                    "bookmark".into(),
-                    "set".into(),
-                    name.into(),
-                    "-r".into(),
-                    target,
-                    "--allow-backwards".into(),
-                ]
-            }
         };
         fired("at_op");
         self.world.jj_at_op(m, &op, &strs(&args));
@@ -626,6 +642,31 @@ impl Search<'_> {
         let other = self.other_than(&tc, m);
         fired("trim_below_accepted_forget");
         self.world.trim_below_accepted_forget(m, other);
+        self.note(&tc);
+    }
+
+    /// A full trim leaves unpublished work on the root, and once the node has handled the
+    /// trim, a command writes on jj's op head from before that: one run `--at-op` that
+    /// operation, or one that loaded the repository then. `at_op` can't run it: the handling
+    /// replaces that operation, and `older_ops` reads the op log as it is now.
+    #[rule]
+    fn late_command_after_trim(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let handling = tc.draw(gs::sampled_from(vec![
+            Handling::Steps(0),
+            Handling::Steps(1),
+            Handling::Steps(2),
+            Handling::Whole,
+        ]));
+        fired("late_command_after_trim");
+        let op = self.world.trim_to_unpublished_root(m);
+        match handling {
+            Handling::Steps(steps) => self.world.sync_partial(m, steps, None),
+            Handling::Whole => self.world.sync(m),
+        }
+        // The trim's change is at that operation, so there is always a command to run.
+        let args = self.at_op_command(&tc, m, &op).unwrap();
+        self.world.jj_at_op(m, &op, &strs(&args));
         self.note(&tc);
     }
 

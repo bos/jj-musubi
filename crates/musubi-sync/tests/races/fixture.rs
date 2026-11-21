@@ -275,7 +275,7 @@ impl Fixture {
     }
 
     /// The workspaces the hub's head has, by key: `<machine key>/<workspace>`.
-    fn hub_workspaces(&self) -> BTreeSet<String> {
+    pub fn hub_workspaces(&self) -> BTreeSet<String> {
         let store = self.hive.hub.store();
         let head = CanonicalOp(store.head().1.clone());
         if head == *store.canonical().root_operation_id() {

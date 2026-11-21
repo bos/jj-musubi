@@ -281,11 +281,22 @@ impl World {
         }
     }
 
-    /// Each machine has its own workspaces, and their working copies are visible, but for a
-    /// machine the hive has forgotten, whose working copy can stay on the hidden commit its
-    /// forget abandoned until its next work. (It shows the other machines' too, as
-    /// `machine/workspace`: `exercise_workspace_visibility`.)
+    /// Each machine has its own workspaces, and none of another machine's, and their working
+    /// copies are visible, but for a machine the hive has forgotten, whose working copy can
+    /// stay on the hidden commit its forget abandoned until its next work. (It shows the other
+    /// machines' too, as `machine/workspace`: `exercise_workspace_visibility`.)
     fn check_workspaces(&mut self, views: &[View], reference: &mut Reference) {
+        // No rule names a workspace with a `/` (`WORKSPACES`, and the machines' own names), so
+        // a copy given one took another machine's workspace, as it shows it (`beta/default`),
+        // for its own.
+        if let Some(key) = self.fx.hub_workspaces().into_iter().find(|key| {
+            key.split_once('/')
+                .is_some_and(|(_, name)| name.contains('/'))
+        }) {
+            self.fail(&format!(
+                "the hive gives a copy another machine's workspace as its own: {key}"
+            ));
+        }
         let witnessed = reference.witnessed_workspace_names(self);
         let shown = self.fx.shown_machines();
         for (m, view) in views.iter().enumerate() {

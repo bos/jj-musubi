@@ -256,12 +256,17 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
                     .join(source.trim())
                     .exists()
             );
-            let error = node.canonical_heads().unwrap_err();
-            assert!(
-                matches!(error, musubi_jj::node::NodeError::UnreachableHistory),
-                "{error}"
-            );
-            assert!(node.pending_drops().is_empty());
+            // Without its source, the command's view alone says which other copy's workspace
+            // `beta/...` stands for no longer, but nothing in it is this copy's to publish.
+            let own = format!("{}/{}", node.machine().key(), foreign);
+            for head in node.canonical_heads().unwrap() {
+                let view = node.canonical_store().read_operation_view(&head).unwrap();
+                assert!(
+                    !view
+                        .wc_commit_ids
+                        .contains_key(jj_lib::ref_name::WorkspaceName::new(&own))
+                );
+            }
             continue;
         }
         let head = node.canonical_heads().unwrap().pop().unwrap();

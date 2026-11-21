@@ -10,6 +10,10 @@
   show one again, run `jj workspace rename <new name>` in that workspace, with no `/` in the new
   name.
 
+- A repo with other machines' workspaces no longer stops syncing with "this repository's
+  history no longer matches the hive's" after `jj op abandon` of its whole history, a `jj`
+  command, and `jj util gc` before the daemon synced. No action is needed on upgrading.
+
 - `musubi hub` makes a new hub in `~/.local/share/musubi/hub` (`$XDG_DATA_HOME/musubi/hub`,
   or `%LOCALAPPDATA%\musubi\hub` on Windows) instead of `~/musubi-hub`. A hub already in
   `~/musubi-hub` stays there, and musubi keeps serving it, but a release after 2027-02-21

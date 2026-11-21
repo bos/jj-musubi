@@ -1087,8 +1087,8 @@ content, supplies the missing input. The adapter reconstructs that twin on its a
 parents, anchored by a validated realization, join or established source, before normalizing
 it through the applied and pending drops. An older accepted view cannot supply its namespace:
 the unpublished command may have forgotten a foreign workspace and created its own under the
-same literal name. Conflicting twins are refused. If gc removed the input needed to distinguish
-an owned literal from a foreign alias, the copy is refused rather than assigned guessed owners.
+same literal name. Conflicting twins are refused. If gc removed that input, the command is
+translated as it is: none of its names with a `/` is this machine's own to publish.
 
 So too where the abandon keeps history below: a command not yet published that jj moved off an
 operation the abandon drops, onto operations that stay, stands for its twin there, given a

@@ -72,25 +72,6 @@ impl Namespace {
         }
     }
 
-    /// Adds what `recorded`, the context an operation itself records, gives other machines'
-    /// workspaces, as `keep_others_of` does, but over a name this context gives its own
-    /// machine: that context was worked out from a view judged by parents the operation no
-    /// longer has, and the recorded one is what the operation was captured with.
-    pub fn take_others_of(&mut self, recorded: Self) {
-        self.known.extend(recorded.known);
-        for (name, key) in recorded.names {
-            let theirs = |key: &str| {
-                workspaces::split_key(key).is_some_and(|(machine, _)| machine != self.source)
-            };
-            if theirs(&key)
-                && !self.names.get(&name).is_some_and(|have| theirs(have))
-                && !self.names.values().any(|have| *have == key)
-            {
-                self.names.insert(name, key);
-            }
-        }
-    }
-
     pub fn encode(&self) -> String {
         // Every field has a string representation in JSON.
         serde_json::to_string(self).expect("workspace context contains strings only")
@@ -159,41 +140,6 @@ mod tests {
                 ],
                 &["alpha#a", "beta#b", "gamma#g"],
             )
-            .encode()
-        );
-    }
-
-    #[test]
-    fn taking_others_of_a_recorded_context_beats_an_own_name_computed_for_it() {
-        let namespace = |names: &[(&str, &str)]| Namespace {
-            source: "alpha#a".to_owned(),
-            names: names
-                .iter()
-                .map(|(name, key)| ((*name).to_owned(), (*key).to_owned()))
-                .collect(),
-            known: ["alpha#a".to_owned()].into(),
-        };
-        let mut recomputed = namespace(&[
-            ("alpha", "alpha#a/alpha"),
-            // Computed as this machine's own, though the recorded context gives it to beta.
-            ("beta/third", "alpha#a/beta/third"),
-            // Another machine's here: this one wins over the recorded one.
-            ("x/y", "gamma#g/y"),
-        ]);
-        recomputed.take_others_of(namespace(&[
-            ("beta/third", "beta#b/third"),
-            ("x/y", "beta#b/y"),
-            // The workspace is already here under another name.
-            ("z/y", "gamma#g/y"),
-            ("own", "alpha#a/own"),
-        ]));
-        assert_eq!(
-            recomputed.encode(),
-            namespace(&[
-                ("alpha", "alpha#a/alpha"),
-                ("beta/third", "beta#b/third"),
-                ("x/y", "gamma#g/y"),
-            ])
             .encode()
         );
     }

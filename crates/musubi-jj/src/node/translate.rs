@@ -11,7 +11,6 @@ use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
-use jj_lib::ref_name::WorkspaceName;
 use pollster::FutureExt as _;
 
 use super::NodeError;
@@ -213,7 +212,6 @@ impl NodeRepo {
         if roots.is_empty() {
             return Ok(RecoveredSources::default());
         }
-        let store = self.loader.op_store().clone();
         let sources = self.native_twins(&roots)?;
         let mut found = RecoveredSources::default();
         let mut historical = HashMap::new();
@@ -244,23 +242,6 @@ impl NodeRepo {
                 }
                 found.roots.insert(root, target);
                 found.twins.extend(authenticated);
-            }
-        }
-        // A root command alone cannot distinguish an owned literal from an old foreign
-        // alias. Once its source is gone, refuse that ambiguity instead of inventing an
-        // owner. Before joining, every native workspace belongs to this copy.
-        if !self.joins.is_empty() || !self.applied_records().is_empty() {
-            for (id, op) in unmapped {
-                if roots.values().any(|root| root == id) && !found.roots.contains_key(id) {
-                    let view = store.read_view(&op.view_id).block_on()?;
-                    if view
-                        .wc_commit_ids
-                        .keys()
-                        .any(|name| name.as_str().contains('/'))
-                    {
-                        return Err(NodeError::UnreachableHistory);
-                    }
-                }
             }
         }
         Ok(found)
@@ -991,18 +972,18 @@ impl NodeRepo {
         {
             OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
         }
-        // Parent contraction changes which workspaces are present, but must not change
-        // whose names a fresh native command inherited. Recover that namespace from the
-        // original canonical parents before interpreting its view on the new frontier.
-        // Do not publish those parents or inherit their membership into the result.
+        // Parent contraction changes which workspaces are present, but must not change which
+        // other machines' workspaces a fresh native command's names stand for. Recover that
+        // namespace from the original canonical parents before interpreting its view on the
+        // new frontier. Do not publish those parents or inherit their membership into the
+        // result.
         let source_parents = self.raw_parents(&LocalOp::parents_of(op));
         let changed_parents = source_parents != parents;
         if changed_parents {
             // A source parent written after an earlier trim carries a context for the names
             // its own view and history have lost. The source view is judged by it, so it
             // goes into the metadata passed here, and into the recomputed context: its other
-            // machines' names and the machines it knows stay, but a name the source view
-            // gives this machine stays this machine's own.
+            // machines' names and the machines it knows stay.
             let carried = self.carried_context(&source_parents)?;
             let recorded = crate::canonical::namespace::Namespace::read(&op.metadata)?
                 .filter(|context| context.source == self.machine.key());
@@ -1024,17 +1005,12 @@ impl NodeRepo {
                 &self.workspace_context_of_view(&source_view, &source_presence)?,
             )
             .expect("a context this machine just encoded");
-            // A context this operation itself records is one musubi wrote onto it when a trim
-            // left it on the root (`rewrite_locals`), standing for the views it started from
-            // as `canonical_view` takes it for a command on the root. A rewrite of its
-            // parents since, as jj's abandon of an operation it was on, has lost those views:
-            // the source view, judged by its parents' names, takes a name beyond them for one
-            // this operation made.
-            if let Some(recorded) = recorded {
-                context.take_others_of(recorded);
-            }
-            if let Some(carried) = carried {
-                context.keep_others_of(carried);
+            // What a context this operation records itself says of other machines stays too:
+            // musubi wrote it onto the operation when a trim left it on the root
+            // (`rewrite_locals`), and a rewrite of its parents since, as jj's abandon of an
+            // operation it was on, has lost the views it stood for.
+            for earlier in [recorded, carried].into_iter().flatten() {
+                context.keep_others_of(earlier);
             }
             OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
         }
@@ -1139,24 +1115,4 @@ pub(super) fn target_of(description: &str) -> Option<(&'static str, OperationId)
         let target = OperationId::try_from_hex(description.strip_prefix(prefix)?)?;
         Some((*prefix, target))
     })
-}
-
-/// Whether jj's description of an operation says that it added workspace `name` to the view:
-/// one of the two operations of `jj workspace add`, which jj describes as `add workspace
-/// '<name>'` and `create initial working-copy commit in workspace <name>`, the second in case
-/// `jj op abandon` drops the first from under it, or `jj workspace rename` to it, `Renamed
-/// workspace '<old>' to '<name>'`. These are the only `jj` commands that make a workspace name,
-/// other than those that go back to an older view (`target_of`). `jj op abandon` gives an
-/// operation other parents, but not another description, so a name the operation found in a
-/// view the abandon dropped from under it is one it doesn't say it added. The race tests that
-/// add and rename workspaces named like other machines'
-/// (`own_workspaces_named_like_another_machine_are_own`) fail if jj describes these commands
-/// otherwise.
-pub(super) fn adds_workspace(description: &str, name: &WorkspaceName) -> bool {
-    let name = name.as_symbol();
-    description == format!("add workspace '{name}'")
-        || description == format!("create initial working-copy commit in workspace {name}")
-        || description
-            .strip_prefix("Renamed workspace '")
-            .is_some_and(|rest| rest.ends_with(&format!("' to '{name}'")))
 }

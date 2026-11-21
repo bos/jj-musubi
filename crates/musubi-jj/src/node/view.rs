@@ -23,7 +23,6 @@ use super::NodeError;
 use super::NodeRepo;
 use super::ReservedNames;
 use super::is_visible;
-use super::translate::adds_workspace;
 use super::translate::target_of;
 use crate::canonical::Work;
 use crate::canonical::namespace::Namespace;
@@ -186,8 +185,8 @@ impl LocalParents {
     }
 }
 
-/// What an operation's canonical parents, and the namespace it records, say of the names in
-/// its local view, for `NodeRepo::canonical_view`.
+/// What an operation's canonical parents say of the names in its local view, for
+/// `NodeRepo::canonical_view`.
 #[derive(Default)]
 struct Inherited {
     /// The names under which this machine showed the parents' other workspaces, exactly as
@@ -195,44 +194,6 @@ struct Inherited {
     others: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
     /// The heads of the parents' views.
     parent_heads: BTreeSet<CommitId>,
-    /// Every machine the parents' histories have known.
-    machines: BTreeSet<String>,
-    /// This machine's own names, in the parents and private to it here.
-    own_names: BTreeSet<WorkspaceNameBuf>,
-    /// The names of `others` that a recorded namespace gives, standing for the views the
-    /// operation started from (`ContextBasis::captures`).
-    captured: BTreeSet<WorkspaceNameBuf>,
-}
-
-/// What a namespace an operation records is taken against.
-enum ContextBasis {
-    /// The operation is on the root alone, as after a full native trim: the namespace stands
-    /// for the views it started from.
-    Initial,
-    /// A fix-up, whose accepted base left no view to go by: likewise.
-    FixUp,
-    /// Otherwise, the workspace names in the views of its local parents, beyond which the
-    /// namespace gives no other machine's.
-    Parents(BTreeSet<WorkspaceNameBuf>),
-}
-
-impl ContextBasis {
-    fn is_initial(&self) -> bool {
-        matches!(self, Self::Initial)
-    }
-
-    /// Whether the namespace stands for the views the operation started from.
-    fn captures(&self) -> bool {
-        !matches!(self, Self::Parents(_))
-    }
-
-    /// Whether the namespace gives `name` to another machine's workspace.
-    fn admits(&self, name: &WorkspaceNameBuf) -> bool {
-        match self {
-            Self::Parents(names) => names.contains(name),
-            Self::Initial | Self::FixUp => true,
-        }
-    }
 }
 
 /// The workspace names and heads of a local operation's parents' views, read when first
@@ -347,7 +308,6 @@ impl NodeRepo {
         // name them (`reserved_names`). Otherwise a `jj` command after `jj workspace forget
         // beta/x` and adding one's own `beta/x` would move beta's workspace to this machine's.
         private.extend(self.unpublished_of(&view.wc_commit_ids));
-
         // Operations are canonicalized parents first, so the one before is usually the parent:
         // its names are known, and it is no realization.
         let last = self
@@ -361,7 +321,13 @@ impl NodeRepo {
         let local_parents = self.read_local_parents(&raw, last)?;
         let mut inherited =
             self.inherited_from_parents(&parent_presences, &private, &local_parents.reserved_at)?;
-        self.apply_namespace_context(&mut inherited, local_op, canonical_parents, metadata)?;
+        self.apply_namespace_context(
+            &mut inherited,
+            local_op,
+            canonical_parents,
+            metadata,
+            &private,
+        )?;
 
         let mut workspaces_by_key = self.present_workspaces(&parent_presences, &present)?;
         workspaces_by_key.retain(|key, _| !self.is_own_key(key));
@@ -390,7 +356,6 @@ impl NodeRepo {
             &mut before,
         )?;
         workspaces_by_key.extend(forgotten);
-        self.drop_stale_names(local_op, &inherited, &mut local, &mut before)?;
         // What is left is this machine's, but only a name with no `/` is its own to publish:
         // other machines' workspaces show here as `beta/x`, so a name of that form, whatever
         // made it, is never this machine's own (design.md, "Which workspaces are this
@@ -461,10 +426,7 @@ impl NodeRepo {
         private: &BTreeSet<WorkspaceNameBuf>,
         reserved_at: &BTreeMap<CanonicalOp, BTreeSet<WorkspaceNameBuf>>,
     ) -> Result<Inherited, NodeError> {
-        let mut inherited = Inherited {
-            own_names: private.clone(),
-            ..Inherited::default()
-        };
+        let mut inherited = Inherited::default();
         for (parent, presence) in parent_presences {
             if parent == self.canonical.root_operation_id() {
                 continue;
@@ -473,12 +435,6 @@ impl NodeRepo {
             inherited
                 .parent_heads
                 .extend(parent_view.head_ids.iter().cloned());
-            inherited
-                .machines
-                .extend(self.machines_of(&parent_view, presence.known()));
-            inherited
-                .own_names
-                .extend(self.own_names_in(&parent_view, presence)?);
             let mut clear_of = private.clone();
             clear_of.extend(reserved_at.get(parent).into_iter().flatten().cloned());
             let prefixes = self.prefixes_with_own(&parent_view, presence, &clear_of)?;
@@ -491,41 +447,40 @@ impl NodeRepo {
         Ok(inherited)
     }
 
-    /// Adds to `inherited` what the namespace `metadata` records gives, where this machine
-    /// recorded it. A full native trim can leave unpublished work directly on root. Its
-    /// captured namespace identifies foreign aliases without claiming erased source parents,
-    /// and stands for the views such an operation started from (`move_others_here`).
+    /// Adds to `inherited` the names the namespace `metadata` records gives other machines'
+    /// workspaces, where this machine recorded it: which of their workspaces the operation's
+    /// names stand for, as the views it started from named them. On the root, as after a full
+    /// trim, or in a fix-up, whose accepted base can leave no view to go by, all of them
+    /// (`restore_fixup_bindings`); otherwise those its local parents' views have.
     fn apply_namespace_context(
         &self,
         inherited: &mut Inherited,
         local_op: &LocalOp,
         canonical_parents: &[CanonicalOp],
         metadata: &jj_lib::op_store::OperationMetadata,
+        private: &BTreeSet<WorkspaceNameBuf>,
     ) -> Result<(), NodeError> {
         let Some(context) =
             Namespace::read(metadata)?.filter(|context| context.source == self.machine.key())
         else {
             return Ok(());
         };
-        let basis = if canonical_parents == [self.canonical.root_operation_id().clone()] {
-            ContextBasis::Initial
-        } else if OpAttrs(&metadata.attributes).is_fixup() {
-            ContextBasis::FixUp
+        let parent_names = if canonical_parents == [self.canonical.root_operation_id().clone()]
+            || OpAttrs(&metadata.attributes).is_fixup()
+        {
+            None
         } else {
-            ContextBasis::Parents(self.parents_names_and_heads(local_op)?.0)
+            Some(self.parents_names_and_heads(local_op)?.0)
         };
-        inherited.machines.extend(context.known.iter().cloned());
-        for (name, key) in &context.names {
-            let key = WorkspaceNameBuf::from(key.clone());
-            let name = WorkspaceNameBuf::from(name.clone());
-            if self.is_own_key(&key) {
-                if basis.is_initial() {
-                    inherited.own_names.insert(name);
-                }
-            } else if !inherited.own_names.contains(&name) && basis.admits(&name) {
-                if basis.captures() {
-                    inherited.captured.insert(name.clone());
-                }
+        for (name, key) in context.names {
+            let key = WorkspaceNameBuf::from(key);
+            let name = WorkspaceNameBuf::from(name);
+            if !self.is_own_key(&key)
+                && !private.contains(&name)
+                && parent_names
+                    .as_ref()
+                    .is_none_or(|names| names.contains(&name))
+            {
                 inherited.others.entry(name).or_insert(key);
             }
         }
@@ -534,10 +489,10 @@ impl NodeRepo {
 
     /// Moves other machines' workspaces that this operation moved from `local` to
     /// `workspaces_by_key`, returning their keys. A `jj` command here that adds a name none
-    /// of the views it started from has never moves the other machine's workspace shown
-    /// under it; the name is a workspace of this machine's own, as after forgetting that one
-    /// here, if the command says it added it, and is otherwise dropped (`drop_stale_names`).
-    /// musubi's own operations make none, but show the others' again under their names.
+    /// of the views it started from has, as after forgetting another machine's workspace here
+    /// and adding one of that name, never moves the other machine's workspace shown under it:
+    /// adding changes nothing of another machine's. musubi's own operations add none, but
+    /// show the others' again under their names.
     fn move_others_here(
         &self,
         raw: &StoreOperation,
@@ -557,7 +512,7 @@ impl NodeRepo {
         for (name, key) in &inherited.others {
             if started_from
                 .as_ref()
-                .is_some_and(|names| !names.contains(name) && !inherited.captured.contains(name))
+                .is_some_and(|names| !names.contains(name))
             {
                 continue;
             }
@@ -636,59 +591,6 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Removes from `local` other machines' workspaces under names the hive no longer gives
-    /// them, as `jj undo` brings back. They are not this machine's to publish. A name this
-    /// machine's own already had stays its own; and so does one this operation made, there
-    /// in none of its parents' views and, for a `jj` command, one it says it added
-    /// (`adds_workspace`): `jj op abandon` of a restore that brought the name back moves a
-    /// command run on it onto the restore's parent, whose view lacks it, but leaves what the
-    /// command says it did. An operation that restores an older view makes none: its names
-    /// are its own if they were in the view it restores, or, for a revert, in that
-    /// operation's parents'.
-    fn drop_stale_names(
-        &self,
-        local_op: &LocalOp,
-        inherited: &Inherited,
-        local: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
-        before: &mut ParentsBefore<'_>,
-    ) -> Result<(), NodeError> {
-        let stale: Vec<WorkspaceNameBuf> = local
-            .keys()
-            .filter(|name| {
-                !inherited.own_names.contains(*name)
-                    && self.names_other_machine(name, &inherited.machines)
-            })
-            .cloned()
-            .collect();
-        if stale.is_empty() {
-            return Ok(());
-        }
-        let op = self
-            .loader
-            .op_store()
-            .read_operation(&local_op.0)
-            .block_on()?;
-        let restored = match target_of(&op.metadata.description) {
-            Some((_, target)) => Some(self.restored_own_names(&LocalOp(target))?),
-            None => None,
-        };
-        let (names, _) = before.get(self)?;
-        for name in stale {
-            let own = match &restored {
-                Some(restored) => restored.contains(&name),
-                None => {
-                    !names.contains(&name)
-                        && (op.metadata.workspace_name.is_none()
-                            || adds_workspace(&op.metadata.description, &name))
-                }
-            };
-            if !own {
-                local.remove(&name);
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {
         let view = self.canonical.read_operation_view(at)?;
         let presence = self.presence(at)?;
@@ -700,18 +602,7 @@ impl NodeRepo {
         view: &View,
         presence: &Presence<Work>,
     ) -> Result<String, NodeError> {
-        // A temporary canonical view can already contain this command's new workspaces
-        // while `presence` still describes its parents. Reserve those literal names too.
-        let own = view
-            .wc_commit_ids
-            .keys()
-            .filter_map(|key| {
-                workspaces::split_key(key.as_str()).and_then(|(owner, name)| {
-                    (owner == self.machine.key()).then(|| WorkspaceNameBuf::from(name))
-                })
-            })
-            .collect();
-        let prefixes = self.prefixes_with_own(view, presence, &own)?;
+        let prefixes = self.prefixes_with_own(view, presence, &BTreeSet::new())?;
         let mut known = self.machines_of(view, presence.known());
         known.insert(self.machine.key().to_owned());
         Ok(Namespace {
@@ -914,9 +805,7 @@ impl NodeRepo {
     /// The names of other machines' workspaces in the views local operation `op` started
     /// from: its parents', which `parent_names` gives, or, for one that goes back to an older
     /// operation, the view it brings back (for a revert, the reverted operation's parents', with
-    /// its parents'), as `private_workspace_names` reads it, less what was this machine's own
-    /// there (`restored_own_names`): `jj undo` of forgetting this machine's own `beta/x` brings
-    /// back its own workspace, even where beta's workspace `x` shows here as `beta/x` now.
+    /// its parents').
     fn names_started_from(
         &self,
         op: &StoreOperation,
@@ -930,20 +819,13 @@ impl NodeRepo {
         let (mut names, sources) = match target {
             // An old target may have been collected: then only the parents say anything.
             None => (parent_names()?, vec![]),
-            Some((true, target, target_op)) => (parent_names()?, vec![(target, target_op.parents)]),
-            Some((false, target, _)) => (BTreeSet::new(), vec![(target.clone(), vec![target])]),
+            Some((true, _, target_op)) => (parent_names()?, target_op.parents),
+            Some((false, target, _)) => (BTreeSet::new(), vec![target]),
         };
-        for (target, sources) in sources {
-            let own = self.restored_own_names(&LocalOp(target))?;
-            for source in sources {
-                let source = op_store.read_operation(&source).block_on()?;
-                let view = op_store.read_view(&source.view_id).block_on()?;
-                names.extend(
-                    view.wc_commit_ids
-                        .into_keys()
-                        .filter(|name| !own.contains(name)),
-                );
-            }
+        for source in sources {
+            let source = op_store.read_operation(&source).block_on()?;
+            let view = op_store.read_view(&source.view_id).block_on()?;
+            names.extend(view.wc_commit_ids.into_keys());
         }
         Ok(names)
     }
@@ -1022,30 +904,6 @@ impl NodeRepo {
                 .map(|(machine, _)| machine.to_owned()),
         );
         machines
-    }
-
-    /// This machine's own names as of a local operation that `jj op restore` or `jj undo`
-    /// goes back to, and as of its parents, which a revert of it goes back to: those of each
-    /// one's canonical form (`own_names`), where it has one yet.
-    fn restored_own_names(
-        &self,
-        target: &LocalOp,
-    ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
-        let op_store = self.loader.op_store();
-        let mut names = BTreeSet::new();
-        let Ok(op) = op_store.read_operation(&target.0).block_on() else {
-            return Ok(names);
-        };
-        // Parents first: working out presence at the target then stops at theirs.
-        for local in LocalOp::parents_of(&op)
-            .iter()
-            .chain(std::iter::once(target))
-        {
-            if let Some(canonical) = self.canonical_of(local) {
-                names.extend(self.own_names(&canonical)?);
-            }
-        }
-        Ok(names)
     }
 
     /// This machine's workspaces in its op heads that musubi doesn't publish, having a `/` in
@@ -1336,70 +1194,6 @@ mod tests {
 
     use super::refs_model::RefsModel;
     use super::refs_model::Slot;
-
-    #[test]
-    fn source_context_reserves_new_owned_literals_before_presence_is_applied() {
-        let env = TestEnv::new();
-        let repo = env.init_repo("alpha");
-        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
-        let head = node.canonical_heads().unwrap().pop().unwrap();
-        let owner = node.machine.key().to_owned();
-        let work = Work::of(&node.canonical, &head).unwrap();
-        let presence = (*node.presence(&head).unwrap()).clone().apply(
-            &work,
-            &Kind {
-                forgets: BTreeSet::from([owner.clone()]),
-                ..Kind::default()
-            },
-        );
-        assert!(!presence.is_present(&owner));
-        let mut view = node.canonical.read_operation_view(&head).unwrap();
-        let target = view.wc_commit_ids.values().next().unwrap().clone();
-        let own = workspaces::workspace_key(&owner, "beta/x");
-        let foreign = workspaces::workspace_key("beta#bbbb", "x");
-        view.wc_commit_ids.insert(own.clone(), target.clone());
-        view.wc_commit_ids.insert(foreign.clone(), target);
-        assert!(
-            !node
-                .own_names_in(&view, &presence)
-                .unwrap()
-                .contains(WorkspaceName::new("beta/x"))
-        );
-        let context: Namespace =
-            serde_json::from_str(&node.workspace_context_of_view(&view, &presence).unwrap())
-                .unwrap();
-        assert_eq!(context.names.get("beta/x"), Some(&own.as_str().to_owned()));
-        assert!(
-            context
-                .names
-                .iter()
-                .any(|(name, key)| { key == foreign.as_str() && name != "beta/x" })
-        );
-        assert_eq!(context.names.len(), view.wc_commit_ids.len());
-        // A source can observe root or a frontier containing only other copies. Its
-        // identity remains part of namespace evidence without reviving its presence.
-        let empty = Presence::default();
-        let root = node
-            .canonical
-            .read_operation_view(node.canonical.root_operation_id())
-            .unwrap();
-        for (with_foreign, mut view) in [(false, root.clone()), (true, root)] {
-            if with_foreign {
-                view.wc_commit_ids.insert(
-                    foreign.clone(),
-                    node.loader.store().root_commit_id().clone(),
-                );
-            }
-            let encoded = node.workspace_context_of_view(&view, &empty).unwrap();
-            let mut metadata = node.canonical.read_operation(&head).unwrap().metadata;
-            metadata
-                .attributes
-                .insert(crate::canonical::namespace::ATTRIBUTE.to_owned(), encoded);
-            let parsed = Namespace::read(&metadata).unwrap().unwrap();
-            assert!(parsed.known.contains(&owner));
-            assert!(!empty.is_present(&owner));
-        }
-    }
 
     const X: &str = "refs/heads/x";
 

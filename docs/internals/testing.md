@@ -875,7 +875,8 @@ family and removing the old one through `unlink` and `unlinkat`. Run the search 
 `just head-schedule search`. Add `--unpublished` to start with local work above the synced
 operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
 schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
-`jj describe` on the same old head instead of another abandon, and `--loader` adds a third,
+`jj describe` on the same old head instead of another abandon, `--peer second` makes it a
+second abandon that starts from the first one's result, and `--loader` adds a third,
 `jj op log`, which merges the heads it finds. `--receive`, with or without `--concurrent`, lets
 the daemon receive the other machine's work once the native commands have started. `--steps N`
 sets the most actions a schedule may take: 8 by default, 14 with `--concurrent` and 22 with
@@ -917,13 +918,35 @@ unlinked the old head, could not find the local operation for a parent that only
 reached. Recovery now replays the head and workspace moves saved before the crash, as it does
 for taking records, instead of working them out again from the translation cache.
 
-An ordinary command publishes inside jj's op-heads lock, which it takes before adding its new
-head and holds until the old one is gone. `jj op abandon` and the daemon's own publication of
-heads don't take it, but loading the repository at several heads does, to merge them. With
-`--peer write`, the search lets the daemon check and publish while the write holds the lock,
-and merges heads only once it has let go. Once everything has settled, every op head must
-still have the write's commit in its view if the write added its head, even if it was killed
-before removing the old one.
+An ordinary command publishes inside jj's op-heads lock, which it takes before adding its new head
+and holds until the old one is gone. `jj op abandon` doesn't take it, but loading the repository
+at several heads does, to merge them, and so does the daemon whenever it moves op heads: it moves
+them only if they are still those it read. While a native command holds the lock, the search
+merges no heads, and runs the daemon's check so that, should the daemon move op heads, the command
+finishes before it takes the lock, as the daemon would wait for it. Once everything has settled,
+every op head must still have the write's commit in its view if the write added its head, even if
+it was killed before removing the old one.
+
+With `--peer second`, once the first abandon has finished and left one op head, the second `jj op
+abandon` drops the operation below that head. Besides publishing and finishing it between the
+daemon's steps, the search can run the daemon's check with the second abandon landing inside the
+daemon's move of op heads, before it takes the lock or holding it, through
+`NodeRepo::race_head_move`: this is [#168](https://github.com/bos/jj-musubi/issues/168)'s race.
+Once everything has settled, the operation the second abandon dropped, known by its description,
+times and view, must not be below any op head, unless the daemon, seeing the second abandon's old
+and new op heads together, took out the old one, when it may put the history back, or the daemon
+or a native command merged the two, which brings it back as jj would. With `retire_overtaken`
+disabled, the search with `--unpublished` finds #168 again in about 30 runs: the daemon's rewrite
+of the first abandon lands beside the second's, and merging the two brings back what the second
+dropped.
+
+Two failures this search finds on main are open. With `--unpublished`, a second abandon that lands
+while the daemon holds the lock, after it checked the op heads, leaves the daemon's rewrite of the
+first beside the second's op head; the next look doesn't take it out, and merging the two brings
+back what the second dropped. With `--receive`, receiving the other machine's work, which still
+has an operation a local abandon dropped and the daemon holds as a pending drop, brings that
+operation back; the search's in-process sync skips the hub, so this may be the model rather than
+musubi.
 
 With `--loader`, once there are several heads and no command holds the lock, the search can
 start a `jj op log`. Loading the repository, it takes the lock and merges the heads, or, where one
@@ -957,16 +980,16 @@ settled, every op head must still have the received commit in its view, and a pu
 sit below it; the check then compares canonical history, not views.
 
 Without `--loader` or `--receive`, each search reaches every state it can within the default
-horizon: a deeper `--steps` finds no new ones. The single command has 20 states, two abandons 358
-and an abandon with a write 482, with or without unpublished work, each found in seconds. With
-`--loader`, two abandons reach about 12,000 to 13,000 states and an abandon with a write about
-7,500; with `--receive` as well, an abandon with a loader reaches about 24,000. These take
-minutes, the last most of an hour with five jobs. A deeper horizon adds no states to them either,
-but their counts vary by a few percent from run to run, as native merges do. With `--receive`
-alone, the single command reaches 34 states, two abandons about 830 and an abandon with a write
-about 710. On a shared machine, pass a `--jobs` that leaves room for others. A command that misses
-its pause for 30 seconds under load is reported as a failed step; replay the saved schedule before
-believing it.
+horizon: a deeper `--steps` finds no new ones. The single command has 20 states; two abandons have
+358, or 330 with unpublished work; an abandon with a write 163, and with a second abandon 174,
+each found in seconds; with unpublished work, a second abandon finds the open failure above. With
+`--loader`, two abandons reach about 7,900 states and an abandon with a write about 1,700; with
+`--receive` as well, an abandon with a loader reaches about 16,000. These take minutes, the last
+over 20 minutes with five jobs. Their counts vary by a few percent from run to run, as native
+merges do. With `--receive` alone, the single command reaches 34 states, two abandons about 830
+and an abandon with a write about 270. On a shared machine, pass a `--jobs` that leaves room for
+others. A command that misses its pause for 30 seconds under load is reported as a failed step;
+replay the saved schedule before believing it.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:

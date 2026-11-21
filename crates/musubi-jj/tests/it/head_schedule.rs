@@ -8,13 +8,13 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{OpStore, OperationId, ViewId};
-use musubi_jj::node::{NodeError, NodeRepo};
+use musubi_jj::node::{HeadRace, NodeError, NodeRepo};
 use musubi_jj::op_id::LocalOp;
 use musubi_testutil::{TestEnv, TestRepo};
 use pollster::FutureExt as _;
@@ -55,6 +55,13 @@ enum Action {
     KillLoader,
     UnlinkLoader,
     Receive,
+    /// The daemon's check, with the second abandon landing inside its move of the op heads:
+    /// before it takes jj's op-heads lock, or holding it, as `jj op abandon` takes none.
+    CheckSecondUnlocked,
+    CheckSecondLocked,
+    /// The daemon's check while a native command holds jj's op-heads lock: should it move op
+    /// heads, the command finishes before it takes the lock.
+    CheckWhileLocked,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -71,6 +78,9 @@ enum Peer {
     #[default]
     Abandon,
     Write,
+    /// A second `jj op abandon`, once the first has finished, of the parent of the op head
+    /// it left: what the daemon, still handling the first, may not have read yet.
+    Second,
 }
 
 impl Peer {
@@ -106,6 +116,13 @@ struct State {
     /// can have different removals still to come.
     #[serde(default, skip_serializing_if = "is_zero")]
     loader_unlinks: usize,
+    /// Whether the second abandon ran to the end inside the daemon's move of the op heads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    second_landed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    second_put_back: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    second_published: bool,
     /// Whether the daemon received the other machine's work.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     received: bool,
@@ -245,6 +262,10 @@ impl<'a> Fixture<'a> {
             put_back: false,
             keys: RefCell::new(keys),
             write_published: false,
+            second: None,
+            second_landed: false,
+            second_published: false,
+            second_put_back: false,
             store,
             old_view,
             repo,
@@ -312,6 +333,16 @@ struct World<'a> {
     /// Whether the write peer added its head: jj merges it later even if the write is killed
     /// before its unlink.
     write_published: bool,
+    /// The op head the second abandon starts from, and what identifies the operation it
+    /// drops: its description, times and view, which rewrites keep.
+    second: Option<(String, (String, i64, i64, ViewId))>,
+    /// Whether the second abandon ran to the end inside the daemon's move.
+    second_landed: bool,
+    /// Whether the second abandon added its op head, finished or not.
+    second_published: bool,
+    /// Whether the daemon saw the second abandon's old and new op heads together, and so may
+    /// have put back what it dropped, as for the first, or merged them, which brings it back.
+    second_put_back: bool,
     store: Arc<dyn OpStore>,
     old_view: ViewId,
     repo: TestRepo,
@@ -416,6 +447,9 @@ impl World<'_> {
             peer: self.concurrent.then_some(self.native[1]),
             loader: self.loader,
             loader_unlinks: self.loader_unlinks,
+            second_landed: self.second_landed,
+            second_put_back: self.second_put_back,
+            second_published: self.second_published,
             received: self.received,
             heads: self.head_keys(&read_heads(&self.repo)),
             checked_heads: self.checked_heads.clone(),
@@ -436,7 +470,9 @@ impl World<'_> {
             } else {
                 Action::StartAbandon
             }),
-            [Native::Prepared, Native::Ready] => choices.push(Action::PreparePeer),
+            [Native::Prepared, Native::Ready] if self.peer != Peer::Second => {
+                choices.push(Action::PreparePeer);
+            }
             _ => {
                 for (status, publish, finish, kill) in [
                     (
@@ -468,11 +504,33 @@ impl World<'_> {
                 }
             }
         }
+        if self.peer == Peer::Second
+            && self.native[0] == Native::Finished
+            && self.native[1] == Native::Ready
+            && state.heads.len() == 1
+            && self.second_target().is_some()
+        {
+            choices.push(Action::PreparePeer);
+        }
+        if self.peer == Peer::Second
+            && matches!(self.native[1], Native::Prepared | Native::Paused)
+            && !self.locked()
+            && state.online
+            && state.checked_heads.as_ref() != Some(&state.heads)
+        {
+            choices.push(Action::CheckSecondUnlocked);
+            choices.push(Action::CheckSecondLocked);
+        }
         if !state.online {
             choices.push(Action::Reopen);
             if self.concurrent {
                 choices.push(Action::ReopenWithoutCache);
             }
+        } else if state.checked_heads.as_ref() != Some(&state.heads) && self.locked() {
+            // Moving op heads takes jj's op-heads lock, so a check that moves any waits for the
+            // command holding it to finish. This lets it finish just before such a move; taking
+            // out a replacement overtaken since, which locks without that hook, isn't modelled.
+            choices.push(Action::CheckWhileLocked);
         } else if state.checked_heads.as_ref() != Some(&state.heads) {
             choices.push(Action::Check);
             if self.abandon_paused()
@@ -535,7 +593,57 @@ impl World<'_> {
             || (self.peer.is_abandon() && self.native[1] == Native::Paused)
     }
 
+    /// Whether the op head the second abandon started from is among `heads`.
+    fn second_start_in(&self, heads: &[String]) -> bool {
+        self.second
+            .as_ref()
+            .is_some_and(|(start, _)| heads.contains(start))
+    }
+
+    /// The op head there is now and the operation below it, if a second abandon may drop it.
+    fn second_target(&self) -> Option<(String, OperationId)> {
+        let [head] = read_heads(&self.repo).try_into().ok()?;
+        let id = OperationId::try_from_hex(&head).unwrap();
+        let op = self.store.read_operation(&id).block_on().unwrap();
+        let [parent] = op.parents.as_slice() else {
+            return None;
+        };
+        // jj abandons only an operation with one parent.
+        let below = self.store.read_operation(parent).block_on().unwrap();
+        (*parent != *self.store.root_operation_id() && below.parents.len() == 1)
+            .then(|| (head, parent.clone()))
+    }
+
+    fn prepare_second(&mut self) {
+        let (head, target) = self.second_target().unwrap();
+        let op = self.store.read_operation(&target).block_on().unwrap();
+        self.second = Some((
+            head.clone(),
+            (
+                op.metadata.description.clone(),
+                op.metadata.time.start.timestamp.0,
+                op.metadata.time.end.timestamp.0,
+                op.view_id.clone(),
+            ),
+        ));
+        let gated = self.repo.repo_path().join("op_heads/heads").join(&head);
+        let mut command = self.repo.program(Path::new("jj"));
+        command
+            .args(["--ignore-working-copy", "op", "abandon", &target.hex()])
+            .env("COLUMNS", "80")
+            .env("RAYON_NUM_THREADS", "1");
+        self.children[1] = Some(self.gate.spawn(
+            &mut command,
+            &gated,
+            &self.env.root().join("gate-1"),
+        ));
+        self.native[1] = Native::Prepared;
+    }
+
     fn prepare(&mut self, slot: usize) {
+        if slot == 1 && self.peer == Peer::Second {
+            return self.prepare_second();
+        }
         let old = self
             .repo
             .repo_path()
@@ -572,11 +680,17 @@ impl World<'_> {
         self.children[slot].as_mut().unwrap().publish();
         self.native[slot] = Native::Paused;
         self.write_published |= slot == 1 && self.peer == Peer::Write;
+        self.second_published |= slot == 1 && self.peer == Peer::Second;
     }
 
     fn act(&mut self, action: Action) -> State {
         match action {
             Action::StartLoader => {
+                // A native merge of the second abandon's old and new op heads brings back what
+                // it dropped, as the daemon's does.
+                let heads = read_heads(&self.repo);
+                self.second_put_back |=
+                    self.native[1] == Native::Paused && self.second_start_in(&heads);
                 let old = self
                     .repo
                     .repo_path()
@@ -658,6 +772,8 @@ impl World<'_> {
                     && heads.len() == 2
                     && heads.contains(&self.old_head)
                     && !self.put_back;
+                // The same for the second abandon: its old and new op heads side by side.
+                let second_both = self.native[1] == Native::Paused && self.second_start_in(&heads);
                 let node = self.node.as_mut().unwrap();
                 if action != Action::Check {
                     let before = action == Action::InterruptBeforePublication;
@@ -679,10 +795,110 @@ impl World<'_> {
                     self.interrupted = true;
                     self.stopped_before_publication = before;
                     self.put_back |= both;
+                    self.second_put_back |= second_both;
                 } else {
                     let noticed = node.check_abandon().unwrap();
                     self.checked_heads = (!noticed).then(|| self.head_keys(&heads));
                     self.put_back |= both && noticed;
+                    // Only a notice that took out the second abandon's old op head: another, as
+                    // of the first abandon, leaves it there.
+                    self.second_put_back |=
+                        second_both && noticed && !self.second_start_in(&read_heads(&self.repo));
+                }
+            }
+            Action::CheckSecondUnlocked | Action::CheckSecondLocked => {
+                let at = if action == Action::CheckSecondLocked {
+                    HeadRace::Locked
+                } else {
+                    HeadRace::Unlocked
+                };
+                let published = self.native[1] == Native::Paused;
+                let child = Arc::new(Mutex::new(self.children[1].take()));
+                let landed = Arc::new(AtomicBool::new(false));
+                let heads = read_heads(&self.repo);
+                // Published, its old and new op heads are both there for the daemon to read.
+                let second_both = published && self.second_start_in(&heads);
+                let node = self.node.as_mut().unwrap();
+                {
+                    let (child, landed) = (child.clone(), landed.clone());
+                    node.race_head_move(at, move || {
+                        if let Some(mut command) = child.lock().unwrap().take() {
+                            if !published {
+                                command.publish();
+                            }
+                            command.release();
+                            landed.store(true, Ordering::Relaxed);
+                        }
+                    });
+                }
+                let noticed = node.check_abandon().unwrap();
+                self.second_put_back |=
+                    second_both && noticed && !self.second_start_in(&read_heads(&self.repo));
+                // Not moved: the command waits where it was, and a later move finds none.
+                if let Some(command) = child.lock().unwrap().take() {
+                    self.children[1] = Some(command);
+                }
+                if landed.load(Ordering::Relaxed) {
+                    self.native[1] = Native::Finished;
+                    self.second_landed = true;
+                    self.second_published = true;
+                    self.checked_heads = None;
+                } else {
+                    self.checked_heads = (!noticed).then(|| self.head_keys(&heads));
+                }
+            }
+            Action::CheckWhileLocked => {
+                // Whichever command holds the lock: the write, or a native merge.
+                let loader = matches!(self.loader, Some(Native::Prepared | Native::Paused));
+                let (holder, prepared) = if loader {
+                    (
+                        self.loader_child.take(),
+                        self.loader == Some(Native::Prepared),
+                    )
+                } else {
+                    (self.children[1].take(), self.native[1] == Native::Prepared)
+                };
+                let holder = Arc::new(Mutex::new(holder));
+                let finished = Arc::new(AtomicBool::new(false));
+                let heads = read_heads(&self.repo);
+                let node = self.node.as_mut().unwrap();
+                {
+                    let (holder, finished) = (holder.clone(), finished.clone());
+                    node.race_head_move(HeadRace::Unlocked, move || {
+                        if let Some(mut command) = holder.lock().unwrap().take() {
+                            // A merge whose heads settled first adds and removes none.
+                            let paused = !prepared
+                                || if loader {
+                                    command.publish_or_exit()
+                                } else {
+                                    command.publish();
+                                    true
+                                };
+                            if paused {
+                                command.release();
+                            }
+                            finished.store(true, Ordering::Relaxed);
+                        }
+                    });
+                }
+                let noticed = node.check_abandon().unwrap();
+                let back = holder.lock().unwrap().take();
+                if finished.load(Ordering::Relaxed) {
+                    if loader {
+                        self.loader = Some(Native::Finished);
+                    } else {
+                        self.native[1] = Native::Finished;
+                        self.write_published = true;
+                    }
+                    self.checked_heads = None;
+                } else {
+                    // It moved nothing, and so took no lock: the command waits where it was.
+                    if loader {
+                        self.loader_child = back;
+                    } else {
+                        self.children[1] = back;
+                    }
+                    self.checked_heads = (!noticed).then(|| self.head_keys(&heads));
                 }
             }
             Action::Reopen | Action::ReopenWithoutCache => {
@@ -708,6 +924,11 @@ impl World<'_> {
                 self.checked_heads = None;
             }
             Action::MergeHeads => {
+                // Merging the second abandon's old and new op heads brings back what it
+                // dropped, as any jj command loading the repository between them does.
+                let heads = read_heads(&self.repo);
+                self.second_put_back |=
+                    self.native[1] == Native::Paused && self.second_start_in(&heads);
                 let node = self.node.as_mut().unwrap();
                 node.settle().unwrap();
                 node.merge_heads().unwrap();
@@ -761,11 +982,51 @@ impl World<'_> {
             {
                 return Some(error);
             }
-            if self.put_back {
+            if self.native[1] == Native::Finished
+                && !self.second_put_back
+                && let Err(error) = self.check_second_dropped()
+            {
+                return Some(error);
+            }
+            // A second abandon that added its op head drops more than the put-back restored,
+            // even killed before it took the old one out.
+            if self.put_back && !self.second_published {
                 return self.check_restored_head().err();
             }
         }
         None
+    }
+
+    /// The operation the second abandon dropped is not back below any op head.
+    fn check_second_dropped(&self) -> Result<(), String> {
+        let Some((_, dropped)) = &self.second else {
+            return Ok(());
+        };
+        let mut pending: Vec<OperationId> = read_heads(&self.repo)
+            .iter()
+            .map(|head| OperationId::try_from_hex(head).unwrap())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) || id == *self.store.root_operation_id() {
+                continue;
+            }
+            let op = self.store.read_operation(&id).block_on().unwrap();
+            let found = (
+                op.metadata.description.clone(),
+                op.metadata.time.start.timestamp.0,
+                op.metadata.time.end.timestamp.0,
+                op.view_id.clone(),
+            );
+            if found == *dropped {
+                return Err(format!(
+                    "the operation the second abandon dropped is back, as {}",
+                    id.hex()
+                ));
+            }
+            pending.extend(op.parents);
+        }
+        Ok(())
     }
 
     /// A commit described with `marker` is in the view of every op head, settled.
@@ -978,13 +1239,15 @@ fn explore(
         "no alternative is enabled at that prefix"
     );
     if fixture.concurrent && prefix.steps.is_empty() {
+        // A second abandon starts from the first one's op head, not the old head.
         assert!(
-            visited.keys().any(|state| {
-                // Both abandons write the same new head; a write adds its own.
-                state.native == Native::Paused
-                    && state.peer == Some(Native::Paused)
-                    && state.heads.len() == if fixture.peer.is_abandon() { 2 } else { 3 }
-            }),
+            fixture.peer == Peer::Second
+                || visited.keys().any(|state| {
+                    // Both abandons write the same new head; a write adds its own.
+                    state.native == Native::Paused
+                        && state.peer == Some(Native::Paused)
+                        && state.heads.len() == if fixture.peer.is_abandon() { 2 } else { 3 }
+                }),
             "the search must reach two pending unlinks of the same old head"
         );
         assert!(
@@ -999,14 +1262,16 @@ fn explore(
                 }),
             "the search must restart after the first unlink while the second is pending"
         );
+        // A write holds jj's op-heads lock until it is done, and a daemon interrupted while
+        // moving op heads held it too: so the write ends, finished or killed, around it.
         assert!(
-            fixture.peer.is_abandon()
+            fixture.peer != Peer::Write
                 || visited.keys().any(|state| {
                     state.online
                         && state.lost_cache
                         && state.stopped_before_publication
                         && state.native == Native::Finished
-                        && state.peer == Some(Native::Finished)
+                        && matches!(state.peer, Some(Native::Finished | Native::Killed))
                 }),
             "the search must finish both commands after a restart that lost the cache"
         );
@@ -1030,6 +1295,10 @@ fn explore(
                     state.loader == Some(Native::Paused) && state.loader_unlinks > 0
                 }),
             "the search must stop a native merge between removing one head and the next"
+        );
+        assert!(
+            fixture.peer != Peer::Second || visited.keys().any(|state| state.second_landed),
+            "the search must land a second abandon inside the daemon's move of the op heads"
         );
         for (loader, what) in [
             (Native::Killed, "kill a native merge"),
@@ -1229,6 +1498,7 @@ fn run() {
     let peer = trace.as_ref().map_or_else(
         || match std::env::var("MUSUBI_HEAD_SCHEDULE_PEER").as_deref() {
             Ok("write") => Peer::Write,
+            Ok("second") => Peer::Second,
             Ok("abandon") | Err(_) => Peer::Abandon,
             Ok(other) => panic!("unknown MUSUBI_HEAD_SCHEDULE_PEER {other}"),
         },

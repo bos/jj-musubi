@@ -58,7 +58,7 @@ def main():
         help="with --concurrent, also load the repository once at several heads, merging them",
     )
     search.add_argument(
-        "--peer", choices=["abandon", "write"], default="abandon",
+        "--peer", choices=["abandon", "write", "second"], default="abandon",
         help="with --concurrent, what the second command does (default abandon)",
     )
     search.add_argument("--out", type=Path, default=ROOT / "target/head-schedule.json")

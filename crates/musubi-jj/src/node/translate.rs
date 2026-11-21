@@ -800,6 +800,23 @@ impl NodeRepo {
         Ok(self.raw_parents(parents) == self.canonical.parents(named)?)
     }
 
+    /// The first context among `parents` that this machine captured.
+    fn carried_context(
+        &self,
+        parents: &[CanonicalOp],
+    ) -> Result<Option<crate::canonical::namespace::Namespace>, NodeError> {
+        for parent in parents {
+            let parent_op = self.canonical.read_operation(parent)?;
+            if let Some(context) =
+                crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
+                && context.source == self.machine.key()
+            {
+                return Ok(Some(context));
+            }
+        }
+        Ok(None)
+    }
+
     fn raw_parents(&self, parents: &[LocalOp]) -> Vec<CanonicalOp> {
         let mut raw = vec![];
         for parent in parents {
@@ -961,17 +978,10 @@ impl NodeRepo {
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
         // Context is local to the machine that captured it. Carry it through native
         // descendants until their canonical views and presence again describe all aliases.
-        if !OpAttrs(&metadata.attributes).has_namespace() {
-            for parent in &parents {
-                let parent_op = self.canonical.read_operation(parent)?;
-                if let Some(context) =
-                    crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
-                    && context.source == self.machine.key()
-                {
-                    OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
-                    break;
-                }
-            }
+        if !OpAttrs(&metadata.attributes).has_namespace()
+            && let Some(context) = self.carried_context(&parents)?
+        {
+            OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
         }
         // Parent contraction changes which workspaces are present, but must not change
         // whose names a fresh native command inherited. Recover that namespace from the
@@ -980,16 +990,34 @@ impl NodeRepo {
         let source_parents = self.raw_parents(&LocalOp::parents_of(op));
         let changed_parents = source_parents != parents;
         if changed_parents {
+            // A source parent written after an earlier trim carries a context for the names
+            // its own view and history have lost. The source view is judged by it, so it
+            // goes into the metadata passed here, and into the recomputed context: its other
+            // machines' names and the machines it knows stay, but a name the source view
+            // gives this machine stays this machine's own.
+            let carried = self.carried_context(&source_parents)?;
+            let mut source_metadata = metadata.clone();
+            if let Some(carried) = &carried
+                && !OpAttrs(&source_metadata.attributes).has_namespace()
+            {
+                OpAttrs(&mut source_metadata.attributes).set_namespace(carried.encode());
+            }
             let (source_view, source_presence) = self.canonical_view(
                 id,
                 view.clone(),
                 &source_parents,
                 commit_predecessors.as_ref(),
                 &Kind::of(&metadata),
-                &metadata,
+                &source_metadata,
             )?;
-            let context = self.workspace_context_of_view(&source_view, &source_presence)?;
-            OpAttrs(&mut metadata.attributes).set_namespace(context);
+            let mut context: crate::canonical::namespace::Namespace = serde_json::from_str(
+                &self.workspace_context_of_view(&source_view, &source_presence)?,
+            )
+            .expect("a context this machine just encoded");
+            if let Some(carried) = carried {
+                context.keep_others_of(carried);
+            }
+            OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
         }
         if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
             let mut known = std::collections::BTreeSet::new();

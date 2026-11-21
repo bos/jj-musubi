@@ -13,7 +13,8 @@
 
 - After `jj op abandon` of a machine's history, another machine's workspace no longer shows
   up as that machine's, as `m3/m1/default`, when a `jj` command run on the history from
-  before the abandon (with `--at-op`, or one already running) finishes afterwards.
+  before the abandon (with `--at-op`, or one already running) finishes afterwards, or when
+  a second abandon of the whole history came between.
 
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.

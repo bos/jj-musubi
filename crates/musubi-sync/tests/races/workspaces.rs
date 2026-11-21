@@ -759,3 +759,58 @@ fn a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
 }
+
+/// As `a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs`, but after a
+/// second full trim, with the late command on the first one. Its parent's canonical form,
+/// written after the first trim, has only this machine's workspaces and knows no other
+/// machine: the namespace context it carries is all that says `beta/beta` is beta's. The
+/// late command, now on the root, takes a context recomputed from that parent, so the
+/// recomputation must read the context too, and keep what it says of other machines: both
+/// halves are needed. Judging the parent's view by the context alone still records one that
+/// drops beta's alias and beta from the machines it knows, and without either the context
+/// recorded gives `beta/beta` to alpha, and beta shows its own workspace as `alpha/beta/beta`.
+#[test]
+fn a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+
+    // The newest operation whose command ran `jj ... new -m <message>`.
+    let made = |hive: &Fixture, message: &str| {
+        let ids = hive.repo(0).jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            &format!(r#"if(tags.contains("-m {message}"), id ++ "\n")"#),
+        ]);
+        ids.lines().next().expect(message).to_owned()
+    };
+    let trim = |hive: &mut Fixture, off: &str| {
+        let alpha = hive.repo(0);
+        alpha.jj(&["new", "-m", "y"]);
+        alpha.jj(&["undo"]);
+        alpha.jj(&["op", "abandon", "..@-"]);
+        alpha.jj(&["new", "-m", off]);
+        let before = made(hive, off);
+        hive.node(0).settle().unwrap();
+        assert!(hive.node(0).check_abandon().unwrap());
+        before
+    };
+    let before = trim(&mut hive, "off1");
+    hive.repo(0).jj(&["--at-op", &before, "new", "-m", "late1"]);
+    let late1 = made(&hive, "late1");
+    hive.sync();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
+
+    trim(&mut hive, "off2");
+    hive.repo(0).jj(&["--at-op", &late1, "new", "-m", "late2"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
+}

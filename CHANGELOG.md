@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `musubi hub` makes a new hub in `~/.local/share/musubi/hub` (`$XDG_DATA_HOME/musubi/hub`,
+  or `%LOCALAPPDATA%\musubi\hub` on Windows) instead of `~/musubi-hub`. A hub already in
+  `~/musubi-hub` stays there, and musubi keeps serving it, but a release after 2027-02-21
+  will stop looking for it there. To keep it there for good, run
+  `jj config set --user musubi.hub-dir '~/musubi-hub'` on the hub's machine. Don't move the
+  directory: repositories on the hub's machine, and any service that runs the hub, name it by
+  its path. A hub you run with `--dir`, that `musubi.hub-dir` names, or that
+  `musubi hub install` set up isn't affected.
+
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.
 

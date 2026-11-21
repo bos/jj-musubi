@@ -271,6 +271,21 @@ pub fn state_dir() -> anyhow::Result<PathBuf> {
     Ok(base.join("musubi"))
 }
 
+/// Where `musubi hub` makes a hub when nothing names another directory:
+/// `$XDG_DATA_HOME/musubi/hub` (`~/.local/share/musubi/hub`), or `%LOCALAPPDATA%\musubi\hub`
+/// on Windows, which, unlike `%APPDATA%`, doesn't roam with the user's profile.
+pub fn default_hub_dir() -> anyhow::Result<PathBuf> {
+    let strategy = etcetera::choose_base_strategy()
+        .context("cannot locate a data directory; give the hub's with --dir")?;
+    // etcetera calls %LOCALAPPDATA% the cache directory.
+    let base = if cfg!(windows) {
+        strategy.cache_dir()
+    } else {
+        strategy.data_dir()
+    };
+    Ok(base.join("musubi").join("hub"))
+}
+
 /// Makes the state directory, if it doesn't exist, private to this user: it holds the ssh
 /// key musubi reaches hubs with, and with `MUSUBI_STATE_DIR` set, the daemon's socket, which
 /// musubi uses only in a directory no one else can write to.

@@ -38,9 +38,9 @@ These need no test:
 - running any jj but the one musubi pins (the nightly run against jj's main branch aside),
   though what an older jj wrote into a repository's history is in scope; and shallow or
   partial clones, beyond their refusal;
-- data from earlier releases, until 1.0 ([AGENTS.md,
-  "Compatibility"](../../AGENTS.md#compatibility)), beyond a message from another release being
-  refused as such;
+- data from earlier releases that no compatibility code ([AGENTS.md,
+  "Compatibility"](../../AGENTS.md#compatibility)) still reads, beyond a message from another
+  release being refused as such. The compatibility code itself needs tests;
 - preserving recent writes through a power cut, or repairing a hub's torn files. The hub is
   disposable ([AGENTS.md, "Resilience"](../../AGENTS.md#resilience)); test detection and
   recreation rather than adding durability.

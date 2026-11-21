@@ -48,8 +48,10 @@ use crate::ui::Ui;
 /// What marks a directory as a hub's, and holds its settings.
 const HUB_FILE: &str = "hub.toml";
 
-/// The fallback directory in the home directory.
-const DEFAULT_DIR: &str = "musubi-hub";
+/// Where releases up to 0.47 made the hub by default, in the home directory.
+// Compatibility until 2027-02-21: remove this, the step in `choose_dir` that looks for a hub
+// here, the hint `serve` prints, and what docs/reference/configuration.md says of it.
+const OLD_DEFAULT_DIR: &str = "musubi-hub";
 
 /// The largest message the hub takes. Larger attachments move in chunks of about this size
 /// (see [`musubi_sync::remote`]).
@@ -81,21 +83,28 @@ pub struct ServeArgs {
 }
 
 /// The directory to serve, in order of precedence: `dir`, the current directory if it is a
-/// hub's, `musubi.hub-dir`, and `~/musubi-hub`.
-fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+/// hub's, `musubi.hub-dir`, `~/musubi-hub` if it is a hub's, and [`config::default_hub_dir`];
+/// and whether it is `~/musubi-hub`, found so.
+fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<(PathBuf, bool)> {
     if let Some(dir) = dir {
-        return Ok(dir);
+        return Ok((dir, false));
     }
     if let Ok(cwd) = std::env::current_dir()
         && cwd.join(HUB_FILE).exists()
     {
-        return Ok(cwd);
+        return Ok((cwd, false));
     }
     if let Some(dir) = config::hub_directory()? {
-        return Ok(dir);
+        return Ok((dir, false));
     }
-    let home = etcetera::home_dir().context("no home directory; give the hub's with --dir")?;
-    Ok(home.join(DEFAULT_DIR))
+    // A hub stays where an earlier release made it: this machine's repositories name it by
+    // its directory.
+    if let Ok(home) = etcetera::home_dir()
+        && home.join(OLD_DEFAULT_DIR).join(HUB_FILE).exists()
+    {
+        return Ok((home.join(OLD_DEFAULT_DIR), true));
+    }
+    Ok((config::default_hub_dir()?, false))
 }
 
 /// The socket of the hub serving `dir`, unless its path is too long to use.
@@ -151,7 +160,7 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
 
 pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     let default = args.dir.is_none();
-    let dir = choose_dir(args.dir)?;
+    let (dir, old_default) = choose_dir(args.dir)?;
     // One hub per user by default; `--dir` runs more on purpose.
     let state = config::state_dir()?;
     let _user_lock = if default {
@@ -174,6 +183,16 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     let Some(_dir_lock) = try_lock(&dir.join("hub.lock"))? else {
         anyhow::bail!("a hub is already serving {}", dir.display());
     };
+    if old_default {
+        // Compatibility until 2027-02-21: remove this hint.
+        writeln!(
+            ui.hint(),
+            "Earlier releases made hubs in ~/{OLD_DEFAULT_DIR}, and a later release will stop \
+             looking there. To keep serving this hub, run `jj config set --user musubi.hub-dir \
+             '~/{OLD_DEFAULT_DIR}'`. Don't move it: this machine's repositories name it by its \
+             path."
+        )?;
+    }
     if default {
         fs::write(state.join("hub.path"), dir.display().to_string())?;
         if let Ok(log) = config::hub_log() {
@@ -238,7 +257,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
 pub fn install(ui: &Ui, args: ServeArgs, at_boot: bool) -> anyhow::Result<()> {
     anyhow::ensure!(!cfg!(windows), "musubi can't run a hub at login on Windows");
     login::prepare_hub_install(at_boot)?;
-    let dir = choose_dir(args.dir)?;
+    let (dir, _) = choose_dir(args.dir)?;
     fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
     // The path the hub, run there, finds its directory by, symbolic links resolved, which it
     // saves as this machine's default hub.

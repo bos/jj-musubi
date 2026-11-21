@@ -83,11 +83,12 @@ The hub will keep running until you stop it. Leave this terminal open for now. O
 satisfied that you want to continue using jj-musubi, you can [manage it through a
 service](#keep-the-hub-running).
 
-When you first start a hub, it creates `~/musubi-hub` by default and prints what to run
-elsewhere:
+When you first start a hub, it creates `~/.local/share/musubi/hub` by default (see [the hub's
+directory](../reference/configuration.md#on-the-hubs-machine) for other systems) and prints
+what to run elsewhere:
 
 ```text
-Created a new hub in /home/you/musubi-hub
+Created a new hub in /home/you/.local/share/musubi/hub
 To share a repository:               musubi create --hub devbox
 To add another machine's copy of it: musubi join --hub devbox
 To make a new copy of a hive:        musubi clone <name> [<dir>] --hub devbox

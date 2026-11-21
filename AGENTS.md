@@ -79,19 +79,48 @@ path that runs often:
 
 ## Compatibility
 
-Until 1.0, musubi promises no compatibility with earlier releases. Rename flags, config keys
-and wire formats outright, with no aliases or migrations, but:
+Until 1.0, musubi keeps working with what earlier releases left on users' machines for about
+three months, not for good. When a flag, config key, command, or a file or directory that a
+machine keeps for itself changes, its old form keeps working, or is migrated, for three months
+and at least until a release has shipped the change; then the code that handles it goes. While
+it lasts:
+
+- Accept the old form. Where the user wrote it down, as in their config, print a hint that
+  says what to change it to. A renamed flag can be a clap `alias`, which `--help` leaves out
+  (`visible_alias` shows it).
+- Migrate a file or directory in place only when nothing outside it names it. On the hub's
+  machine, repositories name the hub by its directory, so a hub where an earlier release made
+  it is served there, not moved.
+- Mark each piece of compatibility code `// Compatibility until YYYY-MM-DD:`, three months
+  from when it lands, with what to remove then, including what the docs say about it. Test
+  it.
+
+For example, to rename the `--dir` flag to `--hub-dir`, rename the field, keep `short = 'd'`
+(`short` would otherwise take `-h` from the new name, which help has), and add
+`alias = "dir"`. To rename the config key `musubi.hub-dir` to `musubi.hub-directory`, read the
+new key, and if it is unset, the old one, with a hint to run `jj config set --user
+musubi.hub-directory <value>` and `jj config unset --user musubi.hub-dir`. When the date
+passes, remove the alias and the fallback read.
+
+Wire formats are the exception. Machines and hubs built either side of a change refuse each
+other instead of staying compatible, and
+[`musubi.upgrade-command`](docs/reference/configuration.md#this-machines) lets a daemon
+upgrade to match its hub:
 
 - Every change that machines and hubs built either side of it would disagree about, whether in
   a message, an encoding, or what a message means, bumps `PROTOCOL_VERSION`, even if an
   earlier change since the last release already did, so that they refuse each other, saying
   so. Never change how an `Envelope` (`crates/musubi-sync/src/wire.rs`) encodes the versions it
   starts with: every release reads them first.
+
+Finally:
+
 - The workspace version in `Cargo.toml` changes only for a release
   ([docs/internals/releasing.md](docs/internals/releasing.md)). Machines follow a build from
   source between releases by when it was deployed, not by its version.
-- Say what breaks, and what a user must do on upgrading, under an Unreleased heading at the top
-  of `CHANGELOG.md`, adding the heading if it's missing.
+- Say what changes, what a user must do on upgrading, and what stops working when the
+  compatibility code goes, under an Unreleased heading at the top of `CHANGELOG.md`, adding
+  the heading if it's missing.
 
 ## Building against jj's main branch
 

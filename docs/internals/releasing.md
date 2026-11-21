@@ -10,7 +10,9 @@ on crates.io, all at one version.
 2. Review changes since the latest `v*` tag (`jj tag list`) against
    [AGENTS.md, "Compatibility"](../../AGENTS.md#compatibility). Each change to what machines
    and hubs must agree on needs its own `PROTOCOL_VERSION` bump, including changes between
-   releases.
+   releases. Find compatibility code with `grep -rn 'Compatibility until' crates`. Where its
+   date has passed and an earlier release shipped it, remove it and what the docs say of it,
+   and say in the Unreleased section what stops working.
 3. In `Cargo.toml`, set the workspace's `version` and the exact versions its crates require
    of each other to the release version, and run `cargo update --workspace` to put it in
    `Cargo.lock`.

@@ -327,13 +327,12 @@ impl Hub {
         Self::spawn(env, logs, name, command, dir)
     }
 
-    /// The hub `musubi hub` serves by default on `repo`'s machine, `~/musubi-hub`, run in
-    /// the repository, as a user might run it anywhere.
+    /// The hub `musubi hub` serves by default on `repo`'s machine, `musubi/hub` in the data
+    /// directory, run in the repository, as a user might run it anywhere.
     #[cfg(unix)]
     fn start_on(env: &TestEnv, logs: &mut Logs, repo: &TestRepo) -> Self {
-        let mut command = repo.program(musubi());
-        command.arg("hub");
-        let dir = env.root().join("home/musubi-hub");
+        let command = default_hub_command(env, repo);
+        let dir = env.root().join("data/musubi/hub");
         Self::spawn(env, logs, "hub", command, dir)
     }
 
@@ -646,6 +645,56 @@ fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
     );
     insta::assert_snapshot!(err, @"Error: this hub has no hive named absent");
     terminate(&mut short, &logs);
+}
+
+/// `musubi hub` run with nothing naming its directory, on `repo`'s machine. Its data
+/// directory is `$ROOT/data`, not `~/.local/share`: under macOS's long temporary directory,
+/// the hub's socket there would be too long a path.
+#[cfg(unix)]
+fn default_hub_command(env: &TestEnv, repo: &TestRepo) -> Command {
+    let mut command = repo.program(musubi());
+    command
+        .arg("hub")
+        .env("XDG_DATA_HOME", env.root().join("data"));
+    command
+}
+
+/// A hub an earlier release made in `~/musubi-hub` stays there, saying how to keep it there
+/// for good; with `musubi.hub-dir` naming it, nothing needs saying. A directory there with
+/// no hub in it is no hub's.
+#[cfg(unix)]
+#[test]
+fn a_hub_made_in_the_old_default_directory_stays_there() {
+    let env = TestEnv::new();
+    let machine = env.init_repo("hub-machine");
+    let mut logs = Logs::default();
+    let _filters = snapshot_filters(&env);
+    let old = env.root().join("home/musubi-hub");
+    fs::create_dir_all(&old).unwrap();
+    let new = env.root().join("data/musubi/hub");
+    let command = default_hub_command(&env, &machine);
+    let hub = Hub::spawn(&env, &mut logs, "new", command, new.clone());
+    insta::assert_snapshot!(hub.greeting, @"Created a new hub in $ROOT/data/musubi/hub");
+    drop(hub);
+    fs::remove_dir_all(&new).unwrap();
+
+    fs::write(old.join("hub.toml"), "").unwrap();
+    let command = default_hub_command(&env, &machine);
+    let hub = Hub::spawn(&env, &mut logs, "old", command, old.clone());
+    insta::assert_snapshot!(hub.greeting, @"Serving 0 hives from $ROOT/home/musubi-hub");
+    drop(hub);
+    let log = fs::read_to_string(env.root().join("old.log")).unwrap();
+    let hint = log.lines().find(|line| line.starts_with("Hint: ")).unwrap();
+    insta::assert_snapshot!(hint, @"Hint: Earlier releases made hubs in ~/musubi-hub, and a later release will stop looking there. To keep serving this hub, run `jj config set --user musubi.hub-dir '~/musubi-hub'`. Don't move it: this machine's repositories name it by its path.");
+    assert!(!new.exists());
+
+    machine.jj(&["config", "set", "--user", "musubi.hub-dir", "~/musubi-hub"]);
+    let command = default_hub_command(&env, &machine);
+    let hub = Hub::spawn(&env, &mut logs, "configured", command, old);
+    insta::assert_snapshot!(hub.greeting, @"Serving 0 hives from $ROOT/home/musubi-hub");
+    drop(hub);
+    let log = fs::read_to_string(env.root().join("configured.log")).unwrap();
+    assert!(!log.contains("Hint: "), "{log}");
 }
 
 /// A stale clone and a hive have independently observed rewritten upstream history. An
@@ -4718,7 +4767,7 @@ fn localhost_reaches_the_hub_here_without_ssh() {
     insta::assert_snapshot!(out, @"Created hive alpha");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     insta::assert_snapshot!(list, @"
-    Hub $ROOT/home/musubi-hub:
+    Hub $ROOT/data/musubi/hub:
       alpha  1 machine: alpha
         here: $ROOT/alpha  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
@@ -4745,7 +4794,7 @@ fn the_quick_start_works_as_written() {
         logs.daemon_of(&env, repo);
         daemons.of(repo);
     }
-    // Run in a repository, the hub still lives in ~/musubi-hub.
+    // Run in a repository, the hub still lives in the data directory.
     let hub = Hub::start_on(&env, &mut logs, &alpha);
     let mut transcript = format!("$ musubi hub\n{}\n", hub.printed.join("\n"));
     let printed = |what: &str| -> Vec<String> {
@@ -4834,7 +4883,7 @@ fn the_quick_start_works_as_written() {
     let _filters = settings.bind_to_scope();
     insta::assert_snapshot!(transcript, @"
     $ musubi hub
-    Created a new hub in $ROOT/home/musubi-hub
+    Created a new hub in $ROOT/data/musubi/hub
     To share a repository:               musubi create --hub $HOST
     To add another machine's copy of it: musubi join --hub $HOST
     To make a new copy of a hive:        musubi clone <name> [<dir>] --hub $HOST
@@ -4858,7 +4907,7 @@ fn the_quick_start_works_as_written() {
     alpha$ musubi sync
     beta$ musubi sync
     alpha$ musubi status
-    Hive: alpha on $ROOT/home/musubi-hub
+    Hive: alpha on $ROOT/data/musubi/hub
     This machine: alpha, synced N ago; the hub has all its work
     Working copies:
     alpha@: [ids] (no description set)

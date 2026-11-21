@@ -28,7 +28,7 @@ with `--user`.
 | Key | Effect |
 | --- | --- |
 | `musubi.hub` | The hub to use without `--hub`, overriding the saved default: the first hub used, or the local hub's directory. Takes an ssh host name or, on the hub's machine, its directory (which may start with `~/`). That machine's own name or `localhost` reaches the hub served by `musubi hub` without `--dir`, without ssh. |
-| `musubi.hub-dir` | The data directory for `musubi hub` and `musubi hub install` on the hub's machine. Takes an absolute path or one starting with `~/`. `--dir` takes precedence, followed by the current directory if it already contains a hub, then this setting, then `~/musubi-hub`. |
+| `musubi.hub-dir` | The data directory for `musubi hub` and `musubi hub install` on the hub's machine. Takes an absolute path or one starting with `~/`. `--dir` takes precedence, followed by the current directory if it already contains a hub, then this setting, then `~/musubi-hub` if an earlier release made a hub there, then [the default](#on-the-hubs-machine). |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | Override the daemon's control socket with an absolute path or one starting with `~/`. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed` (default): share one connection per hub across repos, adding a connection for each transfer of 16 MiB or more until it finishes. `one`: use one connection per hub even for large transfers, useful when each ssh connection is costly or asks you to log in. |
@@ -202,7 +202,12 @@ directory. If a temp cleaner deletes the socket, the daemon restores it within s
 
 ### On the hub's machine
 
-The hub's directory, `~/musubi-hub` by default, holds:
+The hub's directory holds the files below. By default it is `musubi/hub` in your data
+directory: `$XDG_DATA_HOME/musubi/hub`, which is `~/.local/share/musubi/hub` unless you set
+`XDG_DATA_HOME`, or `%LOCALAPPDATA%\musubi\hub` on Windows. Releases up to 0.47 made it in
+`~/musubi-hub`. musubi keeps serving a hub there until a release after 2027-02-21, which the
+changelog will announce; to keep serving it there for good, set `musubi.hub-dir` to
+`~/musubi-hub`. Don't move it: repositories on the hub's machine name it by its path.
 
 | Path | Holds |
 | --- | --- |

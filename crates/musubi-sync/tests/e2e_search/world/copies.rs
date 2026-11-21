@@ -216,23 +216,31 @@ impl World {
     /// the root and synced, then on its local `trunk()`. A new machine's, if `m` is `nodes()`, or
     /// else in place of machine `m`'s copy, which has left the hive.
     pub fn clone_copy(&mut self, m: usize) {
-        self.new_copy(m, false);
+        self.new_copy(m, false, None);
     }
 
     /// An independently fetched Git copy joins with its recorded upstream state, which
     /// can differ from the hive's. Subsequent commands and syncs keep checking both views.
     pub fn join_existing_copy(&mut self, m: usize) {
-        self.new_copy(m, true);
+        self.new_copy(m, true, None);
     }
 
-    fn new_copy(&mut self, m: usize, existing: bool) {
+    /// A new machine `m` joins, as `join_existing_copy` (`existing`) or `clone_copy` would
+    /// have it, but, with `like`, on a host of the same name as that machine's: the hive then
+    /// tells the two apart by a suffix, and the other's aliases change.
+    pub fn join_named(&mut self, m: usize, existing: bool, like: Option<usize>) {
+        assert_eq!(m, self.nodes(), "a machine new to the hive");
+        self.new_copy(m, existing, like);
+    }
+
+    fn new_copy(&mut self, m: usize, existing: bool, like: Option<usize>) {
         crate::coverage::interrupt_races();
         let n = self.next();
         let repo = if m == self.nodes() {
             let machine = MACHINES[m];
             let hostname = match self.naming {
                 Naming::SharedHostname => "mac",
-                Naming::Own | Naming::Default => machine,
+                Naming::Own | Naming::Default => like.map_or(machine, |x| MACHINES[x]),
             };
             self.fx.env.init_repo_with_hostname(machine, hostname)
         } else {

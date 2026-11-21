@@ -531,3 +531,91 @@ fn e2e_late_command_then_import_of_an_unborn_head() {
     }
     world.converge();
 }
+
+/// Found by `late_commands_after_trims` with the fixes for #167 then in place, reduced by hand.
+/// Beta trims and runs two late commands on its trim's op head; alpha commits; beta trims again,
+/// runs another on the first trim's op head, and a late `jj new` on a merge of its first ones.
+/// Alpha then trims, and after another machine joins and works, trims again, runs a late `jj new`
+/// on beta's working copy at its first trim's op head, a late describe of beta's first late
+/// commit at its second, and abandons that describe. The hive then gave alpha beta's workspace,
+/// `beta/default`, as its own, until a name was taken as another machine's only when jj's
+/// description said the command added it. Each of the join, the late `jj new` and the abandon is
+/// needed; the joining machine's name isn't.
+#[test]
+fn e2e_abandoning_a_late_describe_after_a_join_keeps_others_workspaces_theirs() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: true,
+    });
+    let find = |world: &World, m: usize, op: &str, name: &str| working_copy_at(world, m, op, name);
+    let merge = |world: &mut World, m: usize| {
+        if world.op_heads(m).len() > 1 {
+            world.merge_late_heads(m);
+        }
+    };
+    let describe = |world: &mut World, m: usize, op: &str, commit: &str, back: bool| {
+        let message = world.message(m);
+        world.late_command(m, op, &["describe", commit, "-m", &message], back);
+    };
+    // Beta: two trims, with late commands.
+    let first = world.trim_to_unpublished_root(1);
+    world.sync_partial(1, 1, None);
+    let late = find(&world, 1, &first, "default");
+    world.late_command(
+        1,
+        &first,
+        &[
+            "bookmark",
+            "set",
+            "topic",
+            "-r",
+            &late.id,
+            "--allow-backwards",
+        ],
+        false,
+    );
+    merge(&mut world, 1);
+    describe(&mut world, 1, &first, &late.parents[0], true);
+    merge(&mut world, 1);
+    let merges: Vec<String> = world
+        .late_ops(1)
+        .into_iter()
+        .filter(|op| op.merge)
+        .map(|op| op.id)
+        .collect();
+    let file = world::FILES.iter().position(|f| *f == "dir/c.txt").unwrap();
+    world.commit(0, 0, file);
+    world.sync(0);
+    world.trim_to_unpublished_root(1);
+    world.sync(1);
+    let second = find(&world, 1, &first, "alpha/second").id;
+    describe(&mut world, 1, &first, &second, false);
+    merge(&mut world, 1);
+    let alpha = find(&world, 1, &merges[0], "alpha/default").id;
+    world.late_command(1, &merges[0], &["new", &alpha], true);
+    world.observe(0);
+    // Alpha: a trim, another machine joins and works, and another trim, with late commands.
+    let a1 = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    world.join_existing_copy(2);
+    world.sync(2);
+    world.commit(2, 0, 0);
+    world.sync(2);
+    let a2 = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    let beta = find(&world, 0, &a1, "beta/default").id;
+    world.late_command(0, &a1, &["new", &beta], true);
+    merge(&mut world, 0);
+    describe(&mut world, 0, &a2, &late.id, false);
+    merge(&mut world, 0);
+    let described = world
+        .late_ops(0)
+        .into_iter()
+        .find(|op| !op.merge)
+        .unwrap()
+        .id;
+    world.op_abandon(0, &described);
+    world.converge();
+}

@@ -22,6 +22,7 @@ use hegel::generators as gs;
 use crate::coverage::fired;
 use crate::world::BOOKMARKS;
 use crate::world::FILES;
+use crate::world::LateOp;
 use crate::world::MACHINES;
 use crate::world::PastOp;
 use crate::world::SEARCH_MACHINES;
@@ -159,6 +160,16 @@ enum Clock {
     SteppedBack,
 }
 
+/// What a late command of `late_commands_after_trims` does: an ordinary command, or one that
+/// brings back an earlier view, `jj undo` or `jj op restore`, which can bring back a name an
+/// alias had before another machine joined under the same name.
+#[derive(Clone, Copy, Debug)]
+enum LateKind {
+    Command,
+    Undo,
+    Restore,
+}
+
 /// What another machine does between two of `late_commands_after_trims`' trims, as the
 /// shapes of #167 need: a third machine joining, or another changing its workspaces, and its
 /// syncs.
@@ -271,10 +282,13 @@ impl<'a> Search<'a> {
     /// point and followed by one or two late commands, each `--at-op` any operation a trim of
     /// the machine's left, or a late command or merge wrote on one (`World::late_ops`),
     /// perhaps with the clock stepped back, and then perhaps by a merge of the op heads, as
-    /// any command makes. Before each trim but the first, another machine may join, sync,
-    /// commit, change its workspaces, or forget a copy. So the late command can be after a
-    /// second or third trim, on a merge, on the earlier trims' late commands, or first in a
-    /// merge, and a third machine's workspaces can be at stake, as in #167's shapes
+    /// any command makes, and by `jj op abandon` of a late operation a late command brought
+    /// back. A late command may be `jj undo`, or `jj op restore` of an earlier late operation
+    /// below it, bringing back an earlier view. Before each trim but the first, another machine
+    /// may join, perhaps under an existing machine's name, which changes that machine's
+    /// aliases, sync, commit, change its workspaces, or forget a copy. So the late command can
+    /// be after a second or third trim, on a merge, on the earlier trims' late commands, or
+    /// first in a merge, and a third machine's workspaces can be at stake, as in #167's shapes
     /// (`a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs`,
     /// `a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs`,
     /// `abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs`). No merge
@@ -283,9 +297,12 @@ impl<'a> Search<'a> {
         let m = self.machine(tc);
         let trims = tc.draw_named("trims", gs::integers::<usize>().min_value(1).max_value(3));
         fired("late_commands_after_trims");
+        // The trims the machine had made when another machine joined under an existing
+        // machine's name, for a restore to an operation from before that.
+        let mut joined_at = None;
         for round in 0..trims {
-            if round > 0 {
-                self.meanwhile(tc, m);
+            if round > 0 && self.meanwhile(tc, m) {
+                joined_at = Some(self.world.trims(m));
             }
             let head = self.world.trim_to_unpublished_root(m);
             if !self.handle_trim(tc, m, &head) {
@@ -307,9 +324,49 @@ impl<'a> Search<'a> {
                 ops.sort_by_key(|op| op.id != head);
                 let op = tc.draw_named("op", gs::sampled_from(ops));
                 let clock = tc.draw(gs::sampled_from(vec![Clock::Kept, Clock::SteppedBack]));
-                let Some(args) = self.at_op_command(tc, m, &op.id) else {
-                    self.found_nothing(tc, m, "nothing to do at that operation");
-                    continue;
+                // jj refuses to undo a merge, and undoing an operation on the root restores
+                // the empty view, which no search check yet takes; any other's parent is an
+                // operation below it, whose commits jj's index has there. A restore likewise
+                // goes back to an earlier late operation below this one.
+                let ancestry = self.world.op_ancestry(m, &op.id);
+                let others: Vec<LateOp> = self
+                    .world
+                    .late_ops(m)
+                    .into_iter()
+                    .filter(|other| other.id != op.id && ancestry.contains(&other.id))
+                    .collect();
+                let kinds: Vec<LateKind> = [
+                    (LateKind::Command, true),
+                    (LateKind::Undo, !op.merge && !op.on_root),
+                    (LateKind::Restore, !others.is_empty()),
+                ]
+                .into_iter()
+                .filter_map(|(kind, possible)| possible.then_some(kind))
+                .collect();
+                let kind = tc.draw(gs::sampled_from(kinds));
+                let args: Vec<String> = match kind {
+                    LateKind::Command => {
+                        let Some(args) = self.at_op_command(tc, m, &op.id) else {
+                            self.found_nothing(tc, m, "nothing to do at that operation");
+                            continue;
+                        };
+                        args
+                    }
+                    LateKind::Undo => {
+                        fired("late:undo");
+                        vec!["undo".into(), "--allow-cross-workspace".into()]
+                    }
+                    LateKind::Restore => {
+                        let target = tc.draw_named("restore to", gs::sampled_from(others));
+                        fired("late:restore");
+                        // Its view has the aliases from before the join. Every restore is to
+                        // an operation below the one it runs at, which a full trim since
+                        // can't be, so it runs at one whose own view is from before too.
+                        if joined_at.is_some_and(|trims| target.trim <= trims) {
+                            fired("late:restore_to_before_join");
+                        }
+                        vec!["op".into(), "restore".into(), target.id]
+                    }
                 };
                 let trims = self.world.trims(m);
                 for (event, happened) in [
@@ -318,6 +375,7 @@ impl<'a> Search<'a> {
                     ("late:on_merge", op.merge),
                     ("late:clock_back", matches!(clock, Clock::SteppedBack)),
                     ("late:three_machines", self.world.nodes() == 3),
+                    ("late:on_restore", self.world.restored(&op.id)),
                 ] {
                     if happened {
                         fired(event);
@@ -329,6 +387,25 @@ impl<'a> Search<'a> {
             }
             if tc.draw_named("merge", gs::booleans()) {
                 self.merge_late_heads(m);
+            }
+            // `jj op abandon` of an operation a late command wrote, now in the op log.
+            if tc.draw_named("abandon a late one", gs::booleans()) {
+                let ops = self
+                    .world
+                    .abandonable_ops(m)
+                    .into_iter()
+                    .filter(|op| self.world.written_late(&op.id))
+                    .collect();
+                match choose_op(tc, ops) {
+                    Some(op) => {
+                        fired("late:abandon");
+                        if self.world.restored(&op) {
+                            fired("late:abandon_restore");
+                        }
+                        self.world.op_abandon(m, &op);
+                    }
+                    None => self.found_nothing(tc, m, "no late operation it can abandon"),
+                }
             }
         }
         self.note(tc);
@@ -346,7 +423,8 @@ impl<'a> Search<'a> {
     }
 
     /// What another machine than `m` does between two of `late_commands_after_trims`' trims.
-    fn meanwhile(&mut self, tc: &TestCase, m: usize) {
+    /// Returns whether a machine joined under an existing machine's name.
+    fn meanwhile(&mut self, tc: &TestCase, m: usize) -> bool {
         let nodes = self.world.nodes();
         let others: Vec<usize> = (0..nodes).filter(|&o| o != m).collect();
         let world = &*self.world;
@@ -380,12 +458,12 @@ impl<'a> Search<'a> {
         .collect();
         let what = tc.draw_named("meanwhile", gs::sampled_from(possible));
         let o = match what {
-            Meanwhile::Nothing => return,
+            Meanwhile::Nothing => return false,
             Meanwhile::Sync => {
                 let o = draw_machine(tc, "other", others);
                 fired("late:meanwhile_sync");
                 self.world.sync(o);
-                return;
+                return false;
             }
             Meanwhile::Commit => {
                 let o = draw_machine(tc, "other", others);
@@ -441,22 +519,34 @@ impl<'a> Search<'a> {
                 // As `join`, and then the new machine works, so that its workspace is at
                 // stake too.
                 let o = nodes;
-                if tc.draw(gs::booleans()) {
-                    self.world.join_existing_copy(o);
+                let existing = tc.draw(gs::booleans());
+                // Perhaps under another machine's name, which then shows with a suffix.
+                let named = if self.world.shared_hostname() {
+                    // Every machine is "mac" already: no other name to take.
+                    None
                 } else {
-                    self.world.clone_copy(o);
-                }
+                    let names: Vec<Option<&str>> = std::iter::once(None)
+                        .chain((0..nodes).map(|x| Some(MACHINES[x])))
+                        .collect();
+                    tc.draw_named("named as", gs::sampled_from(names))
+                };
+                let like = named.map(|name| MACHINES.iter().position(|x| *x == name).unwrap());
+                self.world.join_named(o, existing, like);
                 fired("late:meanwhile_join");
+                if like.is_some() {
+                    fired("late:meanwhile_join_same_name");
+                }
                 self.world.sync(o);
                 let file = draw_file(tc);
                 self.world.commit(o, 0, file);
                 self.world.sync(o);
-                return;
+                return like.is_some();
             }
         };
         if tc.draw_named("then sync", gs::booleans()) {
             self.world.sync(o);
         }
+        false
     }
 
     /// The arguments of a command to run at machine `m`'s operation `op`, drawn from what

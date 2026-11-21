@@ -268,6 +268,8 @@ pub struct LateOp {
     pub trim: usize,
     /// Whether it has more than one parent.
     pub merge: bool,
+    /// Whether its one parent is the root operation.
+    pub on_root: bool,
 }
 
 impl std::fmt::Debug for LateOp {
@@ -496,6 +498,10 @@ pub struct World {
     trims: Vec<usize>,
     /// The late operations written with the clock stepped back, each at a time of its own.
     stepped_back: BTreeSet<String>,
+    /// The late operations a late `jj undo` or `jj op restore` wrote.
+    restored: BTreeSet<String>,
+    /// The late operations a late command wrote.
+    written_late: BTreeSet<String>,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -623,6 +629,8 @@ impl World {
             late_ops: vec![vec![]; setup.nodes],
             trims: vec![0; setup.nodes],
             stepped_back: BTreeSet::new(),
+            restored: BTreeSet::new(),
+            written_late: BTreeSet::new(),
             counter: 0,
             trace: vec![],
         };
@@ -660,6 +668,12 @@ impl World {
 
     pub fn baseline_operation(&self, key: &SourceKey) -> bool {
         self.evidence.baseline_merge_keys.contains(key)
+    }
+
+    /// Whether every machine of the hive has the same host name, so that another joining
+    /// under an existing machine's name changes nothing.
+    pub fn shared_hostname(&self) -> bool {
+        matches!(self.naming, Naming::SharedHostname)
     }
 
     pub fn nodes(&self) -> usize {

@@ -135,6 +135,17 @@ pub const EVENTS: &[&str] = &[
     "late:meanwhile_workspace_forget",
     "late:meanwhile_forget_copy",
     "late:meanwhile_join",
+    // Late commands that bring back an earlier view, an abandon of a late operation brought
+    // back, and a machine joining under an existing machine's name.
+    "late:undo",
+    "late:restore",
+    "late:abandon",
+    "late:meanwhile_join_same_name",
+    // The old-alias shape: a late restore, after a same-name join, to an operation from before
+    // it, a late command on what a late undo or restore wrote, and an abandon of that.
+    "late:restore_to_before_join",
+    "late:on_restore",
+    "late:abandon_restore",
 ];
 
 /// Approximate exploration guidance for each race-catalogue test. These rule combinations

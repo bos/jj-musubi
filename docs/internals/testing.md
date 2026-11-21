@@ -1041,9 +1041,17 @@ branch jj hasn't imported, a node can stop halfway through a sync.
   it, or a late command or merge written on one, which jj still loads though no op head reaches
   it. A late command may run with the clock stepped back, to a time of its own before the tests'
   epoch, so that jj puts it first in a merge. Before a late command the machine merges its op
-  heads if it has several, since the import check models merges of two heads only. Between trims
+  heads if it has several, since the import check models merges of two heads only. A late
+  command may also be `jj undo`, of an operation neither a merge nor on the root, or `jj op
+  restore` of an earlier late operation below the one it runs at, bringing back an earlier view;
+  a round may end with `jj op abandon` of an operation a late command wrote. Between trims
   another machine syncs, commits, adds, renames or forgets a workspace, or forgets a copy, or a
-  third machine joins and works. Every case of `e2e_search_shard_5` starts with this rule.
+  third machine joins and works, perhaps under an existing machine's name, which changes that
+  machine's aliases. A late restore after such a join, to an operation from before it, a command
+  on that and an abandon of it bring the old aliases back as in #167's old-alias case; since a
+  restore goes back only to an operation below the one it runs at, which a full trim since
+  can't be, it runs at one from before the join too. Every case of `e2e_search_shard_5` starts
+  with this rule.
 - **Workspaces**: add, rename and forget them; forget another machine's; and rewrite or abandon
   another machine's working-copy commit.
 - **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused

@@ -239,6 +239,36 @@ impl World {
         self.trims[m]
     }
 
+    /// The ids of machine `m`'s operation `op` and its ancestors.
+    pub fn op_ancestry(&self, m: usize, op: &str) -> BTreeSet<String> {
+        self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "--at-op",
+                op,
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                r#"id ++ "\n""#,
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    /// Whether operation `id` was written by a late command.
+    pub fn written_late(&self, id: &str) -> bool {
+        self.written_late.contains(id)
+    }
+
+    /// Whether operation `id` was written by a late `jj undo` or `jj op restore`.
+    pub fn restored(&self, id: &str) -> bool {
+        self.restored.contains(id)
+    }
+
     /// Whether operation `id` was written with the clock stepped back (`late_command`).
     pub fn stepped_back(&self, id: &str) -> bool {
         self.stepped_back.contains(id)
@@ -260,7 +290,7 @@ impl World {
                 "-n",
                 "1",
                 "-T",
-                r#"parents.len() ++ " " ++ description.first_line()"#,
+                r#"parents.map(|p| p.id().short(12)).join(",") ++ " " ++ description.first_line()"#,
             ],
         );
         let (parents, description) = described.split_once(' ').unwrap();
@@ -268,7 +298,8 @@ impl World {
             id: id.to_owned(),
             description: description.to_owned(),
             trim: self.trims[m],
-            merge: parents != "1",
+            merge: parents.contains(','),
+            on_root: parents == "000000000000",
         };
         self.late_ops[m].insert(0, op);
     }
@@ -311,10 +342,15 @@ impl World {
                 self.machine(m)
             ));
         }
+        let restores = matches!(args, ["undo", ..] | ["op", "restore", ..]);
         for head in new {
             if stepped_back {
                 self.stepped_back.insert(head.clone());
             }
+            if restores {
+                self.restored.insert(head.clone());
+            }
+            self.written_late.insert(head.clone());
             self.remember_late_op(m, &head);
         }
     }

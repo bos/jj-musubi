@@ -495,3 +495,39 @@ fn e2e_late_rewrites_of_a_renamed_workspace() {
     }
     world.converge();
 }
+
+/// Reduced from a failure of `late_commands_after_trims`. After a full trim, alpha's late
+/// command puts its working copy on its secondary workspace's commit; after another trim, a
+/// late command on the merge abandons that commit, leaving `.git`'s HEAD unborn, while beta
+/// renames and forgets a workspace. The next `jj` command merges and finds HEAD unborn: its
+/// "import git head" checks nothing out, and resets HEAD to the working copy's parent, writing
+/// `.git` and recording that (`jj_resets_an_unborn_head_it_imports`). The import check takes
+/// what that import took from `.git` as the unborn HEAD, not the record it wrote.
+#[test]
+fn e2e_late_command_then_import_of_an_unborn_head() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: true,
+    });
+    let op = world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 2, None);
+    let second = working_copy_at(&world, 0, &op, "second").id;
+    world.late_command(0, &op, &["new", &second], true);
+    world.merge_late_heads(0);
+    let merge = world.late_ops(0)[0].id.clone();
+    world.rename_workspace(1, 1, "work");
+    world.sync(1);
+    world.sync(0);
+    world.trim_to_unpublished_root(0);
+    world.sync_partial(0, 0, None);
+    world.late_command(0, &merge, &["abandon", &second], true);
+    world.forget_workspace(1, 1);
+    world.sync(1);
+    world.trim_to_unpublished_root(0);
+    for m in 0..2 {
+        world.check_imports(m);
+    }
+    world.converge();
+}

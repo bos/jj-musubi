@@ -45,6 +45,10 @@
 //! something else, `.git` having one head's: as after a command at an older operation
 //! (`--at-op`), which still writes HEAD, without checking it where the older operation has no
 //! record of it, as for a workspace renamed since; jj merges it with the operations made since.
+//! An import that finds HEAD unborn, as a command at an older operation can leave it, checks
+//! nothing out, and the command's finish resets HEAD to the working copy's parent, writing
+//! `.git` and recording that: it is judged as taking the unborn HEAD
+//! (`Log::reset_after_unborn_import`).
 //! A record musubi got wrong would move a working copy with nobody having moved HEAD, and bring
 //! back any rewritten commit it moved onto, which then diverges.
 //! Two-head merges whose closest bases disagree about HEAD are replayed by native jj in an
@@ -855,6 +859,54 @@ impl Log {
         block_on(merge_ref_targets(self.repos[at].index(), left, base, right)).unwrap()
     }
 
+    /// Whether `op`, an import of workspace `ws`'s HEAD at `id` on `parent` that recorded
+    /// `recorded`, found `.git`'s HEAD unborn. jj's import then records it absent and checks
+    /// nothing out, and finishing the command resets HEAD to the working copy's first parent,
+    /// writing `.git` and recording that (`import_git_head` in jj-cli's `cli_util.rs`,
+    /// `reset_head` in jj-lib's `git.rs`). An import that takes a commit from `.git` always
+    /// checks out a new working-copy commit on it, with no predecessor, so a working copy that
+    /// is the parent's, or a rewrite of it, tells the two apart. Not recognized: a working copy
+    /// jj replaces with a new child because it is immutable, which would look like a take.
+    fn reset_after_unborn_import(
+        &mut self,
+        parent: &OperationId,
+        id: &OperationId,
+        ws: &str,
+        op: &op_store::Operation,
+        recorded: &RefTarget,
+    ) -> bool {
+        let name = WorkspaceName::new(ws);
+        let before = self.view(parent).wc_commit_ids.get(name).cloned();
+        let after = self.view(id).wc_commit_ids.get(name).cloned();
+        let (Some(before), Some(after)) = (before, after) else {
+            return false;
+        };
+        let kept = before == after
+            || op
+                .commit_predecessors
+                .as_ref()
+                .and_then(|predecessors| predecessors.get(&after))
+                .is_some_and(|previous| previous.contains(&before));
+        if !kept {
+            return false;
+        }
+        if !self.repos.contains_key(id) {
+            let loader = self.replay_loader().unwrap();
+            let at = block_on(loader.load_operation(id)).unwrap();
+            let repo = block_on(loader.load_at(&at)).unwrap();
+            self.repos.insert(id.clone(), repo);
+        }
+        let store = self.repos[id].store().clone();
+        let commit = block_on(store.get_commit_async(&after)).unwrap();
+        let first = &commit.parent_ids()[0];
+        let reset = if first == store.root_commit_id() {
+            RefTarget::absent()
+        } else {
+            RefTarget::normal(first.clone())
+        };
+        *recorded == reset
+    }
+
     /// `ops` and their ancestors.
     fn ancestors(&mut self, mut pending: Vec<OperationId>) -> HashSet<OperationId> {
         let mut ancestors = HashSet::new();
@@ -1393,6 +1445,46 @@ fn a_forgotten_nonroot_publication_keeps_its_observed_git_frontier() {
         native
     );
     world.assert_observer_state(&before);
+}
+
+/// jj's import of an unborn HEAD, which a command at an older operation can leave in `.git`:
+/// it checks nothing out, and finishing the command resets HEAD to the working copy's parent,
+/// writing `.git` and recording that, as "import git head". `Log::reset_after_unborn_import`
+/// relies on it; if jj changes, this fails.
+#[test]
+fn jj_resets_an_unborn_head_it_imports() {
+    let env = musubi_testutil::TestEnv::new();
+    let repo = env.init_repo("alpha");
+    repo.write_file("a", "a");
+    repo.jj(&["commit", "-m", "x"]);
+    let commit = |rev: &str| repo.jj(&["log", "--no-graph", "-r", rev, "-T", "commit_id"]);
+    let (parent, working_copy) = (commit("@-"), commit("@"));
+    repo.git(&["symbolic-ref", "HEAD", "refs/jj/root"]);
+    assert_eq!(
+        repo.git(&["for-each-ref", "refs/jj/root"]),
+        "",
+        "HEAD is unborn"
+    );
+    repo.jj(&["status"]);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), parent);
+    assert_eq!(commit("@"), working_copy);
+    // One operation imports HEAD and records its reset: the working copy's parent.
+    let ops = repo.jj(&[
+        "op",
+        "log",
+        "--no-graph",
+        "-n",
+        "2",
+        "-T",
+        r#"id ++ " " ++ description.first_line() ++ "\n""#,
+    ]);
+    let ops: Vec<(&str, &str)> = ops.lines().map(|l| l.split_once(' ').unwrap()).collect();
+    assert_eq!(ops[0].1, "import git head");
+    assert!(ops[1].1.starts_with("commit "), "{ops:?}");
+    let view = repo.jj(&["debug", "object", "view", "--op", ops[0].0]);
+    let heads = &view[view.find("git_heads").expect("a view lists git_heads")..];
+    let heads = &heads[..heads.find('}').unwrap()];
+    assert!(heads.contains(&parent), "{heads}");
 }
 
 /// jj writes `.git`'s HEAD unborn, and records it absent, where a command leaves the working
@@ -2540,7 +2632,14 @@ impl World {
                 describe(&log.owner, id, &op)
             ));
         };
-        let (was, taken) = (log.head(parent, ws.as_str()), log.head(id, ws.as_str()));
+        let (was, recorded) = (log.head(parent, ws.as_str()), log.head(id, ws.as_str()));
+        // What the import took from `.git`: what it recorded, unless it found HEAD unborn
+        // and recorded the working copy's parent as it wrote HEAD again.
+        let taken = if log.reset_after_unborn_import(parent, id, ws.as_str(), &op, &recorded) {
+            RefTarget::absent()
+        } else {
+            recorded
+        };
         if was == taken {
             return Ok(());
         }

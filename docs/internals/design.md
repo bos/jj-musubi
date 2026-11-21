@@ -347,6 +347,15 @@ shown as `laptop-1a2b`, to keep clear of it:
 the two under one name, and where showing the laptop's workspace under a longer name can undo
 the laptop's move of it meanwhile.
 
+`formal/Musubi/Ownership.lean` proves that `canonical_view` and `own_of_view` agree on whose a
+workspace is, wherever this machine is present; `own_of_view`'s verdict is what this machine
+records as its private names. Over histories of commands, merges, realizations of the hive's
+operations and trims of the whole history, it also proves that an operation's translation never
+makes a name this machine's that the untrimmed history's translation doesn't, and that translating
+a command records no private names, so nothing launders a name into the record both functions
+trust. [conformance.md, "Workspace ownership"](conformance.md#workspace-ownership) says what the
+model leaves out, among it undo, restore and revert, and abandoning a single operation.
+
 ### A forgotten copy's working copies
 
 A machine the hive has forgotten keeps its own working copies. When it realizes an operation whose

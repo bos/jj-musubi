@@ -44,6 +44,8 @@ mod join;
 #[cfg(test)]
 mod native_contract;
 mod originals;
+#[cfg(test)]
+mod ownership_conformance;
 mod presence;
 mod publication;
 mod realize;

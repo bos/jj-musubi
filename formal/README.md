@@ -24,6 +24,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 - The names a machine shows other machines' workspaces under (`Musubi/Names.lean`; [design.md,
   "Which workspaces are this machine's
   own"](../docs/internals/design.md#which-workspaces-are-this-machines-own)).
+- Which workspaces in a local operation are this machine's own, as translating it into the
+  canonical form decides, through trims of the whole history and merges (`Musubi/Ownership.lean`;
+  [conformance.md](../docs/internals/conformance.md#workspace-ownership)).
 - [Snapshot publication budgets](#snapshot-publication-budgets), exact approval and cleanup of
   selected unpublished operations (`Musubi/Publication.lean`; [design.md, "Snapshot publication
   budgets"](../docs/internals/design.md#snapshot-publication-budgets)).
@@ -32,8 +35,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
   are described in
   [conformance.md](../docs/internals/conformance.md#native-lifecycle-inputs-and-events).
 
-The models of chunked transfers, per-machine refs, presence, copies, workspace names, snapshot
-publication and native preparation are separate from the protocol model's state.
+The models of chunked transfers, per-machine refs, presence, copies, workspace names and their
+ownership, snapshot publication and native preparation are separate from the protocol model's
+state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
 depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer.
@@ -425,6 +429,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
+| `Musubi/Ownership.lean` | Which workspaces of a local operation are this machine's own: ownership defined once, `canonical_view`'s and `own_of_view`'s routes to it and their agreement, histories with trims and merges, and the oracle's check of a request. |
 | `Musubi/Publication.lean` | Cumulative snapshot accounting, exact approval, selected operation cleanup, and checks of the prepared result before installation. |
 | `Musubi/NativeLifecycle.lean` | Entry point for the finite native lifecycle model. |
 | `Musubi/NativeLifecycle/Types.lean`, `Musubi/NativeLifecycle/Graph.lean`, `Musubi/NativeLifecycle/Selectors.lean` | Raw observations, finite graph queries, and source selection with explicit evidence gaps. |
@@ -433,7 +438,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/NativeLifecycle/ConstructionSound.lean`, `Musubi/NativeLifecycle/RunSound.lean` | Conditional construction facts and record custody along executable traces. |
 | `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples. They do not authenticate native observations. |
 | `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication and native lifecycle requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, ownership, refs, expected-value, publication and native lifecycle requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 ## Correspondence with protocol.md
@@ -984,6 +989,32 @@ theirs, as the hub, which names every machine, lists them.
   names and the others' as `<prefix>/<workspace>`, are distinct, whatever the machines and the
   names of this machine's own, given machine names and suffixes without `/`, as musubi makes
   them; only a machine key edited by hand could have one.
+
+### Workspace ownership (`Ownership.lean`)
+
+A name in a local view is this machine's unless either (`Owns`):
+
+- the evidence shows another machine's workspace under it, and the operation didn't make it;
+- it is shown as a known other machine's, nothing in the evidence makes it this machine's, and
+  the operation didn't make it.
+
+The evidence is the canonical parents, as this machine named their workspaces, the private names,
+the namespace context with its basis and the views the operation started from ([conformance.md,
+"Workspace ownership"](../docs/internals/conformance.md#workspace-ownership)).
+
+- `mem_owned_iff`: `owned`, `canonical_view`'s route, computes `Owns`.
+- `agreement`, `canonical_owns`, `ownOfView_owns`: where this machine is present, `own_of_view`,
+  reading only the canonical operation `canonical_view` wrote and its context, owns exactly what
+  `canonical_view` put under this machine's key, given machine keys as musubi makes them and
+  every machine a parent knows known at the operation.
+- `trims_keep_ownership`, `safety`: over every history of `jj` commands and merges on any earlier
+  operations, with trims of the whole history between, an operation's canonical form owns
+  exactly what the untrimmed history's would, whether it is on the root alone with a recomputed
+  context or below one carrying its parents' contexts folded together. So a name gets this
+  machine's key only if the untrimmed history's translation makes it this machine's, and only a
+  history's bases keep a nonempty private record. `merge_owns` and `late_owns` are the two kinds
+  of step.
+- `wf_of_wfB`: the oracle answers only requests that meet `agreement`'s hypotheses.
 
 ### Native preparation and publication (`NativeLifecycle/`)
 
@@ -1611,12 +1642,14 @@ match, such as staging never being cleared):
 - **The hub forgetting.** `hubForget ops objs` names what the hub keeps, as
   `SyncStep.hubForget` does.
 
-The oracle also answers with the prefix receiver of `Chunks.lean`, its senders' attempts, and the
-naming rule of `Names.lean`, whose definitions run as they are, so they need no executable form of
-their own ([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
-["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean`'s functions
-are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered targets,
-with jj's merges as a table each request carries, and the oracle answers refs requests with them
+The oracle also answers with the prefix receiver of `Chunks.lean`, its senders' attempts, the
+naming rule of `Names.lean` and the two routes to ownership of `Ownership.lean`, whose definitions
+run as they are, so they need no executable form of their own ([conformance.md, "Chunked
+blobs"](../docs/internals/conformance.md#chunked-blobs), ["Workspace
+names"](../docs/internals/conformance.md#workspace-names) and ["Workspace
+ownership"](../docs/internals/conformance.md#workspace-ownership)). `Refs.lean`'s functions are
+executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered targets, with
+jj's merges as a table each request carries, and the oracle answers refs requests with them
 ([conformance.md, "Per-machine refs"](../docs/internals/conformance.md#per-machine-refs)).
 
 ## Snapshot publication budgets

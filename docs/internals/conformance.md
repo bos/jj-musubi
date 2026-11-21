@@ -17,6 +17,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
 | `Publication.lean`: cumulative snapshot budgets, scoped approval and selected cleanup | `node/publication` and the pre-upload gate | `node::publication::tests` through the oracle, and `musubi-sync` publication fixtures | [Snapshot publication](#snapshot-publication) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
+| `Ownership.lean`: which workspaces of a local operation are this machine's own, through trims and merges | `NodeRepo::canonical_view` and `own_of_view`, and the context `canonical_form` recomputes and carries | `node::ownership_conformance`, through the oracle, and the trim race tests | [Workspace ownership](#workspace-ownership) |
 
 ## The claim
 
@@ -2172,6 +2173,154 @@ view where the private owned name was still a foreign alias. It checks the canon
 before further native commands and the peer's resulting workspace names. Private-name
 reconstruction follows restore and revert sources and stops at native join boundaries.
 
+## Workspace ownership
+
+`formal/Musubi/Ownership.lean` models how a machine decides which workspaces in a local operation
+are its own when it translates the operation into the hive's canonical form, and proves the
+design's rule: another machine's workspaces never become this machine's own ([design.md, "Which
+workspaces are this machine's own"](design.md#which-workspaces-are-this-machines-own)). Two
+functions answer that question from different evidence. `NodeRepo::canonical_view`
+(`node/view.rs`) reads the canonical parents, as this machine named their workspaces, the private
+names, the namespace context with its basis (`ContextBasis`) and the views the operation started
+from. `NodeRepo::own_of_view` (`node/presence.rs`) reads the canonical operation the first wrote:
+its view, its presence and the context it carries. Its verdict is recorded as private names
+(`musubi.local-workspaces`), which both trust from then on: #167 was the two disagreeing after a
+trim. The chain has four links:
+
+1. **Ownership, defined once.** `Owns` says, as the design does, that a name in the local view is
+   this machine's unless either:
+   - the evidence shows another machine's workspace under it, and the operation didn't make it;
+   - it is shown as a known other machine's, nothing in the evidence makes it this machine's, and
+     the operation didn't make it.
+
+   `owned` follows `canonical_view` step by step (`apply_namespace_context`, `move_others_here`,
+   `drop_stale_names`) and computes `Owns` (`mem_owned_iff`).
+2. **Agreement.** Where this machine is present at the canonical operation, `ownOfView`, which
+   follows `own_of_view` and reads only the canonical operation `canonView` builds, its context
+   and the private names, owns exactly the names `canonical_view` puts under this machine's key
+   (`agreement`, `canonical_owns`, `ownOfView_owns`). The proof needs `Names.lean`'s
+   `localName_injective` (a name this machine owns is never another machine's local name in the
+   same view) and that every prefix a machine is given is one it could be shown under
+   (`couldBeShownAs_prefixOf`, so `names_other_machine` catches every other machine's name). The
+   model of `own_of_view` before #167's fix (`ownOfViewUnfixed`) fails it: a `#guard` shows it
+   taking beta's workspace for this machine's.
+3. **Safety, over histories.** A history is this machine's operations, starting from realizations
+   of canonical operations from the hive, which may know different machines. Each step is a `jj`
+   command on any earlier operations, one or several (a merge), or a trim of the whole history. A
+   command whose parents all come from before a trim is translated on the root alone, with the
+   context `canonical_form` recomputes from its translation on its parents' canonical forms; that
+   translation reads the contexts they carry, and the recomputed context keeps their other
+   machines' names and the machines they know (`capture`, `Namespace::keep_others_of`). A command
+   on operations since carries their contexts, folded together at a merge (`carriedOf`,
+   `carried_context`). Each operation also has the canonical form the untrimmed history would give
+   it, from the same views and private names. `trims_keep_ownership` proves the two own the same
+   names, and so `safety` that a name gets this machine's key only if the untrimmed history's
+   translation makes it this machine's. `safety` also proves that only a history's bases keep a
+   nonempty private record: translating a command records none, and a late operation's rewrite an
+   empty one. Both hold of every reachable history; the invariant is `NodeOK`, and `merge_owns`
+   and `late_owns` are the two kinds of step. `#guard`s show each half of the two fixes after #167
+   is needed: a source translation that reads no carried context owns beta's workspace, and a
+   merge that reads only its first parent's context owns gamma's.
+4. **Oracle to Rust.** `owned`, `canonView` and `ownOfView` compute as they are, so the oracle
+   answers `ownership` requests with them, and refuses one outside `agreement`'s hypotheses
+   (`wfB`, proved to imply them by `wf_of_wfB`). The Hegel test `ownership_conforms`, in
+   `crates/musubi-jj/src/node/ownership_conformance.rs`, writes each case's evidence into one
+   joined repository: canonical parents with their presence (this machine's latest work, other
+   machines' work, a forget of this machine), or the root alone; local parents standing for them,
+   marked, with private and reserved names; the target of an undo, restore or revert, or one jj
+   has collected; and a local operation with its view and context. A parent's own line of history
+   can add a machine's join or a forget of this machine, so that a merge's parents know different
+   machines and disagree on whether this one is present. It runs `canonical_view`, writes the
+   canonical operation it returns, runs `own_of_view` on it, and requires the keys of the one and
+   the names of the other to be the oracle's. The presence, the private names and the other
+   machines' workspaces it gives the oracle come from how it built the case, and it checks each
+   against musubi's. `a_trimmed_command_leaves_what_its_context_gives_others` is #167's case, and
+   `a_context_against_the_parents_gives_others_only_their_names` a context judged against the
+   parents (`ContextBasis::Parents`), which the generated cases rarely reach.
+
+The test checks the two functions, not which context `canonical_form` passes them. That the
+recomputed context reads the carried one, and that a merge folds every parent's, is what the
+history model proves, and the race tests
+`a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs`,
+`a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs` and
+`a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs` check natively.
+
+**What the model leaves out.**
+
+- **Presence.** `agreement` holds where this machine is present at the canonical operation. Where
+  it is absent, `canonical_view` puts no name under its key, and `own_of_view`'s verdict is only
+  the private record; the history model's commands are this machine's work, so it is present at
+  all of them. Presence is otherwise an input, checked by its own conformance test
+  ([Presence](#presence)), but for one: at a merge after a trim, the presence a recomputed context
+  names other machines' workspaces by (`mergedPresence`) approximates the presence rule's merge.
+  It only chooses those names' prefixes, and no theorem depends on it.
+- **Machines known.** `agreement` assumes every machine a canonical parent's history knows, or
+  that has a workspace in its view, is known at the operation: presence only learns machines, and
+  musubi writes a machine's workspaces into a canonical view only while it is present. Only a
+  history from an earlier release can hold a machine with workspaces but no presence, one that
+  joined before joining was recorded as work; until 1.0 that is out of scope
+  ([testing-philosophy.md](testing-philosophy.md#what-is-in-scope)), and the oracle refuses such a
+  request. On such a history the two functions would disagree: `canonical_view` drops the
+  machine's `M/x`, knowing `M` from the parent's view, and `own_of_view` keeps it, since the
+  canonical operation it reads neither has `M`'s workspaces nor knows `M`.
+- **Joining.** Before a copy joins, `canonical_view` reads no private names (`joins.is_empty`);
+  the model assumes a copy that has joined.
+- **The history model's steps.** It has `jj` commands only: no undo, restore or revert (the model
+  of one translation and the test have them), no realization of another machine's operation after
+  the bases, no fix-up (`ContextBasis::FixUp` is in the model of one translation only), no
+  reserved names, and no contraction: a trim takes every canonical form away, where a published
+  operation it keeps is contracted with its view and presence. Its bases carry no context of this
+  machine's, so a canonical operation this machine wrote and realizes again, as on joining again
+  after leaving, is outside it. The untrimmed history reads the same private names as the trimmed
+  one: both read the views and records on this machine, and a late operation's rewrite is proved
+  to record nothing. `canonical_form` keeps the context of a publication checkpoint, or of an
+  operation with recorded intent, even where its parents know every machine the context does;
+  `carriedKept` drops it, which leaves the same names owned. A merge's canonical operation keeps
+  every parent's other workspaces, where jj's merge can drop one. Two merges are left out: of an
+  operation from before a trim with one since, and one where a parent shows another machine's
+  workspace under a name this machine owns at another parent: the known limitation of a `jj`
+  command that publishes during a sync step ([races.md, "Copies that go
+  away"](races.md#copies-that-go-away)).
+- **Other callers of `own_of_view`.** Realization (`with_own_workspaces`), rewrites after an
+  abandon (`supersede/rewrite.rs`), `musubi leave`, working-copy repair and cleanup call it on
+  canonical operations other machines or contractions wrote; the test calls it on the canonical
+  form of the operation it translates. `NativeLifecycle`'s `ownOfNative` still follows
+  `own_of_view` from before #167's fix, reading no context; its fixtures carry none.
+- **Keys.** Machine keys have no `/` or whitespace, as musubi makes them; the oracle refuses
+  others.
+- **The test's cases.** Every working copy is at one commit, so which commit a workspace is at,
+  and the rewrites `canonical_view` follows, aren't checked; the model has no commits. The test
+  writes private records in the format `record_private_workspaces` writes, not through it.
+
+The oracle's ownership request and reply:
+
+```json
+{"op": "ownership", "me": {"name": "alpha", "suffix": "aaaa1111"}, "view": ["alpha", "beta/beta"], "private": [], "parents": [null], "start": ["alpha", "beta/beta"], "source": {"kind": "parents"}, "command": true, "fixup": false, "context": {"source": {"name": "alpha", "suffix": "aaaa1111"}, "names": [{"name": "alpha", "key": {"machine": {"name": "alpha", "suffix": "aaaa1111"}, "workspace": "alpha"}}, {"name": "beta/beta", "key": {"machine": {"name": "beta", "suffix": "bbbb2222"}, "workspace": "beta"}}], "known": [{"name": "alpha", "suffix": "aaaa1111"}, {"name": "beta", "suffix": "bbbb2222"}]}, "facts": {"present": true, "known": [{"name": "alpha", "suffix": "aaaa1111"}], "worked": null, "others": []}}
+{"keys":[{"machine":{"name":"alpha","suffix":"aaaa1111"},"workspace":"alpha"}],"ok":true,"ownOfView":["alpha"],"owned":["alpha"],"unfixed":["alpha","beta/beta"]}
+```
+
+`parents` holds each canonical parent, `null` for the root, with its keys, the machines its
+history knows, whether this machine is present, its names as of its latest work (`worked`, or
+`null`) and the names realizations standing for it reserved. `start` holds the names in the local
+parents' views. `source` is `parents`, `restore` or `revert` (with the restored views' names and
+this machine's own names there) or `collected`. `facts` holds what the canonical operation gets
+besides this machine's names: its presence and the other machines' workspaces. The reply has the
+names `canonical_view` puts under this machine's key (`owned`), the canonical operation's keys,
+and what `own_of_view` owns reading it (`ownOfView`), and as it did before #167's fix (`unfixed`).
+In the example only the context says `beta/beta` is beta's: the fixed `own_of_view` leaves it
+beta's, and before the fix it took it for this machine's. An ownership request leaves the oracle's
+session as it was.
+
+```sh
+cargo nextest run -p musubi-jj --lib -E 'test(/ownership_conformance/)'
+```
+
+`ownership_conforms` makes 200 cases. With `presence.rs` from before #167's fix, it and
+`a_trimmed_command_leaves_what_its_context_gives_others` fail: `own_of_view` keeps `beta/x`, which
+only the context gives beta. Three mutants of `canonical_view`'s helpers fail them too:
+`drop_stale_names` dropping nothing, and a command making a name the context stands for
+(`move_others_here` ignoring `captured`), fail `ownership_conforms`; a context judged against the
+parents admitting every name fails `a_context_against_the_parents_gives_others_only_their_names`.
 
 ## Snapshot publication
 

@@ -45,7 +45,14 @@ def main():
     modes = parser.add_subparsers(dest="mode", required=True)
     search = modes.add_parser("search", help="explore schedules from the initial repository")
     search.add_argument("--unpublished", action="store_true", help="start with unpublished work")
-    search.add_argument("--concurrent", action="store_true", help="race two native abandons")
+    search.add_argument(
+        "--concurrent", action="store_true",
+        help="race a second native command: an abandon, or what --peer says",
+    )
+    search.add_argument(
+        "--peer", choices=["abandon", "write"], default="abandon",
+        help="with --concurrent, what the second command does (default abandon)",
+    )
     search.add_argument("--out", type=Path, default=ROOT / "target/head-schedule.json")
     replay = modes.add_parser("replay", help="replay a saved schedule and verify its states")
     replay.add_argument("input", type=Path)
@@ -62,6 +69,11 @@ def main():
     branch.add_argument("input", type=Path)
     branch.add_argument("--at", type=int, required=True, help="number of actions to keep")
     branch.add_argument("--out", type=Path, default=ROOT / "target/head-schedule-branch.json")
+    for mode in (search, replay, branch):
+        mode.add_argument(
+            "--steps", type=int, metavar="N",
+            help="the most actions a schedule may take (default 8, or 14 with --concurrent)",
+        )
     args = parser.parse_args()
 
     if sys.platform != "linux":
@@ -70,6 +82,10 @@ def main():
         parser.error("a C compiler named cc is required")
     if args.mode == "branch" and args.at < 0:
         parser.error("--at must be nonnegative")
+    if getattr(args, "peer", "abandon") != "abandon" and not args.concurrent:
+        parser.error("--peer requires --concurrent")
+    if args.steps is not None and args.steps < 1:
+        parser.error("--steps must be positive")
     rr = getattr(args, "rr", None)
     if getattr(args, "rr_as_root", False) and not rr:
         parser.error("--rr-as-root requires --rr DIRECTORY")
@@ -94,6 +110,9 @@ def main():
         settings["MUSUBI_HEAD_SCHEDULE_UNPUBLISHED"] = "1"
     if getattr(args, "concurrent", False):
         settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
+        settings["MUSUBI_HEAD_SCHEDULE_PEER"] = args.peer
+    if args.steps is not None:
+        settings["MUSUBI_HEAD_SCHEDULE_STEPS"] = str(args.steps)
     if getattr(args, "actions_only", False):
         settings["MUSUBI_HEAD_SCHEDULE_ACTIONS_ONLY"] = "1"
 

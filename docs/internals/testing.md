@@ -863,8 +863,9 @@ A Linux operation-head scheduler complements this search at a finer boundary. It
 real `jj op abandon` immediately before unlinking its old head, after jj has written its new
 head. Its other actor runs the same `NodeRepo::check_abandon` as the daemon, including an
 interruption after publishing a replacement and a reopen of the local store. With
-`--concurrent`, two such commands race from the same old head, and the daemon can also stop
-before moving any head and restart without its translation cache.
+`--concurrent`, a second command races it from the same old head, another abandon or an
+ordinary write, and the daemon can also stop before moving any head and restart without its
+translation cache.
 
 ### Search and replay operation-head schedules
 
@@ -873,7 +874,9 @@ jj binary cannot load the test shim, which gates creating a new head file throug
 family and removing the old one through `unlink` and `unlinkat`. Run the search with
 `just head-schedule search`. Add `--unpublished` to start with local work above the synced
 operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
-schedule.
+schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
+`jj describe` on the same old head instead of another abandon. `--steps N` sets the most
+actions a schedule may take, 8 by default or 14 with `--concurrent`.
 
 ```sh
 just head-schedule search
@@ -911,6 +914,18 @@ unlinked the old head, could not find the local operation for a parent that only
 reached. Recovery now replays the head and workspace moves saved before the crash, as it does
 for taking records, instead of working them out again from the translation cache.
 
+An ordinary command publishes inside jj's op-heads lock, which it takes before adding its new
+head and holds until the old one is gone. `jj op abandon` and the daemon's own publication of
+heads don't take it, but loading the repository at several heads does, to merge them. With
+`--peer write`, the search lets the daemon check and publish while the write holds the lock,
+and merges heads only once it has let go. Once everything has settled, every op head must
+still have the finished write's commit in its view.
+
+Each search reaches every state it can within the default horizon: a deeper `--steps` finds no
+new ones. The single command has 20 states, two abandons 358 and an abandon with a write 482,
+with or without unpublished work. A search takes seconds, so widening the model with more
+commands and more pause points is what extends its reach.
+
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:
 
@@ -924,6 +939,13 @@ If perf access requires root, add `--rr-as-root` to the record command and use
 calling user's UID and leaves the trace owned by root. For a noninteractive replay check,
 pass `-a` to `rr replay`. The JSON schedule works independently of rr and its host counter
 requirements.
+
+None of the EC2 devbox types tried replays with rr. AMD instances (`c7a`) record, but replay
+fails on a tick mismatch: the hypervisor refuses the model-specific register write that rr's
+Zen workaround needs. The Intel `g4dn.xlarge` and `g4dn.16xlarge` exposed no hardware
+performance counters to `perf_event_open`; the devbox tool offers no metal size. Use a
+bare-metal Linux host, or a VM whose hypervisor exposes the counters and applies the Zen
+workaround.
 
 ### Generated command and sync schedules
 

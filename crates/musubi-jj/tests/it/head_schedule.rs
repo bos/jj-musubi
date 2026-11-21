@@ -46,6 +46,26 @@ enum Action {
     MergeHeads,
 }
 
+/// What the second native command does in a concurrent search: the same `jj op abandon`, or
+/// an ordinary write on the same old head, which the daemon must not mistake for an abandon
+/// or lose.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Peer {
+    #[default]
+    Abandon,
+    Write,
+}
+
+impl Peer {
+    fn is_abandon(&self) -> bool {
+        *self == Self::Abandon
+    }
+}
+
+/// The description the write peer gives the working-copy commit, to find it afterwards.
+const WRITE_MARKER: &str = "musubi head-schedule write";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Native {
@@ -89,6 +109,8 @@ struct Schedule {
     unpublished: bool,
     #[serde(default)]
     concurrent: bool,
+    #[serde(default, skip_serializing_if = "Peer::is_abandon")]
+    peer: Peer,
     steps: Vec<Step>,
 }
 
@@ -98,10 +120,11 @@ struct Fixture<'a> {
     parent: String,
     unpublished: bool,
     concurrent: bool,
+    peer: Peer,
 }
 
 impl<'a> Fixture<'a> {
-    fn load(gate: &'a Gate, cache: &Path, unpublished: bool, concurrent: bool) -> Self {
+    fn load(gate: &'a Gate, cache: &Path, unpublished: bool, concurrent: bool, peer: Peer) -> Self {
         let case = if unpublished {
             "unpublished"
         } else {
@@ -120,6 +143,7 @@ impl<'a> Fixture<'a> {
             parent,
             unpublished,
             concurrent,
+            peer,
         }
     }
 
@@ -140,12 +164,14 @@ impl<'a> Fixture<'a> {
             native: [Native::Ready; 2],
             children: [None, None],
             concurrent: self.concurrent,
+            peer: self.peer,
             checked_heads: None,
             interrupted: false,
             stopped_before_publication: false,
             lost_cache: false,
             put_back: false,
             merge_ids: HashMap::new(),
+            write_published: false,
             store,
             old_view,
             repo,
@@ -158,16 +184,25 @@ impl<'a> Fixture<'a> {
             version: VERSION,
             unpublished: self.unpublished,
             concurrent: self.concurrent,
+            peer: self.peer,
             steps: vec![],
         }
     }
 
     fn horizon(&self) -> usize {
-        if self.concurrent {
-            CONCURRENT_STEPS
-        } else {
-            MAX_STEPS
-        }
+        horizon(self.concurrent)
+    }
+}
+
+/// The most actions a schedule may take: `MUSUBI_HEAD_SCHEDULE_STEPS` if set, to search
+/// deeper, or else the default for the kind of search.
+fn horizon(concurrent: bool) -> usize {
+    match std::env::var("MUSUBI_HEAD_SCHEDULE_STEPS") {
+        Ok(steps) => steps
+            .parse()
+            .expect("MUSUBI_HEAD_SCHEDULE_STEPS is a number of actions"),
+        Err(_) if concurrent => CONCURRENT_STEPS,
+        Err(_) => MAX_STEPS,
     }
 }
 
@@ -180,12 +215,16 @@ struct World<'a> {
     // Reap the commands before removing the environment's directory.
     children: [Option<PausedCommand>; 2],
     concurrent: bool,
+    peer: Peer,
     checked_heads: Option<Vec<String>>,
     interrupted: bool,
     stopped_before_publication: bool,
     lost_cache: bool,
     put_back: bool,
     merge_ids: HashMap<OperationId, OperationId>,
+    /// Whether the write peer added its head: jj merges it later even if the write is killed
+    /// before its unlink.
+    write_published: bool,
     store: Arc<dyn OpStore>,
     old_view: ViewId,
     repo: TestRepo,
@@ -196,6 +235,8 @@ fn read_heads(repo: &TestRepo) -> Vec<String> {
     let mut heads: Vec<_> = fs::read_dir(repo.repo_path().join("op_heads/heads"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        // jj's op-heads lock lives beside the heads.
+        .filter(|name| name != "lock")
         .collect();
     heads.sort_unstable();
     heads
@@ -286,7 +327,7 @@ impl World<'_> {
             }
         } else if state.checked_heads.as_ref() != Some(&state.heads) {
             choices.push(Action::Check);
-            if self.native.contains(&Native::Paused)
+            if self.abandon_paused()
                 && !state.interrupted
                 && !state.put_back
                 && state.heads.len() == 2
@@ -297,10 +338,24 @@ impl World<'_> {
                     choices.push(Action::InterruptBeforePublication);
                 }
             }
-        } else if self.concurrent && state.heads.len() > 1 {
+        } else if self.concurrent && state.heads.len() > 1 && !self.write_locked() {
             choices.push(Action::MergeHeads);
         }
         choices
+    }
+
+    /// Whether the write peer holds jj's op-heads lock: an ordinary command takes it before
+    /// adding its new head and keeps it until the old one is gone. Loading the repository at
+    /// several heads waits for it, as merging them does; `jj op abandon` and the daemon's own
+    /// publication of heads don't.
+    fn write_locked(&self) -> bool {
+        self.peer == Peer::Write && matches!(self.native[1], Native::Prepared | Native::Paused)
+    }
+
+    /// Whether a native abandon is paused before its unlink, so the daemon may see both heads.
+    fn abandon_paused(&self) -> bool {
+        self.native[0] == Native::Paused
+            || (self.peer.is_abandon() && self.native[1] == Native::Paused)
     }
 
     fn prepare(&mut self, slot: usize) {
@@ -310,10 +365,19 @@ impl World<'_> {
             .join("op_heads/heads")
             .join(&self.old_head);
         let mut command = self.repo.program(Path::new("jj"));
-        command
-            .args(["--ignore-working-copy", "op", "abandon", self.parent])
-            .env("COLUMNS", "80")
-            .env("RAYON_NUM_THREADS", "1");
+        if slot == 1 && self.peer == Peer::Write {
+            command.args([
+                "--ignore-working-copy",
+                "describe",
+                "-r",
+                "@",
+                "-m",
+                WRITE_MARKER,
+            ]);
+        } else {
+            command.args(["--ignore-working-copy", "op", "abandon", self.parent]);
+        }
+        command.env("COLUMNS", "80").env("RAYON_NUM_THREADS", "1");
         self.children[slot] = Some(self.gate.spawn(
             &mut command,
             &old,
@@ -330,6 +394,7 @@ impl World<'_> {
     fn publish(&mut self, slot: usize) {
         self.children[slot].as_mut().unwrap().publish();
         self.native[slot] = Native::Paused;
+        self.write_published |= slot == 1 && self.peer == Peer::Write;
     }
 
     fn act(&mut self, action: Action) -> State {
@@ -364,7 +429,7 @@ impl World<'_> {
             }
             Action::Check | Action::InterruptPublication | Action::InterruptBeforePublication => {
                 let heads = read_heads(&self.repo);
-                let both = self.native.contains(&Native::Paused)
+                let both = self.abandon_paused()
                     && heads.len() == 2
                     && heads.contains(&self.old_head)
                     && !self.put_back;
@@ -464,10 +529,47 @@ impl World<'_> {
                 return Some(format!("unreadable operation head {head}: {error}"));
             }
         }
-        if self.put_back && self.choices(state).is_empty() {
-            return self.check_restored_head().err();
+        if self.choices(state).is_empty() {
+            if self.write_published
+                && let Err(error) = self.check_write_kept()
+            {
+                return Some(error);
+            }
+            if self.put_back {
+                return self.check_restored_head().err();
+            }
         }
         None
+    }
+
+    /// The write's commit is in the view of every op head, settled, once it added its head.
+    fn check_write_kept(&self) -> Result<(), String> {
+        for head in read_heads(&self.repo) {
+            let output = self
+                .repo
+                .program(Path::new("jj"))
+                .args([
+                    "--ignore-working-copy",
+                    "--at-op",
+                    &head,
+                    "log",
+                    "--no-graph",
+                ])
+                .args(["-r", &format!("description(substring:{WRITE_MARKER:?})")])
+                .args(["-T", "commit_id"])
+                .output()
+                .map_err(|error| format!("run jj log: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "jj log at {head} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            if output.stdout.is_empty() {
+                return Err(format!("op head {head} lost the finished concurrent write"));
+            }
+        }
+        Ok(())
     }
 
     fn check_restored_head(&mut self) -> Result<(), String> {
@@ -478,7 +580,8 @@ impl World<'_> {
         let head = LocalOp(OperationId::try_from_hex(head).unwrap());
         let old = LocalOp(OperationId::try_from_hex(&self.old_head).unwrap());
         let restored = self.store.read_operation(&head.0).block_on().unwrap();
-        if restored.view_id != self.old_view {
+        // A published write changes the view; `check_write_kept` checks what it added.
+        if !self.write_published && restored.view_id != self.old_view {
             return Err("put-back changed the original view".into());
         }
         let node = self.node.as_mut().unwrap();
@@ -565,6 +668,7 @@ fn explore(
                 // Both commands run the same abandon against the same immutable inputs.
                 // Swapping their slots gives the same continuations and head files.
                 if let Some(peer) = &mut key.peer
+                    && fixture.peer.is_abandon()
                     && *peer < key.native
                 {
                     std::mem::swap(&mut key.native, peer);
@@ -575,7 +679,9 @@ fn explore(
                 visited.insert(key, remaining);
                 let choosing_branch =
                     different_from.is_some() && trace.steps.len() == prefix.steps.len();
-                let symmetric = !choosing_branch && state.peer == Some(state.native);
+                let symmetric = !choosing_branch
+                    && fixture.peer.is_abandon()
+                    && state.peer == Some(state.native);
                 let mut choices = world.choices(&state).into_iter().filter(|action| {
                     !(choosing_branch && Some(*action) == different_from
                         || symmetric
@@ -605,22 +711,35 @@ fn explore(
     if fixture.concurrent && prefix.steps.is_empty() {
         assert!(
             visited.keys().any(|state| {
+                // Both abandons write the same new head; a write adds its own.
                 state.native == Native::Paused
                     && state.peer == Some(Native::Paused)
-                    && state.heads.len() == 2
+                    && state.heads.len() == if fixture.peer.is_abandon() { 2 } else { 3 }
             }),
             "the search must reach two pending unlinks of the same old head"
         );
         assert!(
-            visited.keys().any(|state| {
-                state.online
-                    && state.lost_cache
-                    && state.stopped_before_publication
-                    && [Some(state.native), state.peer].contains(&Some(Native::Finished))
-                    && [Some(state.native), state.peer].contains(&Some(Native::Paused))
-                    && state.heads.len() == 1
-            }),
+            !fixture.peer.is_abandon()
+                || visited.keys().any(|state| {
+                    state.online
+                        && state.lost_cache
+                        && state.stopped_before_publication
+                        && [Some(state.native), state.peer].contains(&Some(Native::Finished))
+                        && [Some(state.native), state.peer].contains(&Some(Native::Paused))
+                        && state.heads.len() == 1
+                }),
             "the search must restart after the first unlink while the second is pending"
+        );
+        assert!(
+            fixture.peer.is_abandon()
+                || visited.keys().any(|state| {
+                    state.online
+                        && state.lost_cache
+                        && state.stopped_before_publication
+                        && state.native == Native::Finished
+                        && state.peer == Some(Native::Finished)
+                }),
+            "the search must finish both commands after a restart that lost the cache"
         );
     }
     eprintln!(
@@ -638,13 +757,8 @@ fn load(path: &Path) -> Schedule {
         "unsupported schedule version"
     );
     assert!(
-        trace.steps.len()
-            <= if trace.concurrent {
-                CONCURRENT_STEPS
-            } else {
-                MAX_STEPS
-            },
-        "schedule exceeds the search horizon"
+        trace.steps.len() <= horizon(trace.concurrent),
+        "schedule exceeds the search horizon; pass a larger --steps"
     );
     trace
 }
@@ -675,7 +789,19 @@ fn run() {
         || std::env::var_os("MUSUBI_HEAD_SCHEDULE_CONCURRENT").is_some(),
         |trace| trace.concurrent,
     );
-    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent);
+    let peer = trace.as_ref().map_or_else(
+        || match std::env::var("MUSUBI_HEAD_SCHEDULE_PEER").as_deref() {
+            Ok("write") => Peer::Write,
+            Ok("abandon") | Err(_) => Peer::Abandon,
+            Ok(other) => panic!("unknown MUSUBI_HEAD_SCHEDULE_PEER {other}"),
+        },
+        |trace| trace.peer,
+    );
+    assert!(
+        concurrent || peer.is_abandon(),
+        "a write peer needs a concurrent search"
+    );
+    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent, peer);
     let (trace, violation) = match mode.as_str() {
         "search" => explore(&fixture, fixture.empty_schedule(), None),
         "replay" => {

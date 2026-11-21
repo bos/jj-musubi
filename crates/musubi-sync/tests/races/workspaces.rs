@@ -950,3 +950,147 @@ fn abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta", "beta/third"]);
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta", "third"]);
 }
+
+/// A machine's workspace that once showed under another name comes back with `jj op restore`
+/// (an old alias: here `beta/beta`, as alpha showed the first of two machines named `beta`
+/// before the second joined and made it `beta-xxxx/beta`), and the operation that restored it
+/// is then abandoned. alpha's node has trimmed its whole history first, as in
+/// `abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs`:
+///
+/// 1. alpha and the first `beta` sync; alpha shows `beta/beta`, and `old` is its operation.
+/// 2. A second machine, also named `beta`, joins. alpha shows `beta-xxxx/beta` and
+///    `beta-yyyy/default`, and no longer `beta/beta`.
+/// 3. alpha trims (`jj op abandon ..@-`) and its node takes the abandon; `before` is the
+///    operation left on the root.
+/// 4. A late command, `jj --at-op <before> op restore <old>`, brings `beta/beta` back. Its
+///    canonical form leaves the name out of alpha's workspaces (without step 5 alpha shows no
+///    `beta/beta` once synced).
+/// 5. `jj --at-op <late> new -m late2`, then `jj op abandon <late>`. The new operation's view
+///    has `beta/beta`, its parent was `late` (whose view has it too), and jj rewrites it onto
+///    `late`'s parent, the operation left on the root, whose view has no `beta/beta`. The new
+///    operation records no context of its own, as the dump of `jj op log` after the abandon
+///    shows; only the operations the trim left on the root do, and theirs names
+///    `beta-xxxx/beta` and `beta-yyyy/default` but not `beta/beta`. Judged by its new parents,
+///    `beta/beta` is a name the operation made, so it is taken for alpha's own: the first beta
+///    then lists its own workspace as `alpha/beta/beta` (#167).
+///
+/// Without the trim and `--at-op`, the same happens: see
+/// `abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs`.
+#[test]
+#[ignore = "an old alias restored by a late command and left by abandoning it becomes alpha's \
+own workspace (#167); remove once fixed"]
+fn abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+
+    let op_where = |hive: &Fixture, filter: &str| {
+        let ids = hive.repo(0).jj(&[
+            "--ignore-working-copy",
+            "--no-integrate-operation",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            &format!(r#"if({filter}, id ++ "\n")"#),
+        ]);
+        ids.lines()
+            .next()
+            .unwrap_or_else(|| panic!("no operation where {filter}"))
+            .to_owned()
+    };
+    let old = op_where(&hive, "true");
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+
+    // A second machine named `beta`, which makes alpha show the first as `beta-xxxx`.
+    let second = hive.env.init_repo_with_hostname("beta-two", "beta");
+    hive.add(second);
+    hive.sync();
+    hive.sync();
+    let shown = names(&hive, 0);
+    assert!(
+        shown.len() == 3 && shown.iter().all(|name| name != "beta/beta"),
+        "{shown:?}"
+    );
+
+    let alpha = hive.repo(0);
+    alpha.jj(&["new", "-m", "y"]);
+    alpha.jj(&["undo"]);
+    alpha.jj(&["op", "abandon", "..@-"]);
+    alpha.jj(&["new", "-m", "off1"]);
+    let before = op_where(&hive, r#"tags.contains("-m off1")"#);
+    hive.node(0).settle().unwrap();
+    assert!(hive.node(0).check_abandon().unwrap());
+
+    hive.repo(0)
+        .jj(&["--at-op", &before, "op", "restore", &old]);
+    let late = op_where(&hive, r#"description.first_line().starts_with("restore")"#);
+    hive.repo(0).jj(&["--at-op", &late, "new", "-m", "late2"]);
+    hive.repo(0).jj(&["op", "abandon", &late]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    for index in 0..3 {
+        let shown = names(&hive, index);
+        assert!(
+            shown.iter().all(|name| !name.starts_with("alpha/beta")),
+            "machine {index} shows {shown:?}"
+        );
+    }
+}
+
+/// As `abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs`, without the
+/// trim and the late command: the shortest shape found. alpha restores the operation from
+/// before the second beta joined, runs a command on it, and abandons the restore. The command
+/// is rewritten onto the restore's parent, whose view has no `beta/beta`, and its own view
+/// has, so it is taken to have made it (#167).
+#[test]
+#[ignore = "an old alias restored, built on and then abandoned becomes alpha's own workspace \
+(#167); remove once fixed"]
+fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    let alpha = hive.repo(0);
+    let old = alpha.jj(&[
+        "--ignore-working-copy",
+        "--no-integrate-operation",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    let second = hive.env.init_repo_with_hostname("beta-two", "beta");
+    hive.add(second);
+    hive.sync();
+    hive.sync();
+
+    let alpha = hive.repo(0);
+    alpha.jj(&["op", "restore", &old]);
+    let restore = alpha.jj(&[
+        "--ignore-working-copy",
+        "--no-integrate-operation",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    alpha.jj(&["new", "-m", "on the old alias"]);
+    alpha.jj(&["op", "abandon", &restore]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    for index in 0..3 {
+        let shown = names(&hive, index);
+        assert!(
+            shown.iter().all(|name| !name.starts_with("alpha/beta")),
+            "machine {index} shows {shown:?}"
+        );
+    }
+}

@@ -800,21 +800,28 @@ impl NodeRepo {
         Ok(self.raw_parents(parents) == self.canonical.parents(named)?)
     }
 
-    /// The first context among `parents` that this machine captured.
+    /// The context this machine captured that `parents` carry: the first parent's, with what
+    /// each other parent's says of other machines folded in (`Namespace::keep_others_of`).
+    /// At a merge each parent can carry a context from a different trim, and the names the
+    /// others give other machines are the only evidence left of whose those names are.
     fn carried_context(
         &self,
         parents: &[CanonicalOp],
     ) -> Result<Option<crate::canonical::namespace::Namespace>, NodeError> {
+        let mut carried: Option<crate::canonical::namespace::Namespace> = None;
         for parent in parents {
             let parent_op = self.canonical.read_operation(parent)?;
             if let Some(context) =
                 crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
                 && context.source == self.machine.key()
             {
-                return Ok(Some(context));
+                match &mut carried {
+                    Some(carried) => carried.keep_others_of(context),
+                    None => carried = Some(context),
+                }
             }
         }
-        Ok(None)
+        Ok(carried)
     }
 
     fn raw_parents(&self, parents: &[LocalOp]) -> Vec<CanonicalOp> {

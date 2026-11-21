@@ -814,3 +814,71 @@ fn a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
 }
+
+/// A merge of two late operations, each left on the root by its own full trim, carrying
+/// contexts from different times: the first from before gamma joined, the second from after.
+/// The merge's context must take what both say of other machines. With the first parent's
+/// alone, it knew no gamma, and gamma's workspace became alpha's own (#167).
+#[test]
+fn a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "from alpha");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+
+    // The newest operation whose command ran `jj ... new -m <message>`.
+    let made = |hive: &Fixture, message: &str| {
+        let ids = hive.repo(0).jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            &format!(r#"if(tags.contains("-m {message}"), id ++ "\n")"#),
+        ]);
+        ids.lines().next().expect(message).to_owned()
+    };
+    let trim = |hive: &mut Fixture, off: &str| {
+        let alpha = hive.repo(0);
+        alpha.jj(&["new", "-m", "y"]);
+        alpha.jj(&["undo"]);
+        alpha.jj(&["op", "abandon", "..@-"]);
+        alpha.jj(&["new", "-m", off]);
+        let before = made(hive, off);
+        hive.node(0).settle().unwrap();
+        assert!(hive.node(0).check_abandon().unwrap());
+        before
+    };
+    let before = trim(&mut hive, "off1");
+    hive.repo(0).jj(&["--at-op", &before, "new", "-m", "late1"]);
+    let late1 = made(&hive, "late1");
+    hive.sync();
+
+    let gamma = hive.env.init_repo("gamma");
+    hive.add(gamma);
+    hive.sync();
+    hive.commit(2, "g", "from gamma");
+    hive.sync();
+    hive.sync();
+
+    let before = trim(&mut hive, "off2");
+    hive.repo(0).jj(&["--at-op", &before, "new", "-m", "late2"]);
+    // jj orders a merge's parents by operation time, and leaves operations of the same
+    // millisecond in no particular order. An earlier time, as after the clock steps back,
+    // makes this one the merge's first parent, as such a tie can.
+    hive.repo(0).jj(&[
+        "--config",
+        "debug.operation-timestamp=\"2001-01-01T00:00:00.000+00:00\"",
+        "--at-op",
+        &late1,
+        "new",
+        "-m",
+        "late3",
+    ]);
+    hive.repo(0).jj(&["new", "-m", "merged"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta", "gamma/gamma"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta", "gamma/gamma"]);
+    assert_eq!(names(&hive, 2), ["alpha/alpha", "beta/beta", "gamma"]);
+}

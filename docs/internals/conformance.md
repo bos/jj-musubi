@@ -1249,7 +1249,11 @@ observations, so that Rust fixtures can be compared with them through the oracle
   (`musubi.workspace-context`) its operation records. `ownOfNative` reads it as `own_of_view`
   does: when this machine wrote it, the context gives other machines their names and adds the
   machines it knows to the alias rule; a name that is private or already this machine's own is
-  not affected by it.
+  not affected by it. The decoder and `Namespace.valid` refuse what `Namespace::read_attribute`
+  does: a key with whitespace or a slash, a source or key machine the context doesn't know,
+  two names with one qualified key, and an entry keyed to the source machine whose workspace
+  differs from its name. The model is stricter in two ways: a copy key must have the form
+  `name#suffix`, and a qualified workspace name must not be empty.
 - `Steps.lean` runs the phases of an attempt: planning, each canonical and native write,
   commit, capture, preparation, revalidation, merge, export, head publication, helper load and
   repair, cleanup, interruption, restart and recovery. A named write checks the saved custody

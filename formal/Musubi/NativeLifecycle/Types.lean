@@ -88,9 +88,13 @@ structure Namespace where
   names : List (Name × WorkspaceKey)
 deriving DecidableEq, Repr
 
+/-- What `Namespace::read_attribute` accepts, besides what the decoder checks itself (the key
+characters, and that no two names share a qualified key): the source is known, no name appears
+twice, every key's machine is known, and an entry keyed to the source machine names the
+workspace it is named for. -/
 def Namespace.valid (n : Namespace) : Bool :=
   n.known.contains n.source && uniqueKeys n.names &&
-    n.names.all (fun e => n.known.contains e.2.owner)
+    n.names.all (fun e => n.known.contains e.2.owner && (e.2.owner != n.source || e.2.name = e.1))
 
 structure Work where
   original : Original

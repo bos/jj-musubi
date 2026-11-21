@@ -109,6 +109,14 @@ private def contextual (source : Copy) : Evidence :=
 #guard ownOfNative (contextual me) 30 me (p 9) = .ok [(b, 20)]
 #guard ownOfNative (contextual beta) 30 me (p 9) = .ok [(a, 10), (b, 20)]
 
+-- An entry keyed to the source machine must name the workspace it is named for, as
+-- `Namespace::read_attribute` requires; another machine's entry may differ.
+private def entry (owner : Copy) (name : Name) : Namespace :=
+  { source := me, known := [me, beta], names := [(name, ⟨owner, a⟩)] }
+#guard !(entry me b).valid
+#guard (entry me a).valid
+#guard (entry beta b).valid
+
 -- The machines the context knows join the alias rule, so an undecided `beta/x` is another
 -- machine's only when this copy wrote the context. An invalid context is refused, but only
 -- while some name is undecided.

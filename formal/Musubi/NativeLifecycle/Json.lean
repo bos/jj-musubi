@@ -108,6 +108,13 @@ def context (request : Json) : Except String Context := do
       physical.map (fun row => row.compress) ++ nativeContexts.map (fun row => row.compress)),
     fields := unique (← all.mapM gitFields) }
 
+/-- Rust's `char::is_whitespace`: the Unicode `White_Space` characters. -/
+def isWhite (c : Char) : Bool :=
+  let n := c.toNat
+  (9 ≤ n && n ≤ 13) || n = 0x20 || n = 0x85 || n = 0xA0 || n = 0x1680 ||
+    (0x2000 ≤ n && n ≤ 0x200A) || n = 0x2028 || n = 0x2029 || n = 0x202F || n = 0x205F ||
+    n = 0x3000
+
 def copy (key : String) : Except String Copy :=
   match key.splitOn "#" with
   | [name, suffix] => if name.isEmpty || suffix.isEmpty || key.contains '/' then
@@ -121,6 +128,18 @@ def workspace (key : String) : Except String WorkspaceKey := do
   if name.isEmpty then throw "unqualified canonical workspace"
   return ⟨← copy owner, name.toList⟩
 
+/-- A namespace key as `read_attribute` takes it: `copy`, and no whitespace. Stamp owners keep
+`copy` alone, which the stamp decoder's own rules already narrow. -/
+def namespaceCopy (key : String) : Except String Copy := do
+  if key.toList.any isWhite then throw "namespace key contains whitespace"
+  copy key
+
+def namespaceWorkspace (key : String) : Except String WorkspaceKey := do
+  let result ← workspace key
+  if result.owner.name.any isWhite || result.owner.suffix.any isWhite then
+    throw "namespace key contains whitespace"
+  return result
+
 def readAttr (metadata : Json) (name : String) : Except String (Option String) := do
   let attrs ← get metadata "attributes"
   match attrs.getObjVal? name with
@@ -133,10 +152,10 @@ def namespaceAttribute (metadata : Json) (attr : String) :
   let raw ← Json.parse text
   let names ← (← get raw "names").getObj?
   let names ← names.toList.mapM fun (name, key) => do
-    return (name.toList, ← workspace (← key.getStr?))
+    return (name.toList, ← namespaceWorkspace (← key.getStr?))
   let result : Namespace := {
-    source := ← copy (← str raw "source"),
-    known := ← (← strings raw "known").mapM copy, names }
+    source := ← namespaceCopy (← str raw "source"),
+    known := ← (← strings raw "known").mapM namespaceCopy, names }
   if !result.valid || !uniqueKeys (names.map fun row => (row.2, row.1)) then
     throw "invalid raw namespace"
   return some result

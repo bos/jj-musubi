@@ -1240,6 +1240,15 @@ names. Op heads a jj command made in place of all of those the plan moves from a
 ordinary abandon check, as are op heads that changed between working out the move and making it
 ([Moving op heads](#moving-op-heads)).
 
+Several local operations can stand for one canonical operation when musubi rewrites them: jj's
+rewrite of it, its realization, and the realization of an operation a record dropped, which
+stands for what the drop replaced it with, the dropped operation's parents. Each rewrite keeps
+the view and metadata of one of them, its template. A stand-in for a dropped operation, told by
+the record having dropped its original rather than renamed it, is the template only where
+neither the others nor the translation map have one; among the rest the lowest id is, never an
+order a map happens to give. Otherwise the dropped operation's description and view would come
+back.
+
 ### The fix-up
 
 musubi works some state out from the history rather than from views: which copies are present,

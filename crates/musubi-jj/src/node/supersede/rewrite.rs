@@ -225,8 +225,42 @@ impl NodeRepo {
             let op = op_store.read_operation(&local.0).block_on()?;
             stack.extend(LocalOp::parents_of(&op));
         }
+        // Several local operations can stand for one canonical operation, and they are not
+        // alike: a realization of an operation a record dropped stands for what the drop
+        // replaced it with, its parents, beside those parents' own realizations. Each is a
+        // template for the operation it stands for, and a dropped operation's view and
+        // metadata are not its parents': taking it brings the dropped operation back.
+        let named_by: HashMap<&LocalOp, &StoreOperation> =
+            unmapped.iter().map(|(id, op)| (id, op)).collect();
+        let mut candidates = vec![];
         for (local, c) in counterparts {
-            standing.insert(c.clone(), local.clone());
+            let name = self.records.source(local).cloned().or_else(|| {
+                let op = named_by.get(local)?;
+                OpAttrs(&op.metadata.attributes).canonical_op()
+            });
+            // A record that renamed an operation kept its original; one that dropped it did
+            // not, and what stands for it stands for the image, a different operation.
+            let stand_in = match name {
+                Some(n) if n != *c && self.canonical.has_operation(&n) => {
+                    match (
+                        self.canonical.original_id(&n),
+                        self.canonical.original_id(c),
+                    ) {
+                        (Ok(was), Ok(is)) => was != is,
+                        _ => true,
+                    }
+                }
+                _ => false,
+            };
+            candidates.push((local.clone(), c.clone(), stand_in));
+        }
+        let (genuine, stand_ins) = templates(candidates);
+        standing.extend(genuine);
+        // Only where no other local operation stands for it: the translation map's, or else
+        // the stand-in itself.
+        for (c, local) in stand_ins {
+            let local = self.local_of(&c).unwrap_or(local);
+            standing.entry(c).or_insert(local);
         }
         let mut tops: Vec<CanonicalOp> = standing.keys().cloned().collect();
         for head in heads {
@@ -691,5 +725,76 @@ impl NodeRepo {
             pending.extend(LocalOp::parents_of(&op));
         }
         Ok(())
+    }
+}
+
+/// The local operation each canonical operation takes as its template, from the `candidates`
+/// that stand for it: `(local, canonical, stand_in)`, a stand-in being one that stands for it
+/// only as the image of an operation a record dropped. Returns those that are not stand-ins,
+/// and the stand-ins, each for an operation that has none of the first; the lowest local id
+/// among equals, never an order the caller's map happened to give.
+fn templates(
+    mut candidates: Vec<(LocalOp, CanonicalOp, bool)>,
+) -> (HashMap<CanonicalOp, LocalOp>, HashMap<CanonicalOp, LocalOp>) {
+    candidates.sort_by_key(|(local, _, _)| local.0.hex());
+    let mut genuine = HashMap::new();
+    let mut stand_ins = HashMap::new();
+    for (local, c, stand_in) in candidates {
+        let into = if stand_in {
+            &mut stand_ins
+        } else {
+            &mut genuine
+        };
+        into.entry(c).or_insert(local);
+    }
+    stand_ins.retain(|c, _| !genuine.contains_key(c));
+    (genuine, stand_ins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(byte: u8) -> LocalOp {
+        LocalOp(OperationId::new(vec![byte; 8]))
+    }
+
+    fn canonical(byte: u8) -> CanonicalOp {
+        CanonicalOp(OperationId::new(vec![byte; 8]))
+    }
+
+    /// A realization of a dropped operation stands for the operation its parents image, beside
+    /// that operation's own realization, and never wins, whatever order the map gave them:
+    /// taking it brought the dropped operation back, in about half the runs.
+    #[test]
+    fn a_stand_in_for_a_dropped_operation_is_never_the_template() {
+        let entries = [
+            (local(1), canonical(9), true),
+            (local(2), canonical(9), false),
+            (local(3), canonical(9), false),
+            (local(4), canonical(8), true),
+        ];
+        let orders = [
+            [0, 1, 2, 3],
+            [1, 0, 2, 3],
+            [3, 2, 1, 0],
+            [2, 3, 0, 1],
+            [0, 3, 2, 1],
+            [1, 2, 3, 0],
+        ];
+        for order in orders {
+            let (genuine, stand_ins) =
+                templates(order.iter().map(|&i| entries[i].clone()).collect());
+            assert_eq!(
+                genuine,
+                HashMap::from([(canonical(9), local(2))]),
+                "{order:?}"
+            );
+            assert_eq!(
+                stand_ins,
+                HashMap::from([(canonical(8), local(4))]),
+                "{order:?}"
+            );
+        }
     }
 }

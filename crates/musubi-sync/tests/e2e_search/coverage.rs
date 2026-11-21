@@ -599,6 +599,13 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     // the op heads and moving them.
     ("jj_commands_while_the_daemon_rewrites_an_abandon", None),
     ("a_second_abandon_while_the_daemon_moves_the_op_heads", None),
+    // Both stop or race the daemon's move of the op heads to a record's history, which the
+    // search never interleaves with a native command.
+    (
+        "an_abandon_while_the_daemon_moves_to_what_a_record_names",
+        None,
+    ),
+    ("an_abandon_before_a_restart_that_finishes_taking_one", None),
     ("a_second_abandon_while_the_daemon_rewrites_the_first", None),
     (
         "a_second_abandon_merged_before_the_daemon_looks_again",

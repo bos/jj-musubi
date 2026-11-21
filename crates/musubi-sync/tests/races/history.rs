@@ -252,7 +252,6 @@ fn op_abandon_replicates() {
             "{machine}"
         );
     }
-    assert!(hive.visible(1).iter().any(|c| c.ends_with("second")));
     hive.commit(1, "c", "third");
     hive.sync();
     hive.assert_converged();
@@ -2869,6 +2868,57 @@ fn a_second_abandon_merged_before_the_daemon_looks_again() {
     ]);
     assert_eq!(parent, at);
     hive.assert_converged();
+}
+
+/// A machine stops once it holds another machine's abandon, before its op heads move, and a
+/// `jj op abandon` of its own latest operation lands before it restarts. Both abandons
+/// replicate: nothing the held records drop comes back.
+#[test]
+fn an_abandon_before_a_restart_that_finishes_taking_one() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.commit(1, "c", "beta's");
+    let betas = nth_op(hive.repo(1), "commit ", 0);
+    hive.sync();
+    let first = nth_op(hive.repo(0), "commit ", 1);
+    assert_ne!(first.1, betas.1);
+    hive.repo(0).jj(&["op", "abandon", &first.0]);
+    hive.hive.sync(0).unwrap();
+    hive.node(1).crash_taking_records(false);
+    hive.try_sync().unwrap_err();
+    hive.repo(1).jj(&["op", "abandon", &betas.0]);
+    hive.reopen(1);
+    hive.sync();
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("second")));
+    assert_abandons_replicate(&mut hive, &[&first, &betas]);
+}
+
+/// The same, with no restart: `jj op abandon` of the machine's latest operation, which takes no
+/// lock, lands while the machine moves its op heads to the history the held records name. The
+/// move fails the step; the next resumes from the op heads the abandon left.
+#[test]
+fn an_abandon_while_the_daemon_moves_to_what_a_record_names() {
+    use musubi_jj::node::HeadRace;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.commit(1, "c", "beta's");
+    let betas = nth_op(hive.repo(1), "commit ", 0);
+    hive.sync();
+    let first = nth_op(hive.repo(0), "commit ", 1);
+    hive.repo(0).jj(&["op", "abandon", &first.0]);
+    hive.hive.sync(0).unwrap();
+    let user = hive.repo(1).another_copy(hive.repo(1).path());
+    let abandoned = betas.0.clone();
+    hive.node(1).race_head_move(HeadRace::Locked, move || {
+        user.jj(&["op", "abandon", &abandoned]);
+    });
+    hive.sync();
+    assert!(!has_operation(hive.repo(1), &betas.1), "the abandon ran");
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("second")));
+    assert_abandons_replicate(&mut hive, &[&first, &betas]);
 }
 
 /// A `jj` command that writes on the operation another machine abandoned while this machine

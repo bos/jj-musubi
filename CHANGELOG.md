@@ -11,6 +11,11 @@
   its path. A hub you run with `--dir`, that `musubi.hub-dir` names, or that
   `musubi hub install` set up isn't affected.
 
+- `jj op abandon` of a machine's latest operation, while the machine was taking another
+  machine's abandon (or after a crash while it did), could bring back an operation the other
+  abandon dropped, in about half the runs. Upgrading doesn't repair a repository this already
+  happened to: abandon that operation again.
+
 - After `jj op abandon` of a machine's history, another machine's workspace no longer shows
   up as that machine's, as `m3/m1/default`, when a `jj` command run on the history from
   before the abandon (with `--at-op`, or one already running) finishes afterwards, or when

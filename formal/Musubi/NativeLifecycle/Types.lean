@@ -132,6 +132,8 @@ structure CanonicalBody where
   fixup : Bool := false
   rewrites : List (Commit × List Commit) := []
   stamp : Option Stamp := none
+  /-- The namespace context (`musubi.workspace-context`) the canonical operation carries. -/
+  context : Option Namespace := none
   workspaces : SharedBindings := []
   /-- All remaining hash-visible bytes, interned by exact content by the eventual codec. -/
   content : Nat := 0

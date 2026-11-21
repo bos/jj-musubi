@@ -96,6 +96,36 @@ private def foreignEvidence : Evidence :=
   [{ id := p 8, parents := [p 0], source := .restore (p 88), workspaces := [(b, 20)] }] }
     me 30 (p 8) = .ok []
 
+-- A name only the canonical operation's namespace context gives another machine is not this
+-- copy's own, though no workspace of the canonical view, no private name and no slash shows it
+-- so. The context binds only when this copy wrote it.
+private def contextual (source : Copy) : Evidence :=
+  { evidence with
+    canonical := evidence.canonical ++ [
+      { id := c 5, original := o 5, originalParents := [o 0], parents := [c 0],
+        context := some { source, known := [me, beta], names := [(a, ⟨beta, a⟩)] } }],
+    native := evidence.native ++ [
+      { id := p 9, parents := [p 0], workspaces := [(a, 10), (b, 20)], marker := some (c 5) }] }
+#guard ownOfNative (contextual me) 30 me (p 9) = .ok [(b, 20)]
+#guard ownOfNative (contextual beta) 30 me (p 9) = .ok [(a, 10), (b, 20)]
+
+-- The machines the context knows join the alias rule, so an undecided `beta/x` is another
+-- machine's only when this copy wrote the context. An invalid context is refused, but only
+-- while some name is undecided.
+private def aliased (source : Copy) (known : List Copy) (names : List Name) : Evidence :=
+  { evidence with
+    canonical := evidence.canonical ++ [
+      { id := c 5, original := o 5, originalParents := [o 0], parents := [c 0],
+        context := some { source, known, names := [] } }],
+    native := evidence.native ++ [
+      { id := p 9, parents := [p 0], workspaces := names.map (·, 10), marker := some (c 5) }] }
+#guard ownOfNative (aliased me [me, beta] ["beta/x".toList]) 30 me (p 9) = .ok []
+#guard ownOfNative (aliased beta [me, beta] ["beta/x".toList]) 30 me (p 9) =
+  .ok [("beta/x".toList, 10)]
+#guard ownOfNative (aliased me [] ["beta/x".toList]) 30 me (p 9) =
+  .error (.malformed "namespace attribute")
+#guard ownOfNative (aliased me [] []) 30 me (p 9) = .ok []
+
 -- Source choice: a counterpart recorded in the same receipt wins over published aliases; two
 -- published aliases of one canonical operation are ambiguous and both stay heads.
 #guard (candidates evidence 30 [p 1] (some receipt) (c 1)).map chooseSource =

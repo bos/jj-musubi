@@ -127,8 +127,9 @@ def readAttr (metadata : Json) (name : String) : Except String (Option String) :
   | .error _ => return none
   | .ok value => return some (← value.getStr?)
 
-def namespaceAttribute (metadata : Json) : Except String (Option Namespace) := do
-  let some text ← readAttr metadata "musubi.local-workspaces" | return none
+def namespaceAttribute (metadata : Json) (attr : String) :
+    Except String (Option Namespace) := do
+  let some text ← readAttr metadata attr | return none
   let raw ← Json.parse text
   let names ← (← get raw "names").getObj?
   let names ← names.toList.mapM fun (name, key) => do
@@ -137,7 +138,7 @@ def namespaceAttribute (metadata : Json) : Except String (Option Namespace) := d
     source := ← copy (← str raw "source"),
     known := ← (← strings raw "known").mapM copy, names }
   if !result.valid || !uniqueKeys (names.map fun row => (row.2, row.1)) then
-    throw "invalid raw private namespace"
+    throw "invalid raw namespace"
   return some result
 
 def duration (text : String) : Except String (Option Nat) := do
@@ -248,7 +249,8 @@ def decodeCanonical (ctx : Context) (raw : Json) : Except String CanonicalBody :
     endTime := ← (← get metadata "end").getObjValAs? Int "millis",
     work := owner, forgets := ← forgets.mapM copy, forgetAfter,
     fixup := (← readAttr metadata "musubi.fixup").isSome,
-    rewrites, stamp := ← stamp ctx metadata, workspaces,
+    rewrites, stamp := ← stamp ctx metadata,
+    context := ← namespaceAttribute metadata "musubi.workspace-context", workspaces,
     content := ← label ctx.contents (← content raw), description }
 
 def decodeNative (ctx : Context) (raw : Json) : Except String NativeBody := do
@@ -268,7 +270,7 @@ def decodeNative (ctx : Context) (raw : Json) : Except String NativeBody := do
     parents := ← (← strings raw "parents").mapM (fun id => do return ⟨← label ctx.physical id⟩),
     endTime := ← (← get metadata "end").getObjValAs? Int "millis",
     workspaces := ← bindings ctx (← get raw "view"), marker,
-    context := ← namespaceAttribute metadata, reserved,
+    context := ← namespaceAttribute metadata "musubi.local-workspaces", reserved,
     authorWorkspace := (← optionalString metadata "workspaceName").map String.toList,
     presenceStamp := ← stamp ctx metadata,
     gitFields := ← label ctx.fields (← gitFields raw),

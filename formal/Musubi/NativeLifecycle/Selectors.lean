@@ -187,9 +187,20 @@ def ownOfNative (e : Evidence) (fuel : Nat) (me : Copy) (id : Physical) : Query 
   let body ← e.canonicalBody canonical
   let machines := machinesOf body.workspaces (← presence e fuel canonical).known
   let own ← ownNames e fuel me canonical
-  return raw.workspaces.filter fun (name, _) =>
-    !others.contains name && (literals.contains name || own.contains name ||
-      !namesOtherMachine me name machines)
+  let kept := raw.workspaces.filter fun (name, _) => !others.contains name
+  let decided (name : Name) := literals.contains name || own.contains name
+  if kept.all (fun (name, _) => decided name) then return kept
+  -- A context this copy wrote also gives other machines names and adds the machines it knows.
+  let mut machines := machines
+  let mut contextOthers : List Name := []
+  if let some ns := body.context then
+    if !ns.valid then throw (.malformed "namespace attribute")
+    if ns.source = me then
+      machines := machines ++ ns.known
+      contextOthers := ns.names.filterMap fun (name, key) =>
+        if key.owner ≠ me then some name else none
+  return kept.filter fun (name, _) =>
+    decided name || (!contextOthers.contains name && !namesOtherMachine me name machines)
 
 /-- jj's three-way merge of one workspace slot, as pinned. -/
 def mergeBinding (ours base theirs : Option Commit) : Option Commit :=

@@ -1245,6 +1245,11 @@ observations, so that Rust fixtures can be compared with them through the oracle
   machine owns, the reserved and workspace names, the private attributes, the inherited Git
   fields and the whole native body, and only then looks up the body's hash in a table of
   independently observed encodings.
+- A canonical body carries, besides its workspaces and parents, the namespace context
+  (`musubi.workspace-context`) its operation records. `ownOfNative` reads it as `own_of_view`
+  does: when this machine wrote it, the context gives other machines their names and adds the
+  machines it knows to the alias rule; a name that is private or already this machine's own is
+  not affected by it.
 - `Steps.lean` runs the phases of an attempt: planning, each canonical and native write,
   commit, capture, preparation, revalidation, merge, export, head publication, helper load and
   repair, cleanup, interruption, restart and recovery. A named write checks the saved custody
@@ -2306,8 +2311,9 @@ from it too, or if `keep_others_of` adds a workspace already named.
 - **Other callers of `own_of_view`.** Realization (`with_own_workspaces`), rewrites after an
   abandon (`supersede/rewrite.rs`), `musubi leave`, working-copy repair and cleanup call it on
   canonical operations other machines or contractions wrote; the test calls it on the canonical
-  form of the operation it translates. `NativeLifecycle`'s `ownOfNative` still follows
-  `own_of_view` from before #167's fix, reading no context; its fixtures carry none.
+  form of the operation it translates. `NativeLifecycle`'s `ownOfNative` reads the context as
+  `own_of_view` does: only when some name is still undecided, only when this machine wrote it,
+  refusing an invalid one as malformed.
 - **Keys.** Machine keys have no `/` or whitespace, as musubi makes them; the oracle refuses
   others.
 - **An operation judged against parents it was given.** Where jj's abandon gives an operation

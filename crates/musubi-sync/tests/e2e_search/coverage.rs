@@ -607,6 +607,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     ("an_abandon_before_a_restart_that_finishes_taking_one", None),
     ("a_second_abandon_while_the_daemon_rewrites_the_first", None),
+    ("a_second_abandon_after_the_daemon_moves_the_op_heads", None),
+    (
+        "a_command_from_before_an_abandon_lands_beside_the_daemons_rewrite",
+        None,
+    ),
     (
         "a_second_abandon_merged_before_the_daemon_looks_again",
         None,

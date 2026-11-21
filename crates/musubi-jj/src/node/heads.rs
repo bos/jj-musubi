@@ -192,22 +192,24 @@ impl NodeRepo {
         Ok(replaced)
     }
 
-    /// Takes out the op heads musubi put in place of one that `jj op abandon` rewrote since:
-    /// one that read the op heads before musubi replaced them and wrote its rewrite after, as
-    /// it takes no lock. That rewrite, or a `jj` command on it, is then an op head beside
-    /// musubi's replacement, the two sharing nothing above what the abandon rewrote from;
-    /// merged, they would bring back what it dropped. Taken out, the op heads are as the
-    /// abandon left them, to notice it in as in any other. Of a merge or realization taken out,
-    /// the op heads it was on that are none of what musubi put in place of a rewritten head go
-    /// back: the rewrites of an op head the abandon left as it was, or another machine's work.
-    /// Returns what it took out.
+    /// Takes out the op heads musubi put in place of one that `jj op abandon` rewrote since: one
+    /// that read the op heads before musubi replaced them and wrote its rewrite after, as it
+    /// takes no lock. That rewrite is then an op head beside musubi's replacement, the two
+    /// sharing nothing above what the abandon rewrote from; merged, they would bring back what it
+    /// dropped. Taken out, the op heads are as the abandon left them, to notice it in as in any
+    /// other. Of a merge or realization taken out, the op heads it was on that are none of what
+    /// musubi put in place of a rewritten head go back: the rewrites of an op head the abandon
+    /// left as it was, or another machine's work. Returns what it took out.
     ///
-    /// jj's rewrite of an operation keeps all of it but its parents, so it is an operation
-    /// with the replaced head's [`fingerprint`] and another id, reached from an op head that
-    /// isn't one musubi put in, without passing an operation the translation cache has. An
-    /// operation that rewrote the head, in another `jj op abandon` before it, looks the same,
-    /// but only a `jj` command that loaded the repository before that abandon writes on it,
-    /// in a race jj doesn't resolve either ("Known jj limitations" in races.md).
+    /// jj's rewrite of an operation keeps all of it but its parents, so it is an op head with the
+    /// replaced head's [`fingerprint`] and another id, unknown to the translation cache. It is
+    /// the op head itself: a `jj` command that loads the repository then finds two op heads, and
+    /// merges them before writing anything on them. One run `--at-op` at the rewrite, or another
+    /// `jj op abandon`, which rewrites both, races as it would with any command on one machine
+    /// ("Known jj limitations" in races.md). Below an op head, an operation with that fingerprint
+    /// may instead be what the replaced head was rewritten from, by an earlier `jj op abandon`,
+    /// as a `jj` command that loaded the repository before that abandon writes on: that command
+    /// is no rewrite of the replaced head, and musubi's replacement stays.
     ///
     /// It works that out without jj's op-heads lock, which every jj command waits for, and
     /// takes the lock only to act, if the op heads are still those it read.
@@ -263,7 +265,7 @@ impl NodeRepo {
         let rewritten = if beside.is_empty() {
             HashSet::new()
         } else {
-            self.rewritten(&watched, &beside, &put)?
+            self.rewritten(&watched, &beside)?
         };
         if rewritten.is_empty() {
             self.records.keep_replaced(watched);
@@ -347,36 +349,26 @@ impl NodeRepo {
         }
     }
 
-    /// The heads among `watched` that jj rewrote, as the history below `beside`, the op heads
-    /// musubi didn't put in (`put`), has them.
+    /// The heads among `watched` that jj rewrote: those an op head in `beside`, which musubi
+    /// didn't put in, is a rewrite of.
     fn rewritten(
         &self,
         watched: &[Replaced],
         beside: &[&LocalOp],
-        put: &HashSet<&LocalOp>,
     ) -> Result<HashSet<LocalOp>, NodeError> {
         let mut found = HashSet::new();
-        let mut stack: Vec<LocalOp> = beside.iter().map(|h| (*h).clone()).collect();
-        let mut seen = HashSet::new();
-        while let Some(id) = stack.pop() {
-            if found.len() == watched.len() {
-                break;
-            }
-            if !seen.insert(id.clone())
-                || put.contains(&id)
-                || self.canonical_of(&id).is_some()
-                || self.joins.before.contains(&id)
-            {
-                continue;
-            }
-            let op = self.loader.op_store().read_operation(&id.0).block_on()?;
+        // jj's rewrite is new: the translation cache knows no operation it just wrote.
+        for head in beside
+            .iter()
+            .filter(|head| self.canonical_of(head).is_none() && !self.joins.before.contains(head))
+        {
+            let op = self.loader.op_store().read_operation(&head.0).block_on()?;
             let print = fingerprint(&op);
             for replaced in watched {
-                if replaced.fingerprint == print && replaced.head != id {
+                if replaced.fingerprint == print && replaced.head != **head {
                     found.insert(replaced.head.clone());
                 }
             }
-            stack.extend(LocalOp::parents_of(&op));
         }
         Ok(found)
     }

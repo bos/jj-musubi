@@ -1561,15 +1561,18 @@ after a crash before the move, from the plan it saved ([Taking the hub's](#takin
 abandon can still put its rewrite in while musubi moves the op heads, or after. So musubi
 remembers each op head it took out, by its content but for its parents, while what it put in its
 place is still an op head. jj's rewrite of an operation keeps all but its parents: an op head
-beside musubi's with such a rewrite below it, among operations the translation cache doesn't know,
-was built on an abandon that read the op heads before musubi moved them. musubi takes out what it
-put in place of that op head, at once if it sees this as it finishes the move, still under the
-lock, or at the next look for an abandon, which comes before anything reads the op heads to merge
-them. That look then finds the abandon in the history jj left. What it remembers is saved with
-what else `records.json` saves, so a restart forgets it only after a move that saved nothing else.
-A jj command that merges the two first brings back what the abandon dropped, as it does on one
-machine where `jj op abandon` races another command ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)).
+beside musubi's that is such a rewrite was put in by an abandon that read the op heads before
+musubi moved them. It is the op head itself, since a jj command that loads two op heads merges
+them before writing on them, but for one run `--at-op` at the rewrite, or another abandon, which
+rewrites both. Below an op head, an operation with that content may instead be what the op head
+was rewritten from, as a command that loaded the repository before the abandon writes on, and
+musubi's replacement stays then. musubi takes out what it put in place of that op head, at once if
+it sees this as it finishes the move, still under the lock, or at the next look for an abandon,
+which comes before anything reads the op heads to merge them. That look then finds the abandon in
+the history jj left. What it remembers is saved with what else `records.json` saves, so a restart
+forgets it only after a move that saved nothing else. A jj command that merges the two first
+brings back what the abandon dropped, as it does on one machine where `jj op abandon` races
+another command ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
 
 ## Compatibility
 

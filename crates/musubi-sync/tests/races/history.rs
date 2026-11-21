@@ -2724,51 +2724,92 @@ fn assert_abandons_replicate(hive: &mut Fixture, dropped: &[&(String, String)]) 
     hive.assert_converged();
 }
 
-/// A second `jj op abandon`, and a `jj` command after it, while the daemon rewrites what the
-/// first one rewrote, from the op heads it read before them: its rewrite, of the history from
-/// before the second abandon, is an op head beside the command's, the two sharing nothing above
-/// where the abandons rewrote from, as where the second abandon read the op heads before the
-/// daemon moved them and wrote after, since it takes no lock. A subprocess can't read before
-/// the move and write after it, so the test moves the op heads itself, as jj-lib does. The
-/// daemon restarts after the move, then takes its rewrite out at its next look, before
-/// anything merges the two. Both abandons replicate, and the command stays done. Merged, as
-/// before, the two brought back what the second abandon dropped and undid a `jj edit` (#168,
-/// found with Antithesis).
+/// A second `jj op abandon`, and `jj` commands around it, while the daemon rewrites what the
+/// first one rewrote: they finish after the daemon read the op heads and before it moves
+/// them. The daemon moves nothing and looks again from the op heads they left. Both abandons
+/// replicate, and the commands stay done. Moved, as before, the daemon's rewrite of the
+/// history from before the second abandon was an op head beside the commands', the two sharing
+/// nothing above where the abandons rewrote from, and merged, the two brought back what the
+/// second abandon dropped and undid a `jj edit` (#168, found with Antithesis).
 #[test]
 fn a_second_abandon_while_the_daemon_rewrites_the_first() {
+    use musubi_jj::node::HeadRace;
+
+    let (mut hive, first_op, second_op) = first_of_three_abandoned();
+    let first = hive.commit_id(0, "first");
+    let user = hive.repo(0).another_copy(hive.repo(0).path());
+    let second = second_op.1.clone();
+    let edit = first.clone();
+    hive.node(0).race_head_move(HeadRace::Unlocked, move || {
+        user.jj(&["bookmark", "create", "between", "-r", "@-"]);
+        // The second commit's operation, as the first abandon rewrote it.
+        let rewritten = nth_op(&user, "commit ", 1);
+        assert_eq!(rewritten.1, second);
+        user.jj(&["op", "abandon", &rewritten.0]);
+        user.jj(&["edit", &edit]);
+    });
+    assert!(hive.node(0).check_abandon().unwrap());
+
+    hive.sync();
+    assert_eq!(working_copy(hive.repo(0)), first, "the edit was undone");
+    assert!(hive.bookmarks(1).contains_key("between@"));
+    assert_abandons_replicate(&mut hive, &[&first_op, &second_op]);
+}
+
+/// A second `jj op abandon` that read the op heads before the daemon moved them to its
+/// rewrite of the first, and put its own rewrite in after the daemon finished, since it takes
+/// no lock; then the daemon restarts. Its next look finds the abandon's op head, a rewrite of
+/// the one it took out, beside its own rewrite, takes its rewrite out, and finds the second
+/// abandon: both replicate. A subprocess can't read before the move and write after it, so
+/// the test moves the op heads itself, as jj-lib does.
+#[test]
+fn a_second_abandon_after_the_daemon_moves_the_op_heads() {
     use futures::executor::block_on;
     use jj_lib::op_store::OperationId;
 
     let (mut hive, first_op, second_op) = first_of_three_abandoned();
-    // The daemon reads the op heads here, after the first abandon.
     let read = op_log(hive.repo(0))[0].0.clone();
-    // Meanwhile: a command on them, a second abandon, of the second commit's operation as
-    // the first rewrote it, and a `jj edit`.
-    let first = hive.commit_id(0, "first");
-    hive.repo(0)
-        .jj(&["bookmark", "create", "between", "-r", "@-"]);
     let rewritten = nth_op(hive.repo(0), "commit ", 1);
-    assert_eq!(rewritten.1, second_op.1);
-    hive.repo(0).jj(&["op", "abandon", &rewritten.0]);
-    hive.repo(0).jj(&["edit", &first]);
-    let edit = op_log(hive.repo(0))[0].0.clone();
-    // The daemon's rewrite of the first abandon, from the op heads it read, which it moves
-    // once the edit is done: as if the edit's op head were not there yet, then put back.
+    assert!(hive.node(0).check_abandon().unwrap());
+    let moved = hive.node(0).local_heads().unwrap();
+    assert_eq!(moved.len(), 1);
     let id = |hex: &str| OperationId::try_from_hex(hex).unwrap();
     let store = hive.node(0).loader().op_heads_store().clone();
-    assert_eq!(block_on(store.get_op_heads()).unwrap(), [id(&edit)]);
-    block_on(store.update_op_heads(&[id(&edit)], &id(&read))).unwrap();
-    assert!(hive.node(0).check_abandon().unwrap());
+    block_on(store.update_op_heads(std::slice::from_ref(&moved[0].0), &id(&read))).unwrap();
+    hive.repo(0)
+        .jj(&["--ignore-working-copy", "op", "abandon", &rewritten.0]);
+    assert_eq!(block_on(store.get_op_heads()).unwrap().len(), 1);
+    block_on(store.update_op_heads(&[], &moved[0].0)).unwrap();
     hive.reopen(0);
-    block_on(store.update_op_heads(&[], &id(&edit))).unwrap();
 
     hive.sync();
-    assert_eq!(
-        working_copy(hive.repo(0)),
-        first,
-        "the edit ({edit}) was undone"
-    );
     assert_abandons_replicate(&mut hive, &[&first_op, &second_op]);
+}
+
+/// A `jj` command that loaded the repository before `jj op abandon`, at an operation not yet
+/// published, and writes on it after the daemon rewrote what the abandon rewrote. The daemon's
+/// rewrite stays, and the command's work syncs on it, as any command's that loaded the
+/// repository before an abandon. The operation it wrote on has the content of the abandon's
+/// rewrite of it, which the daemon took out; taken for a rewrite made since, the daemon took
+/// its own rewrite out, and its next look stopped for good with "cannot tell which operations
+/// jj abandoned".
+#[test]
+fn a_command_from_before_an_abandon_lands_beside_the_daemons_rewrite() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    hive.commit(0, "c", "unpublished");
+    let first_op = nth_op(hive.repo(0), "commit ", 2);
+    let before = op_log(hive.repo(0))[0].0.clone();
+    hive.repo(0).jj(&["op", "abandon", &first_op.0]);
+    assert!(hive.node(0).check_abandon().unwrap());
+    hive.repo(0)
+        .jj(&["--at-op", &before, "bookmark", "create", "late", "-r", "@-"]);
+
+    hive.sync();
+    assert!(hive.bookmarks(1).contains_key("late@"));
+    assert_abandons_replicate(&mut hive, &[&first_op]);
 }
 
 /// `jj` commands that finish while the daemon rewrites what `jj op abandon` rewrote, after

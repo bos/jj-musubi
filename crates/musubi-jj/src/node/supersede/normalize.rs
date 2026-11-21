@@ -135,6 +135,8 @@ impl Normalizer {
 
     /// What each operation worked out so far became, where that isn't just itself, and
     /// whether it is dropped.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn worked_out(
         &self,
     ) -> impl Iterator<Item = (&CanonicalOp, &Vec<CanonicalOp>, bool)> {

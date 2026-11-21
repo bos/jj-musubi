@@ -39,11 +39,11 @@ platform = 'cfg(target_os = "macos")'
 filter = "test(=conformance) | test(=survivor_advance_conformance)"
 threads-required = "num-test-threads"
 
-# These long repository walks also do independent native replays and convergence checks.
-# Give them a share of the pool large enough that those checks can finish under contention.
+# This long repository walk also does independent native replays and convergence checks.
+# Give it a share of the pool large enough that those checks can finish under contention.
 [[profile.default.overrides]]
 platform = 'cfg(target_os = "macos")'
-filter = "test(=e2e_dropped_merge) | test(=regressions::e2e_command_above_dropped_merge) | test(=regressions::e2e_git_change_while_taking_a_trim) | test(=e2e_smoke)"
+filter = "test(=e2e_smoke)"
 threads-required = 4
 
 # Keep all 150 oracle cases on CI: Linux and Windows exceeded the default two-minute
@@ -51,18 +51,6 @@ threads-required = 4
 [[profile.ci.overrides]]
 filter = "test(=survivor_advance_conformance)"
 slow-timeout = { period = "60s", terminate-after = 10 }
-
-# These four-repository survivor cases exceed two minutes on Windows. Leave time for all
-# their steps, including the generated walk and independent convergence/import checks.
-[[profile.ci.overrides]]
-filter = "test(=e2e_dropped_merge) | test(=regressions::e2e_command_above_dropped_merge)"
-slow-timeout = { period = "60s", terminate-after = 6 }
-
-# These six four-repository cases, with separate git directories and fetched histories,
-# exceed the two-minute default on Windows while the rest of the suite runs.
-[[profile.ci.overrides]]
-filter = "test(=history::advancing_to_what_survives_of_a_dropped_head)"
-slow-timeout = { period = "60s", terminate-after = 6 }
 
 # Each case of the per-machine refs conformance test runs real `jj`, `git` and syncs. It is
 # the next longest, so it starts next; and shrinking a failure takes minutes, so it has long

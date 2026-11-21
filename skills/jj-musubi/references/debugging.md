@@ -22,11 +22,12 @@ Work in the affected repository. Report findings before changing the hive, daemo
   with the user's agreement run `jj --at-op <head> op revert @` there.
 - **Protocol mismatch:** install the same release everywhere, including the hub, then run
   `musubi daemon restart` on upgraded machines. Also restart if musubi reports an old daemon.
-- **`history no longer matches the hive's`:** this copy can no longer sync, but its work
-  remains locally. With the user's agreement, do as the message says: make a new copy with
-  `musubi clone`, bring across the work this copy made since its last sync, then run
-  `musubi leave --force` in this one. Other machines show the old copy until it is forgotten:
-  run `musubi forget <machine>` in the new copy, naming it as `jj workspace list` shows it.
+- **`lost history the hive has`,** usually after `jj op abandon`: this copy can no longer
+  sync, but its work remains locally. With the user's agreement, do as the message says: make
+  a new copy with `musubi clone`, bring across the work this copy made since its last sync,
+  then run `musubi leave --force` in this one. Other machines show the old copy until it is
+  forgotten: run `musubi forget <machine>` in the new copy, naming it as `jj workspace list`
+  shows it.
 - **jj can't find an operation id from another machine:** operation ids differ between
   machines. Run `musubi debug op-id <id>` on the machine the id came from to get the hive's
   id, then `musubi debug op-id <hive id>` here to get this machine's.

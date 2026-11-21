@@ -43,7 +43,6 @@ use jj_lib::repo::Repo as _;
 use crate::fixture::Fixture;
 use crate::refs_model::RefsModel;
 
-mod abandon;
 mod examples;
 mod model;
 mod scenario;

@@ -5,6 +5,10 @@
 //! computes contracted names, `abandon` detects local abandons, `rewrite` moves local
 //! operations and workspaces, `receive` takes hub records, and `fixup` restores dropped state.
 //!
+//! musubi no longer passes an abandon on: one of operations the hive has stops the copy
+//! syncing (`abandon`), so this node records no drops of its own. The rest stays, to take the
+//! records an earlier release published, until it goes with them.
+//!
 //! Three names can stand for one operation here. The hub's, as its records name its history
 //! (*hub space*), which the protocol speaks in; this node's, with what it has yet to publish
 //! dropped too (*node space*), which its local operations map to; and older names a record
@@ -704,6 +708,8 @@ impl NodeRepo {
     /// as the hub does. These are the operations below `base`, a hub name, above the lowest
     /// pending drop, and any other hub operation translated to node space since, as one
     /// fetched above `base`.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     fn hub_names(
         &self,
         base: &CanonicalOp,

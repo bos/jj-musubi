@@ -31,6 +31,8 @@ impl NodeRepo {
     /// the nearest one below it, where it is new. Where jj put a new one on history that was
     /// intact, below what it abandoned, one of `bases` that descends from that is nearer: the
     /// op heads descended from the base.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn standing_for(
         &self,
         heads: &[LocalOp],
@@ -69,6 +71,8 @@ impl NodeRepo {
     /// back through history takes each operation jj rewrote as the canonical operation it
     /// stands for, as `counterparts` has them, and goes from an operation new since, among
     /// `unmapped`, to `old`, what the head stood for, rather than to what jj put under it.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn expectation(
         &self,
         heads: &[LocalOp],
@@ -150,6 +154,8 @@ impl NodeRepo {
     /// abandon: jj's rewrite of it, among `unmapped`, as this machine rewrote that in `locals`;
     /// or itself, where neither touched it. None where the abandon dropped it, as `dropped`
     /// has the canonical operations, or made it several.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn rekeyed(
         &self,
         at: &LocalOp,

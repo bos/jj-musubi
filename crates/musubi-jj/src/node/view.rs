@@ -591,6 +591,8 @@ impl NodeRepo {
         Ok(())
     }
 
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {
         let view = self.canonical.read_operation_view(at)?;
         let presence = self.presence(at)?;

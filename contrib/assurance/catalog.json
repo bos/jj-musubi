@@ -240,8 +240,7 @@
         "crates/musubi-jj/src/node/supersede/storage.rs"
       ],
       "evidence": [
-        "e20",
-        "e21"
+        "e20"
       ]
     },
     {
@@ -773,15 +772,6 @@
       "needs": [],
       "provenance": "documented",
       "kind": "proof"
-    },
-    {
-      "id": "e21",
-      "claim": "abandonfetch",
-      "mechanism": "races",
-      "source": "crates/musubi-sync/tests/races/refs/abandon.rs#realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon",
-      "detail": "Checks exact merge parents, no dropped ancestor, the fetched ref and subsequent convergence.",
-      "needs": [],
-      "provenance": "documented"
     },
     {
       "id": "e22",
@@ -1645,10 +1635,6 @@
     "formal/Musubi/AbandonRefs.lean": {
       "path": "formal/Musubi/AbandonRefs.lean",
       "symbol": null
-    },
-    "crates/musubi-sync/tests/races/refs/abandon.rs#realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon": {
-      "path": "crates/musubi-sync/tests/races/refs/abandon.rs",
-      "symbol": "realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon"
     },
     "formal/Musubi/Refs.lean#noSpuriousRevert": {
       "path": "formal/Musubi/Refs.lean",

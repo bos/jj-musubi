@@ -108,6 +108,8 @@ impl NodeRepo {
     /// last recorded, is work the abandon dropped, the fix-up does it again, with when it was
     /// done and what it recorded, so that what comes after has it; then forgets the copy
     /// again if it is forgotten where the fix-up is written ([`Self::write_fixup`]).
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn fixup_between(
         &mut self,
         old: &CanonicalOp,

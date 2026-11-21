@@ -20,7 +20,7 @@ Follow the symptom:
 - **The daemon isn't running or serving this copy:** see [The daemon](#the-daemon).
 - **The hub is unreachable:** see [Reaching the hub](#reaching-the-hub).
 - **Sending is held:** see [Accidental files and cleanup](#accidental-files-and-cleanup).
-- **History no longer matches the hive's:**
+- **This repository lost history the hive has:**
   [rescue work in a new copy](#rescue-work-in-a-new-copy).
 - **Another sync error:** follow the command's hint, fix the cause, then run `musubi sync`.
   If it persists, [collect the logs](#report-a-problem).
@@ -185,9 +185,10 @@ below; fetching also brings ancestors, which may contain unwanted content.
 
 ## Rescue work in a new copy
 
-If the error says this repo's history no longer matches the hive's, retrying won't help.
-This can happen after operations are abandoned while a copy is out of the hive, forgotten,
-or away before its first sync finishes. Keep the original repo: its work is still there.
+If the error says this repo lost history the hive has, retrying or rejoining won't help:
+`jj op abandon` removed operations that the hub and other machines still have ([Abandoning
+operations](guides/working-across-machines.md#abandoning-operations)). `musubi status` shows
+the same message. Keep the original repo: its work is still there.
 
 Make a new copy with `musubi clone <hive> <new-directory>`. Bring across work since the last
 successful sync, or all wanted work if the first sync never finished. You can copy files as
@@ -230,5 +231,5 @@ issue](https://github.com/bos/jj-musubi/issues). Include the command and full er
 
 For “the hub refused this machine's work”, include both logs: the hub's log identifies what
 it couldn't accept. To continue working, use the [new-copy rescue](#rescue-work-in-a-new-copy).
-If history stops matching without an operation abandon or a returning copy to explain it,
+If a copy says it lost history the hive has even though no one ran `jj op abandon` there,
 report that too.

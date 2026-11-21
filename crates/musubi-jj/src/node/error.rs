@@ -20,12 +20,12 @@ use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 use crate::op_id::LocalOp;
 
-/// What a user sees once this repository lost history the hive has in a way musubi can't pass
-/// on, which no retry gets past, and the way on. docs/troubleshooting.md says the rest, such
-/// as bringing work across.
-const HISTORY_GONE: &str = "this repository's history no longer matches the hive's, so it \
-     can't sync again: make a new copy with `musubi clone`, bring this one's work across to \
-     it, then run `musubi leave --force` here";
+/// What a user sees once this repository lost history the hive has, as after `jj op abandon`,
+/// which no retry gets past, and the way on. docs/troubleshooting.md says the rest, such as
+/// bringing work across.
+const HISTORY_GONE: &str = "this repository lost history the hive has (was `jj op abandon` \
+     run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work \
+     across to it, then run `musubi leave --force` here";
 
 /// Why musubi can't inspect, record or prune this copy's unpublished history. None has a
 /// source, so a chain of causes ends here as it did when these were plain strings.
@@ -220,8 +220,9 @@ pub enum NodeError {
     },
     #[error("repo config {path}: {message}")]
     Config { path: PathBuf, message: String },
-    /// `jj op abandon` made operations that the hub accepted unreachable. Replicating the
-    /// history that is left would put them back on every other machine.
+    /// `jj op abandon`, or something else, made operations that the hub accepted unreachable.
+    /// musubi doesn't pass that on to other machines, and syncing the history that is left
+    /// would put them back.
     #[error("{HISTORY_GONE}")]
     UnreachableHistory,
     /// An operation that realizes one of the hive's no longer has that operation's parents,

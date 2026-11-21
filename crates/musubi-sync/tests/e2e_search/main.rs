@@ -31,7 +31,8 @@
 //! - `MUSUBI_SEARCH_STEPS`: rules per sequence (default 30);
 //! - `MUSUBI_SEARCH_SEED`: base seed, shard `n` using `seed + n` (default: random);
 //! - `MUSUBI_SEARCH_SHRINK`: `1` shrinks a failure, `0` reports it unshrunk (default: the
-//!   shards shrink, and the smoke tests, `e2e_smoke` and `e2e_dropped_merge`, don't);
+//!   shards shrink, and the smoke tests, `e2e_smoke` and `e2e_join_after_upstream_rewrite`,
+//!   don't);
 //! - `MUSUBI_SEARCH_MASK`: known bugs to look past, comma-separated (see `checks::masked`);
 //! - `MUSUBI_SEARCH_TIMING`: print how long each case took;
 //! - `MUSUBI_SEARCH_VERIFY_OBSERVATIONS`: compare read-only staleness observations with
@@ -70,7 +71,6 @@ use hegel::generators as gs;
 
 use crate::coverage::fired;
 use crate::machine::Search;
-use crate::world::FILES;
 use crate::world::Naming;
 use crate::world::Setup;
 use crate::world::World;
@@ -154,20 +154,6 @@ fn search(tc: TestCase, config: Config) {
     case.passed();
 }
 
-/// The search from full trims and late commands on what they left
-/// (`late_commands_after_trims`), which every case starts with, then a walk, as the
-/// search's, and convergence: the shapes of #167 need several of its draws to line up, and
-/// it is one rule among many.
-#[hegel::standalone_function(config.settings())]
-fn late_trims_search(tc: TestCase, config: Config) {
-    let case = coverage::start_case();
-    let setup = draw_setup(&tc);
-    walk(tc, config, setup, |tc, world| {
-        Search::new(world).late_trims(tc);
-    });
-    case.passed();
-}
-
 /// The hive a case of `search` starts from.
 fn draw_setup(tc: &TestCase) -> Setup {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
@@ -229,64 +215,6 @@ fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCas
             started.elapsed() - walked
         );
     }
-}
-
-/// The search from a merge alpha dropped and gamma keeps, which beta, with work of its own,
-/// took the drop of without advancing, before the hub went back and gamma published the merge
-/// again (`World::hold_dropped_merge`). Beta alone, before alpha does anything again, advances
-/// to what survives of it, two operations neither below the other, merged with its work in
-/// one operation, and publishes the drop. Then a walk, as the search's, and convergence.
-#[hegel::standalone_function(config.settings())]
-fn dropped_merge_search(tc: TestCase, config: Config) {
-    let case = coverage::start_case();
-    let naming = tc.draw(gs::sampled_from(&NAMINGS[..]));
-    let prejoin = tc.draw(gs::booleans());
-    let secondary = tc.draw(gs::booleans());
-    let setup = Setup {
-        nodes: 4,
-        naming,
-        prejoin,
-        secondary,
-    };
-    fired("setup:dropped_merge");
-    walk(tc, config, setup, |tc, world| {
-        // The files beta commits.
-        let work = tc.draw(
-            gs::vecs(gs::sampled_from(&FILES[..]))
-                .min_size(1)
-                .max_size(2),
-        );
-        let work: Vec<usize> = work
-            .iter()
-            .map(|file| FILES.iter().position(|f| f == file).unwrap())
-            .collect();
-        let kept = world.hold_dropped_merge(&work);
-        world.sync(1);
-        world.check_dropped_by(1, &kept);
-    });
-    case.passed();
-}
-
-#[test]
-fn e2e_dropped_merge() {
-    let _report = coverage::Report::new("dropped-merge");
-    dropped_merge_search(Config::smoke());
-}
-
-/// The fifth shard searches from the dropped merge of `dropped_merge_search`, not from the
-/// setups of `search`, so that the nightly run walks that start too: the same walk and
-/// checks, with a report of its own.
-#[test]
-fn e2e_search_shard_4() {
-    let _report = coverage::Report::new("shard-4-dropped-merge");
-    dropped_merge_search(Config::shard(4));
-}
-
-/// The sixth shard searches from `late_trims_search`'s full trims and late commands.
-#[test]
-fn e2e_search_shard_5() {
-    let _report = coverage::Report::new("shard-5-late-trims");
-    late_trims_search(Config::shard(5));
 }
 
 #[test]

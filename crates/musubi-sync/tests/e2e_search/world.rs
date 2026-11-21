@@ -137,7 +137,6 @@ pub struct Setup {
 pub struct AbandonedOperation {
     pub by: usize,
     pub key: HistoryKey,
-    pub merge: SourceKey,
     native: OpId,
     copy: String,
     /// Whether this command could already denote a shared operation. A private command
@@ -254,35 +253,6 @@ pub struct PastOp {
     pub description: String,
     /// How many operations before the machine's head it is.
     pub back: usize,
-}
-
-/// An operation a full trim to the root left on a machine, from before the node handled the
-/// trim, or a late command or merge written on one: jj can still load it by its id, though no
-/// op head reaches it (`World::late_ops`).
-#[derive(Clone)]
-pub struct LateOp {
-    pub id: String,
-    /// The first line of the operation's description.
-    pub description: String,
-    /// How many full trims the machine had made when it was written.
-    pub trim: usize,
-    /// Whether it has more than one parent.
-    pub merge: bool,
-    /// Whether its one parent is the root operation.
-    pub on_root: bool,
-}
-
-impl std::fmt::Debug for LateOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let merge = if self.merge { ", a merge" } else { "" };
-        write!(
-            f,
-            "{:?}, after trim {}{merge} (op {})",
-            self.description,
-            self.trim,
-            &self.id[..12]
-        )
-    }
 }
 
 impl std::fmt::Debug for PastOp {
@@ -490,18 +460,6 @@ pub struct World {
     change_of: BTreeMap<String, String>,
     /// Whether the hub has restarted since it last pruned, for coverage.
     restarted_since_prune: bool,
-    /// Per machine, newest first, the operations its full trims to the root left, and the
-    /// late commands and merges written on them: a command can still run `--at-op` any of
-    /// them (`World::late_ops`).
-    late_ops: Vec<Vec<LateOp>>,
-    /// Per machine, how many full trims to the root it has made.
-    trims: Vec<usize>,
-    /// The late operations written with the clock stepped back, each at a time of its own.
-    stepped_back: BTreeSet<String>,
-    /// The late operations a late `jj undo` or `jj op restore` wrote.
-    restored: BTreeSet<String>,
-    /// The late operations a late command wrote.
-    written_late: BTreeSet<String>,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -626,11 +584,6 @@ impl World {
             integrated_history: BTreeSet::new(),
             change_of: BTreeMap::new(),
             restarted_since_prune: false,
-            late_ops: vec![vec![]; setup.nodes],
-            trims: vec![0; setup.nodes],
-            stepped_back: BTreeSet::new(),
-            restored: BTreeSet::new(),
-            written_late: BTreeSet::new(),
             counter: 0,
             trace: vec![],
         };
@@ -668,12 +621,6 @@ impl World {
 
     pub fn baseline_operation(&self, key: &SourceKey) -> bool {
         self.evidence.baseline_merge_keys.contains(key)
-    }
-
-    /// Whether every machine of the hive has the same host name, so that another joining
-    /// under an existing machine's name changes nothing.
-    pub fn shared_hostname(&self) -> bool {
-        matches!(self.naming, Naming::SharedHostname)
     }
 
     pub fn nodes(&self) -> usize {
@@ -774,168 +721,6 @@ impl World {
 }
 
 #[test]
-fn workspace_fixup_witnesses_require_the_native_source() {
-    let mut world = World::new(Setup {
-        nodes: 3,
-        naming: Naming::Own,
-        prejoin: false,
-        secondary: false,
-    });
-    world.rename_workspace(2, 0, "default");
-    world.sync(2);
-    world.sync(0);
-    let (base, dropped) = world.trim_range(0);
-    world.rename_workspace(2, 0, "work");
-    let foreign = world
-        .foreign_workspace_names(0)
-        .into_iter()
-        .find(|name| name.ends_with("/default"))
-        .unwrap();
-    world.jj(0, &["workspace", "forget", &foreign]);
-    world.jj(0, &["new", "-m", "after forgetting a foreign workspace"]);
-    world.abandon_ops(0, &format!("..{base}"), &dropped);
-    world.sync(0);
-    world.sync(2);
-    world.sync(0);
-    let native: BTreeSet<_> = world
-        .evidence
-        .workspace_fixup_inputs
-        .keys()
-        .cloned()
-        .collect();
-    assert!(!native.is_empty(), "the trim must create native fix-ups");
-    assert!(!world.evidence.workspace_trim_inputs.contains_key(&0));
-    let gamma = format!("{}/default", world.fx.machine_key(2));
-    let mut reference = crate::reference::Reference::build(&world);
-    assert!(reference.witnessed_workspace_names(&world).contains(&gamma));
-
-    let operations = |world: &World, m: usize| {
-        let node = world.fx.hive.members[m].adapter.repo();
-        let store = node.loader().op_store();
-        fs::read_dir(node.repo_path().join("op_store/operations"))
-            .unwrap()
-            .map(|file| file.unwrap())
-            .filter_map(|file| file.file_name().to_str().and_then(OpId::try_from_hex))
-            .map(|id| {
-                let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
-                (id, op)
-            })
-            .collect::<Vec<_>>()
-    };
-    let (id, old) = operations(&world, 0)
-        .into_iter()
-        .find(|(_, op)| {
-            native.contains(&merge_key(op))
-                && op.metadata.attributes.get("musubi.work") == Some(&world.fx.machine_key(2))
-                && !op
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-        })
-        .unwrap();
-    let old_key = merge_key(&old);
-    let parent = old.parents[0].hex();
-    world.evidence.workspace_fixup_inputs.clear();
-    world.jj(
-        0,
-        &[
-            "--ignore-working-copy",
-            "--at-op",
-            &id.hex(),
-            "new",
-            "-m",
-            "above old fix-up",
-        ],
-    );
-    world.abandon_ops(0, &parent, std::slice::from_ref(&parent));
-    assert!(
-        operations(&world, 0).iter().any(|(now, op)| {
-            *now != id
-                && merge_key(op) == old_key
-                && !op
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-        }),
-        "jj must actually reparent the old native fix-up"
-    );
-    world.observe_workspace_fixups(0);
-    assert!(!world.evidence.workspace_fixup_inputs.contains_key(&old_key));
-
-    // Lose the sender's witness, then give the receiver an older accepted baseline.
-    // Receiving a marked realization must not turn that baseline into source evidence.
-    world.evidence.workspace_fixup_inputs.clear();
-    world.begin_workspace_trim(1);
-    world.sync(1);
-    let received = operations(&world, 1).iter().any(|(_, op)| {
-        native.contains(&merge_key(op))
-            && op
-                .metadata
-                .attributes
-                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-    });
-    assert!(received, "the receiver must actually realize a fix-up");
-    assert!(world.evidence.workspace_fixup_inputs.is_empty());
-    assert!(!world.evidence.workspace_trim_inputs.contains_key(&1));
-    world.begin_workspace_trim(1);
-    world.clone_copy(1);
-    assert!(!world.evidence.workspace_trim_inputs.contains_key(&1));
-}
-
-/// After `jj op abandon` of a rename, the operation above it adds the new name. When the
-/// owner then renames it away and another copy trims its whole history, jj's merge against
-/// the root brings the old name back, so the reference must witness it: but only from the
-/// owner's own captured rename, not from the name merely being in the retained base.
-#[test]
-fn an_abandoned_rename_witnesses_the_name_a_full_trim_brings_back() {
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Own,
-        prejoin: false,
-        secondary: false,
-    });
-    world.rename_workspace(0, 0, "work");
-    let rename = world
-        .jj(
-            0,
-            &[
-                "--ignore-working-copy",
-                "op",
-                "log",
-                "--no-graph",
-                "-n",
-                "1",
-                "-T",
-                "id",
-            ],
-        )
-        .trim()
-        .to_owned();
-    world.jj(0, &["new", "-m", "above the rename"]);
-    world.abandon_ops(0, &rename, std::slice::from_ref(&rename));
-    world.sync(0);
-    world.sync(1);
-    world.rename_workspace(0, 0, "third");
-    let (base, dropped) = world.trim_range(1);
-    world.jj(1, &["new", "-m", "before the trim"]);
-    world.abandon_ops(1, &format!("..{base}"), &dropped);
-    world.sync(1);
-    world.sync(0);
-    world.sync(1);
-    let work = format!("{}/work", world.fx.machine_key(0));
-    let mut reference = crate::reference::Reference::build(&world);
-    assert!(reference.witnessed_workspace_names(&world).contains(&work));
-
-    // Without the owner's captured rename, the retained base alone proves nothing.
-    world
-        .evidence
-        .commands
-        .retain(|_, command| command.id.hex() != rename);
-    let mut reference = crate::reference::Reference::build(&world);
-    assert!(!reference.witnessed_workspace_names(&world).contains(&work));
-}
-
-#[test]
 fn private_git_inputs_require_a_known_birth_and_a_retained_name() {
     let mut world = World::new(Setup {
         nodes: 2,
@@ -1021,174 +806,6 @@ fn private_git_inputs_require_a_known_birth_and_a_retained_name() {
         carriers
             .iter()
             .all(|id| !world.imports.preserved_heads[1].contains_key(id))
-    );
-}
-
-#[test]
-fn git_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Default,
-        prejoin: true,
-        secondary: false,
-    });
-    assert!(world.git_record_input(0).is_none());
-    world.fx.hive.pruning = false;
-    let initial = world.hub_seq();
-    world.trim_below_accepted_push(1);
-    world.sync(0);
-    assert!(
-        !world.fx.hive.members[0]
-            .adapter
-            .repo()
-            .applied_records()
-            .is_empty()
-    );
-    world.hub_goes_back(usize::try_from(world.hub_seq() - initial).unwrap());
-    let input = world.git_record_input(0).unwrap();
-    assert_eq!(input.copy, world.fx.machine_key(0));
-    assert_eq!(&input.target, world.fx.hive.hub.store().head().1);
-    assert_eq!(
-        input.heads.iter().map(|id| id.hex()).collect::<Vec<_>>(),
-        world.op_heads(0)
-    );
-    world.fx.hive.sync_all().unwrap();
-    world.fx.hive.pruning = true;
-    world.an_hour_passes();
-    world.fx.hive.sync_all().unwrap();
-    assert!(world.fx.hive.hub.store().pruned() > 0);
-    world.clone_copy(world.nodes());
-    let m = world.nodes() - 1;
-    assert!(
-        world.fx.hive.members[m]
-            .adapter
-            .repo()
-            .record_prefix()
-            .count
-            > 0
-    );
-    assert!(
-        world.fx.hive.members[m]
-            .adapter
-            .repo()
-            .applied_records()
-            .is_empty()
-    );
-    world.remake_hub();
-    assert!(
-        world.git_record_input(m).is_none(),
-        "an opaque prefix is no lost applied suffix"
-    );
-}
-
-#[test]
-fn abandoned_originals_do_not_include_other_native_parent_versions() {
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Default,
-        prejoin: false,
-        secondary: false,
-    });
-    world.jj(0, &["bookmark", "create", "ancestor", "-r", "@"]);
-    let ancestor = world.latest_op_head(0);
-    world.jj(0, &["bookmark", "create", "survivor", "-r", "@"]);
-    let old = world.latest_op_head(0);
-    world.fx.node(0).canonical_heads().unwrap();
-    let old_original = world
-        .known_original(0, &OpId::try_from_hex(&old).unwrap())
-        .unwrap();
-    let store = world.fx.hive.members[0].adapter.repo().loader().op_store();
-    let body =
-        futures::executor::block_on(store.read_operation(&OpId::try_from_hex(&old).unwrap()))
-            .unwrap();
-    let merge = merge_key(&body);
-    world.op_abandon(0, &ancestor);
-    world.sync(0);
-    world.sync(1);
-    // Resume the older immutable branch locally while only the reparented version has
-    // been shared. Both native versions have the same command metadata and view.
-    world.jj_at_op(0, &old, &["bookmark", "create", "old-branch", "-r", "@"]);
-    world.jj(1, &["bookmark", "create", "after", "-r", "@"]);
-    let versions = &world.ops_by_key(1)[&merge];
-    assert_eq!(versions.len(), 1);
-    let shared = versions.iter().next().unwrap().clone();
-    world.crash(1, true, 0);
-    world.op_abandon(1, &shared);
-    let dropped = world
-        .abandoned
-        .iter()
-        .find(|op| op.by == 1 && op.merge == merge)
-        .unwrap();
-    let originals = dropped.originals.clone().unwrap();
-    assert!(!originals.contains(&old_original));
-    // Before the drop reaches the first copy, its exact original is still reachable.
-    let rejected =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
-            .unwrap_err();
-    let message = rejected.downcast_ref::<String>().unwrap();
-    assert!(
-        message.contains("has the operation") && message.contains("which beta abandoned"),
-        "{message}"
-    );
-    world.converge();
-    assert!(
-        world
-            .replicated_history(0)
-            .keys()
-            .any(|id| world.known_original(0, id) == Some(old_original.clone()))
-    );
-    assert!(!world.replicated_history(0).keys().any(|id| {
-        world
-            .known_original(0, id)
-            .is_some_and(|id| originals.contains(&id))
-    }));
-    let dropped = world
-        .abandoned
-        .iter()
-        .find(|op| op.by == 1 && op.merge == merge)
-        .unwrap();
-    let alternate = world.operation_history(0, true);
-    assert!(
-        !alternate.proves_present(dropped),
-        "an alternate original proves no native return"
-    );
-    assert!(
-        !alternate.may_contain(dropped),
-        "known alternate metadata is not uncertain source identity"
-    );
-    let mut foreign = OperationHistory {
-        copy: Some("another-copy".to_owned()),
-        ..OperationHistory::default()
-    };
-    foreign.native.insert(dropped.native.clone());
-    assert!(
-        !foreign.proves_present(dropped),
-        "equal native bytes on a different copy prove no return"
-    );
-    let mut unknown = OperationHistory::default();
-    unknown.unknown.insert(dropped.header.clone());
-    assert!(
-        unknown.may_contain(dropped),
-        "uncertain matching metadata prevents absence proof"
-    );
-    assert!(
-        !unknown.proves_present(dropped),
-        "uncertain metadata cannot suppress or discharge a drop"
-    );
-    world.clone_copy(1);
-    let at = world
-        .abandoned
-        .iter()
-        .position(|op| op.by == 1 && op.merge == merge)
-        .unwrap();
-    world.abandoned[at].originals = None;
-    let rejected =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
-            .unwrap_err();
-    let message = rejected.downcast_ref::<String>().unwrap();
-    assert!(
-        message.contains("has the operation") && message.contains("which beta abandoned"),
-        "matching metadata is rejected without an exact original witness: {message}"
     );
 }
 

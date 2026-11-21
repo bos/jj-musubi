@@ -23,7 +23,6 @@ use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::records::HubOp;
-use crate::records::Record;
 
 /// The local operations a walk from the op heads met: those a canonical operation stands for,
 /// with it, and the rest, read, parents first.
@@ -132,11 +131,14 @@ impl NodeRepo {
     }
 
     /// Notices a `jj op abandon` of operations the hub accepted, before anything is
-    /// canonicalized on what it rewrote, once for each set of op heads. Returns whether it
-    /// noticed one. It must run before the op heads are read for anything else: jj rewrites
-    /// every operation above the abandoned ones that isn't below them, putting on their parent
-    /// even what was beside them, as a realization merged with them, and musubi puts that
-    /// back, so an op head read before is one it no longer reaches.
+    /// canonicalized on what it rewrote, once for each set of op heads. Fails with
+    /// [`NodeError::UnreachableHistory`] where it dropped operations the hive has, which this
+    /// copy can't sync past. Otherwise, as where it abandoned only history from before the
+    /// join, puts what jj rewrote back where the hive has it, and returns whether it did. It
+    /// must run before the op heads are read for anything else: jj rewrites every operation
+    /// above the abandoned ones that isn't below them, putting on their parent even what was
+    /// beside them, as a realization merged with them, and musubi puts that back, so an op
+    /// head read before is one it no longer reaches.
     pub fn check_abandon(&mut self) -> Result<bool, NodeError> {
         let mut noticed = false;
         // Only a move overtaken during this look makes it look again.
@@ -334,10 +336,8 @@ impl NodeRepo {
     }
 
     /// Notices a `jj op abandon` of operations the hub accepted: `base`, a hub name for an
-    /// accepted operation here, is no longer below the op heads. Works out what was dropped,
-    /// renames this node's history as contraction does, rewrites its local operations to
-    /// match, and records the drops to publish, with the fix-up that goes first. Returns
-    /// whether it noticed one.
+    /// accepted operation here, is no longer below the op heads. As [`Self::check_abandon`],
+    /// fails where it dropped operations the hive has.
     pub fn notice_abandon(&mut self, base: &HubOp) -> Result<bool, NodeError> {
         let mut noticed = false;
         self.abandon.take_overtaken();
@@ -491,23 +491,6 @@ impl NodeRepo {
                 counterparts.insert(id.clone(), c);
             }
         }
-        // A command not yet published that jj moved off what it dropped stands for its
-        // pre-abandon twin, on the parents it had, as one jj moved to the root does: looked
-        // for only where something the hub accepted is gone, which reading every operation in
-        // the op store is worth.
-        let stood_for: HashSet<&CanonicalOp> = counterparts.values().collect();
-        let dropping: HashSet<CanonicalOp> = region
-            .iter()
-            .filter(|op| !stood_for.contains(op))
-            .cloned()
-            .collect();
-        if !recovered && !dropping.is_empty() {
-            let reached: HashSet<LocalOp> = mapped.iter().map(|(local, _)| local.clone()).collect();
-            let sources =
-                self.unpublished_reparented_sources(&unmapped, &reached, &dropping, &counterparts)?;
-            counterparts.extend(sources.roots);
-            historical_sources.extend(sources.twins);
-        }
         // Dropped: what this machine had below the base, or below what jj rewrote, that no
         // operation it reaches stands for now.
         // jj op abandon rewrites what was above what it abandoned. Where nothing was, the
@@ -535,118 +518,28 @@ impl NodeRepo {
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
             let locals =
                 self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
-            // As below: a restart partway resumes the move, and jj's rewrites keep the
-            // identities established here.
+            // A restart partway resumes the move, and jj's rewrites keep the identities
+            // established here.
             counterparts.extend(historical_sources);
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
             self.finish_local_move(&heads, &locals)?;
             return Ok(true);
         }
-        if dropped.is_empty() {
+        // What was dropped below sources recovered from the root, where nothing the hub
+        // accepted is watched, was never sent: an abandon of it is this copy's alone.
+        if dropped.is_empty() || recovered {
             return Ok(false);
         }
+        // An abandon of operations the hive has: rather than pass it on, which would rewrite
+        // every machine's history, or bring the operations back, this copy stops syncing,
+        // publishing nothing. The other machines keep the operations. No retry gets past this,
+        // and nothing it changed here first (only cached translations) stops the next look
+        // finding it again.
         tracing::info!(
             "jj op abandon dropped {} operations the hive has",
             dropped.len()
         );
-        let old_head = self.standing_for(&heads, &counterparts, &bases)?;
-        let mut contraction = Contraction::new(&self.canonical, dropped.iter().cloned())?
-            .sharing(self.presences.clone());
-        let new_head = match &old_head {
-            Some(old) => contraction.images(&self.canonical, old)?.first().cloned(),
-            None => None,
-        };
-        let context = old_head
-            .as_ref()
-            .filter(|_| new_head.as_ref() == Some(self.canonical.root_operation_id()))
-            .map(|old| self.workspace_context(old))
-            .transpose()?;
-        let locals = self.rewrite_locals(
-            &mut contraction,
-            &heads,
-            &counterparts,
-            &unmapped,
-            context.as_deref(),
-        )?;
-        let mut hub_names = HashMap::new();
-        for base in watched {
-            hub_names.extend(self.hub_names(&base.0)?);
-        }
-        let pending = self.records.pending.ops().iter().cloned().chain(
-            dropped
-                .iter()
-                .map(|op| HubOp(hub_names.get(op).cloned().unwrap_or_else(|| op.clone()))),
-        );
-        self.records.pending = Record::new(pending);
-        self.forget_to_node();
-        // Restoring the state from before the first abandon not yet published, the fix-up
-        // covers every such abandon.
-        let (from, expected) = match (&self.records.fixup_from, self.records.fixup_written) {
-            (Some(from), false) => {
-                let expected = self.records.fixup.as_ref().and_then(|f| f.expected.clone());
-                let expected = expected.and_then(|mut expected| {
-                    let at = LocalOp(OperationId::try_from_hex(&expected.at)?);
-                    let now = self.rekeyed(&at, contraction.dropped(), &unmapped, &locals)?;
-                    expected.at = now.0.hex();
-                    Some(expected)
-                });
-                if let Some(fixup) = &mut self.records.fixup {
-                    fixup.expected.clone_from(&expected);
-                }
-                (Some(from.clone()), expected)
-            }
-            _ => {
-                let expected = match &old_head {
-                    Some(old) => {
-                        self.expectation(&heads, old, &counterparts, &unmapped, &locals)?
-                    }
-                    None => None,
-                };
-                (old_head, expected)
-            }
-        };
-        if let (Some(old), Some(new)) = (from, new_head) {
-            let mut fixup = self.fixup_between(&old, &new)?;
-            fixup.expected = expected;
-            // A fix-up this one replaces may have been written in part, before a crash: the
-            // op head then has its work, so decide as it did.
-            if let Some(replaced) = &self.records.fixup
-                && !self.records.fixup_written
-            {
-                for work in &mut fixup.work {
-                    work.forgotten = replaced
-                        .work
-                        .iter()
-                        .find(|was| was.copy == work.copy)
-                        .and_then(|was| was.forgotten);
-                }
-            }
-            self.records.fixup = Some(fixup);
-            self.records.fixup_written = false;
-            self.records.fixup_from = Some(old);
-        }
-        // Recorded before the op heads move, so that a restart in between resumes the move; a
-        // renaming appended without them doesn't count.
-        let dropped_here = contraction.dropped().clone();
-        // A concurrent command can still name the unstamped native id. Bind it durably
-        // to the same contextual source before either op heads or workspace records move.
-        if context.is_some() {
-            for (old, _) in &unmapped {
-                if counterparts.contains_key(old) {
-                    continue;
-                }
-                if let Some([now]) = locals.get(old).map(Vec::as_slice) {
-                    let canonical = self.canonicalize_unchecked(now)?;
-                    let original = self.loader.op_store().read_operation(&old.0).block_on()?;
-                    self.remember_original(&canonical, &original)?;
-                    counterparts.insert(old.clone(), canonical);
-                }
-            }
-        }
-        counterparts.extend(historical_sources);
-        self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
-        self.finish_local_move(&heads, &locals)?;
-        Ok(true)
+        Err(NodeError::UnreachableHistory)
     }
 
     /// Moves the op heads and the workspaces to the rewrites `locals` of a renaming just

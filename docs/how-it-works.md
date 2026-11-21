@@ -75,9 +75,8 @@ cleanup](guides/snapshots.md) explains these holds and how to handle them.
 Shared history lets `jj op log` show what's happening on every machine, and `jj evolog` follows
 rewrites made anywhere. You can [undo or restore shared
 work](guides/working-across-machines.md#undo-across-machines) from another machine. `jj op
-abandon` also affects every copy's operation log, leaving working-copy files and Git refs
-unchanged. Read the [abandonment rules](guides/working-across-machines.md#abandoning-operations)
-before using it across machines.
+abandon` of operations other machines already have stops that copy syncing: read [Abandoning
+operations](guides/working-across-machines.md#abandoning-operations) before using it.
 
 ## Working copies stay put
 
@@ -131,6 +130,4 @@ machine; your resolution syncs to the others.
 
 You can keep using jj when you can't reach the hub. When you reconnect, the daemon fetches
 missed history, merges local work, and syncs the result. `musubi status` reports failed syncs
-while offline; [monitoring](guides/manage.md#check-syncing) explains those reports. If a machine
-misses an operation abandonment (abandonments are rare), it may need
-[recovery](guides/working-across-machines.md#abandoning-operations).
+while offline; [monitoring](guides/manage.md#check-syncing) explains those reports.

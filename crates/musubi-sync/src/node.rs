@@ -217,7 +217,24 @@ impl NodeAdapter {
         Ok(())
     }
 
+    /// Refuses to go on with drops this node recorded and hasn't published, which only a
+    /// release that passed on `jj op abandon` records.
+    ///
+    /// Compatibility until 2027-02-21: remove this, its calls and its test,
+    /// `drops_recorded_before_upgrading_stop_that_copy`, with the records themselves. Such a
+    /// copy lost history the hive has, so it stops as any other does, publishing nothing. So
+    /// too does one that took an earlier release's records which the hub then lost, as by
+    /// going back, where it once published them again: it needs a new copy, as any does.
+    fn refuse_pending_drops(&self) -> anyhow::Result<()> {
+        if self.repo.pending_drops().is_empty() {
+            Ok(())
+        } else {
+            Err(NodeError::UnreachableHistory.into())
+        }
+    }
+
     fn read_heads(&mut self, known: Option<&OpId>) -> anyhow::Result<Vec<OpId>> {
+        self.refuse_pending_drops()?;
         let base = self.accepted_base()?;
         self.repo.settle()?;
         // This discovers local abandons before pending names are reconciled.
@@ -471,8 +488,8 @@ fn state_of(count: u64, digest: &RecordDigest) -> RecordState {
     }
 }
 
-/// Whether `err` is that this repository lost history the hive has, which no `jj op abandon`
-/// explains and no retry gets past.
+/// Whether `err` is that this repository lost history the hive has, as after `jj op abandon`,
+/// which no retry gets past.
 pub fn history_lost(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
@@ -498,8 +515,7 @@ impl LocalRepo for NodeAdapter {
 
     fn heads(&mut self) -> anyhow::Result<Vec<OpId>> {
         // jj never makes an operation the hub accepted unreachable from the op heads except
-        // through `jj op abandon`, which this node then publishes (docs/internals/design.md,
-        // "Abandoning operations").
+        // through `jj op abandon`, which stops this node syncing for good.
         self.read_heads(None)
     }
 
@@ -841,6 +857,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn pending(&self) -> anyhow::Result<Vec<OpId>> {
+        self.refuse_pending_drops()?;
         Ok(self
             .repo
             .pending_drops()

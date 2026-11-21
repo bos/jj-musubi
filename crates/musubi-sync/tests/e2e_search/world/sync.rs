@@ -122,60 +122,6 @@ impl World {
         self.record_merges(m);
     }
 
-    /// Lets node `m` sync until it has taken the hub's records and realized its head, and
-    /// stops there, before advancing to it.
-    pub fn sync_taking(&mut self, m: usize) {
-        crate::coverage::interrupt_races();
-        self.observe_operation_sources(m);
-        self.touched.insert(m);
-        self.record(format!(
-            "{}: sync until the hub's records are taken and its head realized",
-            self.machine(m)
-        ));
-        self.merge_local_heads(m);
-        let record_input = self.git_record_input(m);
-        let result = (|| -> anyhow::Result<()> {
-            let poll = {
-                let member = &mut self.fx.hive.members[m];
-                member.adapter.poll(&member.core)?
-            };
-            self.deliver(m, poll, false)?;
-            self.fx.hive.members[m].adapter.before_sync()?;
-            self.observe_workspace_fixups(m);
-            if self.fx.hive.members[m]
-                .adapter
-                .repo()
-                .pending_drops()
-                .is_empty()
-            {
-                self.evidence.workspace_trim_inputs.remove(&m);
-            }
-            let mut adopted = false;
-            for _ in 0..64 {
-                if adopted && !self.behind_hub(m) {
-                    return Ok(());
-                }
-                let member = &mut self.fx.hive.members[m];
-                match member.core.step(&mut member.adapter)? {
-                    Step::Adopted => adopted = true,
-                    Step::Send(requests) => {
-                        for request in requests {
-                            self.deliver(m, request, false)?;
-                        }
-                    }
-                    Step::Realized(_) | Step::Merged => {}
-                    step => anyhow::bail!("{step:?} before taking the records"),
-                }
-            }
-            anyhow::bail!("never took the records and realized the hub's head")
-        })();
-        self.finish_git_record_input(m, record_input);
-        if let Err(err) = result {
-            self.fail(&format!("{} taking records: {err:#}", self.machine(m)));
-        }
-        self.record_merges(m);
-    }
-
     pub(super) fn try_sync_partial(
         &mut self,
         m: usize,

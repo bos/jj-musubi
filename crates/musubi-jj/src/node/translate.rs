@@ -259,6 +259,8 @@ impl NodeRepo {
     /// moved a command more than once, the twin furthest up the history is the one jj first
     /// moved. A command whose twins can't be ordered so, or whose twin can't be translated, is
     /// left as it is.
+    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
+    #[allow(dead_code)]
     pub(super) fn unpublished_reparented_sources(
         &mut self,
         unmapped: &[(LocalOp, StoreOperation)],

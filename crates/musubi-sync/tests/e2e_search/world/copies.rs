@@ -225,14 +225,6 @@ impl World {
         self.new_copy(m, true, None);
     }
 
-    /// A new machine `m` joins, as `join_existing_copy` (`existing`) or `clone_copy` would
-    /// have it, but, with `like`, on a host of the same name as that machine's: the hive then
-    /// tells the two apart by a suffix, and the other's aliases change.
-    pub fn join_named(&mut self, m: usize, existing: bool, like: Option<usize>) {
-        assert_eq!(m, self.nodes(), "a machine new to the hive");
-        self.new_copy(m, existing, like);
-    }
-
     fn new_copy(&mut self, m: usize, existing: bool, like: Option<usize>) {
         crate::coverage::interrupt_races();
         let n = self.next();
@@ -347,11 +339,6 @@ impl World {
         self.evidence.join_inputs[m] = join_input;
         self.logical_extras.resize_with(self.nodes(), BTreeSet::new);
         self.logical_extras[m].clear();
-        // A new copy has none of the operations the one it replaces left behind.
-        self.late_ops.resize_with(self.nodes(), Vec::new);
-        self.late_ops[m].clear();
-        self.trims.resize(self.nodes(), 0);
-        self.trims[m] = 0;
         for ws in &self.workspaces[m] {
             let key = format!("{}/{}", self.fx.machine_key(m), ws.name);
             self.evidence.workspace_births.insert(key.clone());

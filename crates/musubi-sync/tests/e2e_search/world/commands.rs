@@ -6,6 +6,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::process::Output;
 
+use musubi_jj::node::ACCEPTED_PUSH;
+use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::op_id::LocalOp;
+use musubi_sync::OpId;
+
 use crate::identity::SourceKey;
 use crate::ledger::Seen;
 use crate::view::Commit;
@@ -18,6 +23,7 @@ use super::OperationHistory;
 use super::PastOp;
 use super::Workspace;
 use super::World;
+use super::operation_header;
 
 /// The three native command boundaries. Preparation and completion differ: an
 /// observation can snapshot too; a historical command creates another operation head.
@@ -87,7 +93,8 @@ impl World {
             .collect()
     }
 
-    /// Those of `older_ops` that `jj op abandon` can abandon: not merges, which it refuses.
+    /// Those of `older_ops` that `jj op abandon` can abandon: not merges, which it refuses,
+    /// and none the hive has, whose abandon stops the copy syncing for good.
     pub fn abandonable_ops(&mut self, m: usize) -> Vec<PastOp> {
         let older = self.older_ops(m);
         let merges: BTreeSet<String> = self
@@ -109,8 +116,39 @@ impl World {
             .collect();
         older
             .into_iter()
-            .filter(|op| !merges.contains(&op.id))
+            .filter(|op| !merges.contains(&op.id) && !self.hive_has(m, &op.id))
             .collect()
+    }
+
+    /// Whether the hive has machine `m`'s operation `op`, as published, or as below an
+    /// operation the hub accepted from `m`, which it may have lost since.
+    fn hive_has(&mut self, m: usize, op: &str) -> bool {
+        self.observe_published_operations();
+        let repo = self.fx.hive.members[m].adapter.repo();
+        let id = OpId::try_from_hex(op).unwrap();
+        let body =
+            futures::executor::block_on(repo.loader().op_store().read_operation(&id)).unwrap();
+        if self
+            .evidence
+            .published_headers
+            .contains(&operation_header(&body))
+        {
+            return true;
+        }
+        let Some(canonical) = repo.canonical_of(&LocalOp(id)) else {
+            return false;
+        };
+        let store = repo.canonical_store();
+        let musubi = self.fx.repo(m).repo_path().join("musubi");
+        ["accepted_base", ACCEPTED_PUSH]
+            .into_iter()
+            .filter_map(|name| fs::read_to_string(musubi.join(name)).ok())
+            .filter_map(|hex| OpId::try_from_hex(hex.trim()))
+            .map(CanonicalOp)
+            .any(|accepted| {
+                store.has_operation(&accepted)
+                    && store.is_ancestor_of(&canonical, &accepted).unwrap()
+            })
     }
 
     /// What machine `m` sees, through a `jj` command: like the command the rule is about to

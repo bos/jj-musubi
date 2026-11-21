@@ -10,9 +10,9 @@ exchanges jj's operation log. Incoming work becomes available in the repo, and y
 to check it out. If another machine rewrites the commit you're using, jj reports a stale working
 copy. Files only change when you update them.
 
-Commits, bookmarks, Git refs and repo operations are synced across repos. A mistaken rewrite,
-restore or operation abandon can reach every machine. Concurrent edits can leave conflicted
-bookmarks or divergent changes, as in local jj workspaces.
+Commits, bookmarks, Git refs and repo operations are synced across repos. A mistaken rewrite
+or restore can reach every machine. Concurrent edits can leave conflicted bookmarks or
+divergent changes, as in local jj workspaces.
 
 The daemon syncs edits once jj records a snapshot. You can opt in to
 [background snapshots](guides/working-across-machines.md#record-saves-automatically) so the daemon

@@ -105,7 +105,6 @@ Other machines stop showing `laptop/default@` as they sync, and the hub stops co
 The copy keeps its local workspaces and returns when a `jj` command records an operation,
 including a snapshot. Other machines' rewrites can make its working copy
 [stale](working-across-machines.md#when-another-machine-rewrites-your-working-copy).
-[Returning after an operation abandon](#rejoin-or-stop-using-jj-musubi) may require a new copy.
 
 A copy deleted and cloned again on the same machine shows beside the new one, both under the
 machine's name with part of their ids, as `laptop-1a2b` and `laptop-3c4d`. `musubi list` and
@@ -136,20 +135,13 @@ no restart is needed.
 
 Recording an operation or changing this setting counts as use. After the inactivity limit,
 the first daemon to notice forgets the copy within a few minutes, as `musubi forget` would.
-It returns when used again, subject to the abandon exception below. `musubi status` shows each
-copy's last use and when it will be forgotten.
+It returns when used again. `musubi status` shows each copy's last use and when it will be
+forgotten.
 
 ### Rejoin, or stop using jj-musubi
 
 After leaving, run `musubi join` to rejoin. Joining a different hive brings the old shared
 history and working-copy names along.
-
-A copy cannot sync again if another machine runs `jj op abandon` while it is away and every
-remaining member takes that abandon: "this repository's history no longer matches the hive's".
-Follow the [recovery
-steps](../troubleshooting.md#rescue-work-in-a-new-copy).
-A copy can also become unable to sync if its first sync after rejoining takes over a day
-([more](working-across-machines.md#abandoning-operations)).
 
 To stop using jj-musubi on a machine:
 

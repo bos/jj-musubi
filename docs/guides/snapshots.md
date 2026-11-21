@@ -91,8 +91,8 @@ jj's garbage collection reclaims unused objects later.
 
 Pruning is limited to operations this copy has never tried to send to the hub. If `musubi`
 refuses a selection, it discards no operations; follow the
-[recovery advice](../troubleshooting.md#accidental-files-and-cleanup). For history already
-sent, see
+[recovery advice](../troubleshooting.md#accidental-files-and-cleanup). History already sent
+stays in the hive: see
 [Abandoning operations](working-across-machines.md#abandoning-operations).
 
 ## Approve the history or change limits

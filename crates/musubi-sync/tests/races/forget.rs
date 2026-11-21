@@ -178,6 +178,39 @@ fn a_copy_without_workspaces_can_be_forgotten_by_name() {
     assert!(!hive.node(0).present_copies().unwrap().1.is_present(&beta));
 }
 
+/// A workspace this machine adds as `beta/default` while the hive has forgotten beta stays
+/// this machine's when beta comes back with work: the name has a `/`, so it is never taken
+/// for beta's, beta's own workspace is shown under a longer name, and no machine shows this
+/// machine's as `alpha/beta/default`.
+#[test]
+fn a_local_name_like_a_forgotten_copys_workspace_stays_local_when_it_returns() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "shared work");
+    hive.sync();
+    let beta = hive.machine_key(1);
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.hive.sync(0).unwrap();
+    let second = hive.env.root().join("alpha-second");
+    hive.repo(0).jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "beta/beta",
+        second.to_str().unwrap(),
+    ]);
+    hive.hive.sync(0).unwrap();
+    assert!(hive.workspace_names(0).contains("beta/beta"));
+    hive.commit(1, "back", "beta returns");
+    hive.sync();
+    hive.assert_converged();
+    let qualified = musubi_jj::workspaces::qualified_name(&beta);
+    let alpha = hive.workspace_names(0);
+    assert!(alpha.contains("beta/beta"), "{alpha:?}");
+    assert!(alpha.contains(&format!("{qualified}/beta")), "{alpha:?}");
+    let shown = hive.workspace_names(1);
+    assert!(!shown.contains("alpha/beta/beta"), "{shown:?}");
+}
+
 /// While the hive has forgotten a copy, no other machine sees its working-copy commit as a
 /// working copy, so a rewrite of it there doesn't move the copy's workspace. The copy
 /// follows it to the rewrite itself, as jj would have moved it.

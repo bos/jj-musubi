@@ -228,26 +228,19 @@ elsewhere. `git.private-commits` limits that copy's Git pushes, not what jj-musu
 
 ## Abandoning operations
 
-`jj op abandon` removes operations from every machine's log, including offline members when
-they return. Remaining operations keep their repo state, but descendants get new ids:
-ids saved from `jj op log` no longer work. jj-musubi logs this as
-`musubi: pass on jj op abandon`.
+Don't run `jj op abandon` on operations the hive already has. The other machines keep them,
+and this copy can't sync without them, so it stops syncing for good, with "this repository
+lost history the hive has (was `jj op abandon` run?)". To carry on, make a new copy and bring
+your work across, as the [new-copy rescue
+steps](../troubleshooting.md#rescue-work-in-a-new-copy) say.
 
-An offline member can return and take the abandon. If all remaining members took an abandon
-while a copy was forgotten or out of the hive, that copy cannot sync again. The same can
-happen to a copy away before its first `musubi join` or `musubi clone` sync finished: after a
-day without contact, or an hour after a hub restart. It reports "this repository's history
-no longer matches the hive's"; follow the [new-copy recovery
-steps](../troubleshooting.md#rescue-work-in-a-new-copy).
+The daemon sends each operation to the hub soon after jj records it, so the hive has nearly
+every operation. Two kinds of abandon are fine:
 
-A command already running when the abandon arrives, such as `jj git fetch`, still syncs its
-work. If another command merges it before jj-musubi sees it, bookmarks changed by the first
-command can conflict. Set them again with `jj bookmark set`, as after `jj op abandon` on one
-machine.
+- Abandoning operations from before this copy joined its hive.
+- Abandoning operations this copy hasn't sent yet, such as snapshots held back by the
+  [snapshot limits](snapshots.md). Use `musubi sync --prune` for those instead: it refuses
+  any operation this copy has tried to send, and keeps your current work. Add `--dry-run` to
+  check without changing anything.
 
-A command finishing on an old operation can also repeat a rebase, leaving identical divergent
-changes. Compare them with `jj log -r '<first> | <second>'` and
-`jj diff --from <first> --to <second>`. Only abandon an unused leaf: check
-`jj log -r '<unwanted-commit>::'` for descendants, and check bookmarks, tags and working copies.
-`jj abandon` rebases descendants onto the parents and removes bookmarks; it does not move
-them to the equivalent copy. Keep versions used by other work or references.
+Abandoning an operation doesn't remove its data from disk, on this machine or any other.

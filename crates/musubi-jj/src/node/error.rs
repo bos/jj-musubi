@@ -178,6 +178,11 @@ pub enum NodeError {
     Lock(#[from] FileLockError),
     #[error("I/O error on {path}")]
     Io { path: PathBuf, source: io::Error },
+    /// `jj op abandon` or `jj op integrate`, which take no lock, changed the op heads while
+    /// musubi moved them, after it had made what it moved them to. The sync step stops there,
+    /// as a crash would, and the next one moves them from where they are.
+    #[error("jj changed the operation heads while musubi moved them; the next sync tries again")]
+    HeadsMoved,
     /// An op head whose history is from before this repository joined, as a `jj` command
     /// makes that loaded the repository before `musubi join` and wrote after it: the hive
     /// takes its work only once a merge with this machine's other op heads does.

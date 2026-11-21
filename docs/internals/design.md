@@ -1228,7 +1228,8 @@ local operation, before any head moves, as taking records does. A restart finish
 from that saved plan alone. Working it out again would need the translation cache, which may
 be gone, and jj may since have removed the only old head that reached an operation the rewrite
 names. Op heads a jj command made in place of all of those the plan moves from are left to the
-ordinary abandon check.
+ordinary abandon check, as are op heads that changed between working out the move and making it
+([Moving op heads](#moving-op-heads)).
 
 ### The fix-up
 
@@ -1523,6 +1524,34 @@ Publication follows dependency order: objects, views, operations with their ance
 then the op head. Together with the record-taking order in [Taking the hub's](#taking-the-hubs),
 this keeps published history readable across interruption and restart.
 [Conformance](conformance.md) states which native boundaries are checked against the models.
+
+### Moving op heads
+
+musubi replaces op heads it read earlier: with its rewrite of the local history after an
+abandon, with the history records it takes name, with a command reparented after a renaming,
+and with the exported copy of a merge. Every jj command but two publishes its operation under
+jj's op-heads lock, in place of the op heads it loaded. `jj op abandon` and `jj op integrate`
+take no lock: an abandon puts its rewrite in place of each op head it read, however long ago it
+read them. A replacement of op heads that changed meanwhile would leave musubi's rewrite of the
+old history beside the newer one, sharing nothing with it above where the abandon rewrote from.
+Merged, by musubi or by the next jj command, the two bring back what the abandon dropped, and
+undo a command made on its rewrite.
+
+So musubi replaces op heads only under jj's op-heads lock, and only while they are exactly those
+it read. Otherwise it moves nothing and works the move out again from the op heads as they are, as
+after a crash before the move, from the plan it saved ([Taking the hub's](#taking-the-hubs)). An
+abandon can still put its rewrite in while musubi moves the op heads, or after. So musubi
+remembers each op head it took out, by its content but for its parents, while what it put in its
+place is still an op head. jj's rewrite of an operation keeps all but its parents: an op head
+beside musubi's with such a rewrite below it, among operations the translation cache doesn't know,
+was built on an abandon that read the op heads before musubi moved them. musubi takes out what it
+put in place of that op head, at once if it sees this as it finishes the move, still under the
+lock, or at the next look for an abandon, which comes before anything reads the op heads to merge
+them. That look then finds the abandon in the history jj left. What it remembers is saved with
+what else `records.json` saves, so a restart forgets it only after a move that saved nothing else.
+A jj command that merges the two first brings back what the abandon dropped, as it does on one
+machine where `jj op abandon` races another command ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)).
 
 ## Compatibility
 

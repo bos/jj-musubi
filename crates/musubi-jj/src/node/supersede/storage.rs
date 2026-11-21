@@ -18,6 +18,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::Realign;
 use super::Records;
+use super::Replaced;
 use super::digests;
 use super::fixup::Fixup;
 
@@ -110,6 +111,10 @@ struct RecordsFile {
     fixup_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     realign: Option<RealignFile>,
+    /// `Records::replaced`: each op head musubi took out, in hex, with its fingerprint, what
+    /// musubi rewrote it to and what it put in its place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    replaced: Vec<(String, String, Vec<String>, Vec<String>)>,
     /// How many renamings of the steps log count: one appended after is from a run cut short.
     #[serde(default)]
     steps: usize,
@@ -428,6 +433,19 @@ impl Records {
                 .transpose()?,
             ..Self::default()
         };
+        let mut replaced = vec![];
+        let ops = |hexes: &[String]| -> Result<Vec<LocalOp>, NodeError> {
+            Ok(parse_ids(&path, hexes)?.into_iter().map(LocalOp).collect())
+        };
+        for (head, fingerprint, images, by) in &file.replaced {
+            replaced.push(Replaced {
+                head: ops(std::slice::from_ref(head))?.swap_remove(0),
+                fingerprint: fingerprint.clone(),
+                images: ops(images)?,
+                by: ops(by)?,
+            });
+        }
+        records.keep_replaced(replaced);
         // Each log has every block that `records.json`, written after it, counts on, unless a
         // power cut lost some of it.
         let damaged = |path: PathBuf| {
@@ -474,6 +492,15 @@ impl NodeRepo {
             fixup_written: records.fixup_written,
             fixup_from: records.fixup_from.as_ref().map(|op| op.0.hex()),
             realign: records.realign.as_ref().map(Realign::to_file),
+            replaced: records
+                .replaced()
+                .into_iter()
+                .map(|replaced| {
+                    let hex = |ops: &[LocalOp]| ops.iter().map(|op| op.0.hex()).collect();
+                    let (images, by) = (hex(&replaced.images), hex(&replaced.by));
+                    (replaced.head.0.hex(), replaced.fingerprint, images, by)
+                })
+                .collect(),
             steps: records.steps,
             earlier: records
                 .earlier

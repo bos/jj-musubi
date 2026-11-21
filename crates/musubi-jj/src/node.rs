@@ -39,6 +39,7 @@ mod error;
 mod expiry;
 mod git;
 mod git_config;
+mod heads;
 mod join;
 #[cfg(test)]
 mod native_contract;
@@ -57,6 +58,7 @@ pub use expiry::Activity;
 pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
+pub use heads::HeadRace;
 pub use join::JoinSummary;
 use join::Joins;
 use originals::Originals;
@@ -138,6 +140,9 @@ struct AbandonWatch {
     /// Whether `check_abandon` noticed a `jj op abandon` since [`NodeRepo::take_abandon_noticed`]
     /// last said so.
     noticed: bool,
+    /// Whether a move of the op heads found them other than they were read since the last
+    /// look for an abandon began, and left the move to work out again.
+    overtaken: bool,
 }
 
 impl AbandonWatch {
@@ -166,6 +171,18 @@ impl AbandonWatch {
     /// Makes the next check look again, whatever it finds, keeping an abandon noticed.
     fn recheck(&mut self) {
         self.checked = None;
+    }
+
+    /// Says that a move of the op heads found them changed since they were read, and moved
+    /// nothing, or took its move out again: the look for an abandon under way looks again.
+    fn overtaken(&mut self) {
+        self.overtaken = true;
+        self.checked = None;
+    }
+
+    /// Whether a move of the op heads was overtaken since this last said so.
+    fn take_overtaken(&mut self) -> bool {
+        std::mem::take(&mut self.overtaken)
     }
 }
 
@@ -220,6 +237,10 @@ pub struct NodeRepo {
     late: Vec<LocalOp>,
     /// What looking for a `jj op abandon` last found.
     abandon: AbandonWatch,
+    /// Whether this handle holds jj's op-heads lock (`heads::HeadsLock`).
+    heads_locked: Arc<std::sync::atomic::AtomicBool>,
+    /// For tests of races: what to run in the next move of op heads.
+    head_races: heads::HeadRaces,
 }
 
 impl Drop for NodeRepo {
@@ -309,6 +330,8 @@ impl NodeRepo {
             records: Records::load(&musubi_dir)?,
             late: vec![],
             abandon: AbandonWatch::default(),
+            heads_locked: Arc::default(),
+            head_races: heads::HeadRaces::default(),
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
             node.joins
@@ -502,22 +525,29 @@ impl NodeRepo {
         colocation: &Colocation,
     ) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let _lock = colocation.lock()?;
-        let merged = self.load_head(None)?;
-        let exported = colocation.export_refs(
-            &self.loader,
-            &LocalOp(merged.op_id().clone()),
-            &|op| self.is_join_point(op),
-            &[],
-            &self.pending_expected(),
-        )?;
-        if exported.0 == *merged.op_id() {
-            return Ok(merged);
+        loop {
+            let merged = self.load_head(None)?;
+            let exported = colocation.export_refs(
+                &self.loader,
+                &LocalOp(merged.op_id().clone()),
+                &|op| self.is_join_point(op),
+                &[],
+                &self.pending_expected(),
+            )?;
+            if exported.0 == *merged.op_id() {
+                return Ok(merged);
+            }
+            // Only while the merge is still the op head: a `jj` command in a workspace that
+            // doesn't take the colocated lock, or `jj op abandon`, which takes no lock, can
+            // have replaced it. Then the heads are merged and exported again, the colocated
+            // lock held throughout, so that `.git` is never ahead of the op heads it shows.
+            let merged = LocalOp(merged.op_id().clone());
+            let from = HashMap::from([(merged.clone(), vec![exported.clone()])]);
+            let new = std::slice::from_ref(&exported);
+            if self.replace_heads(std::slice::from_ref(&merged), &from, new, true)? {
+                return self.repo_at(&exported);
+            }
         }
-        self.loader
-            .op_heads_store()
-            .update_op_heads(std::slice::from_ref(merged.op_id()), &exported.0)
-            .block_on()?;
-        self.repo_at(&exported)
     }
 
     /// The repository as of its local operation `id`.

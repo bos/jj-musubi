@@ -155,19 +155,37 @@ impl NodeRepo {
             self.insert_map(rewrite.clone(), canonical.clone())?;
             normalized.insert(canonical, rewrite);
         }
-        for head in self.local_heads()? {
-            if let Some(rewrite) = self
-                .canonical_of(&head)
-                .and_then(|canonical| normalized.get(&canonical))
-                && *rewrite != head
-            {
-                self.loader
-                    .op_heads_store()
-                    .update_op_heads(std::slice::from_ref(&head.0), &rewrite.0)
-                    .block_on()?;
-                rewrites.insert(head, vec![rewrite.clone()]);
+        // Read again if a `jj` command changes the op heads before they move.
+        let moved = loop {
+            let heads = self.local_heads()?;
+            let mut from = HashMap::new();
+            for head in &heads {
+                if let Some(rewrite) = self
+                    .canonical_of(head)
+                    .and_then(|canonical| normalized.get(&canonical))
+                    && rewrite != head
+                {
+                    from.insert(head.clone(), vec![rewrite.clone()]);
+                }
             }
-        }
+            if from.is_empty() {
+                break from;
+            }
+            let mut seen = HashSet::new();
+            let new: Vec<LocalOp> = heads
+                .iter()
+                .flat_map(|head| {
+                    from.get(head)
+                        .cloned()
+                        .unwrap_or_else(|| vec![head.clone()])
+                })
+                .filter(|op| seen.insert(op.clone()))
+                .collect();
+            if self.replace_heads(&heads, &from, &new, true)? {
+                break from;
+            }
+        };
+        rewrites.extend(moved);
         self.late.clear();
         self.move_workspaces(&rewrites)
     }

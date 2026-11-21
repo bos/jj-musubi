@@ -404,16 +404,17 @@ impl NodeRepo {
 
     /// Moves the op heads to their rewrites, and to `head` too if given, keeping the maximal
     /// ones: `heads := max(images(heads) ∪ {head})`. `merged`, a merge of some of those, goes
-    /// in place of the ones it merges.
+    /// in place of the ones it merges. Returns whether it moved them, as
+    /// [`Self::publish_heads`] does.
     pub(super) fn move_heads(
         &mut self,
         heads: &[LocalOp],
         locals: &HashMap<LocalOp, Vec<LocalOp>>,
         head: Option<&LocalOp>,
         merged: Option<&LocalOp>,
-    ) -> Result<(), NodeError> {
+    ) -> Result<bool, NodeError> {
         let new = self.new_heads(heads, locals, head, merged)?;
-        self.publish_heads(heads, &new)
+        self.publish_heads(heads, locals, &new)
     }
 
     /// The op heads [`Self::move_heads`] moves `heads` to.
@@ -439,32 +440,27 @@ impl NodeRepo {
         Ok(new)
     }
 
-    /// Makes `new` the op heads in place of `heads`.
+    /// Makes `new` the op heads in place of `heads`, the op heads as read before working out
+    /// the move, each of which became what `from` says, if they are still those
+    /// ([`Self::replace_heads`]). Returns whether it moved them. Where it didn't, as a `jj`
+    /// command or `jj op abandon` changed the op heads meanwhile, the move is left to work
+    /// out again from the op heads as they are, and the next look for an abandon does so.
     pub(super) fn publish_heads(
         &mut self,
         heads: &[LocalOp],
+        from: &HashMap<LocalOp, Vec<LocalOp>>,
         new: &[LocalOp],
-    ) -> Result<(), NodeError> {
-        let old: Vec<OperationId> = heads
-            .iter()
-            .filter(|h| !new.contains(h))
-            .map(|h| h.0.clone())
-            .collect();
-        // The new heads go in before the old come out, the last with them: a crash in between
-        // leaves extra heads, which jj merges, rather than losing any.
-        let op_heads = self.loader.op_heads_store().clone();
-        if let Some((last, rest)) = new.split_last() {
-            for head in rest {
-                op_heads.update_op_heads(&[], &head.0).block_on()?;
-            }
-            if self.records.stop == Some(TakingStop::Publishing) {
-                // As a crash in jj's update leaves them, its new op head in.
-                op_heads.update_op_heads(&[], &last.0).block_on()?;
-                self.stop_taking(TakingStop::Publishing)?;
-            }
-            op_heads.update_op_heads(&old, &last.0).block_on()?;
+    ) -> Result<bool, NodeError> {
+        if self.records.stop == Some(TakingStop::Publishing) {
+            // As a crash in jj's update leaves them, its new op heads in.
+            self.replace_heads(heads, from, new, false)?;
+            self.stop_taking(TakingStop::Publishing)?;
         }
-        Ok(())
+        let moved = self.replace_heads(heads, from, new, true)?;
+        if !moved {
+            self.abandon.overtaken();
+        }
+        Ok(moved)
     }
 
     /// The op heads `heads` moved to their rewrites, with `head` too if given, the maximal

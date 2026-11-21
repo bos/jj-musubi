@@ -32,6 +32,7 @@ use self::normalize::fact;
 use self::storage::Step;
 use super::NodeError;
 use super::NodeRepo;
+use super::heads::Replaced;
 
 use crate::canonical::CanonicalError;
 use crate::canonical::Contraction;
@@ -91,6 +92,11 @@ pub(super) struct Records {
     /// Where records this node took move its op heads and workspaces, until they have: a
     /// restart moves them there (`realign_heads`).
     realign: Option<Realign>,
+    /// The op heads musubi took out lately, while what it put in their place is still an op
+    /// head (`NodeRepo::retire_overtaken`). Saved with what else is saved, as after rewriting
+    /// this node's history: a move with nothing else to save leaves it unsaved, to go with
+    /// a restart, rather than write it on every merge.
+    replaced: std::sync::Mutex<Vec<Replaced>>,
     /// How many renamings this node made: applied records', and rewrites of this node's own
     /// drops.
     steps: usize,
@@ -233,6 +239,53 @@ fn dedup<Op: Clone + Eq + std::hash::Hash>(ops: impl IntoIterator<Item = Op>) ->
 }
 
 impl Records {
+    /// Watches the op heads `replaced` names, which musubi has just taken out. Where one is
+    /// itself what musubi put in place of one it watches already, what replaced it takes its
+    /// place there too.
+    pub(super) fn watch_replaced(&self, replaced: Vec<Replaced>) {
+        if replaced.is_empty() {
+            return;
+        }
+        let mut watched = self.replaced();
+        for earlier in &mut watched {
+            for now in &replaced {
+                for (ops, with) in [
+                    (&mut earlier.images, &now.images),
+                    (&mut earlier.by, &now.by),
+                ] {
+                    if ops.contains(&now.head) {
+                        ops.retain(|op| *op != now.head);
+                        ops.extend(with.iter().cloned());
+                        *ops = dedup(std::mem::take(ops));
+                    }
+                }
+            }
+        }
+        watched.extend(replaced);
+        self.keep_replaced(watched);
+    }
+
+    /// Whether any op head musubi took out is watched.
+    pub(super) fn watching_replaced(&self) -> bool {
+        !self.replaced_lock().is_empty()
+    }
+
+    /// The op heads musubi took out that are watched.
+    pub(super) fn replaced(&self) -> Vec<Replaced> {
+        self.replaced_lock().clone()
+    }
+
+    /// Watches only `replaced`.
+    pub(super) fn keep_replaced(&self, replaced: Vec<Replaced>) {
+        *self.replaced_lock() = replaced;
+    }
+
+    fn replaced_lock(&self) -> std::sync::MutexGuard<'_, Vec<Replaced>> {
+        self.replaced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Adds a step, a renaming with what it dropped and the sources it established, to what
     /// the steps compose, leaving its counting to the caller. Each lookup composes them, so
     /// that adding one costs only its own size, as reading them all does.

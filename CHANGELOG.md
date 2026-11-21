@@ -14,6 +14,11 @@
 - Keep the repo usable when `jj op abandon` removes an old operation head while the daemon
   is putting rewritten history back.
 
+- Two `jj op abandon` commands in quick succession could bring back the operations the
+  second one dropped, and undo the `jj` command run after it. Upgrading doesn't repair a
+  repository this already happened to: abandon those operations again, and run the command
+  again.
+
 - After `jj op abandon`, a daemon that stopped partway through rewriting local history, and
   lost its translation cache before restarting, finishes the rewrite instead of failing every
   sync with "its local operation is missing". No action is needed on upgrading.

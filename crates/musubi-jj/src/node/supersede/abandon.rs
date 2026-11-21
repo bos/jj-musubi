@@ -138,40 +138,64 @@ impl NodeRepo {
     /// even what was beside them, as a realization merged with them, and musubi puts that
     /// back, so an op head read before is one it no longer reaches.
     pub fn check_abandon(&mut self) -> Result<bool, NodeError> {
-        let base = self.stored_base();
-        // This machine's push the hub took, which the base may not have moved to yet, as where
-        // a sync stopped right after the reply, or lost it: an abandon of it is one of an
-        // operation the hub accepted all the same. Both it and the base outlive the hub going
-        // back: another machine may have taken them (design.md, "Publishing an abandon").
-        let pushed = self
-            .stored_op(ACCEPTED_PUSH)
-            .filter(|pushed| Some(pushed) != base.as_ref());
-        let heads = self.local_heads()?;
-        let checked = AbandonObservation {
-            heads,
-            base,
-            accepted_push: pushed,
-        };
-        // A move that taking records left to do, as after an error, is done whether or not
-        // the op heads changed since.
-        if self.abandon.checked(&checked) && self.records.realign.is_none() {
-            return Ok(false);
+        let mut noticed = false;
+        // Only a move overtaken during this look makes it look again.
+        self.abandon.take_overtaken();
+        loop {
+            let base = self.stored_base();
+            // This machine's push the hub took, which the base may not have moved to yet, as
+            // where a sync stopped right after the reply, or lost it: an abandon of it is one
+            // of an operation the hub accepted all the same. Both it and the base outlive the
+            // hub going back: another machine may have taken them (design.md, "Publishing an
+            // abandon").
+            let pushed = self
+                .stored_op(ACCEPTED_PUSH)
+                .filter(|pushed| Some(pushed) != base.as_ref());
+            let heads = self.local_heads()?;
+            let checked = AbandonObservation {
+                heads,
+                base,
+                accepted_push: pushed,
+            };
+            // A move that taking records left to do, as after an error, is done whether or
+            // not the op heads changed since.
+            if self.abandon.checked(&checked) && self.records.realign.is_none() {
+                if noticed {
+                    self.abandon.found(checked, noticed);
+                }
+                return Ok(noticed);
+            }
+            // musubi's own replacement of op heads that a `jj op abandon` rewrote meanwhile,
+            // taken out first, or it would hide that abandon.
+            if !self.retire_overtaken()?.is_empty() {
+                noticed = true;
+                continue;
+            }
+            let moved = self.realign_heads(&checked.heads)?;
+            // A move resumed from a plan, which the op heads changed under, is resumed again
+            // from them as they are, before anything else reads them.
+            if self.abandon.take_overtaken() {
+                noticed |= moved;
+                continue;
+            }
+            // Inspect both accepted histories together. The push may contain a surviving
+            // operation above a base that was dropped in full: treating it as new while
+            // inspecting only the base loses its original identity and presence.
+            let watched: Vec<HubOp> = checked
+                .base
+                .iter()
+                .chain(checked.accepted_push.iter())
+                .cloned()
+                .collect();
+            // A move resumed rewrote local history, as noticing an abandon does: what was
+            // staged on it is stale.
+            noticed |= self.notice_abandons(&watched)? || moved;
+            // A move the op heads changed under is worked out again from them as they are.
+            if !self.abandon.take_overtaken() {
+                self.abandon.found(checked, noticed);
+                return Ok(noticed);
+            }
         }
-        let moved = self.realign_heads(&checked.heads)?;
-        // Inspect both accepted histories together. The push may contain a surviving
-        // operation above a base that was dropped in full: treating it as new while
-        // inspecting only the base loses its original identity and presence.
-        let watched: Vec<HubOp> = checked
-            .base
-            .iter()
-            .chain(checked.accepted_push.iter())
-            .cloned()
-            .collect();
-        // A move resumed rewrote local history, as noticing an abandon does: what was staged
-        // on it is stale.
-        let noticed = self.notice_abandons(&watched)? || moved;
-        self.abandon.found(checked, noticed);
-        Ok(noticed)
     }
 
     /// Whether a local operation that stands for a canonical one, as `counterparts` say, is
@@ -236,10 +260,17 @@ impl NodeRepo {
             // jj putting each new op head in before taking the old ones out, or a `jj`
             // command made: those it moves from move, each where it was to, and the rest stay.
             let beside = !ours && heads.iter().any(|head| realign.from.contains_key(head));
-            if ours && now != to {
-                self.publish_heads(heads, &realign.to)?;
+            let published = if ours && now != to {
+                self.publish_heads(heads, &realign.from, &realign.to)?
             } else if beside {
-                self.move_heads(heads, &realign.from, None, None)?;
+                self.move_heads(heads, &realign.from, None, None)?
+            } else {
+                true
+            };
+            // The op heads changed since `heads` were read: the plan stays, for the look under
+            // way to resume from them as they are.
+            if !published {
+                return Ok(false);
             }
             let moved = ours || beside;
             if moved {
@@ -274,7 +305,7 @@ impl NodeRepo {
                 return Ok(true);
             }
         }
-        let mut moved = false;
+        let mut from = HashMap::new();
         for head in heads {
             let Some(canonical) = self.canonical_of(head) else {
                 continue;
@@ -283,17 +314,23 @@ impl NodeRepo {
                 && *now != canonical
                 && let Some(local) = self.local_of(now)
             {
-                self.loader
-                    .op_heads_store()
-                    .update_op_heads(std::slice::from_ref(&head.0), &local.0)
-                    .block_on()?;
-                moved = true;
+                from.insert(head.clone(), vec![local]);
             }
         }
-        if moved {
-            self.move_workspaces(&HashMap::new())?;
+        if from.is_empty() {
+            return Ok(false);
         }
-        Ok(moved)
+        let new = dedup(heads.iter().flat_map(|head| {
+            from.get(head)
+                .cloned()
+                .unwrap_or_else(|| vec![head.clone()])
+        }));
+        if !self.replace_heads(heads, &from, &new, true)? {
+            self.abandon.overtaken();
+            return Ok(false);
+        }
+        self.move_workspaces(&HashMap::new())?;
+        Ok(true)
     }
 
     /// Notices a `jj op abandon` of operations the hub accepted: `base`, a hub name for an
@@ -302,11 +339,27 @@ impl NodeRepo {
     /// match, and records the drops to publish, with the fix-up that goes first. Returns
     /// whether it noticed one.
     pub fn notice_abandon(&mut self, base: &HubOp) -> Result<bool, NodeError> {
-        // Never on a move a restart left pending: it would be worked out again, from what the
-        // translation cache may have lost.
-        let heads = self.local_heads()?;
-        let moved = self.realign_heads(&heads)?;
-        Ok(self.notice_abandons(std::slice::from_ref(base))? || moved)
+        let mut noticed = false;
+        self.abandon.take_overtaken();
+        loop {
+            // As in `check_abandon`.
+            if !self.retire_overtaken()?.is_empty() {
+                noticed = true;
+                continue;
+            }
+            // Never on a move a restart left pending: it would be worked out again, from what
+            // the translation cache may have lost.
+            let heads = self.local_heads()?;
+            let moved = self.realign_heads(&heads)?;
+            if self.abandon.take_overtaken() {
+                noticed |= moved;
+                continue;
+            }
+            noticed |= self.notice_abandons(std::slice::from_ref(base))? || moved;
+            if !self.abandon.take_overtaken() {
+                return Ok(noticed);
+            }
+        }
     }
 
     fn notice_abandons(&mut self, watched: &[HubOp]) -> Result<bool, NodeError> {
@@ -632,14 +685,19 @@ impl NodeRepo {
             }
         }
         self.records.realign = Some(Realign {
-            from,
+            from: from.clone(),
             to: to.clone(),
             canonical,
             rewrites: locals.clone(),
         });
         self.save_records()?;
         self.stop_taking(TakingStop::Heads)?;
-        self.publish_heads(heads, &to)?;
+        // Changed since they were read, the op heads are left to the saved plan, which the
+        // look for an abandon under way resumes from them as they are, as after a crash here.
+        if !self.publish_heads(heads, &from, &to)? {
+            self.forget_local_caches();
+            return Ok(());
+        }
         self.stop_taking(TakingStop::Workspaces)?;
         self.move_workspaces(locals)?;
         let realign = self.records.realign.take().expect("saved above");

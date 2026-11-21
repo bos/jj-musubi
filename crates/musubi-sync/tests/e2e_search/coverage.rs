@@ -544,6 +544,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     // The search runs native abandon to completion before the next daemon step.
     ("abandon_put_back_survives_the_native_head_removal", None),
+    // It runs native commands between the daemon's steps, never between the daemon reading
+    // the op heads and moving them.
+    ("jj_commands_while_the_daemon_rewrites_an_abandon", None),
+    ("a_second_abandon_while_the_daemon_moves_the_op_heads", None),
+    ("a_second_abandon_while_the_daemon_rewrites_the_first", None),
+    (
+        "a_second_abandon_merged_before_the_daemon_looks_again",
+        None,
+    ),
     (
         "a_native_serial_merge_can_repeat_a_rebase_after_abandon",
         Some(&["op_abandon", "at_op"]),

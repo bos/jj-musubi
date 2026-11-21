@@ -511,7 +511,7 @@ impl NodeRepo {
         let selected = self.publication_selection(selectors, &ops)?;
         let workspaces = self.lock_cleanup_workspaces(&plan.source()?)?;
         let op_heads = self.loader.op_heads_store().clone();
-        let lock = op_heads.lock().block_on()?;
+        let lock = self.lock_heads(&*op_heads)?;
         let source = self.locked_cleanup_source(&plan, &ops)?;
         let kept = self.intentional_predecessors(&ops, &source.intentional)?;
         let contraction = self.contract_unpublished(&source, &ops, &selected)?;
@@ -525,11 +525,14 @@ impl NodeRepo {
             &contraction.movements,
             &checkpoint,
         )?;
-        op_heads
-            .update_op_heads(std::slice::from_ref(&source.head.0), &checkpoint)
-            .block_on()?;
-        drop(lock);
         let checkpoint = LocalOp(checkpoint);
+        let from = HashMap::from([(source.head.clone(), vec![checkpoint.clone()])]);
+        let read = std::slice::from_ref(&source.head);
+        // `jj op abandon` takes no lock: one can have changed the head since it was read.
+        if !self.replace_heads(read, &from, std::slice::from_ref(&checkpoint), true)? {
+            return Err(PublicationError::OutgoingChanged.into());
+        }
+        drop(lock);
         self.finish_cleanup(workspaces, &checkpoint)?;
         Ok(CleanupEffect {
             pruned: plan.selected.len(),

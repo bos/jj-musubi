@@ -13,7 +13,6 @@ use jj_lib::backend::CommitId;
 use jj_lib::lock::FileLock;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_heads_store::OpHeadsStore;
-use jj_lib::op_heads_store::OpHeadsStoreLock;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceNameBuf;
@@ -22,6 +21,7 @@ use pollster::FutureExt as _;
 use super::super::NodeError;
 use super::super::NodeRepo;
 use super::super::git::Colocation;
+use super::super::heads::HeadsLock;
 #[cfg(test)]
 use super::super::native_contract;
 use super::super::translate::target_of;
@@ -77,7 +77,7 @@ enum Preparation {
 /// The publication locks: jj's colocated import/export lock, in a colocated repository, and
 /// the op heads lock. Dropped, the op heads lock goes first, as [`Self::release`] does.
 struct PublicationLocks<'a> {
-    heads: Box<dyn OpHeadsStoreLock + 'a>,
+    heads: HeadsLock<'a>,
     git: Option<FileLock>,
 }
 
@@ -494,7 +494,7 @@ impl NodeRepo {
         if git.is_some() {
             native_contract::emit(native_contract::Event::GitLocked);
         }
-        let heads = op_heads_store.lock().block_on()?;
+        let heads = self.lock_heads(op_heads_store)?;
         #[cfg(test)]
         native_contract::emit(native_contract::Event::HeadsLocked);
         let mut now = self.local_heads()?;
@@ -705,8 +705,13 @@ impl NodeRepo {
         };
         if beside.taking {
             // The hub's head, named as records this machine is taking name the history: the
-            // op heads move there, renamed, at once (`NodeRepo::switch_to_taken`).
-            self.switch_to_taken(Some(head), merged.as_ref())?;
+            // op heads move there, renamed, at once (`NodeRepo::switch_to_taken`). If `jj op
+            // abandon`, which takes no lock, changed them meanwhile, the records are held but
+            // the realization isn't published: the step fails, as a crash here would, and the
+            // next one resumes from the plan the records were held with.
+            if !self.switch_to_taken(Some(head), merged.as_ref())? {
+                return Err(NodeError::HeadsMoved);
+            }
             for other in &apart {
                 self.loader
                     .op_heads_store()

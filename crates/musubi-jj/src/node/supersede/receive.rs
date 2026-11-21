@@ -567,15 +567,17 @@ impl NodeRepo {
     /// ([`Self::prepare_again_if_moved`]). Does nothing if no records are being taken, or the
     /// op heads are there already. The caller moves the workspaces after
     /// ([`Self::move_taken_workspaces`]), holding no lock of jj's: jj takes a workspace's lock
-    /// before its colocated git lock.
+    /// before its colocated git lock. Returns false if the op heads changed between reading
+    /// them and moving them ([`Self::publish_heads`]): the records are held then, and the op
+    /// heads left to the look for an abandon, as after a crash once they are held.
     pub(in super::super) fn switch_to_taken(
         &mut self,
         head: Option<&LocalOp>,
         merged: Option<&LocalOp>,
-    ) -> Result<(), NodeError> {
+    ) -> Result<bool, NodeError> {
         self.prepare_again_if_moved()?;
         let Some(mut taking) = self.records.taking.take() else {
-            return Ok(());
+            return Ok(true);
         };
         if !taking.switched {
             // Translation no longer names the history as `taking` does, whether this fails,
@@ -609,14 +611,20 @@ impl NodeRepo {
                 canonical,
                 rewrites: HashMap::new(),
             };
+            let from = realign.from.clone();
             self.hold_taken(&mut taking, realign)?;
             self.stop_taking(TakingStop::Heads)?;
-            self.publish_heads(&heads, &to)?;
+            let moved = self.publish_heads(&heads, &from, &to)?;
             self.forget_local_caches();
+            // Changed since they were read, the op heads are left to the plan `hold_taken`
+            // saved, as after a crash here: the records are held, so not taken again.
+            if !moved {
+                return Ok(false);
+            }
             taking.switched = true;
         }
         self.records.taking = Some(taking);
-        Ok(())
+        Ok(true)
     }
 
     /// Whether one of the local operations `canonical` names that stands for an operation a
@@ -822,7 +830,7 @@ impl NodeRepo {
         records: &[Record],
     ) -> Result<Option<HubOp>, NodeError> {
         self.prepare_records(prefix, records)?;
-        self.switch_to_taken(None, None)?;
+        // As the records name it, whatever the op heads are.
         let base = self
             .records
             .taking
@@ -830,7 +838,13 @@ impl NodeRepo {
             .expect("prepared above")
             .base
             .clone();
-        self.move_taken_workspaces()?;
+        if self.switch_to_taken(None, None)? {
+            self.move_taken_workspaces()?;
+        } else {
+            // Held, but the op heads changed meanwhile: they move from where they are, as
+            // after a crash once the records are held.
+            self.check_abandon()?;
+        }
         Ok(base)
     }
 }

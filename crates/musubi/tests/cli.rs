@@ -2709,14 +2709,17 @@ fn a_copy_can_join_again_after_leaving() {
 
 /// A hub that lost its directory knows none of its hives; one `musubi join`, in one copy,
 /// makes a hive again under its id, and the other copies, their work since included, fill
-/// it as they sync, with every machine's working copy under its own name.
+/// it as they sync, with every machine's working copy under its own name. Moving to another
+/// hub is `musubi join --hub` in each copy: the first makes the hive again there, under its
+/// id, and the rest join it, carrying on as before.
 #[test]
-fn copies_make_a_lost_hive_again() {
+fn copies_make_a_lost_hive_again_on_its_hub_or_another() {
     let env = TestEnv::with_real_op_times();
     let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
-    // Stopped before the hub.
+    let new = Hub::start_in(&env, &mut logs, "newhub");
+    // Stopped before the hubs.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     hub.kill();
@@ -2745,21 +2748,8 @@ fn copies_make_a_lost_hive_again() {
         let listed: Vec<&str> = list.lines().collect();
         assert_eq!(listed, names, "{list}");
     }
-}
 
-/// Moving to another hub is `musubi join --hub` in each copy: the first makes the hive
-/// again there, under its id, and the rest join it, carrying on as before.
-#[test]
-fn copies_move_to_another_hub() {
-    let env = TestEnv::with_real_op_times();
-    let _filters = snapshot_filters(&env);
-    let mut logs = Logs::default();
-    let mut old = Hub::start(&env, &mut logs);
-    let new = Hub::start_in(&env, &mut logs, "newhub");
-    // Stopped before the hubs.
-    let mut daemons = Daemons::default();
-    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &old);
-    old.kill();
+    hub.kill();
     let out = musubi_in(&env, &logs, &alpha, &["join", "--hub", &new.url]);
     insta::assert_snapshot!(out, @"Made hive alpha again from this repository");
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &new.url]);
@@ -3271,8 +3261,10 @@ fn membership(repo: &TestRepo) -> String {
 
 /// With its hub gone, `musubi sync` through the daemon says why at once, as it does without
 /// a daemon, rather than once the sync's requests time out, and `musubi list` says it too.
+/// `musubi leave` fails, leaving the repository part of its hive, served and with its working
+/// copy; `--force` leaves without telling the hive.
 #[test]
-fn a_sync_says_at_once_that_the_hub_is_gone() {
+fn a_copy_whose_hub_is_gone_says_so_at_once_and_leaves_only_if_forced() {
     let env = TestEnv::with_real_op_times();
     let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
@@ -3297,11 +3289,46 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
         here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
+    let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
+    insta::assert_snapshot!(err, @"
+    Error: couldn't tell hive alpha that this repository leaves: no hub is serving $ROOT/hub
+    Hint: `musubi leave --force` leaves without telling the hive
+    ");
+    assert_eq!(membership(&alpha), "joined");
+    // It keeps its working copy, though on the empty commit its forget abandoned.
+    let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy", "-T", NAMES]);
+    assert!(
+        workspaces.lines().any(|line| line == "alpha"),
+        "{workspaces}"
+    );
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub: no hub is serving $ROOT/hub. This machine's copies:
+      alpha
+        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    ");
+    assert!(log(&alpha).contains("start"));
     // As soon as the hub is back, a sync goes through: what the daemon knew is not stale.
     hub = Hub::start(&env, &mut logs);
     insta::assert_snapshot!(hub.greeting, @"Serving 1 hive from $ROOT/hub");
     let out = musubi_in(&env, &logs, &alpha, &["sync"]);
     insta::assert_snapshot!(out, @"");
+    hub.kill();
+    let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
+    insta::assert_snapshot!(out, @"This repository has left hive alpha.");
+    assert_eq!(membership(&alpha), "left");
+    // With a new commit to work on, which no next work of its in the hive will make now.
+    let at = alpha.jj(&[
+        "log",
+        "--ignore-working-copy",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "if(hidden, \"hidden\", \"visible\")",
+    ]);
+    assert_eq!(at.trim(), "visible");
 }
 
 /// A daemon whose hub runs a newer release runs `musubi.upgrade-command`, telling it the
@@ -3692,59 +3719,6 @@ fn serve_newer_hub(dir: &Path) -> tokio::runtime::Runtime {
         }
     });
     runtime
-}
-
-/// `musubi leave` with its hub gone fails, leaving the repository part of its hive, served
-/// and with its working copy; `--force` leaves without telling the hive.
-#[test]
-fn leaving_needs_the_hub_unless_forced() {
-    let env = TestEnv::with_real_op_times();
-    let _filters = snapshot_filters(&env);
-    let mut logs = Logs::default();
-    let mut hub = Hub::start(&env, &mut logs);
-    // Stopped before the hub.
-    let mut daemons = Daemons::default();
-    let alpha = env.init_repo("alpha");
-    logs.daemon_of(&env, &alpha);
-    daemons.of(&alpha);
-    alpha.write_file("a", "a");
-    alpha.jj(&["commit", "-m", "start"]);
-    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
-    hub.kill();
-    let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
-    insta::assert_snapshot!(err, @"
-    Error: couldn't tell hive alpha that this repository leaves: no hub is serving $ROOT/hub
-    Hint: `musubi leave --force` leaves without telling the hive
-    ");
-    assert_eq!(membership(&alpha), "joined");
-    // It keeps its working copy, though on the empty commit its forget abandoned.
-    let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy", "-T", NAMES]);
-    assert!(
-        workspaces.lines().any(|line| line == "alpha"),
-        "{workspaces}"
-    );
-    let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    insta::assert_snapshot!(list, @"
-    Hub $ROOT/hub: no hub is serving $ROOT/hub. This machine's copies:
-      alpha
-        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub
-    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
-    ");
-    assert!(log(&alpha).contains("start"));
-    let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
-    insta::assert_snapshot!(out, @"This repository has left hive alpha.");
-    assert_eq!(membership(&alpha), "left");
-    // With a new commit to work on, which no next work of its in the hive will make now.
-    let at = alpha.jj(&[
-        "log",
-        "--ignore-working-copy",
-        "-r",
-        "@",
-        "--no-graph",
-        "-T",
-        "if(hidden, \"hidden\", \"visible\")",
-    ]);
-    assert_eq!(at.trim(), "visible");
 }
 
 /// The daemon reopens the repository after a failed sync, so it carries on after changes

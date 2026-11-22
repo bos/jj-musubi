@@ -2838,6 +2838,131 @@ fn copies_leave_a_removed_hive() {
     assert!(log(&alpha).contains("start"));
 }
 
+/// `musubi pause` in one copy stops every machine syncing the hive, one whose daemon was
+/// stopped at the time included, once it comes back, and `musubi status` and `musubi sync` say
+/// so everywhere; jj works meanwhile, and nothing can join. `musubi pause --cancel`, from any
+/// copy, lets the work done meanwhile sync. Breaking the hub's check, or the daemon's hold,
+/// fails the snapshots of what `musubi sync` and `musubi status` print.
+#[test]
+fn a_paused_hive_holds_every_machine_until_cancelled() {
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["pause", "--help"]), @"
+    Stop every machine syncing the hive of the repository in the current directory, until `musubi pause
+    --cancel`.
+
+    The hub refuses the hive's syncs as soon as it's paused. Each machine's daemon finds out at its next
+    attempt to sync, within half a minute, or once the machine is back online, and waits; from then on,
+    `musubi status` there says who paused the hive and when, as `musubi sync` does. jj works as usual
+    meanwhile: work done on a machine stays on it until the pause is lifted, and then syncs. `musubi
+    join` and `musubi clone` refuse a paused hive.
+
+    It doesn't sync first, so it works in a copy whose syncing fails. Pausing a hive that is paused
+    already says who paused it, and when.
+
+    Usage: musubi pause [OPTIONS]
+
+    Options:
+          --cancel
+              Lift the pause instead, from any copy: every machine syncs again, as before
+
+      -h, --help
+              Print help (see a summary with '-h')
+
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    ");
+    // Beta is offline as the hive pauses.
+    musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
+    let out = musubi_in(&env, &logs, &alpha, &["pause"]);
+    insta::assert_snapshot!(out, @"Paused hive alpha: nothing syncs with it until `musubi pause --cancel`.");
+    let out = musubi_in(&env, &logs, &alpha, &["pause"]);
+    insta::assert_snapshot!(out, @"Hive alpha was paused already (by alpha, N ago).");
+    let (_, hints) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(hints, @"
+    Warning: Hive alpha is paused (by alpha, N ago), so nothing syncs.
+    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    ");
+
+    // jj works on both machines meanwhile, and nothing syncs.
+    alpha.write_file("from-alpha", "alpha");
+    alpha.jj(&["commit", "-m", "alpha while paused"]);
+    beta.write_file("from-beta", "beta");
+    beta.jj(&["commit", "-m", "beta while paused"]);
+    let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    insta::assert_snapshot!(err, @"
+    Error: hive alpha is paused (by alpha, N ago)
+    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    ");
+    // Beta's daemon, back, hears at its first sync, and waits.
+    musubi_in(&env, &logs, &beta, &["daemon", "start"]);
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    insta::assert_snapshot!(err, @"
+    Error: hive alpha is paused (by alpha, N ago)
+    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    ");
+    let (_, hints) = status_in(&env, &logs, &beta);
+    insta::assert_snapshot!(hints, @"
+    Warning: Hive alpha is paused (by alpha, N ago), so nothing syncs.
+    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    ");
+    let clone = env.root().join("clone");
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &alpha,
+        &["clone", "alpha", clone.to_str().unwrap(), "--hub", &hub.url],
+    );
+    insta::assert_snapshot!(err, @"Error: hive alpha is paused (by alpha); it can be joined once `musubi pause --cancel` is run in one of its copies");
+    assert!(!log(&alpha).contains("beta while paused"));
+    assert!(!log(&beta).contains("alpha while paused"));
+
+    // Beta's daemon waited rather than retrying, which logs each failure as a warning.
+    let daemon_log = fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();
+    let paused: Vec<&str> = daemon_log
+        .lines()
+        .filter(|line| line.contains("the hive is paused"))
+        .collect();
+    assert!(
+        !paused.is_empty()
+            && paused
+                .iter()
+                .all(|line| line.contains("waiting for the pause")),
+        "{daemon_log}"
+    );
+
+    // Lifted from another copy, everything syncs, with nothing lost: beta sends its work as
+    // the pause lifts, and the daemons, told of each other's, send and fetch the rest.
+    let out = musubi_in(&env, &logs, &beta, &["pause", "--cancel"]);
+    insta::assert_snapshot!(out, @"Hive alpha syncs again.");
+    let out = musubi_in(&env, &logs, &beta, &["pause", "--cancel"]);
+    insta::assert_snapshot!(out, @"Hive alpha isn't paused.");
+    for repo in [&alpha, &beta] {
+        wait_for(&logs, "both machines' work everywhere", || {
+            let log = log(repo);
+            log.contains("alpha while paused") && log.contains("beta while paused")
+        });
+        let (_, hints) = status_in(&env, &logs, repo);
+        assert_eq!(hints, "");
+    }
+}
+
 /// Whether the repository is part of the hive its record names: `joined`, `left`, or
 /// `removed`.
 fn membership(repo: &TestRepo) -> String {
@@ -4431,7 +4556,10 @@ fn status_says_when_retrying_cannot_help() {
         "abandon",
         &format!("{}-..{}-", first.trim(), last.trim()),
     ]);
-    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @r#"
+    Error: this repository lost history the hive has (was `jj op abandon` run?)
+    Hint: Make a new copy with `musubi clone`, bring this one's work across, then run `musubi leave --force` here; "Rescue work in a new copy" in the troubleshooting guide says how.
+    "#);
     // Restoring what was abandoned, before anything else changes, puts the copy back.
     alpha.jj(&["--ignore-working-copy", "op", "integrate", last.trim()]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
@@ -4462,12 +4590,31 @@ fn status_says_when_retrying_cannot_help() {
     settings.add_filter("the first sync failed: ", "");
     let checks = settings.bind_to_scope();
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
+    insta::assert_snapshot!(err, @r#"
+    Error: this repository lost history the hive has (was `jj op abandon` run?)
+    Hint: Make a new copy with `musubi clone`, bring this one's work across, then run `musubi leave --force` here; "Rescue work in a new copy" in the troubleshooting guide says how.
+    "#);
     let (_, hints) = status_in(&env, &logs, &alpha);
-    insta::assert_snapshot!(hints, @"
-    Warning: Syncing fails: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here
-    Hint: Retrying won't get past this; the warning says what will.
+    insta::assert_snapshot!(hints, @r#"
+    Warning: Syncing fails: this repository lost history the hive has (was `jj op abandon` run?)
+    Hint: Make a new copy with `musubi clone`, bring this one's work across, then run `musubi leave --force` here; "Rescue work in a new copy" in the troubleshooting guide says how.
+    "#);
+    // It can still pause the hive, since pausing doesn't sync first, and lifting the pause
+    // says again what it lost.
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["pause"]), @"Paused hive alpha: nothing syncs with it until `musubi pause --cancel`.");
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &beta, &["sync"]), @"
+    Error: hive alpha is paused (by alpha, N ago)
+    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
     ");
+    let mut cancel = alpha.program(musubi());
+    cancel.args(["pause", "--cancel"]);
+    let (ok, out, err) = try_run(&logs, &env, cancel);
+    assert!(ok, "{out}{err}");
+    insta::assert_snapshot!(format!("{out}{err}"), @r#"
+    Hive alpha syncs again.
+    Warning: Syncing fails: this repository lost history the hive has (was `jj op abandon` run?)
+    Hint: Make a new copy with `musubi clone`, bring this one's work across, then run `musubi leave --force` here; "Rescue work in a new copy" in the troubleshooting guide says how.
+    "#);
 
     // The other machine keeps what was abandoned, and syncs on.
     beta.write_file("d", "d");
@@ -4480,7 +4627,10 @@ fn status_says_when_retrying_cannot_help() {
     // Nor does joining again, which says so, though the copy joins.
     musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
     let err = musubi_fails(&env, &logs, &alpha, &["join"]);
-    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
+    insta::assert_snapshot!(err, @r#"
+    Error: this repository lost history the hive has (was `jj op abandon` run?)
+    Hint: Make a new copy with `musubi clone`, bring this one's work across, then run `musubi leave --force` here; "Rescue work in a new copy" in the troubleshooting guide says how.
+    "#);
     drop(checks);
 }
 

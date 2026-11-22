@@ -73,6 +73,7 @@ login (at boot on illumos, which needs a [rights profile](guides/setup.md#illumo
 Simply use jj as usual; `musubi status` and `musubi top` will tell you what's going on if you're
 curious. The [working guide](guides/working-across-machines.md) covers handoffs, stale
 working copies and undo. [Monitoring](guides/manage.md#check-syncing) explains sync reports
-and where to look if work isn't syncing. You can [pause syncing or
-leave](guides/manage.md#pause-syncing-or-leave) without affecting your repos or files.
+and where to look if work isn't syncing. You can [stop syncing or
+leave](guides/manage.md#stop-syncing-on-this-machine-or-leave) without affecting your repos or
+files.
 

@@ -20,6 +20,7 @@ use futures::stream::FuturesOrdered;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::hub_dir::Pause;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
 
@@ -123,12 +124,35 @@ impl HiveGone {
     }
 }
 
+/// That the hive asked about is paused (`musubi pause`), by whom and when: the error a sync
+/// fails with then, which the daemon looks for, to wait rather than retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HivePaused(pub Pause);
+
+impl std::fmt::Display for HivePaused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the hive is paused, by {}", self.0.by)
+    }
+}
+
+impl std::error::Error for HivePaused {}
+
+impl HivePaused {
+    /// Who paused the hive, and when, if `err` comes of its being paused.
+    pub fn of(err: &anyhow::Error) -> Option<Pause> {
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<Self>())
+            .map(|paused| paused.0.clone())
+    }
+}
+
 /// The error a reply stands for when it isn't one the request expects.
 fn unexpected(reply: HubReply) -> anyhow::Error {
     match reply {
         HubReply::Error(err) => anyhow::anyhow!("hub: {err}"),
         HubReply::NoHive => HiveGone::Missing.into(),
         HubReply::Removed => HiveGone::Removed.into(),
+        HubReply::Paused(pause) => HivePaused(pause).into(),
         other => anyhow::anyhow!("unexpected reply {other:?}"),
     }
 }

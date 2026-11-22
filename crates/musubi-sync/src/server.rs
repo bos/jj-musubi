@@ -5,8 +5,9 @@
 //! time, as [`HubService`] does; different hives never wait for each other. A request whose
 //! sender has stopped waiting for it by the time the thread comes to it goes unanswered, as if
 //! lost, unless it uploads a chunk. Requests to `musubi.hub.rpc` ([`HUB_TOKEN`]) are about the
-//! hub as a whole: joining, listing, renaming, and removing hives. A request for a hive the hub
-//! doesn't have gets an error: only a join creates a hive.
+//! hub as a whole: joining, listing, renaming, pausing and removing hives. A request for a hive
+//! the hub doesn't have gets an error: only a join creates a hive. One for a paused hive gets
+//! [`HubReply::Paused`].
 //!
 //! The hub keeps account of what it serves, and of what machines report of their syncing,
 //! in memory, for `musubi top` (see `musubi_hub::activity`).
@@ -263,6 +264,20 @@ impl HubServer {
                 })
             }
             HubWideRequest::Remove { name } => self.remove(&name).map(HubWideReply::Hive),
+            HubWideRequest::Pause { hive, machine } => {
+                self.lock().pause(&hive, &machine).map(|(hive, before)| {
+                    if before.is_none() {
+                        tracing::info!("{machine} paused hive {}", hive.name);
+                    }
+                    HubWideReply::PauseChanged { hive, before }
+                })
+            }
+            HubWideRequest::Unpause { hive } => self.lock().unpause(&hive).map(|(hive, before)| {
+                if before.is_some() {
+                    tracing::info!("hive {} is no longer paused", hive.name);
+                }
+                HubWideReply::PauseChanged { hive, before }
+            }),
             HubWideRequest::Report { hive, report } => {
                 // Under the hub, so that a removal can't forget the hive's activity between
                 // the two: nothing takes the hub while holding the activity.
@@ -382,6 +397,17 @@ fn spawn_worker(
                     continue;
                 }
                 let limit = transport.max_payload();
+                // Checked here, rather than as the request is dispatched, so that a request
+                // queued before a pause and taken after it is refused too.
+                let paused = hubs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .paused(&id)
+                    .cloned();
+                if let Some(pause) = paused {
+                    answer_paused(&runtime, &*transport, &message, pause);
+                    continue;
+                }
                 let started = Instant::now();
                 // Whether the activity has counted the request, as it does once the request
                 // is handled, even if what follows fails.
@@ -470,6 +496,23 @@ fn spawn_worker(
         })
         .expect("spawning a thread");
     Worker { requests, thread }
+}
+
+/// Answers `message`, a request for a paused hive, that it is paused, without opening the
+/// hive's store.
+fn answer_paused(
+    runtime: &tokio::runtime::Handle,
+    transport: &dyn Transport,
+    message: &Message,
+    pause: musubi_hub::hub_dir::Pause,
+) {
+    let Ok(reply) = Envelope::encode(HubReply::Paused(pause)) else {
+        return;
+    };
+    let reply_to = message.reply.as_deref().unwrap_or_default();
+    if let Err(err) = runtime.block_on(transport.publish(reply_to, Bytes::from(reply))) {
+        tracing::warn!("could not reply: {err}");
+    }
 }
 
 /// What a panic said, if it said it as text.

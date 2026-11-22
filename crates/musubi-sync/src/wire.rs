@@ -28,6 +28,7 @@ use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
+use musubi_hub::hub_dir::Pause;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -35,7 +36,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -148,6 +149,9 @@ pub enum HubReply {
     NoHive,
     /// `musubi hub remove` removed the hive asked about.
     Removed,
+    /// The hive asked about is paused (`musubi pause`): the hub answers nothing else for it
+    /// until the pause is lifted.
+    Paused(Pause),
 }
 
 /// The first token of every subject the hub serves (docs/internals/design.md, "Transport").
@@ -200,6 +204,16 @@ pub enum HubWideRequest {
     },
     /// What the hub has seen of its hives since it started, for `musubi top`.
     Activity,
+    /// Pause the hive `hive`, by id, for the machine named `machine`, unless it is paused
+    /// already: `musubi pause`.
+    Pause {
+        hive: HiveId,
+        machine: String,
+    },
+    /// Lift the hive `hive`'s pause, if it is paused: `musubi pause --cancel`.
+    Unpause {
+        hive: HiveId,
+    },
     /// Validate and reserve the destination's inherited names before clone makes its path.
     PrepareClone {
         /// The exact id returned by Resolve, never a hive name or prefix.
@@ -222,6 +236,12 @@ pub enum HubWideReply {
         hive: HiveInfo,
     },
     Activity(HubActivity),
+    /// After a [`HubWideRequest::Pause`] or [`HubWideRequest::Unpause`]: the hive as it is now,
+    /// and its pause before, if it was paused.
+    PauseChanged {
+        hive: HiveInfo,
+        before: Option<Pause>,
+    },
     Error(String),
 }
 

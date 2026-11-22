@@ -17,6 +17,7 @@ mod list;
 mod lock;
 mod login;
 mod open_files;
+mod pause;
 mod repo;
 mod settings;
 mod snapshot;
@@ -376,6 +377,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
                 sync::sync(ui, &start, &socket)
             }
         }
+        Command::Pause { cancel } => pause::pause(ui, &cwd()?, &socket()?, cancel),
         Command::Completion { shell } => completion::print_script(ui, shell),
         Command::Debug(Debug::OpId { id }) => debug::op_id(ui, &cwd()?, &id),
     }

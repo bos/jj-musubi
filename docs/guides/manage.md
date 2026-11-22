@@ -1,6 +1,6 @@
 # Manage hives, machines, and hubs
 
-Check syncing, rename or remove hives, take machines out, and replace a hub.
+Check syncing, rename, remove or pause hives, take machines out, and replace a hub.
 
 A hub passes shared history between copies; each machine's daemon keeps them in sync.
 See [How jj-musubi works](../how-it-works.md).
@@ -56,9 +56,31 @@ To share again, start a hive with `musubi create` and run `musubi join --hive <n
 copies. A plain `musubi join` refuses while the copy records a removed hive; run
 `musubi leave` first, after which `musubi join` matches it as any other repo.
 
-## Pause syncing or leave
+## Pause a whole hive
 
-To pause background syncing on this machine:
+To stop every machine syncing a hive, run this in any of its copies:
+
+```sh
+musubi pause
+```
+
+No copy can sync once `musubi pause` returns. Each machine's daemon finds out at its next
+attempt to sync, within half a minute, or when the machine comes back online, and waits; from
+then on, `musubi status` there says who paused the hive and when, as `musubi sync` does. jj
+works as usual meanwhile, but work done on a machine exists only there until the pause is
+lifted. `musubi join` and `musubi clone` refuse a paused hive.
+
+`musubi pause` doesn't sync first, so it works in a copy whose syncing fails.
+
+To lift the pause, run `musubi pause --cancel` in any copy. Machines sync again within half a
+minute, or at once with `musubi sync`, sending what each did meanwhile. Pausing removes
+nothing from the hub or from other machines, and the work done meanwhile syncs as any work
+does: `jj op abandon` of operations the hive has still stops that copy syncing ([Abandoning
+operations](working-across-machines.md#abandoning-operations)).
+
+## Stop syncing on this machine or leave
+
+To stop background syncing on this machine only:
 
 ```sh
 musubi daemon stop
@@ -68,13 +90,13 @@ This stops syncing for all copies served by the daemon, keeping their membership
 already sent or received. It leaves the hub and other machines alone. Wait for completion,
 then check `musubi status`; stopping does not undo an exchange or guarantee it had no effect.
 
-`musubi daemon start` resumes syncing. Login startup remains installed;
+`musubi daemon start` starts syncing again. Login startup remains installed;
 `musubi daemon uninstall` stops the daemon and removes it. Explicit
 `musubi sync` can still sync while the daemon is stopped, and `create`, `join` and `clone`
 can start it again.
 
 To remove one copy, [leave its hive](#take-a-repo-or-machine-out). Leaving attempts a
-final sync, even with `musubi leave --force`; pause the daemon while deciding what to send.
+final sync, even with `musubi leave --force`; stop the daemon while deciding what to send.
 
 ## Take a repo or machine out
 

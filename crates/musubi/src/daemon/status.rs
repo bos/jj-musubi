@@ -13,7 +13,9 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::SystemTime;
 
+use musubi_hub::hub_dir::Pause;
 use musubi_sync::node::history_lost;
+use musubi_sync::remote::HivePaused;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -30,8 +32,12 @@ pub struct Status {
     pub known_head: Option<String>,
     pub error: Option<String>,
     /// Whether the error is one that syncing again can't get past, as after `jj op abandon`.
+    /// `paused` in the file, as earlier releases wrote it, before hives could be paused.
+    #[serde(default, rename = "paused")]
+    pub history_lost: bool,
+    /// Who paused the hive, and when, if the error is that it is paused (`musubi pause`).
     #[serde(default)]
-    pub paused: bool,
+    pub hive_paused: Option<Pause>,
     /// Outgoing snapshot content needs a decision; receiving continues normally.
     #[serde(default)]
     pub publication_held: bool,
@@ -66,7 +72,8 @@ impl Status {
 
     fn set_error(&mut self, error: Option<&anyhow::Error>) {
         self.error = error.map(|err| format!("{err:#}"));
-        self.paused = error.is_some_and(history_lost);
+        self.history_lost = error.is_some_and(history_lost);
+        self.hive_paused = error.and_then(HivePaused::of);
         self.publication_held = error.is_some_and(publication_held);
     }
 
@@ -149,6 +156,15 @@ impl SharedStatus {
             .sync
             .last_success
             .is_some_and(|time| time >= started)
+    }
+
+    pub(super) fn hive_paused(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sync
+            .hive_paused
+            .is_some()
     }
 
     pub(super) fn publication_held(&self) -> bool {

@@ -324,6 +324,9 @@ fn describe(status: Option<&Status>) -> String {
     let Some(status) = status else {
         return "not synced yet".to_owned();
     };
+    if let Some(pause) = &status.hive_paused {
+        return format!("paused {}", crate::status::paused_by(pause));
+    }
     if let Some(error) = &status.error {
         return format!("sync failing: {error}");
     }

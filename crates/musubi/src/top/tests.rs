@@ -26,6 +26,7 @@ fn hive(name: &str) -> HiveActivity {
             clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
+            paused: None,
         },
         head: Some(10),
         traffic: Traffic {

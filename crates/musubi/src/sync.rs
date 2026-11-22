@@ -5,9 +5,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use musubi_sync::node::history_lost;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
+use musubi_sync::remote::HivePaused;
 
 use crate::block_on;
 use crate::config::HiveConfig;
@@ -19,6 +21,8 @@ use crate::daemon;
 use crate::repo::Located;
 use crate::repo::the_copy;
 use crate::socket::Socket;
+use crate::status;
+use crate::ui;
 use crate::ui::Ui;
 
 fn counted(count: usize, noun: &str) -> String {
@@ -235,7 +239,12 @@ pub fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(S
     })?;
     let synced = match through_daemon {
         Some(Ok(synced)) => synced,
-        Some(Err(message)) => anyhow::bail!("{message}"),
+        // The daemon recorded why before it answered.
+        Some(Err(message)) => {
+            let status = daemon::Status::load(&located.repo_path)
+                .filter(|status| status.error.as_ref() == Some(&message));
+            return Err(way_on(&hive, anyhow::anyhow!("{message}"), status));
+        }
         None => match sync_directly(ui, &located) {
             Ok(synced) => synced,
             // As the daemon would: the hive is over.
@@ -245,10 +254,34 @@ pub fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(S
                     "{err:#}, so this repository no longer syncs with it; everything it has stays"
                 );
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(way_on(&hive, err, None)),
         },
     };
     Ok((synced, stopped))
+}
+
+/// `err`, a sync's failure, with the way on as a hint where it's one no retry gets past: the
+/// hive is paused, or this repository lost history the hive has. `status` is what the daemon
+/// recorded of it, for a failure that came from the daemon, as a message, if it recorded this
+/// failure.
+pub fn way_on(
+    hive: &HiveConfig,
+    err: anyhow::Error,
+    status: Option<daemon::Status>,
+) -> anyhow::Error {
+    let paused = HivePaused::of(&err).or_else(|| status.as_ref()?.hive_paused.clone());
+    if let Some(pause) = paused {
+        let err = anyhow::anyhow!(
+            "hive {} is paused {}",
+            hive.display_name(),
+            status::paused_by(&pause)
+        );
+        return ui::with_hint(err, status::PAUSED_HINT);
+    }
+    if history_lost(&err) || status.is_some_and(|status| status.history_lost) {
+        return ui::with_hint(err, status::HISTORY_LOST_HINT);
+    }
+    err
 }
 /// Asks the daemon what its sync of `key`'s copy is doing, each time it is called.
 pub fn daemon_progress(

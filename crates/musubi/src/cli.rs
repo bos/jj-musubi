@@ -319,6 +319,23 @@ pub enum Command {
         #[arg(long, requires = "prune", conflicts_with = "approve")]
         dry_run: bool,
     },
+    /// Stop every machine syncing the hive of the repository in the current directory, until
+    /// `musubi pause --cancel`.
+    ///
+    /// The hub refuses the hive's syncs as soon as it's paused. Each machine's daemon finds out
+    /// at its next attempt to sync, within half a minute, or once the machine is back online,
+    /// and waits; from then on, `musubi status` there says who paused the hive and when, as
+    /// `musubi sync` does. jj works as usual meanwhile: work done on a machine stays on it
+    /// until the pause is lifted, and then syncs. `musubi join` and `musubi clone` refuse a
+    /// paused hive.
+    ///
+    /// It doesn't sync first, so it works in a copy whose syncing fails. Pausing a hive that
+    /// is paused already says who paused it, and when.
+    Pause {
+        /// Lift the pause instead, from any copy: every machine syncs again, as before.
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///
     /// Without a subcommand, it runs the daemon in the foreground, logging to standard

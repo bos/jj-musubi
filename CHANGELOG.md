@@ -7,9 +7,12 @@
   `jj op abandon` run?)", and the other machines keep the operations; [Rescue work in a new
   copy](docs/troubleshooting.md#rescue-work-in-a-new-copy) says how to carry on there. Passing
   an abandon on never removed the abandoned data from the hub, or from other machines' disks.
-  `musubi pause` and `musubi resume`, coming in this release, will remove data such as a
-  committed secret from every machine. Abandoning operations from before a copy joined, or
-  ones it hasn't sent yet, works as before.
+  `musubi pause` now stops every machine syncing a hive, until `musubi pause --cancel` ([Pause
+  a whole hive](docs/guides/manage.md#pause-a-whole-hive)); `musubi resume`, coming in this
+  release, will then remove data such as a committed secret from every machine. Abandoning
+  operations from before a copy joined, or ones it hasn't sent yet, works as before. The
+  lost-history error is now followed by a hint naming the commands to carry on with, which
+  `musubi status` gives too.
 
 - A copy that was away before its first sync finished, or that the hive forgot, no longer
   stops syncing because other machines abandoned operations meanwhile.

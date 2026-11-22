@@ -446,6 +446,9 @@ impl Hive {
             "head": sync.and_then(|sync| sync.known_seq),
             "last_sync": sync.and_then(|sync| sync.last_success),
             "error": sync.and_then(|sync| sync.error.as_ref()),
+            "paused": sync.and_then(|sync| sync.hive_paused.as_ref()).map(|pause| {
+                serde_json::json!({ "by": pause.by, "at": pause.at })
+            }),
             "sent": self.sent,
             "forgotten": self.forgotten,
             "working_copies": working_copies,
@@ -493,7 +496,19 @@ impl Hive {
             )?;
         }
         let failing = self.failing();
-        if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
+        if let Some(pause) = self
+            .sync
+            .as_ref()
+            .and_then(|sync| sync.hive_paused.as_ref())
+        {
+            writeln!(
+                ui.warning(),
+                "Hive {} is paused {}, so nothing syncs.",
+                self.config.display_name(),
+                paused_by(pause)
+            )?;
+            writeln!(ui.hint(), "{PAUSED_HINT}")?;
+        } else if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
             if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {
                 writeln!(ui.warning(), "{error}")?;
             } else {
@@ -502,11 +517,8 @@ impl Hive {
             if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {
                 // The stored hold already names the inspection command, and receiving
                 // still runs. It is not a connection failure to retry.
-            } else if self.sync.as_ref().is_some_and(|sync| sync.paused) {
-                writeln!(
-                    ui.hint(),
-                    "Retrying won't get past this; the warning says what will."
-                )?;
+            } else if self.sync.as_ref().is_some_and(|sync| sync.history_lost) {
+                writeln!(ui.hint(), "{HISTORY_LOST_HINT}")?;
             } else if daemon.serving == Some(true) {
                 writeln!(
                     ui.hint(),
@@ -781,6 +793,22 @@ fn sent(node: &NodeRepo, sync: Option<&daemon::Status>) -> Option<bool> {
         }
     }
     Some(true)
+}
+
+/// The way on for a copy that lost history the hive has, as after `jj op abandon`, which
+/// commands print as a hint after the error.
+pub const HISTORY_LOST_HINT: &str = "Make a new copy with `musubi clone`, bring this one's work \
+     across, then run `musubi leave --force` here; \"Rescue work in a new copy\" in the \
+     troubleshooting guide says how.";
+
+/// The way on while a hive is paused, which commands print as a hint.
+pub const PAUSED_HINT: &str =
+    "Run `musubi pause --cancel` in any copy of the hive to let it sync again.";
+
+/// Who paused a hive, and how long ago: `(by laptop, 12m ago)`.
+pub fn paused_by(pause: &musubi_hub::hub_dir::Pause) -> String {
+    let since = Duration::from_secs(daemon::now().saturating_sub(pause.at));
+    format!("(by {}, {} ago)", pause.by, roughly(since))
 }
 
 /// A duration in its largest whole unit, as musubi shows how long ago or how soon: `40s`,

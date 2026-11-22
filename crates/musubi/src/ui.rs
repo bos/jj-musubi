@@ -243,6 +243,17 @@ impl Ui {
         ExitCode::FAILURE
     }
 
+    /// Prints `err` as a warning after `lead`, followed by its hints, for a failure that
+    /// doesn't end the command.
+    pub fn warn_with_hints(&self, lead: &str, err: &anyhow::Error) -> io::Result<()> {
+        let hints = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Hinted>())
+            .map_or(&[][..], |hinted| &hinted.hints);
+        writeln!(self.warning(), "{lead}{err:#}")?;
+        self.print_hints(hints)
+    }
+
     /// Prints `hints` after an error, as jj does.
     fn print_hints(&self, hints: &[ErrorHint]) -> io::Result<()> {
         let mut formatter = self.stderr().into_labeled("hint");

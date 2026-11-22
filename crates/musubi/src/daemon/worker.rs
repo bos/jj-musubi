@@ -21,6 +21,7 @@ use musubi_sync::driver::NodeDriver;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
+use musubi_sync::remote::HivePaused;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
@@ -359,6 +360,8 @@ struct Attempt {
     synced: Synced,
     /// Whether publication was held before it.
     held_before: bool,
+    /// Whether the hive was paused before it.
+    paused_before: bool,
 }
 
 /// One copy served in its hive, from opening it until something calls for starting over.
@@ -572,6 +575,7 @@ impl<'a> Session<'a> {
         // Reconnecting during the sync, which may miss announcements, calls for another.
         self.reconnections.seen();
         let held_before = self.status.publication_held();
+        let paused_before = self.status.hive_paused();
         let result = self.driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&self.driver);
@@ -584,6 +588,7 @@ impl<'a> Session<'a> {
             result,
             synced,
             held_before,
+            paused_before,
         }
     }
 
@@ -594,6 +599,7 @@ impl<'a> Session<'a> {
             result,
             synced,
             held_before,
+            paused_before,
         } = attempt;
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
@@ -639,6 +645,17 @@ impl<'a> Session<'a> {
                     self.gc_checked = Some(std::time::Instant::now());
                     collect_garbage(&self.located);
                 }
+                Ok(Flow::Again)
+            }
+            // A pause is no failure: wait for it to be lifted, which the next poll, request or
+            // reconnection finds out. Its first request, the hub answers at once that the hive
+            // is paused, before anything here changes.
+            Err(err) if HivePaused::of(&err).is_some() => {
+                if !paused_before {
+                    tracing::info!("{err:#}; waiting for the pause to be lifted");
+                }
+                self.retry = false;
+                self.backoff.reset();
                 Ok(Flow::Again)
             }
             Err(err) if publication_held(&err) => {

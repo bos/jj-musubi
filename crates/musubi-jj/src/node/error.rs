@@ -21,11 +21,10 @@ use crate::objects::ObjectError;
 use crate::op_id::LocalOp;
 
 /// What a user sees once this repository lost history the hive has, as after `jj op abandon`,
-/// which no retry gets past, and the way on. docs/troubleshooting.md says the rest, such as
-/// bringing work across.
-const HISTORY_GONE: &str = "this repository lost history the hive has (was `jj op abandon` \
-     run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work \
-     across to it, then run `musubi leave --force` here";
+/// which no retry gets past. The command shows the way on as a hint (`HISTORY_LOST_HINT` in
+/// the `musubi` crate), and docs/troubleshooting.md says the rest, such as bringing work
+/// across.
+const HISTORY_GONE: &str = "this repository lost history the hive has (was `jj op abandon` run?)";
 
 /// Why musubi can't inspect, record or prune this copy's unpublished history. None has a
 /// source, so a chain of causes ends here as it did when these were plain strings.

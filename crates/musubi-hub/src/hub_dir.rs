@@ -1,6 +1,7 @@
 //! A hub's directory: one subdirectory per hive, named by the hive's id, each holding a hub
 //! store (see [`crate::store`]), the hive's `hive.toml` (its name and backend), and its
-//! index (see [`crate::index`]). Removed hives move to `removed/`.
+//! index (see [`crate::index`]), and while it is paused, its `paused` file. Removed hives move
+//! to `removed/`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -40,6 +41,8 @@ pub use lifecycle::open_whole;
 use lifecycle::set_aside;
 
 const HIVE_FILE: &str = "hive.toml";
+/// Who paused a hive, and when ([`Pause`]), while it is paused.
+const PAUSED_FILE: &str = "paused";
 
 /// A hive's internal identity, distinct from a human-supplied name or prefix: a UUID in its
 /// usual form, as the hub makes them, though one a repository asks for may be anything.
@@ -144,6 +147,20 @@ pub struct HiveInfo {
     pub urls: Vec<String>,
     /// Names of the machines with workspaces in the hive.
     pub machines: Vec<String>,
+    /// Who paused the hive, and when, while it is paused.
+    pub paused: Option<Pause>,
+}
+
+/// A hive paused by `musubi pause`: while it is, the hub answers its requests with this, so
+/// that nothing syncs, until `musubi pause --cancel`. Kept in the hive's `paused` file, which
+/// isn't synced to disk: a hub that loses it is simply not paused, and nothing changed while
+/// it was.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    /// The name of the machine that paused it, as its copy's record has it.
+    pub by: String,
+    /// When, by the hub's clock, in seconds since the epoch.
+    pub at: u64,
 }
 
 /// The outcome of a join.
@@ -172,6 +189,7 @@ struct Hive {
     unsaved: bool,
     /// Joins whose first push the hive hasn't accepted yet.
     pending: Vec<Pending>,
+    paused: Option<Pause>,
 }
 
 /// What a joining repository said it brings, so that another copy of it joining meanwhile
@@ -232,6 +250,10 @@ impl HubDir {
                 unindexed.push(id.clone());
                 HiveIndex::default()
             });
+            // One that won't parse, as a power cut can leave it, is no pause.
+            let paused = fs::read_to_string(hive_dir.join(PAUSED_FILE))
+                .ok()
+                .and_then(|text| toml::from_str(&text).ok());
             hives.insert(
                 id,
                 Hive {
@@ -240,6 +262,7 @@ impl HubDir {
                     index,
                     unsaved: false,
                     pending: vec![],
+                    paused,
                 },
             );
         }
@@ -336,6 +359,7 @@ impl HubDir {
                 index,
                 unsaved: false,
                 pending: vec![],
+                paused: None,
             },
         );
         Ok(())
@@ -410,7 +434,48 @@ impl HubDir {
             clone_config: hive.meta.clone_config.clone(),
             urls: hive.index.urls.iter().cloned().collect(),
             machines: display_names(&hive.index.machines),
+            paused: hive.paused.clone(),
         })
+    }
+
+    /// Who paused hive `id`, and when, if it is paused.
+    pub fn paused(&self, id: &HiveId) -> Option<&Pause> {
+        self.hives.get(id)?.paused.as_ref()
+    }
+
+    /// Pauses hive `id` for machine `by`, unless it is paused already. Returns the hive as it
+    /// is now, and how it was paused before, if it was.
+    pub fn pause(&mut self, id: &HiveId, by: &str) -> Result<(HiveInfo, Option<Pause>), Refusal> {
+        let removed = self.is_removed(id);
+        let hive = self.hives.get_mut(id).ok_or_else(|| no_record(removed))?;
+        let before = hive.paused.clone();
+        if before.is_none() {
+            let pause = Pause {
+                by: by.to_owned(),
+                at: lifecycle::now(),
+            };
+            let text = toml::to_string(&pause).map_err(refusal)?;
+            files::replace(&hive.dir.join(PAUSED_FILE), text.as_bytes()).map_err(refusal)?;
+            hive.paused = Some(pause);
+        }
+        Ok((self.info(id).expect("found above"), before))
+    }
+
+    /// Lifts hive `id`'s pause, if it is paused. Returns the hive as it is now, and how it was
+    /// paused, if it was.
+    pub fn unpause(&mut self, id: &HiveId) -> Result<(HiveInfo, Option<Pause>), Refusal> {
+        let removed = self.is_removed(id);
+        let hive = self.hives.get_mut(id).ok_or_else(|| no_record(removed))?;
+        if hive.paused.is_some() {
+            match fs::remove_file(hive.dir.join(PAUSED_FILE)) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(refusal(err));
+                }
+                _ => {}
+            }
+        }
+        let before = hive.paused.take();
+        Ok((self.info(id).expect("found above"), before))
     }
 
     /// The keys of the machines with workspaces in hive `id`'s head.
@@ -753,6 +818,7 @@ impl HubDir {
         created: bool,
         reason: String,
     ) -> Result<Joined, Refusal> {
+        self.check_unpaused(id)?;
         if let Some(refusal) = backend_refusal(request, &self.hives[id].meta) {
             return Err(refusal);
         }
@@ -784,6 +850,23 @@ impl HubDir {
         })
     }
 
+    /// Refuses a copy joining hive `id`, or cloned from it, while it is paused: it couldn't
+    /// sync.
+    fn check_unpaused(&self, id: &HiveId) -> Result<(), Refusal> {
+        match &self.hives[id] {
+            Hive {
+                meta,
+                paused: Some(pause),
+                ..
+            } => Err(format!(
+                "hive {} is paused (by {}); it can be joined once `musubi pause --cancel` is run \
+                 in one of its copies",
+                meta.name, pause.by
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Checks and reserves inherited Git names before a clone creates any directory.
     pub fn prepare_clone(
         &mut self,
@@ -792,6 +875,7 @@ impl HubDir {
         incoming: &BTreeMap<String, RemoteBinding>,
     ) -> Result<HiveInfo, Refusal> {
         let hive = self.hives.get(id).ok_or_else(|| format!("no hive {id}"))?;
+        self.check_unpaused(id)?;
         if hive.meta.backend != backend {
             return Err(
                 "the hive changed backend during clone; run `musubi clone` again".to_owned(),
@@ -936,6 +1020,15 @@ fn backend_refusal(request: &JoinRequest, hive: &HiveMeta) -> Option<Refusal> {
     ))
 }
 
+/// Why a request about a hive by its id, from one of its copies, finds no such hive here.
+fn no_record(removed: bool) -> Refusal {
+    if removed {
+        "this repository's hive was removed from the hub".to_owned()
+    } else {
+        "the hub has no record of this repository's hive".to_owned()
+    }
+}
+
 fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
     files::replace(&dir.join(HIVE_FILE), toml::to_string(meta)?.as_bytes())?;
     Ok(())
@@ -1000,6 +1093,56 @@ mod tests {
         assert!(
             hubs.prepare_clone(&missing, Backend::GIT, &BTreeMap::new())
                 .is_err()
+        );
+    }
+
+    /// A pause outlives the hub restarting, keeps who paused first, and refuses joins and
+    /// clones until it is lifted; a pause file a power cut emptied is no pause.
+    #[test]
+    fn a_pause_lasts_until_lifted() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let joined = hubs
+            .join(&creating(request("alpha", "https://example.com/one")))
+            .unwrap();
+        let id = joined.hive.id;
+        // As its first push records, for a join after the hub restarts to match.
+        let index = HiveIndex {
+            roots: ["11".repeat(20)].into(),
+            ..HiveIndex::default()
+        };
+        hubs.update_index(&id, index).unwrap();
+        let (info, before) = hubs.pause(&id, "alpha").unwrap();
+        assert_eq!(before, None);
+        let pause = info.paused.expect("paused");
+        assert_eq!(pause.by, "alpha");
+        let (_, before) = hubs.pause(&id, "beta").unwrap();
+        assert_eq!(before.as_ref(), Some(&pause));
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        assert_eq!(hubs.paused(&id), Some(&pause));
+        let joining = JoinRequest {
+            choice: JoinChoice::Hive(id.as_str().to_owned()),
+            ..request("beta", "https://example.com/one")
+        };
+        let err = hubs.join(&joining).unwrap_err();
+        assert!(err.contains("is paused (by alpha)"), "{err}");
+        let err = hubs
+            .prepare_clone(&id, Backend::GIT, &BTreeMap::new())
+            .unwrap_err();
+        assert!(err.contains("is paused (by alpha)"), "{err}");
+        let (info, before) = hubs.unpause(&id).unwrap();
+        assert_eq!((info.paused, before), (None, Some(pause)));
+        assert_eq!(HubDir::open(dir.path()).unwrap().paused(&id), None);
+        hubs.join(&request("beta", "https://example.com/one"))
+            .unwrap();
+        hubs.pause(&id, "alpha").unwrap();
+        fs::write(dir.path().join(id.as_str()).join(PAUSED_FILE), "").unwrap();
+        assert_eq!(HubDir::open(dir.path()).unwrap().paused(&id), None);
+        let missing = HiveId::from(Uuid::new_v4());
+        assert!(
+            hubs.pause(&missing, "alpha")
+                .unwrap_err()
+                .contains("no record")
         );
     }
 

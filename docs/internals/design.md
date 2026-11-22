@@ -548,6 +548,23 @@ when nodes that synced through different hubs can each merge the same work once 
 and a hub going back to a head it accepted earlier, having lost later ones to a power cut
 ([protocol.md, "Network and failures"](protocol.md#network-and-failures)).
 
+## Pausing a hive
+
+`musubi pause` asks the hub, in a request about the hub as a whole that names the hive by id, to
+pause the hive. The hub writes who paused it and when to the hive's `paused` file, without
+syncing it to disk: a hub that loses it is simply not paused, and nothing changed meanwhile.
+From then on the hive's thread answers each of the hive's requests with `Paused`, without
+opening its store, until `musubi pause --cancel` deletes the file. It checks as it takes each
+request, rather than as requests are dispatched to it, so that one queued before the pause is
+refused too; one it is serving as the pause comes, a push say, still finishes, after the pause
+is acknowledged. Joins and clones of a paused hive are refused.
+
+A node's sync asks for the hive's head first, so the hub answers `Paused` before the node
+changes anything. A daemon whose sync gets it records it in the copy's status, for `musubi
+status`, and syncs again only at its next poll, request, local operation or reconnection,
+rather than retrying with backoff. `musubi pause` itself sends no operations, so it works in a
+copy that lost history the hive has.
+
 ## Objects
 
 A canonical operation is complete on a node or hub when its ancestors and every object its view

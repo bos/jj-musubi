@@ -415,6 +415,7 @@ mod tests {
             clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
+            paused: None,
         }
     }
 

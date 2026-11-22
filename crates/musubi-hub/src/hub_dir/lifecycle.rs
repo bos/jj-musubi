@@ -16,6 +16,7 @@ use super::HIVE_FILE;
 use super::HiveId;
 use super::HiveInfo;
 use super::HubDir;
+use super::PAUSED_FILE;
 use super::Refusal;
 use super::refusal;
 use crate::store;
@@ -60,6 +61,10 @@ impl HubDir {
         // Linked, not written again: a file new to the disk is what a power cut empties, and
         // a hive whose own file won't parse stops the hub starting.
         fs::hard_link(hive.dir.join(HIVE_FILE), staging.join(HIVE_FILE))?;
+        // A pause is the hub's to forget, though it's kept where it can be.
+        if hive.paused.is_some() {
+            fs::hard_link(hive.dir.join(PAUSED_FILE), staging.join(PAUSED_FILE)).ok();
+        }
         hive.index.save(&staging)?;
         fs::rename(&hive.dir, &aside)?;
         if let Err(err) = fs::rename(&staging, &hive.dir) {

@@ -22,6 +22,8 @@ Follow the symptom:
 - **Sending is held:** see [Accidental files and cleanup](#accidental-files-and-cleanup).
 - **This repository lost history the hive has:**
   [rescue work in a new copy](#rescue-work-in-a-new-copy).
+- **Hive … is paused:** `musubi pause` stopped every machine syncing it; see [Pause a whole
+  hive](guides/manage.md#pause-a-whole-hive).
 - **Another sync error:** follow the command's hint, fix the cause, then run `musubi sync`.
   If it persists, [collect the logs](#report-a-problem).
 
@@ -85,9 +87,9 @@ Use the same socket setting in every shell; see
 [Configuration](reference/configuration.md#environment-variables). For a socket that disappeared,
 `musubi daemon restart` restarts it.
 
-To pause background traffic while investigating, run `musubi daemon stop`. This pauses all
-copies on this machine. `musubi leave` attempts a final sync, even with `--force`; see
-[Pause syncing or leave](guides/manage.md#pause-syncing-or-leave).
+To stop background traffic while investigating, run `musubi daemon stop`. This stops syncing
+all copies on this machine. `musubi leave` attempts a final sync, even with `--force`; see
+[Stop syncing on this machine or leave](guides/manage.md#stop-syncing-on-this-machine-or-leave).
 
 ### illumos
 
@@ -190,7 +192,8 @@ If the error says this repo lost history the hive has, retrying or rejoining won
 operations](guides/working-across-machines.md#abandoning-operations)). `musubi status` shows
 the same message. Keep the original repo: its work is still there.
 
-Make a new copy with `musubi clone <hive> <new-directory>`. Bring across work since the last
+Make a new copy with `musubi clone <hive> <new-directory>`, which refuses a paused hive until
+`musubi pause --cancel`. Bring across work since the last
 successful sync, or all wanted work if the first sync never finished. You can copy files as
 above, or transfer commits:
 

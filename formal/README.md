@@ -21,13 +21,16 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 - How musubi moves the jj operation heads it read earlier while jj commands and the lockless
   `jj op abandon` race it (`Musubi/OpHeads.lean`, `Musubi/OpHeadsRace.lean`; [design.md, "Moving
   op heads"](../docs/internals/design.md#moving-op-heads)).
+- Realization: musubi writing other machines' work into this machine's jj repository while jj
+  commands run and musubi crashes, with jj's operation store, op heads, lock and merge as they
+  are, and the promises users are made of it (`Musubi/Realize.lean`; [design.md,
+  "Translation"](../docs/internals/design.md#translation)).
 - [Snapshot publication budgets](#snapshot-publication-budgets), exact approval and cleanup of
   selected unpublished operations (`Musubi/Publication.lean`; [design.md, "Snapshot publication
   budgets"](../docs/internals/design.md#snapshot-publication-budgets)).
 
 The models of chunked transfers, per-machine refs, presence, copies, workspace names, snapshot
-publication and moving op heads are separate from the protocol model's
-state.
+publication, moving op heads and realization are separate from the protocol model's state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
 depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer.
@@ -112,8 +115,10 @@ deleted with them. Rebuilding one on `Exec` is a separate project.
 | `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as a pure function for the oracle and the code: `same` (`plan::same`); and what it reads of operations. |
 | `Musubi/OpHeadsJson.lean` | The oracle's `opHeads` request. |
 | `Musubi/OpHeadsRace.lean` | A small model of the op heads among jj commands, `jj op abandon`, `jj op integrate` and musubi's moves, and its theorems. |
+| `Musubi/Realize.lean` | Realization against jj: the operation store, op heads and lock, jj's merge of op heads as laws (`Jj`), your commands, musubi's publication and crashes, the six promises, and `settledE`, what the oracle answers. |
+| `Musubi/RealizeJson.lean` | The oracle's `realization` request. |
 | `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication and op-head requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication, op-head and realization requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 ## Correspondence with protocol.md
@@ -522,6 +527,100 @@ out how the local moves refine the protocol model's steps, which are on canonica
 command's publish and merge have the shape of `EnvStep.userOp` and `EnvStep.merge` on the heads,
 but relating a local op head to its canonical operation is the translation, which this model
 abstracts away.
+
+### Realization (`Realize.lean`)
+
+musubi writes other machines' work into this machine's jj repository as operations, its
+*realizations*, while the user's `jj` commands run when they like and musubi can crash between
+any two steps. The model is of jj, and of what users are promised; it has no copy of musubi's
+code. It has jj's operation store, whose operations never change once written, each with its
+parents and view; the op heads; jj's op-heads lock; and jj's merge of several op heads into one
+view, `Jj.load`, which is abstract and obeys laws that `node::realize_laws` pins against jj: one
+op head is its own view (`load_single`); jj merges op heads in the order they ended, so the order
+it finds them in doesn't matter (`load_congr`); it drops an op head below another without a
+merge (`load_drop`); it reads only the operations below the op heads (`load_local`); and beside
+one op head that descends from its parents, an operation leaves alone a workspace it records no
+change to, nor a rewrite of the commit the op head puts it on, and keeps its change to one the op
+head left alone (`load_keeps`, `load_takes`, with `keeps` naming that commit). These two are for
+one op head: with several, jj's merge can go through a common ancestor below some of them that
+changed the workspace and changed it back. `load_congr` assumes op heads that ended at different
+times; jj takes two that ended in the same millisecond in the order the file system lists them.
+`load_single` and `load_local` are how jj loads at all, and aren't pinned. `Jj.trivial` shows
+only that the laws don't contradict each other.
+
+A `jj` command, under the lock, publishes an operation with any view on any operation it loaded,
+the op head or one `--at-op`, in place of that one (`Step.cmd`); jj, loading several op heads,
+drops those below another (`Step.collapse`) or merges the rest (`Step.merge`), whoever runs it.
+Of musubi the model assumes three things about the op heads: it writes an operation before it
+adds it (R1); it adds its new op head before it takes any old one out (R2, `Step.del`); and it
+takes out op heads only under the lock, after checking that they are those it read, and only
+those below the one it added (R3, `Step.check`, `Plan.drop`). And of what it writes: a
+realization, whose view the hive gives (`Step.realize`), or jj's merge of a realization not yet
+in the op log with the op heads, some beside it (`Step.mergeWith`); it publishes one or the other
+(`Step.plan`). Everything else, when it writes, merges or gives up, is free, and a crash
+(`Step.crash`) forgets where it was and lets go of the lock. The code writes the merge, and the
+copies of the realization and the merge that exporting to `.git` makes, under the lock after its
+check, where the model has them written before it reads the op heads: writing touches neither
+the op heads nor the lock, and a check that passes means the op heads haven't changed since,
+since an operation taken out of them never comes back, so a run of the code is a run of the model
+with those writes moved earlier. An exported copy has the realization's or the merge's parents,
+and its view but for this machine's record of `.git`.
+
+- `nothing_lost`, `log_kept` (promise 1, nothing you did is lost): every operation your
+  commands wrote stays in the op log, and nothing in the op log ever leaves it, whatever runs.
+  `OpHeadsRace.lean` doesn't say this: its musubi may take out any op head it read, as the
+  checkpoint after `musubi sync --prune` does; realization takes out only op heads below the
+  one it adds.
+- `shown_step`, `publish_shows_merge` (promise 2, you see what jj would show): every step but
+  a command of yours leaves what jj shows as it was, or is musubi's publication, after which jj
+  shows its merge of the op heads there were with the realization, what it would show had the
+  realization been put beside them. `settled_shows`: once there is one op head, jj shows its
+  view.
+- `crash_harmless` (promise 3, crashes are harmless): every state a run with crashes reaches, a
+  run without reaches too, with the same operations, op log and view shown, and differing only
+  in op heads below another, which jj drops when it next loads; `crash_invisible`: a crash
+  itself changes neither. The run without holds each of musubi's attempts back until the run
+  with crashes adds its op head, and finishes one a crash cut short after that.
+- `musubi_writes`, `ops_known` (promise 4, received work isn't sent back as yours): every
+  operation musubi writes is a realization, which translation marks as received, or a merge whose
+  view is jj's merge of its parents, a realization among them and something beside it, as jj
+  itself writes on loading those op heads; every operation is the root, yours, musubi's or one
+  of jj's merges. This follows from what the model assumes musubi writes, and the theorems only
+  record it: the mark itself is translation's, and whether the work beside a realization is new
+  to the hive is the protocol model's (`mergeOwnership`).
+- `quiet_check_passes`, `finishes` (promise 5, it finishes): musubi's check fails only if a
+  command or jj's load changed the op heads since it read them (`ev` counts those), so an attempt
+  nothing interrupts publishes; and from every state, musubi's steps and jj's loads alone can
+  reach one op head with the realization in it. That says nothing in the repository can stop
+  realization finishing, not that musubi's code takes those steps; the protocol model and the
+  tests are the evidence that it does.
+- `own_workspace_kept`, `others_workspace_appears` (promise 6): with one op head, which
+  descends from the realization's parents, and a realization that records no change to your
+  workspace nor a rewrite of its commit, no step but a command of yours moves the workspace; and
+  a workspace the realization records, which the op head left alone, appears as it records it, as
+  another machine's workspace does under the name `Names.lean` gives it. A realization that moves
+  your workspace or rewrites its commit, as when another machine rewrote it, moves it as jj moves
+  a workspace whose commit a command in another workspace rewrote. Read strictly, "realization
+  never moves one of your own" is false: where two op heads of yours moved your workspace apart,
+  jj keeps the move of the one that ended first, and a realization published on that one carries
+  the other machine's later end time, so jj's merge with it keeps the other move. That is what
+  `publish_shows_merge` says jj shows, and `own_workspace_kept` excludes it, since one op head
+  doesn't descend from the realization's parents.
+  `a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it`, in
+  `node/realize/concurrent_tests.rs`, is the case, ignored.
+
+`settledE` and `keptE` compute, for a finite history, the operations whose merge jj shows once a
+realization is published, and those that stay in the op log (`settled_sound`, `mem_keptE`):
+what the oracle's `realization` request answers ([conformance.md,
+"Realization"](../docs/internals/conformance.md#realization)).
+
+The model leaves out `jj op abandon` and `jj op integrate`, which take no lock and which
+`OpHeadsRace.lean` has against musubi's check; a `jj` command's crash, which leaves only an
+operation nothing names; this machine's record of `.git` in a view, which `Refs.lean` models;
+and translation, which makes a realization's view, its parents and its mark, and which
+`Names.lean` and the protocol model cover in part. Its theorems about workspaces assume what a
+realization records of them; the tests of [races.md](../docs/internals/races.md#workspaces)
+check that.
 
 ## Modeling choices
 

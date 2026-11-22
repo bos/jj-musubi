@@ -210,6 +210,22 @@
       ]
     },
     {
+      "id": "realize",
+      "area": "history",
+      "title": "Received work lands as jj would merge it",
+      "detail": "Through any interleaving of jj commands and crashes, nothing leaves the op log and publishing shows jj's merge of the op heads with the received work.",
+      "code": [
+        "crates/musubi-jj/src/node/realize.rs"
+      ],
+      "evidence": [
+        "e75",
+        "e76",
+        "e77",
+        "e78",
+        "e79"
+      ]
+    },
+    {
       "id": "revert",
       "area": "refs",
       "title": "Imports do not spuriously revert work",
@@ -993,6 +1009,57 @@
       "provenance": "documented"
     },
     {
+      "id": "e75",
+      "claim": "realize",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Realize.lean#shown_step",
+      "detail": "Every step but a command leaves what jj shows, or shows jj's merge of the op heads with the realization.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e76",
+      "claim": "realize",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Realize.lean#crash_harmless",
+      "detail": "A run with crashes reaches only what a run without reaches, but for op heads jj drops.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e77",
+      "claim": "realize",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/node/realize/concurrent_tests.rs#a_command_finishing_before_publication_is_merged_and_exported",
+      "detail": "A real command racing publication ends as the oracle predicts: jj's own merge of the op heads with the realization.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e78",
+      "claim": "realize",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/node/realize/concurrent_tests.rs#publication_interrupted_before_the_old_heads_go_loses_nothing",
+      "detail": "Publication interrupted and resumed ends where the oracle predicts an uninterrupted one would.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e79",
+      "claim": "realize",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/node/realize_laws.rs",
+      "detail": "Pins the laws of jj's merge of op heads on which the realization model relies.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
       "id": "e51",
       "claim": "copy",
       "mechanism": "conformance",
@@ -1752,6 +1819,26 @@
     "crates/musubi-sync/src/wire.rs#a_chunk_leaves_room_for_the_envelope": {
       "path": "crates/musubi-sync/src/wire.rs",
       "symbol": "a_chunk_leaves_room_for_the_envelope"
+    },
+    "formal/Musubi/Realize.lean#shown_step": {
+      "path": "formal/Musubi/Realize.lean",
+      "symbol": "shown_step"
+    },
+    "formal/Musubi/Realize.lean#crash_harmless": {
+      "path": "formal/Musubi/Realize.lean",
+      "symbol": "crash_harmless"
+    },
+    "crates/musubi-jj/src/node/realize/concurrent_tests.rs#a_command_finishing_before_publication_is_merged_and_exported": {
+      "path": "crates/musubi-jj/src/node/realize/concurrent_tests.rs",
+      "symbol": "a_command_finishing_before_publication_is_merged_and_exported"
+    },
+    "crates/musubi-jj/src/node/realize/concurrent_tests.rs#publication_interrupted_before_the_old_heads_go_loses_nothing": {
+      "path": "crates/musubi-jj/src/node/realize/concurrent_tests.rs",
+      "symbol": "publication_interrupted_before_the_old_heads_go_loses_nothing"
+    },
+    "crates/musubi-jj/src/node/realize_laws.rs": {
+      "path": "crates/musubi-jj/src/node/realize_laws.rs",
+      "symbol": null
     }
   },
   "roles": [
@@ -1943,6 +2030,9 @@
     ],
     "refresh": [
       "Chunks"
+    ],
+    "realization": [
+      "Realize"
     ]
   }
 }

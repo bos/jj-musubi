@@ -12,6 +12,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `OpHeads.lean` and `OpHeadsRace.lean`: moving op heads | `node/heads.rs` | `same_conformance` through the oracle, and `heads_laws` against jj | [Moving op heads](#moving-op-heads) |
+| `Realize.lean`: realization among jj commands and crashes | `node/realize/advance.rs` | `concurrent_tests` against jj's own merge, through the oracle, and `realize_laws` against jj | [Realization](#realization) |
 | `Expected.lean`: conflicted-ref history | `node/git.rs::expected` | `expected_history_conforms_to_model`, through the oracle | [Expected values from history](#expected-values-from-history) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive`, and `RemoteHub`'s `upload` and `download` | `receive_follows_the_prefix_model` and `transfers_follow_the_attempt_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
@@ -945,6 +946,94 @@ What isn't proved is the refinement itself: `Node.heads` in the protocol
 model are canonical operations, and what relates them to local op heads is the translation, whose
 code is `translate.rs`. Proving that a move refines
 `SyncStep.realize` or `advance` needs that relation, which `OpHeadsRace.lean` leaves abstract.
+
+## Realization
+
+`Realize.lean` models jj and what users are promised of realization, not musubi's code
+([formal/README.md](../../formal/README.md#realization-realizelean)), so nothing compares the
+code with it step by step. The code is checked by what it ends with, and the model's jj by laws.
+
+**What is checked.** `assert_shows_jj_merge`, in `node/realize/concurrent_tests.rs`, sends the
+oracle the operations below the op heads there were before publication, numbered parents first,
+and the realization. The oracle answers with `settledE` and `keptE` of `Realize.lean`: the
+operations whose merge jj shows once the realization is published (`publish_shows_merge`), and
+those that stay in the op log (`log_kept`).
+
+```json
+{"op": "realization", "parents": [[1, [0]], [2, [1]], [3, [1]]], "heads": [2], "realization": 3}
+{"kept": [0, 1, 2, 3], "merge": [2, 3], "ok": true}
+```
+
+jj then resolves op heads made of `merge`, in an op-heads store of their own, with
+`resolve_op_heads`, as it does on loading them. The op head musubi published must show the same,
+but for this machine's record of `.git`, which [Per-machine refs](#per-machine-refs) covers, and
+every operation of `kept` must be in the op log. Commits are compared by change id, description,
+tree and parents, since a merge that rewrites a commit records when it did; a commit no input
+had, as the new working-copy commit jj makes for a workspace whose commit went, by description,
+tree and parents, since jj gives it a random change id. The comparison is of the op head musubi
+published, which in these colocated tests is its merge. Two of the tests that race real `jj`
+commands with realization use it:
+
+- `a_command_finishing_before_publication_is_merged_and_exported`: a command finishes before
+  `advance`, or while it prepares, with the hive having forgotten this copy or not;
+- `publication_interrupted_before_the_old_heads_go_loses_nothing`: publication stops between
+  putting the new op head in and taking the old ones out, and resumes after a restart. The
+  prediction is that of an uninterrupted run (`crash_harmless`).
+
+Either fails if musubi publishes anything but jj's merge of the op heads with the realization,
+for example a merge with op heads it read before the command, or takes an operation out of the
+op log.
+
+**What jj is assumed to do**, pinned against jj by `node::realize_laws`, as `heads_laws` pins
+what `OpHeadsRace.lean` assumes: an op head below another is dropped, with no merge written
+(`jj_drops_an_op_head_below_another_without_merging`, `load_drop`); op heads are merged in the
+order they ended: the one that ended first keeps a workspace both moved, whichever move it made
+(`jj_merges_op_heads_in_the_order_they_ended`, `load_congr`); and beside one op head workspaces
+are merged name by name, so that an operation that leaves a workspace alone doesn't move it, and
+another machine's workspace it adds appears, whichever ended first
+(`jj_merges_workspaces_name_by_name`, `load_keeps`, `load_takes`), unless it rewrites the commit
+the op head put the workspace on, which moves it
+(`jj_moves_a_workspace_whose_commit_the_other_operation_rewrote`, why `keeps` names a commit).
+The tests write operations with jj-lib on an older operation, put them beside the op heads with
+no lock, and have the `jj` binary load them. They can't choose the order the file system lists
+op heads in. `load_congr` assumes operations that end at different times: jj sorts op heads by
+when they ended, to the millisecond, and two that end together it takes in the order the file
+system lists them. `load_single` and `load_local` are how jj loads at all, and aren't pinned;
+`heads_laws` pins that commands publish under the lock and that `update_op_heads` adds before it
+removes.
+
+**What the code is assumed to do**, by reading `advance.rs`, as `OpHeadsRace.lean`'s steps are
+read from `heads.rs`. R1: `prepare_advance` writes the realization, and `merge_unpublished` its
+merge, before `move_heads_to` touches the op heads. R2: `move_heads_to` makes one
+`update_op_heads` call, which adds before it removes. R3: `lock_if_unchanged` takes the locks
+and compares the op heads with those it captured, and otherwise prepares again;
+`move_heads_to` takes out the realization's parents, the op heads it descends from, and, if it
+published a merge, those it merged, all below what it adds. What it writes: `realize_one`
+makes the realization, and `merge_unpublished` jj's merge of it with the concurrent op heads, in
+the order they ended. `export_refs` writes a copy of each with the same parents and a view
+differing only in this machine's record of `.git`. The merge and the copies are written under
+the lock after the check, where the model writes them before musubi reads the op heads; writing
+touches neither, and a check that passes means the op heads haven't changed since they were read,
+so the code's run is the model's with those writes moved earlier.
+
+**What it doesn't cover.**
+
+- The order of the code's steps is read, not checked, as for moving op heads; the tests above
+  check their outcome on the interleavings they set up, and the e2e search on those it
+  generates.
+- What a realization's view is, its parents and its mark are translation's: the theorems about
+  workspaces take what a realization records as given, and the tests of
+  [races.md](races.md#workspaces) check it. Promise 4 follows from what the model assumes
+  musubi writes.
+- Promise 6 read strictly, that realization never moves a workspace of yours, is false where
+  two op heads of yours moved it apart:
+  `a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it` is ignored, and
+  fails ([formal/README.md](../../formal/README.md#realization-realizelean) says why).
+- `jj op abandon` and `jj op integrate`, which take no lock ([Moving op
+  heads](#moving-op-heads)).
+- The tests above are colocated. Without `.git`, `advance` publishes the realization beside the
+  concurrent op heads and merges them as the next step of the sync, which `shown_step` covers
+  as a publication followed by jj's load, and `advance_tests` runs.
 
 ## Expected values from history
 

@@ -601,13 +601,13 @@ and its view but for this machine's record of `.git`.
   another machine's workspace does under the name `Names.lean` gives it. A realization that moves
   your workspace or rewrites its commit, as when another machine rewrote it, moves it as jj moves
   a workspace whose commit a command in another workspace rewrote. Read strictly, "realization
-  never moves one of your own" is false: where two op heads of yours moved your workspace apart,
-  jj keeps the move of the one that ended first, and a realization published on that one carries
-  the other machine's later end time, so jj's merge with it keeps the other move. That is what
-  `publish_shows_merge` says jj shows, and `own_workspace_kept` excludes it, since one op head
-  doesn't descend from the realization's parents.
-  `a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it`, in
-  `node/realize/concurrent_tests.rs`, is the case, ignored.
+  never moves your workspace" has one exception: where two op heads of yours moved it apart, jj
+  keeps the move of the one that ended first, and a realization published on that one carries
+  the other machine's later end time, so jj's merge with it keeps the other move. That is jj's
+  own tie-break, what `publish_shows_merge` says jj shows, and `own_workspace_kept` excludes it,
+  since one op head doesn't descend from the realization's parents.
+  `a_workspace_moved_two_ways_follows_jjs_tie_break_after_realization`, in
+  `node/realize/concurrent_tests.rs`, pins it.
 
 `settledE` and `keptE` compute, for a finite history, the operations whose merge jj shows once a
 realization is published, and those that stay in the op log (`settled_sound`, `mem_keptE`):

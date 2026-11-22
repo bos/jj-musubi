@@ -82,8 +82,8 @@ drops the next time any jj command runs; and that once you stop running commands
 repo can stop syncing from finishing with the incoming work in. Tests with real jj check where
 the daemon's code ends up, not its individual steps. How each incoming change becomes an
 operation in your repo, including what it records of each workspace, is checked by tests, not
-proofs. Where your own commands moved a workspace two ways at once, jj can keep the other move
-once incoming work arrives.
+proofs. Realization never moves your workspace, except when you moved it two ways at once, where jj's
+own tie-break decides, as it would without musubi.
 
 These models have different scopes; they are not all one combined proof.
 

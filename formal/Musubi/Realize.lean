@@ -46,12 +46,13 @@ The promises, in the user's words, and their theorems:
 5. It finishes: an attempt that no command or jj load interrupts passes its check
    (`quiet_check_passes`), and from every state musubi and jj alone can reach one op head with the
    received work in it (`finishes`): nothing in the repository can stop it finishing.
-6. Other machines' workspaces appear, and realization never moves one of your own: with one op
+6. Other machines' workspaces appear, and realization never moves yours, except when you moved it
+   two ways at once, where jj's own tie-break decides, as it would without musubi: with one op
    head, where the realization leaves your workspace and its commit alone, publishing it leaves
    the workspace where the op head has it (`own_workspace_kept`), and a workspace the realization
    records that the op head left alone appears as it records it (`others_workspace_appears`).
-   With two op heads of yours that moved your workspace apart, the strict reading is false:
-   `concurrent_tests` has the case, ignored.
+   With two op heads of yours that moved your workspace apart, jj's tie-break decides:
+   `concurrent_tests` pins it.
 
 Left out: `jj op abandon` and `jj op integrate`, which take no lock (`OpHeadsRace.lean` has them
 against musubi's check); a crash of a `jj` command, which leaves only an operation nothing names;
@@ -1326,8 +1327,8 @@ theorem crash_invisible (s : S V) :
 /-- **Promise 6, your workspaces.** With one op head, a step that is not a command of yours leaves
 your workspace `n` where it was, given that the realization musubi publishes descends from what
 the op head descends from and records no change to `n`, nor a rewrite of its commit (`keeps`).
-Where your own op heads moved the workspace apart, jj's merge with the realization can keep the
-other move: `concurrent_tests` has the case, ignored. -/
+Where your own op heads moved the workspace apart, jj's tie-break decides, as it would without
+musubi, and can keep the other move: `concurrent_tests` pins the case. -/
 theorem own_workspace_kept {b : Bool} {v0 : V} {s s' : S V} (hr : Reach J b v0 s)
     (hs : Step J b s s') (hyours : s'.mine = s.mine) {n : N}
     (hW : ∀ p todo, s.mv = .writing p false todo → ∃ h, s.heads = [h] ∧

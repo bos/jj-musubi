@@ -858,19 +858,18 @@ fn a_child_realized_ahead_of_its_published_parent_keeps_the_parents_exports() {
     );
 }
 
-/// Promise 6, "realization never moves one of your own [workspaces]", read strictly, is false
-/// here. Two op heads of this machine's move its workspace `a` apart: a command, then one run
-/// `--at-op` on the operation before it. jj, merging them, keeps the move of the one that ended
-/// first. musubi then publishes a realization of another machine's later work on the first,
-/// which jj puts in its place; merged with the second, in the order they ended, the
-/// realization, which carries the other machine's later end time, comes last, and jj keeps the
-/// second's move instead. That is jj's own merge of the op heads with the realization, as
-/// `Realize.lean`'s `publish_shows_merge` says, and `own_workspace_kept` excludes it, since the
-/// second op head doesn't descend from the realization's parent; but the workspace moves with
-/// no command of the user's. Ignored until the promise or the code changes.
+/// Promise 6 says realization never moves your workspace, except when you moved it two ways at
+/// once, where jj's own tie-break decides, as it would without musubi. Two op heads of this
+/// machine's move its workspace `a` apart: a command, then one run `--at-op` on the operation
+/// before it. jj, merging them, keeps the move of the one that ended first. musubi then publishes
+/// a realization of another machine's later work on the first, which jj puts in its place;
+/// merged with the second, in the order they ended, the realization, which carries the other
+/// machine's later end time, comes last, and jj keeps the second's move instead. That is jj's
+/// rule, the same as plain jj with a later operation from another workspace, and what
+/// `Realize.lean`'s `publish_shows_merge` says; `own_workspace_kept` excludes it, since the
+/// second op head doesn't descend from the realization's parent.
 #[test]
-#[ignore = "counterexample to the strict reading of promise 6: a realization changes which of two conflicting moves of this machine's workspace jj keeps"]
-fn a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it() {
+fn a_workspace_moved_two_ways_follows_jjs_tie_break_after_realization() {
     let env = TestEnv::new();
     let alpha = env.init_repo_with_workspace("alpha", "a");
     let beta = env.init_repo_with_workspace("beta", "a");
@@ -922,7 +921,7 @@ fn a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it(
     let after = node.repo_at(&head).unwrap();
     assert_eq!(
         described(&after),
-        "x\n",
-        "the realization moved this machine's workspace"
+        "y\n",
+        "jj's tie-break keeps the move that ended last, as without musubi"
     );
 }

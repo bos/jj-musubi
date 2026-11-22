@@ -652,6 +652,33 @@ fn own_workspaces_named_like_one_of_a_machine_joining_meanwhile_stay_apart() {
     hive.assert_converged();
 }
 
+/// A workspace of this machine's named `beta/x`, whose directory is away while this machine
+/// syncs, as on a disk not mounted, goes missing: with no working copy here, musubi can't tell
+/// it from a workspace of beta's that `jj undo` brought back, and drops it. Brought back by
+/// `jj undo` once the directory is back, it stays this machine's, apart from beta's `x`
+/// arriving after: whether the directory is there is asked at each sync.
+#[test]
+fn own_workspaces_named_like_another_machines_stay_once_their_directory_is_back() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+    let own = hive.workspaces(0)["beta/x"].clone();
+    let path = hive.env.root().join("alpha-beta-x");
+    let away = hive.env.root().join("alpha-beta-x-away");
+    std::fs::rename(&path, &away).unwrap();
+    hive.commit(0, "a", "alpha, its beta/x away");
+    hive.sync();
+    assert!(!hive.workspaces(0).contains_key("beta/x"));
+    std::fs::rename(&away, &path).unwrap();
+    hive.repo(0).jj(&["undo"]);
+    assert_eq!(hive.workspaces(0).get("beta/x"), Some(&own));
+    add_workspace(&hive, 1, "x", "beta-x");
+    let theirs = hive.workspaces(1)["x"].clone();
+    hive.sync();
+    hive.sync();
+    assert_kept_apart(&hive, "beta/x", &own, 1, "x", &theirs);
+    hive.assert_converged();
+}
+
 /// A workspace this machine adds, or renames its own to, under the name of another machine's
 /// that it has just forgotten, stays this machine's, unpublished: forgetting another machine's
 /// workspace stays local, and the next sync shows that one again, as `beta-1a2b/beta`. So too

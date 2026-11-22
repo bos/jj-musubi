@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- musubi shows another machine's workspace `x` as `beta/x`, `beta` being that machine's name.
+  A workspace of yours named that way, whose directory is missing when musubi syncs, as on a
+  disk not mounted, goes missing, as before: jj in its directory says it has no working copy,
+  and it's gone from `jj workspace list`. Brought back with `jj undo` once the directory is
+  back, it now stays. Before, the daemon went on removing it at every sync until it restarted,
+  and if that machine then added a workspace `x`, it showed as `beta/x` with your directory as
+  its working copy, so that work in your directory moved that machine's working copy. A daemon
+  already running keeps the old behaviour until it restarts: run `musubi daemon restart` after
+  upgrading.
+
 - `jj op abandon` of operations the hive already has no longer reaches other machines. The
   copy where you ran it stops syncing, with "this repository lost history the hive has (was
   `jj op abandon` run?)", and the other machines keep the operations; [Rescue work in a new

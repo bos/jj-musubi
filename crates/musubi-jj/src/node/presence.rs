@@ -29,12 +29,13 @@ use crate::workspaces;
 /// asked about.
 pub(super) type WorkedNames = Option<(Vec<Option<CanonicalOp>>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
 
-/// The names `NodeRepo::has_working_copy_here` answered for, with the workspace store file's
-/// modification time and length then, if it could be read.
+/// Where jj's workspace store put the working copy of each name `NodeRepo::has_working_copy_here`
+/// asked about, if anywhere, with the store file's modification time and length then, if it
+/// could be read.
 #[derive(Default)]
 pub(super) struct WorkingCopies {
     stamp: Option<(Option<std::time::SystemTime>, u64)>,
-    names: std::collections::HashMap<WorkspaceNameBuf, bool>,
+    paths: std::collections::HashMap<WorkspaceNameBuf, Option<std::path::PathBuf>>,
 }
 
 /// The names of this machine's own workspaces in a canonical view.
@@ -288,39 +289,43 @@ impl NodeRepo {
     /// that is still there: musubi makes none for another machine's workspace, so a name of the
     /// form other machines' show by, `beta/x`, with one is this machine's, which it doesn't
     /// publish. jj records one from `jj workspace add` on, moves it with `jj workspace rename`,
-    /// and leaves it after `jj workspace forget`. Remembered while the store's file is
-    /// unchanged, since every other machine's workspace of every operation is asked about.
+    /// and leaves it after `jj workspace forget`. Where the store puts it is remembered while
+    /// the store's file is unchanged, since every other machine's workspace of every operation
+    /// is asked about, but whether the directory is there is asked each time: the user can
+    /// move it away and back, or unmount and mount its disk, without a `jj` command.
     pub(super) fn has_working_copy_here(&self, name: &WorkspaceName) -> bool {
-        let ask = || {
-            matches!(
-                self.loader.workspace_store().get_workspace_path(name),
-                Ok(Some(path)) if path.exists()
-            )
+        let path = || {
+            self.loader
+                .workspace_store()
+                .get_workspace_path(name)
+                .ok()
+                .flatten()
         };
-        let Some(stamp) = std::fs::metadata(self.repo_path.join("workspace_store").join("index"))
-            .ok()
-            .map(|metadata| (metadata.modified().ok(), metadata.len()))
-        else {
-            return ask();
+        let path = match std::fs::metadata(self.repo_path.join("workspace_store").join("index")) {
+            Err(_) => path(),
+            Ok(metadata) => {
+                let stamp = Some((metadata.modified().ok(), metadata.len()));
+                let mut memo = self
+                    .names
+                    .working_copies
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if memo.stamp != stamp {
+                    *memo = WorkingCopies {
+                        stamp,
+                        ..WorkingCopies::default()
+                    };
+                }
+                if let Some(path) = memo.paths.get(name) {
+                    path.clone()
+                } else {
+                    let path = path();
+                    memo.paths.insert(name.to_owned(), path.clone());
+                    path
+                }
+            }
         };
-        let stamp = Some(stamp);
-        let mut memo = self
-            .names
-            .working_copies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if memo.stamp != stamp {
-            *memo = WorkingCopies {
-                stamp,
-                ..WorkingCopies::default()
-            };
-        }
-        if let Some(&here) = memo.names.get(name) {
-            return here;
-        }
-        let here = ask();
-        memo.names.insert(name.to_owned(), here);
-        here
+        path.is_some_and(|path| path.exists())
     }
 
     /// This machine's own workspaces in `heads`, merged as jj merges them.

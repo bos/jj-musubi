@@ -98,10 +98,10 @@ fails when one `ssh-keygen` tries to overwrite the other's file. The existing SS
 workflow still checks key creation and authorization through the shipped commands.
 
 `a_copy_without_workspaces_can_be_forgotten_by_name` removes beta's last workspace with jj,
-syncs it, and resolves beta's name, qualified name and key for forgetting, including with a
-reserved local prefix. Looking up copies only through their workspaces returns no match and
-fails this regression. `machines_whose_workspaces_are_all_default_can_join` also runs the
-real `musubi forget beta` command after beta removes its last workspace.
+syncs it, and resolves beta's name, qualified name and key for forgetting. Looking up copies
+only through their workspaces returns no match and fails this regression.
+`machines_whose_workspaces_are_all_default_can_join` also runs the real `musubi forget beta`
+command after beta removes its last workspace.
 
 ## Coverage reconnaissance
 
@@ -457,9 +457,12 @@ tell when its thread has stopped.
 
 `recreating_hives_keeps_work_without_inheriting_remote_workspaces` has two copies leave a
 hive, the first before the other, and start another together. It checks that both keep their
-commits, a linked workspace whose name has a `/` included, and show exactly the local and
-remote workspaces expected: the other machine's working copy, which the first copy still shows
-from the old hive, is not published as its own.
+commits, a linked workspace's included, and show exactly the local and remote workspaces
+expected: the other machine's working copy, which the first copy still shows from the old hive,
+is not published as its own. Before that, the linked workspace's name has a `/`, and the test
+snapshots what `musubi sync`, `musubi status`, `musubi leave` and `musubi create` say then,
+with a second such workspace whose directory has a space in its name and then goes missing,
+and checks that the daemon syncs again once it is renamed.
 
 `the_quick_start_works_as_written` follows the quick start in `docs/get-started.md` as a new
 user would:

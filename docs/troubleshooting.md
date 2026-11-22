@@ -24,6 +24,16 @@ Follow the symptom:
   [rescue work in a new copy](#rescue-work-in-a-new-copy).
 - **Hive … is paused:** `musubi pause` stopped every machine syncing it; see [Pause a whole
   hive](guides/manage.md#pause-a-whole-hive).
+- **This repository can't sync while its workspace … has a "/" in its name:** rename the
+  workspace as the hint says; see [Other machines'
+  workspaces](how-it-works.md#other-machines-workspaces). If its directory is missing, as on
+  a disk not mounted, run `jj workspace forget <name>` from another workspace of the repo, or
+  mount the disk and rename the workspace there.
+- **This repository can't sync while jj keeps a directory for …, now another machine's
+  workspace:** usually a workspace of yours that `jj workspace forget` dropped had that name,
+  and jj kept its directory. Move out any ignored files you want to keep from that directory,
+  then run `jj workspace remove <name>`, as the hint says: it saves the rest in a commit and
+  deletes the directory. If you had just added the workspace, rename it instead.
 - **Hive … was reset:** `musubi resume` in another copy made the hive again without its old
   history; replace this copy with a new one, as [On the other
   machines](guides/manage.md#on-the-other-machines) says.
@@ -120,6 +130,9 @@ A remote name must have the same fetch and push destinations across a hive. `--h
 bypass that check. Give a different destination an unused name, for example
 `jj git remote rename origin fork`, then retry. Renaming does not release the old name's
 binding. See [Fetch and push](guides/working-across-machines.md#fetch-and-push).
+
+A workspace whose name has a `/` stops `musubi join` and `musubi create` too, before they ask
+the hub anything: rename it as the hint says, then retry.
 
 A filesystem copy duplicates the original's identity. Use `musubi clone` for another syncing
 copy; use `musubi join --original` for a move or restore only once the original is gone.

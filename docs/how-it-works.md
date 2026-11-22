@@ -106,10 +106,13 @@ That name identifies the laptop's last snapshotted commit. You can [diff it or b
 it](guides/working-across-machines.md#see-what-other-machines-are-doing) like any change. When
 you leave or forget a machine, jj-musubi removes those names.
 
-A workspace of yours whose name has a `/`, such as `feat/x`, stays on your machine: other
-machines don't show it, because they show each other's workspaces as `laptop/default`. It keeps
-working here, and `musubi status` warns about it. To show it on other machines, run
-`jj workspace rename <new name>` in that workspace, with no `/` in the new name.
+Because names with a `/` are how machines show each other's workspaces, a repo with a
+workspace of yours named that way, such as `feat/x`, doesn't sync; other repos on the machine
+sync on. `musubi sync` and `musubi status` say which workspace it is. Run `jj workspace rename
+<new name>` in that workspace's directory, with no `/` in the new name, and the repo syncs
+again, with the work you did meanwhile. If the directory is missing, as on a disk not mounted,
+run `jj workspace forget <name>` from another workspace of the repo instead, or mount the disk
+and rename it there.
 
 Moving a repo will maintain its identity in jj-musubi's eyes, but copying its files makes a
 *duplicate* with the same identity that cannot sync. Use the [move, copy and restore

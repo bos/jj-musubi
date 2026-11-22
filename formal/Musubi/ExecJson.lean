@@ -25,7 +25,6 @@ import Musubi.ExpectedExec
 import Musubi.PacketAcceptance
 import Musubi.SysAcceptance
 import Musubi.NodeSysExec
-import Musubi.NativeLifecycle.Json
 import Musubi.OpHeadsJson
 
 namespace Musubi.Exec.Json
@@ -1055,9 +1054,7 @@ def badRequestOps : List (String × (Json → Except String Json)) :=
 
 /-- Requests that need no session, by `op`, whose errors are whole messages, not bad requests. -/
 def wholeMessageOps : List (String × (Json → Except String Json)) :=
-  [("presence", presenceReply),
-    ("nativeLifecycle", fun j =>
-      (NativeLifecycle.Json.reply j).mapError ("native lifecycle interpretation gap: " ++ ·))]
+  [("presence", presenceReply)]
 
 /-- Every request that needs no session, by `op`. An error is the message of the reply. -/
 def statelessOps : List (String × (Json → Except String Json)) :=

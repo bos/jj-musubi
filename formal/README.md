@@ -30,13 +30,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 - [Snapshot publication budgets](#snapshot-publication-budgets), exact approval and cleanup of
   selected unpublished operations (`Musubi/Publication.lean`; [design.md, "Snapshot publication
   budgets"](../docs/internals/design.md#snapshot-publication-budgets)).
-- A finite executable model of native preparation and publication (`Musubi/NativeLifecycle/`),
-  with construction and record-custody proofs. Its native evidence and correspondence limits
-  are described in
-  [conformance.md](../docs/internals/conformance.md#native-lifecycle-inputs-and-events).
 
 The models of chunked transfers, per-machine refs, presence, copies, workspace names, snapshot
-publication, native preparation and moving op heads are separate from the protocol model's
+publication and moving op heads are separate from the protocol model's
 state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
@@ -433,14 +429,8 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as a pure function for the oracle and the code: `same` (`plan::same`); and what it reads of operations. |
 | `Musubi/OpHeadsJson.lean` | The oracle's `opHeads` request. |
 | `Musubi/OpHeadsRace.lean` | A small model of the op heads among jj commands, `jj op abandon`, `jj op integrate` and musubi's moves, and its theorems. |
-| `Musubi/NativeLifecycle.lean` | Entry point for the finite native lifecycle model. |
-| `Musubi/NativeLifecycle/Types.lean`, `Musubi/NativeLifecycle/Graph.lean`, `Musubi/NativeLifecycle/Selectors.lean` | Raw observations, finite graph queries, and source selection with explicit evidence gaps. |
-| `Musubi/NativeLifecycle/NativeFacts.lean`, `Musubi/NativeLifecycle/Construction.lean` | Native observation tables and executable receipt and render construction. |
-| `Musubi/NativeLifecycle/Steps.lean` | Executable preparation, revalidation and publication actions. |
-| `Musubi/NativeLifecycle/ConstructionSound.lean`, `Musubi/NativeLifecycle/RunSound.lean` | Conditional construction facts and record custody along executable traces. |
-| `Musubi/NativeLifecycle/Json.lean`, `Musubi/NativeLifecycleTest.lean` | Finite fixture codec and model examples. They do not authenticate native observations. |
 | `Musubi/Axioms.lean` | `#assert_axioms`, which fails unless a theorem uses only the standard axioms, for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication and native lifecycle requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs, expected-value, publication requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 ## Correspondence with protocol.md
@@ -786,7 +776,7 @@ For unpublished surviving work, selecting its pre-trim state is another native o
 frontier in both orders of saved base and own push. `pres_eq` does not select that frontier.
 
 Root-based native publication, and publication while taking records that drop a current op
-head (`NativeLifecycle` `dropsHead`), also select current local Git state independently of the
+head, also select current local Git state independently of the
 contracted shared ancestry. `Refs.lean` preserves supplied local slots, and
 `AbandonRefs.publish_refines` uses its normalized common-base slot; neither proves this
 native source selection, cache refresh, or Git HEAD handling. The trim, concurrent bookmark
@@ -1021,20 +1011,6 @@ out how the local moves refine the protocol model's steps, which are on canonica
 command's publish and merge have the shape of `EnvStep.userOp` and `EnvStep.merge` on the heads,
 but relating a local op head to its canonical operation is the translation, which this model
 abstracts away.
-
-### Native preparation and publication (`NativeLifecycle/`)
-
-This finite executable model selects sources from raw graph, namespace and record observations,
-constructs receipts and rendered operations, and revalidates prepared work before publication.
-Its proofs cover construction origins and record responsibility along the executable action
-trace. Missing or ambiguous evidence stays explicit.
-
-These results do not authenticate arbitrary native observations or establish a complete Rust
-refinement. The native fixtures compare the model with the shipping code through the first retry
-after a changed head; retry canonicalization beyond it and the whole publication are not
-simulated. The real adapter fixtures and their schedule restrictions are described in
-[conformance.md](../docs/internals/conformance.md#native-lifecycle-inputs-and-events), which owns
-the correspondence and remaining gaps.
 
 ## The asynchronous liveness bridge
 

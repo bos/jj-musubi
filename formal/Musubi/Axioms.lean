@@ -26,8 +26,6 @@ import Musubi.HubSuffix
 import Musubi.NodeSettle
 import Musubi.EarlyEntry
 import Musubi.HistoryWindow
-import Musubi.NativeLifecycle.ConstructionSound
-import Musubi.NativeLifecycle.RunSound
 import Musubi.EntryAssembly
 import Musubi.CallBatch
 import Musubi.HubHistory
@@ -578,50 +576,6 @@ open Musubi
 #assert_axioms Refs.Expected.checkpoint
 #assert_axioms Refs.Expected.conflicted_import_agrees_of_history
 
--- Finite native lifecycle fixtures: local execution and the same actual action list.
-#assert_axioms NativeLifecycle.encodeNative_observed
-#assert_axioms NativeLifecycle.encodeCanonical_observed
-#assert_axioms NativeLifecycle.writeRender_captured_records
-#assert_axioms NativeLifecycle.writeRender_current
-#assert_axioms NativeLifecycle.planReceipt_origin
-#assert_axioms NativeLifecycle.planRender_origin
-#assert_axioms NativeLifecycle.run_has_trace
-#assert_axioms NativeLifecycle.writeReceiptCanonical_records
-#assert_axioms NativeLifecycle.writeReceiptNative_records
-#assert_axioms NativeLifecycle.step_named_custody
-#assert_axioms NativeLifecycle.runs_named_custody
-#assert_axioms NativeLifecycle.sourceCounterpart_none
-#assert_axioms NativeLifecycle.matchingCandidates_gap
-#assert_axioms NativeLifecycle.chooseTier_selected
-#assert_axioms NativeLifecycle.chooseSource_selected
-#assert_axioms NativeLifecycle.candidates_complete
-#assert_axioms NativeLifecycle.computedSource_selected
-#assert_axioms NativeLifecycle.descriptionExclusion_necessary
-#assert_axioms NativeLifecycle.DescriptionExclusion.no_ordinary_body
-#assert_axioms NativeLifecycle.descriptionExclusion_pinned
-#assert_axioms NativeLifecycle.matchingCandidates_excluded_necessary
-#assert_axioms NativeLifecycle.matchingCandidates_accounted
-#assert_axioms NativeLifecycle.currentGitBody_fields
-#assert_axioms NativeLifecycle.currentGitBody_frame
-#assert_axioms NativeLifecycle.currentGitBody_marker
-#assert_axioms NativeLifecycle.encodeCurrentGit_shape
-#assert_axioms NativeLifecycle.constructCurrentGit_pinned
-#assert_axioms NativeLifecycle.refreshCurrentGit_records
-#assert_axioms NativeLifecycle.refreshCurrentGit_origin
-#assert_axioms NativeLifecycle.step_source_routes
-#assert_axioms NativeLifecycle.step_invalidates_source_routes
-#assert_axioms NativeLifecycle.runs_source_routes
-#assert_axioms NativeLifecycle.commitRender_current
-#assert_axioms NativeLifecycle.commitRender_association
-#assert_axioms NativeLifecycle.rawInitial_construction
-#assert_axioms NativeLifecycle.construction_step_preserves
-#assert_axioms NativeLifecycle.runs_construction
--- `NativeLifecycle.certifiedConstructionRun` is a program, not a theorem; the theorems it is
--- built from are audited above.
-#assert_axioms NativeLifecycle.revalidate_changed_heads
-#assert_axioms NativeLifecycle.preparationProbe_historical_frame
-#assert_axioms NativeLifecycle.preparationProbe_captured_records
-#assert_axioms NativeLifecycle.preparationProbe_source_routes
 #assert_axioms Musubi.Exec.Json.encodeNet_eq_reference
 #assert_axioms Musubi.Exec.Json.encodeNet_compress_eq_reference
 

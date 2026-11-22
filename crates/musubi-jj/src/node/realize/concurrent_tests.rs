@@ -219,7 +219,8 @@ struct Hive {
     incoming: CanonicalOp,
 }
 
-fn hive() -> Hive {
+/// `forgotten` says whether `alpha` forgets `beta`'s copy before it sends the work.
+fn hive(forgotten: bool) -> Hive {
     let env = TestEnv::new();
     let alpha = env.init_repo_with_workspace("alpha", "a");
     let beta = env.init_repo_with_workspace("beta", "a");
@@ -240,6 +241,9 @@ fn hive() -> Hive {
     let joined = single_head(&mut node);
     transfer(&node, &mut source, &joined);
     source.advance(&joined).unwrap();
+    if forgotten {
+        source.forget_copy(node.machine().key(), "beta").unwrap();
+    }
     alpha.jj(&["new", "--no-edit", "-m", "remote work"]);
     alpha.jj(&[
         "workspace",
@@ -296,8 +300,8 @@ fn late_command(repo: &TestRepo) -> (String, OperationId) {
 /// command moves nothing back, and the workspaces keep their commits.
 #[test]
 fn a_command_finishing_before_publication_is_merged_and_exported() {
-    for meanwhile in [false, true] {
-        let mut hive = hive();
+    for (forgotten, meanwhile) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut hive = hive(forgotten);
         let a_before = commit_of(&hive.beta, "a@");
         let b_before = commit_of(&hive.beta, "b@");
         let command = hive.beta.another_copy(hive.beta.path());
@@ -339,23 +343,32 @@ fn a_command_finishing_before_publication_is_merged_and_exported() {
         assert_eq!(
             published.first(),
             Some(&true),
-            "meanwhile: {meanwhile}: the first head published lacks the command's operation"
+            "forgotten: {forgotten}, meanwhile: {meanwhile}: the first head published lacks the command's operation"
         );
 
         let heads = hive.node.local_heads().unwrap();
-        assert_eq!(heads.len(), 1, "meanwhile: {meanwhile}");
+        assert_eq!(
+            heads.len(),
+            1,
+            "forgotten: {forgotten}, meanwhile: {meanwhile}"
+        );
         let repo = hive.node.repo_at(&heads[0]).unwrap();
         let x = repo.view().get_local_bookmark(RefName::new("x"));
         assert_eq!(
             x.as_normal().unwrap().hex(),
             moved,
-            "meanwhile: {meanwhile}"
+            "forgotten: {forgotten}, meanwhile: {meanwhile}"
         );
         assert_eq!(git_bookmark(&hive.beta, "x"), moved);
         let wc = |name| repo.view().get_wc_commit_id(WorkspaceName::new(name));
-        // The command's `jj new` moved `a`, the workspace it ran in, and only that.
+        // The command's `jj new` moved `a`, the workspace it ran in, and only that, unless
+        // the hive forgot this copy: it takes new working copies then.
         assert_ne!(wc("a").unwrap().hex(), a_before);
-        assert_eq!(wc("b").unwrap().hex(), b_before);
+        if forgotten {
+            assert!(wc("b").is_some());
+        } else {
+            assert_eq!(wc("b").unwrap().hex(), b_before);
+        }
         assert!(wc("alpha/a").is_some());
         assert!(!commit_of(&hive.beta, "description(substring:\"remote work\")").is_empty());
         // Every operation of the command is in the history of the op head.
@@ -386,7 +399,7 @@ fn a_command_finishing_before_publication_is_merged_and_exported() {
 #[test]
 fn a_workspace_named_like_another_machines_stays_this_machines() {
     for prepared_first in [false, true] {
-        let mut hive = hive();
+        let mut hive = hive(false);
         let alpha_working_copy = commit_of(&hive.alpha, "c@");
         if prepared_first {
             hive.node.realize(&hive.incoming).unwrap();
@@ -598,4 +611,43 @@ fn publication_interrupted_before_the_old_heads_go_loses_nothing() {
             "import must not revert a bookmark"
         );
     }
+}
+
+/// An operation realized ahead of its parent keeps what exporting the parent did. The parent is
+/// published, and exported, before its child is: the child was rendered against the parent's
+/// unpublished realization, which publication replaced, so it is rendered again from the
+/// published one, with its Git record. Reusing the old rendering's record would leave the
+/// bookmark the parent exported out of it, and the next import would move the bookmark.
+#[test]
+fn a_child_realized_ahead_of_its_published_parent_keeps_the_parents_exports() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    alpha.jj(&["describe", "-m", "shared base"]);
+    let mut source = open(&alpha);
+    let mut node = open(&beta);
+    let base = single_head(&mut source);
+    transfer(&source, &mut node, &base);
+    node.advance(&base).unwrap();
+    alpha.jj(&["bookmark", "create", "x", "-r", "@"]);
+    let first = single_head(&mut source);
+    alpha.jj(&["new", "-m", "second"]);
+    alpha.jj(&["bookmark", "set", "x", "-r", "@"]);
+    let second = single_head(&mut source);
+    transfer(&source, &mut node, &second);
+    node.realize(&first).unwrap();
+    node.realize(&second).unwrap();
+    node.advance(&first).unwrap();
+    node.advance(&second).unwrap();
+
+    let moved = commit_of(&alpha, "x");
+    assert_eq!(commit_of(&beta, "x"), moved);
+    assert_eq!(git_bookmark(&beta, "x"), moved);
+    let before = local_bookmarks(&beta);
+    beta.jj(&["--ignore-working-copy", "git", "import"]);
+    assert_eq!(
+        local_bookmarks(&beta),
+        before,
+        "import must not move a bookmark"
+    );
 }

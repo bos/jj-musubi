@@ -25,6 +25,11 @@
 //! For Git refs, merges of more heads at once or with differing closest bases aren't modeled,
 //! and fail as unexplained.
 //!
+//! jj itself changes refs git didn't move: its import of a moved ref rewrites, by change id,
+//! the commits only the old target reaches, and moves other bookmarks with them. An import the
+//! rules above can't explain is imported again by plain jj, from the import's parent and git's
+//! moves alone, and passes if plain jj makes the same refs (`World::plain_jj_import`).
+//!
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
 //!
@@ -113,6 +118,8 @@ pub struct Imports {
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
     /// had before each of those moves.
     moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
+    /// Where git last moved each of those refs.
+    moved_to: Vec<BTreeMap<String, RefTarget>>,
     /// Each machine's HEAD, where git moved it through the branch it is a symbolic ref to,
     /// since jj last imported it, by its workspace's name: what HEAD had before each move.
     head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
@@ -196,6 +203,17 @@ impl Ref {
     }
 }
 
+impl Ref {
+    /// The change `World::check_import` reports to this ref, as `ref_targets` names it.
+    fn subject(&self) -> String {
+        match self.kind {
+            Kind::Bookmark => format!("bookmark {}", self.name),
+            Kind::Tag => format!("tag {}", self.name),
+            Kind::Remote => format!("remote bookmark {self}"),
+        }
+    }
+}
+
 impl fmt::Display for Ref {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
@@ -212,6 +230,72 @@ impl fmt::Display for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} (git_refs {})", show(&self.0), show(&self.1))
     }
+}
+
+/// How the rules explain a ref an import changed (`World::justify`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Explained {
+    GitMove,
+    ConcurrentRecords,
+}
+
+/// Every bookmark, tag, remote ref and record of a git ref in `view`, by a name for each, with
+/// the name of the change to it `World::check_import` reports (`Ref::subject`) and a remote
+/// ref's tracking state.
+fn ref_targets(view: &View) -> BTreeMap<String, (String, RefTarget, String)> {
+    let mut refs = BTreeMap::new();
+    for (name, target) in &view.local_bookmarks {
+        let subject = format!("bookmark {}", name.as_str());
+        refs.insert(subject.clone(), (subject, target.clone(), String::new()));
+    }
+    for (name, target) in &view.local_tags {
+        let subject = format!("tag {}", name.as_str());
+        refs.insert(subject.clone(), (subject, target.clone(), String::new()));
+    }
+    for (remote, remote_view) in &view.remote_views {
+        let git = remote.as_str() == REMOTE_NAME_FOR_LOCAL_GIT_REPO.as_str();
+        for (kind, remote_refs) in [
+            ("bookmark", &remote_view.bookmarks),
+            ("tag", &remote_view.tags),
+        ] {
+            for (name, remote_ref) in remote_refs {
+                let state = match remote_ref.state {
+                    RemoteRefState::New => "",
+                    RemoteRefState::Tracked => " (tracked)",
+                };
+                let label = format!("remote {kind} {}@{}", name.as_str(), remote.as_str());
+                let subject = if git {
+                    format!("{kind} {}", name.as_str())
+                } else {
+                    label.clone()
+                };
+                refs.insert(
+                    label,
+                    (subject, remote_ref.target.clone(), state.to_owned()),
+                );
+            }
+        }
+    }
+    for (name, target) in &view.git_refs {
+        let name = name.as_str();
+        let subject = if let Some(x) = name.strip_prefix("refs/heads/") {
+            format!("bookmark {x}")
+        } else if let Some(x) = name.strip_prefix("refs/tags/") {
+            format!("tag {x}")
+        } else if let Some((remote, x)) = name
+            .strip_prefix("refs/remotes/")
+            .and_then(|r| r.split_once('/'))
+        {
+            format!("remote bookmark {x}@{remote}")
+        } else {
+            name.to_owned()
+        };
+        refs.insert(
+            format!("jj's record of {name}"),
+            (subject, target.clone(), String::new()),
+        );
+    }
+    refs
 }
 
 fn show(target: &RefTarget) -> String {
@@ -1904,6 +1988,7 @@ impl World {
             self.imports.seen.push(HashSet::new());
             self.imports.judged.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
+            self.imports.moved_to.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
             self.imports.preserved_heads.push(BTreeMap::new());
             self.check_imports(m);
@@ -1919,6 +2004,7 @@ impl World {
             self.imports.seen.push(HashSet::new());
             self.imports.judged.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
+            self.imports.moved_to.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
             self.imports.preserved_heads.push(BTreeMap::new());
             self.imports.setup.push(HashSet::new());
@@ -1926,6 +2012,7 @@ impl World {
         self.imports.seen[m].clear();
         self.imports.judged[m].clear();
         self.imports.moved[m].clear();
+        self.imports.moved_to[m].clear();
         self.imports.head_moved[m].clear();
         self.imports.preserved_heads[m].clear();
         self.imports.started = false;
@@ -1934,8 +2021,9 @@ impl World {
         self.imports.setup[m] = self.imports.seen[m].clone();
     }
 
-    /// git is about to move `git_ref` on machine `m`: imports before now can't follow it.
-    pub fn git_moves(&mut self, m: usize, git_ref: &str) {
+    /// git is about to move `git_ref` on machine `m` to `to`: imports before now can't follow
+    /// it.
+    pub fn git_moves(&mut self, m: usize, git_ref: &str, to: RefTarget) {
         self.check_imports(m);
         let value = self
             .fx
@@ -1962,6 +2050,7 @@ impl World {
             .entry(git_ref.to_owned())
             .or_default()
             .push(value);
+        self.imports.moved_to[m].insert(git_ref.to_owned(), to);
     }
 
     /// Whose machine `m`'s marked operations are.
@@ -2083,6 +2172,7 @@ impl World {
             }
             if refs {
                 self.imports.moved[m].clear();
+                self.imports.moved_to[m].clear();
             } else if let Some(ws) = &log.ops[&id].metadata.workspace_name {
                 self.imports.head_moved[m].remove(ws.as_str());
             }
@@ -2190,27 +2280,225 @@ impl World {
             changed.push((format!("tag {name}"), refs));
         }
         let mut failures = vec![];
+        // What the rules can't explain, by the names `ref_targets` gives them, and the refs
+        // they explain only by jj's merge of concurrent records.
+        let mut unexplained: BTreeSet<String> = BTreeSet::new();
+        let mut concurrent: Vec<Ref> = vec![];
         for (what, refs) in changed {
             if refs.is_empty() {
                 failures.push(format!(
                     "{} changed {what} without changing jj's record of git's refs",
                     describe(&log.owner, id, &op)
                 ));
+                unexplained.insert(what.clone());
             }
             for r in refs {
-                if let Err(why) = self.justify(m, log, parent, &r) {
-                    failures.push(format!(
-                        "{} changed {what}: {why}",
-                        describe(&log.owner, id, &op)
-                    ));
+                match self.justify(m, log, parent, &r) {
+                    Ok(Explained::GitMove) => {}
+                    Ok(Explained::ConcurrentRecords) => concurrent.push(r),
+                    Err(why) => {
+                        failures.push(format!(
+                            "{} changed {what}: {why}",
+                            describe(&log.owner, id, &op)
+                        ));
+                        unexplained.insert(what.clone());
+                        unexplained.insert(r.subject());
+                    }
                 }
             }
         }
         if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("\n"))
+            return Ok(());
         }
+        match self.plain_jj_import(m, log, parent, &after, &unexplained, &concurrent) {
+            Ok(()) => {
+                fired("import:plain_jj");
+                Ok(())
+            }
+            Err(why) => {
+                failures.push(why);
+                Err(failures.join("\n"))
+            }
+        }
+    }
+
+    /// Adjudicates with plain jj what an import changed that the rules above can't explain.
+    /// jj itself changes refs git didn't move: its import of a moved ref rewrites, by change
+    /// id, the commits only the old target reaches into those only the new one reaches,
+    /// moving the bookmarks on them, and the command's export writes them to `.git`
+    /// (`record_synthetic_predecessors` in jj-lib's `git.rs`;
+    /// `e2e_imports_follow_what_jj_makes_of_a_git_move`). So plain jj imports the same moves,
+    /// without musubi, in a copy of the repository at the import's parent, whose `.git` holds
+    /// the parent's record of each ref, except those git moved, which hold where git moved
+    /// them, and those the rules explain by jj's merge of concurrent records (`concurrent`),
+    /// which hold what the import took. The import is explained if plain jj leaves each
+    /// `unexplained` bookmark, remote bookmark and tag, and its record, as the import did; a
+    /// record musubi got wrong isn't, as plain jj starts from `.git` matching it. A commit
+    /// both imports wrote, as by rebasing, has each command's time, so two such commits match
+    /// by change id, description and parents' change ids; any other commit, an older version
+    /// of a change above all, matches only itself. It runs only where the rules fail, and
+    /// its commands don't take the tested repositories' seeds, so a passing case is as it
+    /// was without it.
+    fn plain_jj_import(
+        &self,
+        m: usize,
+        log: &mut Log,
+        parent: &OperationId,
+        after: &View,
+        unexplained: &BTreeSet<String>,
+        concurrent: &[Ref],
+    ) -> Result<(), String> {
+        let before = log.view(parent).clone();
+        let dir = musubi_testutil::tempdir();
+        let root = dir.path().join("repo");
+        musubi_testutil::copy_tree(&log.source_root, &root);
+        // Every machine of the search is a colocated repository that `jj git init
+        // --colocate` made (`TestEnv::init_repo`): `.jj/repo` is the repository, and `.git`
+        // beside it, which `.jj/repo/store/git_target` names by a relative path, so the copy
+        // is a colocated repository of its own. Secondary workspaces, whose `.jj/repo` is a
+        // file naming the primary, are never `source_root`.
+        assert!(
+            root.join(".jj/repo").is_dir() && root.join(".git").is_dir(),
+            "{} is a colocated repository's primary workspace",
+            log.source_root.display()
+        );
+        let heads = root.join(".jj/repo/op_heads/heads");
+        for entry in std::fs::read_dir(&heads).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        std::fs::write(heads.join(parent.hex()), "").unwrap();
+        let mut refs: BTreeMap<String, RefTarget> = before
+            .git_refs
+            .iter()
+            .map(|(name, target)| (name.as_str().to_owned(), target.clone()))
+            .collect();
+        refs.extend(self.imports.moved_to[m].clone());
+        for r in concurrent {
+            refs.insert(r.git_ref(), r.record(after).1);
+        }
+        let repo = self.fx.repo(m);
+        let git = |args: &[&str]| repo.checker_git(&root, args);
+        let listed = git(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ]);
+        let existing: BTreeSet<&str> = listed.lines().filter(|r| !r.ends_with("/HEAD")).collect();
+        for (name, target) in &refs {
+            if let Some(id) = target.as_normal() {
+                git(&["update-ref", name, &id.hex()]);
+            } else if !target.is_absent() {
+                return Err(format!(
+                    "plain jj can't import from the conflicted record of {name}"
+                ));
+            }
+        }
+        for name in existing {
+            if refs.get(name).is_none_or(RefTarget::is_absent) {
+                git(&["update-ref", "-d", name]);
+            }
+        }
+        let output = repo.checker_jj(&root, &["--ignore-working-copy", "git", "import"]);
+        if !output.status.success() {
+            return Err(format!(
+                "plain jj failed to import the same moves: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let loader = RepoLoader::init_from_file_system(
+            &crate::reference::settings(),
+            &root.join(".jj/repo"),
+            &default_backend_factories(),
+        )
+        .map_err(|err| format!("opening plain jj's import: {err}"))?;
+        let [head] = &std::fs::read_dir(&heads)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()[..]
+        else {
+            return Err("plain jj's import left several op heads".to_owned());
+        };
+        let head = OperationId::try_from_hex(head).unwrap();
+        let op = block_on(loader.op_store().read_operation(&head)).unwrap();
+        let plain = block_on(loader.op_store().read_view(&op.view_id)).unwrap();
+        let at_parent = block_on(loader.load_at(&block_on(loader.load_operation(parent)).unwrap()))
+            .map_err(|err| format!("loading the import's parent: {err}"))?;
+        let existed = |id: &CommitId| block_on(at_parent.index().has_id(id)).unwrap();
+        let store = loader.store();
+        let key = |id: &CommitId| {
+            let commit = store.get_commit(id).unwrap();
+            let parents: Vec<_> = commit
+                .parent_ids()
+                .iter()
+                .map(|p| store.get_commit(p).unwrap().change_id().clone())
+                .collect();
+            (
+                commit.change_id().clone(),
+                commit.description().to_owned(),
+                parents,
+            )
+        };
+        let same_commit =
+            |x: &CommitId, y: &CommitId| x == y || (!existed(x) && !existed(y) && key(x) == key(y));
+        let same = |a: &RefTarget, b: &RefTarget| {
+            a.iter().len() == b.iter().len()
+                && a.iter().zip(b.iter()).all(|(x, y)| match (x, y) {
+                    (Some(x), Some(y)) => same_commit(x, y),
+                    (x, y) => x == y,
+                })
+        };
+        let judged = |refs: BTreeMap<String, (String, RefTarget, String)>| {
+            refs.into_iter()
+                .filter(|(_, (subject, ..))| unexplained.contains(subject))
+                .map(|(label, (_, target, state))| (label, (target, state)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let (made, plain) = (judged(ref_targets(after)), judged(ref_targets(&plain)));
+        let labels: BTreeSet<&String> = made.keys().chain(plain.keys()).collect();
+        let absent = (RefTarget::absent(), String::new());
+        let differences: Vec<String> = labels
+            .into_iter()
+            .filter_map(|label| {
+                let (a, b) = (
+                    made.get(label).unwrap_or(&absent),
+                    plain.get(label).unwrap_or(&absent),
+                );
+                (!same(&a.0, &b.0) || a.1 != b.1).then(|| {
+                    format!(
+                        "{label}: {}{} where plain jj makes {}{}",
+                        show(&a.0),
+                        a.1,
+                        show(&b.0),
+                        b.1
+                    )
+                })
+            })
+            .collect();
+        if differences.is_empty() {
+            return Ok(());
+        }
+        let moves: Vec<String> = self.imports.moved_to[m]
+            .iter()
+            .map(|(name, to)| format!("{name} to {}", show(to)))
+            .collect();
+        let list = |items: Vec<String>| {
+            if items.is_empty() {
+                "none".to_owned()
+            } else {
+                items.join(", ")
+            }
+        };
+        Err(format!(
+            "plain jj, importing git's moves since jj last imported ({}) on top of the import's \
+             parent, with what the import took of refs only concurrent records explain ({}), \
+             differs on what the rules can't explain ({}): {}",
+            list(moves),
+            list(concurrent.iter().map(Ref::git_ref).collect()),
+            list(unexplained.iter().cloned().collect()),
+            differences.join("; ")
+        ))
     }
 
     /// Why an import on top of `parent` could change `r` with no git move, if it could.
@@ -2220,7 +2508,7 @@ impl World {
         log: &mut Log,
         parent: &OperationId,
         r: &Ref,
-    ) -> Result<(), String> {
+    ) -> Result<Explained, String> {
         let target = log.record(parent, r);
         // Unless git moved the ref, jj's record matches `.git` (`LInv`). After a move, an
         // export's compare-and-swap succeeds only where `.git` already has the bookmark's
@@ -2230,7 +2518,7 @@ impl World {
             && values.contains(&target.1)
         {
             fired("import:git_move");
-            return Ok(());
+            return Ok(Explained::GitMove);
         }
         // Back from `parent` to the operation that made the record what it is.
         let mut at = parent.clone();
@@ -2299,7 +2587,7 @@ impl World {
                 let merged = log.merge(&at, r, left, base, right);
                 if merged.1 == now.1 {
                     fired("import:concurrent_records");
-                    return Ok(());
+                    return Ok(Explained::ConcurrentRecords);
                 }
                 return Err(format!(
                     "git didn't move {}, and the merge {} made jj's record of {r} {now}, where \

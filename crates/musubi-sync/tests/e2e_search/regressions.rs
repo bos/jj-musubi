@@ -153,3 +153,90 @@ fn e2e_command_rerun_past_jj_duplicate_commit_bug() {
     }
     world.converge();
 }
+
+/// jj's import of a branch git moved rewrites, by change id, the commits only its old target
+/// reaches, and moves the bookmarks on them, which git didn't move
+/// (`record_synthetic_predecessors` in jj-lib's `git.rs`). Git moves `topic` back to its
+/// version from before a describe of its parent, so jj moves `feature` back too, and exports
+/// it. The import check's own rules explain only `topic`; plain jj, importing the same move,
+/// makes the rest (`World::plain_jj_import`). The search failed here at seed 161.
+///
+/// The controls are records musubi could get wrong: `.git` holding an older version of a
+/// rebased commit, the same change with the same description on its parent's same change,
+/// with no git move, alone and beside a move git made of another ref. Each fails the check.
+#[test]
+fn e2e_imports_follow_what_jj_makes_of_a_git_move() {
+    let (mut world, a, old_topic) = describe_under_bookmarks();
+    world.move_git_branch(0, "topic", &old_topic);
+    world.jj(0, &["status"]);
+    assert_eq!(
+        head_rev(&world, "feature"),
+        a,
+        "jj takes the move of topic as a rewrite of a"
+    );
+    world.converge();
+    // Without `feature`, only `topic`'s commit, rebased, differs from its older version.
+    let (b, a) = (old_topic.id, head_rev(&world, "feature"));
+    world.jj(0, &["bookmark", "delete", "feature"]);
+    world.jj(0, &["describe", "-r", &a, "-m", "a, again"]);
+    assert_ne!(head_rev(&world, "topic"), b, "the describe rebases topic");
+    // Plain jj starts from `.git` matching the record, so it doesn't make these imports.
+    world
+        .fx
+        .repo(0)
+        .git(&["update-ref", "refs/heads/topic", &b]);
+    expect_unexplained(world, "bookmark topic");
+
+    let (mut world, _, old_topic) = describe_under_bookmarks();
+    let topic = head_rev(&world, "topic");
+    let view = world.view_at_head(0);
+    let rebased = view.commits.iter().find(|c| c.id == topic).unwrap();
+    world.move_git_branch(0, "feature", rebased);
+    world
+        .fx
+        .repo(0)
+        .git(&["update-ref", "refs/heads/topic", &old_topic.id]);
+    expect_unexplained(world, "bookmark topic");
+}
+
+/// Machine 0 with `feature` on a commit `a` and `topic` on its child, synced, and then `a`
+/// described, which rewrites both: the world, `a`, and `topic`'s commit as it was before.
+fn describe_under_bookmarks() -> (World, String, crate::view::Commit) {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.commit(0, 0, 0);
+    world.commit(0, 0, 1);
+    let (a, b) = (head_rev(&world, "@--"), head_rev(&world, "@-"));
+    world.jj(0, &["bookmark", "create", "feature", "-r", &a]);
+    world.jj(0, &["bookmark", "create", "topic", "-r", &b]);
+    world.sync(0);
+    let old_topic = world
+        .view_at_head(0)
+        .commits
+        .into_iter()
+        .find(|c| c.id == b)
+        .unwrap();
+    world.jj(0, &["describe", "-r", &a, "-m", "a, described"]);
+    (world, a, old_topic)
+}
+
+fn head_rev(world: &World, rev: &str) -> String {
+    world.raw_jj(0, &["log", "--no-graph", "-r", rev, "-T", "commit_id"])
+}
+
+/// Runs a command on machine 0, which imports, and converges, expecting the import check to
+/// fail on `what`, with plain jj's import differing.
+fn expect_unexplained(mut world: World, what: &str) {
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.jj(0, &["status"]);
+        world.converge();
+    }))
+    .expect_err("an import the record of git's refs caused fails the check");
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert!(message.contains(&format!("changed {what}")), "{message}");
+    assert!(message.contains("plain jj"), "{message}");
+}

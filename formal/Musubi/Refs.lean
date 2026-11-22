@@ -7,7 +7,11 @@ every `jj` command imports any difference between that record and `.git` as a ch
 with git. musubi replicates the rest of the view and keeps the record per-machine. This file
 models one ref. jj's ref merge is an abstract three-way merge that obeys the trivial
 resolution laws of `merge_ref_targets`, and git is an adversary that can move the ref at any
-time. Commit graphs, rebases and jj's conflict algebra are not modeled.
+time. Commit graphs, rebases and jj's conflict algebra are not modeled, nor is a change one
+ref's import makes to another: jj's import of a moved ref rewrites, by change id, the commits
+only its old target reaches, and moves the bookmarks on them with no move of their own refs.
+That is jj's behavior, with or without musubi; the search's import check adjudicates it with
+plain jj (`e2e_search/imports.rs`).
 
 The import functions below update one selected ref. jj 0.47 selects a ref for an ordinary
 command only if its physical value differs from `git_refs`, and otherwise performs an

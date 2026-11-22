@@ -591,8 +591,33 @@ impl TestRepo {
         expect_success("jj", args, &output)
     }
 
+    /// Runs `jj` in `dir`, a copy a check made, with this repository's environment but a
+    /// seed of its own rather than the environment's next: what checks do outside the tested
+    /// repositories mustn't change the randomness and times later commands get.
+    pub fn checker_jj(&self, dir: &Path, args: &[&str]) -> Output {
+        self.jj_command_seeded(dir, CHECKER_SEED)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    /// Runs `git` in `dir` as [`Self::checker_jj`] runs `jj`, and returns stdout, panicking on
+    /// failure.
+    pub fn checker_git(&self, dir: &Path, args: &[&str]) -> String {
+        let output = self
+            .command_seeded("git", dir, CHECKER_SEED)
+            .args(args)
+            .output()
+            .unwrap();
+        expect_success("git", args, &output)
+    }
+
     fn jj_command(&self, dir: &Path) -> Command {
-        let mut command = self.command("jj", dir);
+        self.jj_command_seeded(dir, self.next_seed())
+    }
+
+    fn jj_command_seeded(&self, dir: &Path, seed: u64) -> Command {
+        let mut command = self.command_seeded("jj", dir, seed);
         command
             // Without a terminal, jj asks `tput` for its width: two more processes for each
             // command that writes output.
@@ -625,8 +650,11 @@ impl TestRepo {
     }
 
     fn command(&self, program: &str, dir: &Path) -> Command {
+        self.command_seeded(program, dir, self.next_seed())
+    }
+
+    fn command_seeded(&self, program: &str, dir: &Path, seed: u64) -> Command {
         let mut command = Command::new(program);
-        let seed = self.next_seed();
         command
             .current_dir(dir)
             .env_clear()
@@ -684,6 +712,10 @@ fn expect_success(program: &str, args: &[&str], output: &Output) -> String {
     );
     String::from_utf8(output.stdout.clone()).unwrap()
 }
+
+/// The seed of every command a check runs ([`TestRepo::checker_jj`]): far beyond what an
+/// environment's counter reaches, and its times still in this century.
+const CHECKER_SEED: u64 = 1_000_000_000;
 
 /// The time a `jj` command made with `seed` gives its commits, as `JJ_TIMESTAMP`: a second
 /// later for each seed. Git records whole seconds, so jj, repeating a rewrite it undid within

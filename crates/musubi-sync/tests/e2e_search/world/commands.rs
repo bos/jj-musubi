@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::process::Output;
 
+use jj_lib::backend::CommitId;
+use jj_lib::op_store::RefTarget;
 use musubi_jj::node::ACCEPTED_PUSH;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
@@ -538,14 +540,15 @@ impl World {
     pub fn move_git_branch(&mut self, m: usize, name: &str, target: &Commit) {
         self.ledger.git_move(Some(&target.change));
         let git_ref = format!("refs/heads/{name}");
-        self.git_moves(m, &git_ref);
+        let to = RefTarget::normal(CommitId::try_from_hex(&target.id).unwrap());
+        self.git_moves(m, &git_ref, to);
         self.git(m, &["update-ref", &git_ref, &target.id]);
     }
 
     /// Deletes a physical branch after capturing the import frontier it changes.
     pub fn delete_git_branch(&mut self, m: usize, name: &str) {
         let git_ref = format!("refs/heads/{name}");
-        self.git_moves(m, &git_ref);
+        self.git_moves(m, &git_ref, RefTarget::absent());
         self.git(m, &["update-ref", "-d", &git_ref]);
     }
 

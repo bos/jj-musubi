@@ -1044,8 +1044,20 @@ change a bookmark, remote bookmark or tag only through a ref git moved in that t
 value `git_refs` had, or where jj's merge of two op heads that both changed `git_refs`
 left the record different from the physical ref (`concurrent_records_revert`). A conflicted
 remote bookmark or a restored bookmark alone is not an explanation: jj 0.47 imports only
-physical refs that differ from `git_refs`. Otherwise the check walks back from the import to
-the operation that left the record differing from `.git`, and the failure names it. Imports of
+physical refs that differ from `git_refs`. That rule is the fast path, not all jj does: jj's
+import of a moved ref also rewrites, by change id, the commits only the old target reaches,
+moving other bookmarks on them, which the command then exports. So an import the rule can't
+explain is imported again by plain jj, `jj --ignore-working-copy git import` in a copy of the
+repository at the import's parent, whose `.git` holds the parent's record of each ref except
+those git moved, which hold where git moved them, and those the rule explains by concurrent
+records, which hold what the import took. If plain jj leaves each bookmark, remote bookmark
+and tag the rule can't explain, and its record, as the import did, the import passes. Commits
+both imports wrote match by change id, description and parents' change ids, since each has
+its command's time; any other commit, such as an older version of a rebased one, matches only
+itself (`e2e_imports_follow_what_jj_makes_of_a_git_move`). The copy's commands take no seed
+from the tested repositories. Otherwise the check walks back from the import to the operation
+that left the record differing from `.git`, and the failure names it and says what plain jj
+made instead. Imports of
 git's HEAD
 ("import git head"), which move a workspace's working copy onto what HEAD has, are checked the
 same way against jj's record of each workspace's HEAD (`git_heads`). git moves HEAD only where

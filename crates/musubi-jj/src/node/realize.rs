@@ -10,7 +10,6 @@ mod workspaces;
 mod writes;
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
@@ -40,7 +39,6 @@ use merge::fields_of;
 pub(super) use merge::merged_by_jj;
 #[cfg(test)]
 use workspaces::latest_work_index;
-use workspaces::with_kept;
 pub(super) use writes::State;
 
 /// How many linear descendants have their views prepared or written together.
@@ -101,8 +99,6 @@ impl NodeRepo {
                 NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
             });
         }
-        let starts = self.starts_of(&order);
-        let (reserved, kept) = self.reserved_for(&order)?;
         for (i, (id, op)) in order.iter().enumerate() {
             // `unrealized` puts parents first, so a parent missing here is a bug: refuse to
             // realize the operation rather than panic in the daemon.
@@ -123,7 +119,7 @@ impl NodeRepo {
                 self.settle()?;
             }
             let per_machine = self.inherited_per_machine(&parents)?;
-            let prepared = self.realizing.take_prepared(id, &per_machine, &reserved);
+            let prepared = self.realizing.take_prepared(id, &per_machine);
             let view = match prepared {
                 Some(view) => view,
                 None => {
@@ -132,7 +128,7 @@ impl NodeRepo {
                     // So that the threads making views each find the presence before theirs
                     // remembered, rather than each reading the history below it.
                     self.presence(id)?;
-                    let mut views = self.local_views(&run, &per_machine, &reserved).into_iter();
+                    let mut views = self.local_views(&run, &per_machine).into_iter();
                     let view = views
                         .next()
                         .expect("a run starts with its first operation")?;
@@ -142,25 +138,19 @@ impl NodeRepo {
                         .zip(views)
                         .filter_map(|((id, _), view)| Some((id.clone(), view.ok()?)))
                         .collect();
-                    self.realizing
-                        .prepare(per_machine.clone(), reserved.clone(), ahead);
+                    self.realizing.prepare(per_machine.clone(), ahead);
                     view
                 }
             };
-            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
+            let view = self.with_own_workspaces(id, op, &parents, view)?;
             let own = self.own_of(&view);
-            let view = with_kept(view, &kept);
-            let realization =
-                self.realize_one(id, op, parents, view, &own, &reserved, per_machine)?;
+            let realization = self.realize_one(id, op, parents, view, &own, per_machine)?;
             self.realizing.remember_own(realization.id.clone(), own);
             self.write_later(realization, id.clone())?;
         }
-        let realized = self.local_of(canonical).ok_or_else(|| {
+        self.local_of(canonical).ok_or_else(|| {
             NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
-        })?;
-        // The next along this line starts from this one, beside the same op heads.
-        self.realizing.advance_kept(&starts, &realized);
-        Ok(realized)
+        })
     }
 
     /// `first`, and the stored, unrealized operations of `later` that follow it, each with
@@ -221,17 +211,15 @@ impl NodeRepo {
         Ok(order)
     }
 
-    /// The local views of `ops`, which all inherit `per_machine`, made in parallel, with
-    /// other machines' workspaces named clear of `reserved` (`reserved_names`).
+    /// The local views of `ops`, which all inherit `per_machine`, made in parallel.
     fn local_views(
         &self,
         ops: &[(CanonicalOp, StoreOperation)],
         per_machine: &PerMachine,
-        reserved: &BTreeSet<WorkspaceNameBuf>,
     ) -> Vec<Result<LocalView, NodeError>> {
         let make = |part: &[(CanonicalOp, StoreOperation)]| -> Vec<_> {
             part.iter()
-                .map(|(id, op)| self.local_view(id, op, per_machine, reserved))
+                .map(|(id, op)| self.local_view(id, op, per_machine))
                 .collect()
         };
         if ops.len() == 1 {
@@ -263,9 +251,7 @@ impl NodeRepo {
     }
 
     /// Realizes one canonical operation whose parents are realized, as `parents`, without
-    /// writing it, from its local view, in which `own` are this machine's own workspaces and
-    /// other machines' are shown clear of `reserved` (`reserved_for`).
-    #[expect(clippy::too_many_arguments, reason = "each is part of the realization")]
+    /// writing it, from its local view, in which `own` are this machine's own workspaces.
     fn realize_one(
         &self,
         canonical_id: &CanonicalOp,
@@ -273,7 +259,6 @@ impl NodeRepo {
         parents: Vec<LocalOp>,
         local: LocalView,
         own: &BTreeMap<WorkspaceNameBuf, CommitId>,
-        reserved: &BTreeSet<WorkspaceNameBuf>,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
         let LocalView {
@@ -281,7 +266,6 @@ impl NodeRepo {
         } = local;
         let mut metadata = op.metadata.clone();
         self.record_private_workspaces(&mut metadata, own.keys().cloned(), canonical_id)?;
-        super::view::record_reserved(&mut metadata, reserved);
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let target = CanonicalOp(target)
             && self

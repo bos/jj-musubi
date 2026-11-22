@@ -9,7 +9,6 @@ use std::sync::PoisonError;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::View;
-use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
@@ -28,15 +27,6 @@ use crate::workspaces;
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
 pub(super) type WorkedNames = Option<(Vec<Option<CanonicalOp>>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
-
-/// Where jj's workspace store put the working copy of each name `NodeRepo::has_working_copy_here`
-/// asked about, if anywhere, with the store file's modification time and length then, if it
-/// could be read.
-#[derive(Default)]
-pub(super) struct WorkingCopies {
-    stamp: Option<(Option<std::time::SystemTime>, u64)>,
-    paths: std::collections::HashMap<WorkspaceNameBuf, Option<std::path::PathBuf>>,
-}
 
 /// The names of this machine's own workspaces in a canonical view.
 fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
@@ -245,9 +235,9 @@ impl NodeRepo {
     /// This machine's of `workspaces`, a local view's, whose canonical form is `canonical`:
     /// every one but those the canonical view gives other machines, and other machines' under
     /// names the hive no longer gives them, as `jj undo` brings back (`names_other_machine`),
-    /// unless this machine records the name as its own here (`private_workspace_names`) or has
-    /// a working copy for it (`has_working_copy_here`). Those with a `/` in their names are
-    /// this machine's to keep but not to publish (`view::is_publishable`).
+    /// unless this machine records the name as its own here (`private_workspace_names`).
+    /// Those with a `/` in their names are this machine's to keep but not to publish
+    /// (`view::is_publishable`).
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
@@ -278,54 +268,9 @@ impl NodeRepo {
             .filter(|(name, _)| {
                 super::view::is_publishable(name)
                     || private.contains(name)
-                    || !others.contains(name)
-                        && (!self.names_other_machine(name, &machines)
-                            || self.has_working_copy_here(name))
+                    || !others.contains(name) && !self.names_other_machine(name, &machines)
             })
             .collect())
-    }
-
-    /// Whether jj's workspace store records a working copy here for `name`, in a directory
-    /// that is still there: musubi makes none for another machine's workspace, so a name of the
-    /// form other machines' show by, `beta/x`, with one is this machine's, which it doesn't
-    /// publish. jj records one from `jj workspace add` on, moves it with `jj workspace rename`,
-    /// and leaves it after `jj workspace forget`. Where the store puts it is remembered while
-    /// the store's file is unchanged, since every other machine's workspace of every operation
-    /// is asked about, but whether the directory is there is asked each time: the user can
-    /// move it away and back, or unmount and mount its disk, without a `jj` command.
-    pub(super) fn has_working_copy_here(&self, name: &WorkspaceName) -> bool {
-        let path = || {
-            self.loader
-                .workspace_store()
-                .get_workspace_path(name)
-                .ok()
-                .flatten()
-        };
-        let path = match std::fs::metadata(self.repo_path.join("workspace_store").join("index")) {
-            Err(_) => path(),
-            Ok(metadata) => {
-                let stamp = Some((metadata.modified().ok(), metadata.len()));
-                let mut memo = self
-                    .names
-                    .working_copies
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                if memo.stamp != stamp {
-                    *memo = WorkingCopies {
-                        stamp,
-                        ..WorkingCopies::default()
-                    };
-                }
-                if let Some(path) = memo.paths.get(name) {
-                    path.clone()
-                } else {
-                    let path = path();
-                    memo.paths.insert(name.to_owned(), path.clone());
-                    path
-                }
-            }
-        };
-        path.is_some_and(|path| path.exists())
     }
 
     /// This machine's own workspaces in `heads`, merged as jj merges them.
@@ -491,8 +436,7 @@ impl NodeRepo {
     /// workspace. Membership, rather than workspace existence, determines who can be named.
     /// They keep clear of this machine's names in the local operation standing for
     /// `canonical`, as the local view names other machines: those it records
-    /// (`private_workspace_names`), keeps (`own_of_view`), or has working copies for but
-    /// doesn't publish (`unpublished_of`).
+    /// (`private_workspace_names`) or keeps (`own_of_view`).
     pub(super) fn machine_prefixes(
         &self,
         canonical: &CanonicalOp,
@@ -502,7 +446,6 @@ impl NodeRepo {
             let op = self.loader.op_store().read_operation(&local.0).block_on()?;
             let local_view = self.loader.op_store().read_view(&op.view_id).block_on()?;
             let mut names = self.private_workspace_names(&op, &local_view.wc_commit_ids)?;
-            names.extend(self.unpublished_of(&local_view.wc_commit_ids));
             names.extend(
                 self.own_of_view(local_view.wc_commit_ids, canonical, &op)?
                     .into_keys(),

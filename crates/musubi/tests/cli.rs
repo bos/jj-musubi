@@ -4063,6 +4063,36 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["sync"]);
     let (_, warnings) = status_in(&env, &logs, &alpha);
     assert_eq!(warnings, "");
+    // A workspace forgotten with `jj workspace forget` leaves jj's record of its directory;
+    // once another machine's workspace shows by its name, the hint says how to drop it.
+    let stale = env.root().join("alpha-stale");
+    alpha.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "beta/z",
+        stale.to_str().unwrap(),
+    ]);
+    alpha.jj(&["workspace", "forget", "beta/z"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let beta_z = env.root().join("beta-z");
+    beta.jj(&["workspace", "add", "--name", "z", beta_z.to_str().unwrap()]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    let mut sync = alpha.program(musubi());
+    sync.arg("sync");
+    // Shown by this sync, which stops then.
+    let (synced, _, _) = try_run(&logs, &env, sync);
+    assert!(!synced);
+    let refused = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    insta::assert_snapshot!(refused, @r#"
+    Error: this repository can't sync while jj keeps a directory for beta/z, now another machine's workspace
+    Hint: If $ROOT/alpha-stale is a workspace of yours that `jj workspace forget` left, move out any ignored files you want to keep, then run `jj workspace remove beta/z`: it saves the rest in a commit and deletes the directory. If you have just added it, run `jj workspace rename <new name>` in it instead, with no "/" in the new name.
+    "#);
+    alpha.jj(&["workspace", "remove", "beta/z"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    beta.jj(&["workspace", "forget", "z"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
     let head = [
         "--ignore-working-copy",
         "log",

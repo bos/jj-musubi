@@ -1,17 +1,13 @@
-//! Preserving this copy's workspace ownership while preparing received operations.
-//!
-//! Reserved and kept names are selected against the current native heads. The write state
-//! remembers their preparation context; this module computes the views without publishing.
+//! Preserving this copy's workspace ownership while preparing received operations. This
+//! module computes the views without publishing.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::op_store::Operation as StoreOperation;
-use jj_lib::op_walk;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use pollster::FutureExt as _;
@@ -24,73 +20,7 @@ use crate::op_id::LocalOp;
 use crate::presence::Kind;
 use crate::workspaces;
 
-pub(super) type Kept = BTreeMap<WorkspaceNameBuf, CommitId>;
-
 impl NodeRepo {
-    /// What realizing `order`, parents first, keeps clear of: this machine's own names in its
-    /// op heads (`reserved_names`), which other machines' workspaces are shown clear of; and
-    /// those of them that a merge with the heads would merge against, in the views of the
-    /// closest common ancestors of the heads and the operations it starts from, at their
-    /// commits. Showing another machine's workspaces under a longer name drops the names they
-    /// had, which the merge would take for removals, and a removal wins over the heads' own
-    /// workspace of that name, as after `jj workspace forget beta/default` and `jj workspace
-    /// add --name beta/default`. So a realization keeps such a name as the merge's base has it,
-    /// which leaves the merge the heads' own workspace.
-    pub(super) fn reserved_for(
-        &mut self,
-        order: &[(CanonicalOp, StoreOperation)],
-    ) -> Result<(Arc<BTreeSet<WorkspaceNameBuf>>, Kept), NodeError> {
-        let reserved = self.reserved_names()?;
-        let starts = self.starts_of(order);
-        if reserved.is_empty() || starts.is_empty() {
-            return Ok((reserved, Kept::new()));
-        }
-        let mut heads = self.local_heads()?;
-        heads.sort();
-        // A line of realizations beside the same op heads merges against the same base.
-        if let [start] = starts.as_slice()
-            && let Some(kept) = self.realizing.kept(&heads, start, &reserved)
-        {
-            return Ok((reserved, kept));
-        }
-        // The operations it starts from may still be being written.
-        if self.realizing.pending_among(&starts) {
-            self.settle()?;
-        }
-        let load = |op: &LocalOp| self.loader.load_operation(&op.0).block_on();
-        let start_ops = starts.iter().map(load).collect::<Result<Vec<_>, _>>()?;
-        let head_ops = heads.iter().map(load).collect::<Result<Vec<_>, _>>()?;
-        let mut kept = Kept::new();
-        for base in op_walk::closest_common_ancestors(start_ops, head_ops).block_on()? {
-            for (name, commit) in base.view().block_on()?.wc_commit_ids() {
-                if reserved.contains(name) {
-                    kept.entry(name.clone()).or_insert_with(|| commit.clone());
-                }
-            }
-        }
-        if let [start] = starts.as_slice() {
-            self.realizing
-                .remember_kept(heads, start.clone(), (*reserved).clone(), kept.clone());
-        }
-        Ok((reserved, kept))
-    }
-
-    /// The local operations realizing `order`, parents first, starts from: the realizations
-    /// of its operations' parents that aren't in it.
-    pub(super) fn starts_of(&self, order: &[(CanonicalOp, StoreOperation)]) -> Vec<LocalOp> {
-        let realizing: HashSet<&CanonicalOp> = order.iter().map(|(id, _)| id).collect();
-        let mut starts: Vec<LocalOp> = vec![];
-        for parent in order.iter().flat_map(|(_, op)| CanonicalOp::parents_of(op)) {
-            if !realizing.contains(&parent)
-                && let Some(local) = self.local_of(&parent)
-                && !starts.contains(&local)
-            {
-                starts.push(local);
-            }
-        }
-        starts
-    }
-
     /// `local`, the local view of canonical operation `canonical_id`, with this machine's own
     /// workspaces if it has none of them and the hive has forgotten this machine there: as the
     /// realization of its parent with the machine's latest work has them
@@ -102,15 +32,13 @@ impl NodeRepo {
     /// that has this machine's workspaces, or where it is otherwise present without any, is
     /// left as it is, but for this machine's workspaces with a `/` in their names, which no
     /// canonical view has (`view::is_publishable`): those it keeps as the parent has them, as
-    /// it keeps the others while forgotten. Other machines' workspaces stay named clear of
-    /// `reserved` too.
+    /// it keeps the others while forgotten.
     pub(super) fn with_own_workspaces(
         &mut self,
         canonical_id: &CanonicalOp,
         op: &StoreOperation,
         parents: &[LocalOp],
         local: LocalView,
-        reserved: &BTreeSet<WorkspaceNameBuf>,
     ) -> Result<LocalView, NodeError> {
         let published = local.names.keys().any(|key| self.is_own_key(key));
         let canonical_parents = CanonicalOp::parents_of(op);
@@ -149,7 +77,7 @@ impl NodeRepo {
             mut prefixes,
             ..
         } = local;
-        let private: BTreeSet<WorkspaceNameBuf> = own.keys().chain(reserved).cloned().collect();
+        let private: BTreeSet<WorkspaceNameBuf> = own.keys().cloned().collect();
         let canonical_view = self.canonical.read_view(&op.view_id)?;
         let adjusted =
             self.prefixes_with_own(&canonical_view, &*self.presence(canonical_id)?, &private)?;
@@ -239,26 +167,6 @@ impl NodeRepo {
         self.local_name(key, prefixes)
             .unwrap_or_else(|| key.to_owned())
     }
-}
-
-/// `local` with each of `kept` it lacks, at its commit in the base of the realization's merge
-/// with the op heads (`reserved_for`).
-pub(super) fn with_kept(mut local: LocalView, kept: &Kept) -> LocalView {
-    let mut changed = false;
-    for (name, commit) in kept {
-        if !local.view.wc_commit_ids.contains_key(name) {
-            local
-                .view
-                .wc_commit_ids
-                .insert(name.clone(), commit.clone());
-            changed = true;
-        }
-    }
-    if changed {
-        // The id the op store gives it, worked out as it does.
-        local.id = jj_lib::op_store::ViewId::new(blake2b_hash(&local.view).to_vec());
-    }
-    local
 }
 
 /// Pick the branch of `parents` whose work includes every other branch's, given each one's

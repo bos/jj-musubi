@@ -1,7 +1,5 @@
 //! Runs a node's policy against a remote hub.
 
-use std::collections::BTreeSet;
-
 use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
@@ -24,9 +22,6 @@ pub struct NodeDriver {
     remote: RemoteHub,
     /// What the current `sync` has done, for its log line.
     tally: Tally,
-    /// This machine's workspaces the log has said other machines don't show, so that it says
-    /// so once for each.
-    unpublished: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -43,7 +38,6 @@ impl NodeDriver {
             adapter,
             remote,
             tally: Tally::default(),
-            unpublished: BTreeSet::new(),
         })
     }
 
@@ -76,7 +70,6 @@ impl NodeDriver {
                     if self.adapter.when_idle()? {
                         continue;
                     }
-                    self.log_unpublished()?;
                     // Learning the head alone, as after a restart, changes nothing here.
                     let Tally { pushed, realized } = self.tally;
                     if pushed > 0 || realized > 0 {
@@ -106,20 +99,6 @@ impl NodeDriver {
             }
             steps += 1;
         }
-    }
-
-    /// Says in the log, once for each, which of this machine's workspaces other machines don't
-    /// show, having a `/` in their names (`NodeRepo::unpublished_workspaces`).
-    fn log_unpublished(&mut self) -> anyhow::Result<()> {
-        let now = self.adapter.repo().unpublished_workspaces()?;
-        for name in now.difference(&self.unpublished) {
-            tracing::warn!(
-                "other machines don't show workspace {name}@, because its name has a \"/\"; \
-                 `musubi status` says how to rename it"
-            );
-        }
-        self.unpublished = now;
-        Ok(())
     }
 
     async fn deliver(&mut self, request: Request<OpId, crate::Attachment>) -> anyhow::Result<()> {

@@ -28,7 +28,8 @@ impl NodeRepo {
     /// changes to them never count (see `canonical_view`), and the canonical view still has
     /// them. Drops other machines' workspaces under names the hive no longer gives them, as
     /// `jj undo` brings back: those this machine's view doesn't keep as its own
-    /// (`own_of_view`) and that it has no working copy for (`has_working_copy_here`). Returns
+    /// (`own_of_view`). None is a workspace of this machine's with a `/` in its name: it
+    /// refuses to go on while there is one ([`Self::refuse_slashed_workspaces`]). Returns
     /// whether it wrote an operation, which then needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
         self.refuse_slashed_workspaces()?;
@@ -75,11 +76,7 @@ impl NodeRepo {
             .view()
             .wc_commit_ids()
             .keys()
-            .filter(|name| {
-                !shown_names.contains(name)
-                    && !own.contains_key(*name)
-                    && !self.has_working_copy_here(name)
-            })
+            .filter(|name| !shown_names.contains(name) && !own.contains_key(*name))
             .cloned()
             .collect();
         for name in &stale {

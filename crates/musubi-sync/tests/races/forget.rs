@@ -178,10 +178,10 @@ fn a_copy_without_workspaces_can_be_forgotten_by_name() {
     assert!(!hive.node(0).present_copies().unwrap().1.is_present(&beta));
 }
 
-/// A workspace this machine adds as `beta/default` while the hive has forgotten beta stays
+/// A workspace this machine adds as `beta/beta` while the hive has forgotten beta stays
 /// this machine's when beta comes back with work: the name has a `/`, so it is never taken
-/// for beta's, beta's own workspace is shown under a longer name, and no machine shows this
-/// machine's as `alpha/beta/default`.
+/// for beta's, beta's own workspace is shown here under a longer name, as `beta-1a2b/beta`,
+/// and beta doesn't show this machine's as `alpha/beta/beta`.
 #[test]
 fn a_local_name_like_a_forgotten_copys_workspace_stays_local_when_it_returns() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

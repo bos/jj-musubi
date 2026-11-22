@@ -16,7 +16,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from storage errors or a buggy hub | Milliseconds per case |
-| Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean`, or changing where a contraction keeps an operation (`PresenceContract.lean`) ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | Milliseconds per case |
+| Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean` ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | Milliseconds per case |
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
 | Chunked blob conformance | `crates/musubi-sync/src/blobs.rs`, `crates/musubi-sync/src/remote.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean`, and the senders from its attempts under a deadline ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
 | Workspace names conformance | `crates/musubi-jj/src/workspaces.rs` | The names under which a machine shows other machines' workspaces departing from `formal/Musubi/Names.lean` ([conformance.md, "Workspace names"](conformance.md#workspace-names)) | A millisecond per case |
@@ -34,10 +34,9 @@ macOS arm64. Use them as a rough guide; performance work needs fresh measurement
 the suite ([efficient-tests.md](efficient-tests.md#when-making-tests-faster)).
 
 The core harness uses abstract operations and storage. Native tests cover repository effects it
-cannot represent: advancing while merging concurrent heads, partial adoption of abandonment
-records, cached restoration after rollback, and replies whose storage effects differ despite
-an equal projected state. [Conformance](conformance.md) owns the correspondence to the models,
-the tests at each boundary, and the limits of those checks.
+cannot represent: advancing while merging concurrent heads, and replies whose storage effects
+differ despite an equal projected state. [Conformance](conformance.md) owns the correspondence to
+the models, the tests at each boundary, and the limits of those checks.
 
 ## Running the tests
 
@@ -280,7 +279,7 @@ failures shrink and replay. Immediately after an error, before recovery, the har
 closure, retained operations and objects, and reachability of the previously published heads.
 It then follows the daemon: reopen the node's logical store and restart its core; a request
 handling error keeps the hub adapter and reaches the requesting node as a failed sync.
-Pruning upkeep errors keep the hub adapter without failing a node. Every case finishes with
+Every case finishes with
 faults disabled and the usual convergence/retention checks.
 
 `storage_boundaries::an_interrupted_fetch_does_not_discard_a_later_object_reply` combines an
@@ -289,10 +288,9 @@ crash controls, so an object-only reply is retained. Removing the object-loss la
 makes its oracle comparison fail instead of silently losing the next reply.
 
 `storage_boundaries::every_storage_boundary_recovers` sweeps every countdown in a fixed
-schedule of concurrent work, fetching, missing-object recovery, pruning and held-record
-adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine
-complete-effect error boundaries and four proper import-prefix boundaries; none needs a real
-repository fixture.
+schedule of concurrent work, fetching and missing-object recovery. Its coverage assertion
+requires 26 reachable fallible trait methods, seven complete-effect error boundaries and four
+proper import-prefix boundaries; none needs a real repository fixture.
 The sweep takes about a second on macOS. `storage_failures_preserve_operations` makes as many
 cases as `conformance` ([Running the tests](#running-the-tests)). The oracle checks prefixes
 it can represent; partial merged uploads or partial bundle receipt explicitly retire it for
@@ -319,12 +317,8 @@ node's policy until nothing changes. The test then checks liveness: every node's
 `{hub.head}`, and every operation created is in its ancestry, after false replies too. A bound
 on quiescence steps turns livelock into a failure. While quiescing, `conformance` also asks the
 Lean model for its liveness measures after each exchange, and requires them to fall whenever
-the exchange changes the node, including its ordered applied records. The refined measure
-appends the number of record mismatches to the eight set-based components.
-`regrouped_records_conformance` reaches a remake and republication that preserves the dropped
-union but changes record grouping, then checks the record-only adoption's strict decrease.
-Every push the policy sends must upload what the
-[liveness proofs assume](conformance.md#liveness).
+the exchange changes the node. Every push the policy sends must upload what the [liveness proofs
+assume](conformance.md#liveness).
 
 ## Example tests
 
@@ -336,62 +330,6 @@ operation destination with a directory, reaching a background write error rather
 files after writes finish. A recorded fixture shares setup among the three failure/recovery
 cases. [Conformance](conformance.md#storage-errors) describes the batch invalidation, recovery
 and publication checks and their limits.
-
-`translation::a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss` also checks
-that resolving a saved source identity walks its native parents before recovery decides which
-operations need realizing. Restoring the old shortcut, which returned the identity without
-walking those parents, fails its unmapped-parent assertion.
-Keeping a second delayed child on the cached old source fails its native-reachability
-assertion, even when that source and its normalized realization share a canonical id.
-`e2e_reparenting_a_merge_keeps_one_realization_per_operation` exercises two paths through
-the same operation after a stale workspace brings back abandoned history. Reparenting just
-the queued operations leaves a cached descendant on the old copy, which the translation
-check finds when it walks the converged history from an empty cache.
-`translation::taking_an_abandon_preserves_original_identity_after_cache_loss` also interrupts
-taking records before publishing the heads and removes the cache. Restoring the saved head
-identities directly into the cache fails its assertion that recovery maps every native ancestor.
-`history::a_command_inside_a_full_trim_keeps_workspace_owners` checks rebuilding through an old
-marked ancestor after a full trim: validating that ancestor as its contracted image instead of
-its original body rejects the delayed command.
-
-`translation::an_orphaned_command_keeps_its_native_workspace_owners` trims an unpublished
-command to the root after accepted history was already contracted. It checks exact owner and
-target, including a foreign-looking literal deliberately recreated as an owned workspace,
-then loses the cache and the last workspace move. Collecting its source instead must refuse
-before publishing drops. Both the historical twin and its orphan are exercised with and
-without the cache.
-
-`translation::a_fresh_child_of_trimmed_parents_keeps_its_source_namespace` leaves the native
-parent intact while contracting its canonical image to root, then makes a new command.
-Warm and cold caches must agree that its foreign aliases are not owned workspaces.
-`node::view::tests::source_context_reserves_new_owned_literals_before_presence_is_applied`
-checks a source view with a newly owned foreign-looking literal and pre-command forgotten
-presence: both owned and foreign keys keep distinct local names. It also round-trips a root
-or foreign-only source through the namespace reader: the maker is a known identity without
-being present.
-
-`translation::a_private_root_workspace_is_not_a_lost_shared_source` retains a join through
-one delayed command and returns to a private root through another. Even with a slash in its
-owned workspace name and no translation cache, that root stays private before source-loss
-recovery decides whether it must refuse.
-
-`translation::another_version_of_a_dropped_merge_does_not_drop_its_parents` checks that a
-record naming another version of a locally dropped merge preserves its surviving parent.
-`translation::a_lost_receipt_keeps_the_dropped_original_pending` keeps a dropped original in
-custody across an unadopted record and a newer record.
-`translation::a_pending_drop_is_not_named_as_an_already_dropped_child` checks the reverse
-mapping used to publish pending drops: an expansion into a parent cannot name that parent
-as the child it came from.
-
-Removing each of the three drop-identity guards individually makes its regression name or
-drop the wrong operation. The parent-version test deliberately omits the record that produced
-that version, as a peer with a pruned prefix can after hub recreation. The reverse-name test
-first drops a sibling at the parent's generation, so the name walk visits the dropped child
-but stops before it can correct its mapping by visiting the parent.
-
-The orphan regression also fails independently without source reconstruction, without the
-same-identity workspace move, and without source-loss refusal. Removing the private-history
-exclusion makes the private-root regression report a history mismatch instead of `BeforeJoin`.
 
 ### The hub and the CLI
 
@@ -648,7 +586,7 @@ build"](efficient-tests.md#make-an-expensive-fixture-once-per-build)).
 
 `server::tests::a_worker_reopens_its_service_after_a_panic` runs the production hive worker
 with real jj repositories and storage. Its per-worker, test-only hook panics once after a push
-has accepted a head, before the server prunes records, counts the request, updates the hive index,
+has accepted a head, before the server counts the request, updates the hive index,
 or sends the reply and notice. The error leaves the accepted head in place: a fetch to the same
 thread must reopen its service and find that head with its closure intact. Counting successful
 service opens makes removing the panic path's reset fail even if retaining the service happens to
@@ -809,8 +747,6 @@ The files musubi appends lines to have Hegel properties beside their parsers ins
 - the translation map, the joins and local original evidence: among whole lines, a line
   torn anywhere names nothing,
   and the whole ones are read;
-- a node's logs of renamings and of how records renamed the hub's history: with more appended
-  after, a line torn anywhere names nothing, and a block counts as far as its whole lines go;
 - the hub's log of heads: cut where a line ends, it reads as the heads before the cut; cut
   anywhere else, it is corrupt;
 - a hub store whose `heads` or `backend` a crash or a disk damaged opens as it was, or is
@@ -1008,82 +944,37 @@ taskset -c 0-7 rr replay -p PID target/head-schedule-rr
 
 A Hegel state machine drives two or three real colocated repositories, each served by a musubi
 node, through an in-process hub. `musubi_sync::hive::Hive` delivers their requests to the hub
-directly, one step at a time, so that a failing case replays exactly, and has the hub prune its
-records after each request, as a hub does. The rules fall into groups, kept separate so that the
-inconsistent states between them get explored: a machine can work on a stale view, git can move a
-branch jj hasn't imported, a node can stop halfway through a sync.
+directly, one step at a time, so that a failing case replays exactly. The rules fall into groups,
+kept separate so that the inconsistent states between them get explored: a machine can work on a
+stale view, git can move a branch jj hasn't imported, a node can stop halfway through a sync.
 
 - **Local work**, through the `jj` CLI on a chosen machine: commit, edit without snapshotting,
   describe, new (including merges), rebase, squash, abandon, resolve, bookmark and tag changes,
-  undo, `jj op abandon`, and commands at an older operation (`--at-op`), which create
-  concurrent operations. `trim_below_accepted_push` publishes a new child, pauses before
-  advancing the saved base, and trims the earlier history, including the joins: this reaches
-  accepted-frontier discovery and loss of all local parents without waiting for a sequence
-  of independent rules to line up. `e2e_trim_below_accepted_push` exercises that rule with
-  the independent import and history checks. `trim_below_accepted_forget` instead leaves
-  unpublished work above an accepted forget and trims both watched accepted frontiers;
-  `e2e_trim_below_accepted_forget` runs that rule through the same independent checks.
-  The reference captures recipient merges before receipt, including setup and pre-sync local
-  merges: a trim published elsewhere may reparent them while keeping their views. Only an
-  independently captured operation with unchanged nonparent content qualifies; a replacement copy
-  starts its capture afresh.
-  `late_command_after_trim` publishes a machine's work, makes a change the hub hasn't accepted,
-  and trims everything below it to the root. It lets the node handle the trim in a sync of up to
-  two policy steps, perhaps none past noticing it, or in a whole sync. Then it runs a command
-  `--at-op` the op head the trim left, from before the node handled it, as a command that had
-  loaded the repository then would write on it. `at_op` can't: the handling replaces that
-  operation, and it takes its operations from the op log as it is. `e2e_late_command_after_trim`
-  runs the rule through the same checks. `late_commands_after_trims` makes one to three full trims
-  to the root on one machine, each handled by its node as far as a drawn point and followed by one
-  or two late commands `--at-op` any operation a trim of that machine left before the node handled
-  it, or a late command or merge written on one, which jj still loads though no op head reaches
-  it. A late command may run with the clock stepped back, to a time of its own before the tests'
-  epoch, so that jj puts it first in a merge. Before a late command the machine merges its op
-  heads if it has several, since the import check models merges of two heads only. A late
-  command may also be `jj undo`, of an operation neither a merge nor on the root, or `jj op
-  restore` of an earlier late operation below the one it runs at, bringing back an earlier view;
-  a round may end with `jj op abandon` of an operation a late command wrote. Between trims
-  another machine syncs, commits, adds, renames or forgets a workspace, or forgets a copy, or a
-  third machine joins and works, perhaps under an existing machine's name, which changes that
-  machine's aliases. A late restore after such a join, to an operation from before it, a command
-  on that and an abandon of it bring the old aliases back as in #167's old-alias case; since a
-  restore goes back only to an operation below the one it runs at, which a full trim since
-  can't be, it runs at one from before the join too. Every case of `e2e_search_shard_5` starts
-  with this rule.
+  undo, `jj op abandon`, and commands at an older operation (`--at-op`), which create concurrent
+  operations. `op_abandon` abandons only an operation the hive doesn't have, below the head and
+  not a merge.
 - **Workspaces**: add, rename and forget them; forget another machine's; and rewrite or abandon
   another machine's working-copy commit.
 - **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused
-  past its `musubi.forget-after`; forget one, abandon an operation, and sync the rest of the
-  hive while the forgotten copy is away, so that the hub prunes the record it never took, as
-  one rule, which a sequence would rarely do by itself; or, with two machines, have a third
-  join, with an empty copy made as `musubi clone` makes one.
+  past its `musubi.forget-after`; forget one, abandon an operation the hive doesn't have, and
+  sync the rest of the hive twice while the forgotten copy is away, as one rule, which a sequence
+  would rarely do by itself; or, with two machines, have a third join, with an empty copy made as
+  `musubi clone` makes one.
 - **The remote**: someone outside the hive advances `origin`; a machine fetches or pushes.
 - **Git-side work**: move or delete a branch with `git`.
 - **Sync**: one node syncs until it is idle, or takes only a few steps of a sync, which may stop
   partway through an upload.
 - **Faults**: restart or crash a node, with or without its translation cache, or while it is
   still writing realizations; restart the hub, or send it back by dropping the last one to
-  three lines of its `heads` before it restarts, as a power cut would; have it lose the `heads`
-  log its latest prune wrote, going back to the one before, as a power cut just after the
-  prune would; have it make the hive again, empty, as it does when its store is corrupt; or lose
-  a reply the hub sent. Faults are capped per sequence, so that a short sequence still reaches
-  recovery.
-- **Time**: an hour passes on the hub, which prunes nothing for that long after it opens its
-  store, as after a restart, in case a machine was joining then.
+  three lines of its `heads` before it restarts, as a power cut would; have it make the hive
+  again, empty, as it does when its store is corrupt; or lose a reply the hub sent. Faults are
+  capped per sequence, so that a short sequence still reaches recovery.
 
 Every sync step must succeed except for stops a user recovers from as the error says. If jj
 cannot merge a machine's operations with the hive's ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)), the test reverts the operation named. If an
-abandon is ambiguous, it runs `jj op integrate` with the exact operation the hint names. Both
-share a bounded repair count; a copy cannot integrate the same hint twice. A copy can also lack
-the exact chain the hub pruned, identified by count and digest. The test records presence, known copies and reports at the actual prune. A refusal is
-expected only if the hub did not wait for that copy then and the copy lacks that exact prefix.
-Holding another chain with the same count does not suffice. A later indirect push can make the
-copy present again, so current presence cannot decide this check. Anywhere else the refusal
-fails the case. The user then
-makes a new copy with `musubi clone`, bringing nothing across, and runs `musubi leave --force` in
-the old one, which tells the hive nothing: the new copy takes the old one's place in the rest of
-the sequence, and the old one, out of the hive, is out of the checks.
+limitations"](races.md#known-jj-limitations)), the test reverts the operation named, within a
+bounded repair count. Anywhere else a refused sync fails the case, and a copy that lost history
+the hive has can't arise, since the search abandons only operations the hive doesn't have.
 
 Every `jj` command must succeed too, with one exception. A recorded command, one in a
 workspace or a look, that fails with jj's duplicate-commit bug ([races.md, "Known jj
@@ -1126,17 +1017,7 @@ copy's parent and records that, so the import's record is a value `.git` didn't 
 before. The checker judges such an import as taking the unborn HEAD, recognising it by a working
 copy left unchanged or rewritten, where taking a commit always checks out a new one with no
 predecessor. A working copy jj replaces because it is immutable isn't recognised.
-`imports::jj_resets_an_unborn_head_it_imports` pins jj's behaviour in a plain repository, and
-`e2e_late_command_then_import_of_an_unborn_head` reaches it through musubi.
-
-For an operation whose parents a trim changed, the record checker uses its independently
-observed native body and original parents only when the rest of that body, including its
-view, matches exactly. It checks the original record history too, so an invalid record
-inherited from an erased ancestor still fails. Which physical branch touched a record still
-goes by the physical history and merge bases.
-`imports::trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors` checks
-HEAD and ref records, altered bodies, missing or marked-only sources, invalid original
-transitions and invalid erased ancestors.
+`imports::jj_resets_an_unborn_head_it_imports` pins jj's behaviour in a plain repository.
 
 A machine's own `jj op abandon` can reparent a realization too: one on the root, as of a copy
 that joined since, lands on the abandoned operation's parent, keeping its view and so none of
@@ -1166,41 +1047,6 @@ proof as it uses for recursive bases. The test includes this deletion, an accept
 writer and a rejected physical value that neither branch wrote.
 
 
-When incoming records lose an applied suffix or drop the entire saved accepted base,
-the checker captures the exact native op heads before driving the receipt. A newly published
-realization of that exact hub target can inherit those HEAD records, rather than its rewritten
-parent's older record. This is scoped to the copy and physical operation id, keeps the first
-witness, and validates the entire captured source history without granting a new HEAD writer.
-The exact published carrier body is frozen with that observation. If contraction changes its
-native and canonical ids, a marked alias can reuse this witness only when its complete body
-still matches, including the view and original-parent evidence. Changed views, metadata or
-original parents and unmarked candidates cannot use it.
-The captured frontier explains only records matching jj's merge of it; a later merge or
-export of the same target still uses its own valid physical history.
-`imports::preserved_head_records_require_the_exact_captured_frontier` rejects a missing witness,
-a different body, a wrong value and an invalid source ancestor, including a carrier whose
-metadata names a local command. It also accepts a valid physical record differing from
-the earlier captured frontier.
-A realization of a received trim carries the records of `.git`, refs as well as HEAD, that its
-machine's native op heads had when it was received. The ref check judges such a carrier's record
-by that captured frontier too (`Log::ref_operation`): the record must be its one head's, or jj's
-merge of its two over closest bases that agree, and the frontier's own history must validate.
-`imports::preserved_ref_records_require_the_captured_frontier` rejects a carrier without the
-frontier, with one that records the ref otherwise, with one whose own record nothing explains, and
-one recording either of two heads' records rather than jj's merge.
-`world::git_record_inputs_distinguish_lost_work_from_an_opaque_prefix` checks the actual
-lost-record transition and rejects loss of only an opaque pruned prefix.
-
-A known forgotten copy can also preserve current Git fields without a root-based receipt,
-when the incoming target retains a private workspace. The checker captures its native frontier
-before driving sync, using the hub's known/forgotten state and the intersection of independently
-recorded private names in its input views. It attaches that frontier only to an exact target
-carrier retaining one of those names. Expected HEAD values still come from the captured native
-history; the carrier gains no physical writer authority.
-`imports::a_forgotten_nonroot_publication_keeps_its_observed_git_frontier` uses a real publication
-whose physical parent has different Git fields. It compares the complete Git tuple and physical
-HEAD/refs, rejects the carrier without the witness, and checks its inherited native writer set.
-
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:
 
@@ -1220,24 +1066,11 @@ and the test checks that:
   nothing;
 - every operation made on any machine appears in the replicated portion of every machine's
   `jj op log`, down to independently recorded join points, except a copy's join, which on the
-  copy itself is its last operation before joining, and operations `jj op abandon` removed
-  completely. Removing one native alias while another remains does not remove that operation.
-  The checker captures an already-known immutable original before abandonment, qualifying
-  its native alias by metadata. Different originals may share metadata after native parent
-  rewrites; every exact dropped original must still disappear. An alias already reachable
-  immediately after the native abandon can be qualified after an ordinary sync establishes
-  its mapping. Exact parent rewrites in later native abandons extend that witness; sync
-  cannot. The first identity learned for each immutable native survivor stays fixed.
-  Unwitnessed matching versions remain forbidden even when the dropped identity is unknown.
-  A command removed before publication forbids its exact native source and any original that
-  source later acquires. Other matching versions require a qualified native survivor or return
-  witness, scoped to its copy and raw operation id. A marked source can recover its already
-  stored original after cache loss without canonicalizing anything. Retention and clone
-  cleanup use the same observation. A native return requires proven absence before the
-  command and exact presence afterward, including through a stale working copy
-  ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
-  History below a join point stays private even if a native abandon reparents that join point
-  above shared history;
+  copy itself is its last operation before joining, and operations `jj op abandon` removed.
+  The search abandons only operations the hive doesn't have, so removing one native alias
+  while another remains does not remove that operation, and a command removed before
+  publication forbids its exact native source. History below a join point stays private even if
+  a native abandon reparents that join point above shared history;
 - no change diverges, and no bookmark or tag conflicts, unless jj makes the same of the same
   operations in one repository (the reference, below);
 - no change has two commits with the same parents and contents that independent merges rewrote
@@ -1278,10 +1111,6 @@ uses an actual native workspace add and forget, then an erased original marker, 
 that concrete work wins in either parent order while two erased identities stay unordered, and
 that later work an abandon dropped wins, in either order, on the line whose history has the
 older concrete work.
-`world::abandoned_originals_do_not_include_other_native_parent_versions` constructs two native
-parent versions with equal metadata, verifies that an exact dropped original still fails
-before propagation, preserves the alternate original after convergence and clone replacement,
-and rejects matching metadata without its original witness.
 `world::private_abandons_still_reject_their_first_published_rendering` deliberately republishes
 an unpublished discarded source through the real adapter and syncs. The checker rejects it
 both when its source can be translated and when only its cached canonical form survives
@@ -1298,60 +1127,11 @@ Certificate dependencies and the source copies used for native replay are walked
 the source history's depth does not consume the test thread's stack.
 `reference::workspace_witnesses_walk_deep_histories_without_recursing` checks 512 unchanged
 source operations, including binding, name, merged and dormant state, and exact copied ids.
-Another 512 root-parent fix-ups depend only on captured trim inputs, checking that those
-non-ancestral witness edges are preloaded too.
-`e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
-parents and local base let native jj witness a restored name. A realization's marker neither
-certifies that name nor disqualifies its independently checked replay.
-`reference::contracted_merge_replays_the_forgotten_receivers_workspace` checks a merge whose
-ordered parents survive contraction with new ids. The receiver's replay can certify its omitted
-private workspace using those parents and their original certificates. The test requires a
-realization and independent evidence of the workspace's birth. A retained command on that
-contracted parent carries its dormant binding while the owner is absent, following a unique
-rewrite recorded by the native command. Removing the original parent's certificate isolates
-this path, and removing the birth evidence revokes it.
-
-`translation::root_realizations_keep_current_private_workspaces_without_a_receipt` checks
-exact private bindings when a forgotten copy realizes contracted history ahead of receipt.
-It covers native renames, deletion of every workspace, owned slash names beside foreign
-aliases, cached children of refreshed parents, reopening, a multi-target advance, and a
-non-colocated repository. It also requires one reachable native realization per canonical
-operation; checking names alone would miss a stale target or a duplicated physical prefix.
-Two mixed-target cases cache incomparable tips where the receiver is respectively absent
-and present, change its Git record after preparation, and advance in both orders. The private
-tip must keep the full current Git record, physical refs and HEAD must stay unchanged, and
-the next native status must import nothing.
-
-The native unit test `private_overlap::disjoint_owned_names_do_not_select_current_git`
-complements these cases with a cached non-root target `{b}` and current owned names `{a,c}`
-after a native rename. It checks rejection of current Git carry at the actual first export,
-using pre-call native fields and ordered parents. Warm and cache-erased modes check each
-trace's inputs; their [contract and limits](conformance.md#native-lifecycle-inputs-and-events)
-include the U/I restrictions on any broader exact-cache-agreement claim.
-
-`multibase::cached_suffix_after_contraction_uses_both_ordered_native_bases` checks a cached
-suffix over an authored native criss-cross, an ancestor contraction, a late native bookmark
-command and translation-cache loss. A fixed contracted edge table and independent native
-replay judge the actual suffix write, its complete returned body and view, and a separate final
-head retaining the late command. A selected first-base-only shipping-merge control fails on
-the returned Git fields; exact restoration and a normal rebuild pass. The test covers one
-non-colocated, zero-rebase trace. Its
-[contract and limits](conformance.md#native-lifecycle-inputs-and-events) do not imply arbitrary
-source qualification, general observer purity or exact cache agreement.
-
 A replacement clone's synthetic join has its own independently captured native input, keyed
 by the join's metadata identity. Only its exact owned workspace keys and commit targets can
 be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`
 rejects both a foreign key and a changed target on an otherwise valid synthetic join, and
 checks that removing the captured input revokes the certificate.
-
-Native trim fix-ups have a separate source witness: the accepted history observed before the
-trim. Only unchanged foreign bindings already certified there can be inherited.
-`workspace_fixup_witnesses_require_the_native_source` pairs an offline rename with a foreign
-workspace forget and a full trim, then checks the resulting native merge certificate. It also
-loses the sender's evidence deliberately: reparenting an old native fix-up or receiving a marked
-realization cannot create new evidence, and a replacement copy cannot inherit its predecessor's
-pending trim context. Removing either source guard fails the negative control.
 
 The reference (`e2e_search/reference.rs`) is a jj repository of the test's own that replays
 the hub's history, operation by operation, with the same parents:
@@ -1363,17 +1143,11 @@ the hub's history, operation by operation, with the same parents:
    operations beside it, which it moves onto the abandoned operation's parent: jj keeps its
    view, as it keeps every operation's, so the hive's must be the view of the merge it
    replaced, as the realizations are held to theirs, and it goes in as the hive has it.
-   A command's one local parent can expand to several canonical parents or contract to the root
-   when its former parent was dropped. It remains a command: the harness records each new
+   A command stays a command, whatever its parents stand for: the harness records each new
    operation of a jj invocation, including intermediate snapshots and imports, with its source
    input and output. The reference checks its shared payload against that output and checks
    unexplained divergence and conflicts against its input, bounded by the native result. Genuine
-   reconciliations still take the
-   merge path. `e2e_command_above_dropped_merge` pairs such a bookmark command with a concurrent
-   one and checks the resulting genuine merge, then trims to the root while preserving the
-   inherited conflict. Source witnesses cover reparented single-parent fix-ups as well as merges;
-   their shared payload must still match, with no newly introduced divergence. A retained internal
-   operation is also checked against its original single-parent input.
+   reconciliations still take the merge path.
 2. Where jj's merge gives what the hive's did, comparing commits by contents, change ids and
    parents, the reference goes on from the hive's operation. Where it doesn't, it goes on from
    its own, applying later operations three-way as jj applies a concurrent one, until the two
@@ -1382,17 +1156,16 @@ the hub's history, operation by operation, with the same parents:
    does, or a name conflict with terms jj's lacks, is musubi's doing, and so is any such excess
    at the hive's head over the reference's. The failure lists where the merges parted.
 
-Merges staged through the hub are judged as staged: a node that merges part of another
-machine's work and later the rest makes what jj makes of the same two merges. A merge made on a
-machine, rather than realized there, is judged against the parents as that machine had them
-too, where they lack only the working-copy commit of another machine's workspace it forgot,
-which the hive keeps: jj there merges as if the forget abandoned it ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)). Where `jj op abandon`, or musubi reparenting the
-machine's operations to match the hive's contraction, later moved such a merge onto other
-parents, keeping its view, and the merge no longer qualifies, each native version of it, the same
-but for its parents, can witness it: its parents must stand for the canonical parents, in order,
-mapped or as earlier versions of the merge's own, its base must be mapped and below both canonical
-parents, and each must qualify as the merge's own inputs do.
+Merges staged through the hub are judged as staged: a node that merges part of another machine's
+work and later the rest makes what jj makes of the same two merges. A merge made on a machine,
+rather than realized there, is judged against the parents as that machine had them too, where they
+lack only the working-copy commit of another machine's workspace it forgot, which the hive keeps:
+jj there merges as if the forget abandoned it ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)). Where `jj op abandon` later moved such a merge onto
+other parents, keeping its view, and the merge no longer qualifies, each native version of it, the
+same but for its parents, can witness it: its parents must stand for the canonical parents, in
+order, mapped or as earlier versions of the merge's own, its base must be mapped and below both
+canonical parents, and each must qualify as the merge's own inputs do.
 `reference::a_native_merge_qualifies_over_a_command_jj_op_abandon_reparented` checks that such a
 version witnesses a merge that can't, and that a version on parents in another order, on a parent
 that stands for none, or over a base not below both, witnesses nothing.
@@ -1401,13 +1174,13 @@ The test also checks that the hive's history can stand for one repository's: eve
 realization of each operation has the hive's view of it, and no operation but a merge makes
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
 import of git refs or of git's HEAD. A recorded native command can itself introduce divergence;
-translation may retain those exact versions and conflict terms, but add none beyond them.
-A native command or retained native operation can also leave an older foreign working copy
-protected in the canonical view. This allowance requires an exact live input certificate, an unchanged output slot, and
-visibility in that same source; only that commit and its ancestors extend the captured native
-payload bound. Owned, dormant, hidden, altered and output-only targets cannot extend it.
-The snapshot-capture example checks both an accepted native divergence and a rejected extra
-canonical version using its captured commit versions.
+translation may retain those exact versions and conflict terms, but add none beyond them. A native
+command or retained native operation can also leave an older foreign working copy protected in the
+canonical view. This allowance requires an exact live input certificate, an unchanged output slot,
+and visibility in that same source; only that commit and its ancestors extend the captured native
+payload bound. Owned, dormant, hidden, altered and output-only targets cannot extend it. The
+snapshot-capture example checks both an accepted native divergence and a rejected extra canonical
+version using its captured commit versions.
 
 Workspace certificates distinguish an authenticated historical name from an exact canonical
 binding. A captured command can rebase another copy's working copy without moving that owner's
@@ -1415,8 +1188,8 @@ canonical slot. Its unambiguous raw alias can carry an input name. If that alias
 forgotten, an already-certified live foreign binding can instead remain unchanged or follow
 its unique visible successor from the command's captured predecessor map. An owned or dormant
 binding, a hidden successor, or several visible successors supplies no such witness. A global
-birth or a matching outgoing name alone supplies no certificate. A command that `jj op abandon`,
-or musubi reparenting, moved onto other parents, keeping its view, ran on its recorded input
+birth or a matching outgoing name alone supplies no certificate. A command that `jj op abandon`
+moved onto other parents, keeping its view, ran on its recorded input
 rather than its new parent: where the retained source records that input as the command's base,
 the command's own output certifies its maker's slots, though the new parent's bindings differ
 from that base. The test above checks that a native merge over such a command qualifies, and
@@ -1424,7 +1197,7 @@ that without that retained input the maker's binding is not certified. Native me
 the same copy's actual owned bindings in its base and ordered parents, for authenticated names
 only, and checks the output structurally. Multiple closest bases retain their separate projections
 and source-parent graphs, then jj recursively merges them in the order it found them. A base
-whose required source, command-input or fix-up dependency closure reaches an active proof
+whose required source or command-input dependency closure reaches an active proof
 cannot provide a new replay candidate. This preflight changes no certificates and rejects
 circular evidence before replay; completed certificates stop the walk.
 Existing marked source identities remain usable after their disposable cache mappings disappear;
@@ -1462,15 +1235,13 @@ not change.
 
 Native origins are captured from unmarked local operations and qualified only by an existing
 original identity. A later canonical marker does not make the author's own operation a foreign
-realization: a repair can carry another copy's work marker. The captured header and entire
-shared view must still match; only private workspace and Git fields can differ. Qualified
-origins survive cache loss, but never pass to a replacement copy. Observing an unknown source
-must not canonicalize it. `world::marked_native_repairs_keep_their_author_after_cache_loss`
-checks these boundaries, including a receiver with the same hostname, altered heads and a
-non-Git remote. `world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname`
-checks retained-source classification using constructed operations, without a repository
-fixture. The pure namespace controls cover a missing input certificate, an owner rename, and an
-owned literal that collides with a foreign alias.
+realization. The captured header and entire shared view must still match; only private workspace
+and Git fields can differ. Qualified origins survive cache loss, but never pass to a replacement
+copy. Observing an unknown source must not canonicalize it.
+`world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname` checks
+retained-source classification using constructed operations, without a repository fixture. The
+pure namespace controls cover a missing input certificate, an owner rename, and an owned literal
+that collides with a foreign alias.
 
 To keep the search effective:
 
@@ -1506,12 +1277,10 @@ workspace:
 - `mutants-stream` selects `Shared::attach`, `detach`, `receive` and the stream transport's
   `request`: pending-call completion, failure reasons, reconnect subscriptions and request ids.
   It runs the transport crate's unit and public contract tests.
-- `mutants-adapter` selects the repository adapter's ancestry, missing-object, accepted-base,
-  record-preparation and permanent-history-loss decisions, and the `LocalRepo` state the
-  core's model leaves out: naming pending drops, keeping record bodies and receipts, noting
-  pushes and their acceptance, and publication holds. It runs focused native
-  tests of missing objects, gc of an abandoned base, pruned records, rollback across a cached
-  fix-up, record custody, abandoning an accepted push and held publications, together with the
+- `mutants-adapter` selects the repository adapter's ancestry, missing-object, accepted-base
+  and permanent-history-loss decisions, and the `LocalRepo` state the core's model leaves out:
+  noting pushes and their acceptance, and publication holds. It runs focused native tests of
+  missing objects, abandoning published history and held publications, together with the
   adapter's unit tests. These use real repositories where the core's model uses an abstract
   `LocalRepo`.
 
@@ -1551,21 +1320,13 @@ can fail or notice concurrent collection sooner. This loses an optimization with
 an incorrect cached answer. With this generator the adapter recipe exits 2 for that survivor;
 inspect any other survivor separately.
 
-Two hand-made controls check assumptions the generator does not mutate:
-
-- Limiting `history_lost` to the outermost error must fail
-  `node::tests::permanent_history_loss_survives_error_context` on a wrapped error.
-- Replacing the object-store completeness check in `accepted_base` with `true` must fail
-  `fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again` on the poll
-  that would omit collected objects.
-
-Make one mutation at a time in a disposable workspace, then run its selected test:
+A hand-made control checks an assumption the generator does not mutate: limiting `history_lost`
+to the outermost error must fail `node::tests::permanent_history_loss_survives_error_context` on
+a wrapped error. Make the mutation in a disposable workspace, then run its selected test:
 
 ```sh
 cargo nextest run -p musubi-sync --lib \
     -E 'test(=node::tests::permanent_history_loss_survives_error_context)'
-cargo nextest run -p musubi-sync --test races \
-    -E 'test(=fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again)'
 ```
 
 Restore the source before running normal checks. The native advance campaign's coverage and

@@ -85,16 +85,16 @@ A node that gets no reply in time sends the same request again, for ten minutes.
 one request at a time for each hive, and working out a reply can take it longer than the node's
 deadline, as for a machine catching up on a large history, or a push of one. So the hub keeps its
 last eight replies for ten minutes, and answers the same request again with the same reply,
-without the work, while its head and records are as that reply left them and the blobs the reply
-names are still there: the reply the request would get anyway. A repeat sent while the hub still
-works on the first waits behind it, then gets that reply at once. A request that waits behind
-others past its sender's deadline, which travels with it, goes unanswered, as if lost: its sender
-has asked again or given up, and working it out would only hold up the rest; a chunk of an upload
-is taken all the same, since its bytes have crossed the link already. The hub doesn't repeat
-`Incomplete`, which a rejected push can make untrue without moving the head, by storing what `new`
-lacked. Once a request has gone, the node doesn't upload what it carries again: the hub has it
-until it answers, and then needs it only if the hive has changed since, when the repeat fails and
-the sync starts over.
+without the work, while its head is as that reply left it and the blobs the reply names are still
+there: the reply the request would get anyway. A repeat sent while the hub still works on the
+first waits behind it, then gets that reply at once. A request that waits behind others past its
+sender's deadline, which travels with it, goes unanswered, as if lost: its sender has asked again
+or given up, and working it out would only hold up the rest; a chunk of an upload is taken all the
+same, since its bytes have crossed the link already. The hub doesn't repeat `Incomplete`, which a
+rejected push can make untrue without moving the head, by storing what `new` lacked. Once a
+request has gone, the node doesn't upload what it carries again: the hub has it until it answers,
+and then needs it only if the hive has changed since, when the repeat fails and the sync starts
+over.
 
 The formal model also has finer-grained requests, which musubi doesn't send: `GetHead`,
 `PutOps` and `PutObjects` (each answered by `Stored`), `GetOps(S)` for operations
@@ -309,133 +309,15 @@ by blob id. Power-loss rollback is the separate case described above.
 [conformance.md](conformance.md) describes how the Rust implementation is checked against
 the model.
 
-## Supersedes
+## Lost history
 
-A replicated `jj op abandon` ([design.md, "Abandoning
-operations"](design.md#abandoning-operations)) drops operations from the hive's history. The
-protocol above is unchanged by it, taken over each operation's *original*, the operation it was
-before any drop renamed it: a renamed operation is the same operation, so dropping changes no
-operation, no head and no `seq`. What it adds is a dropped set at each party, and which of its
-operations each shows, under which ids.
-
-State:
-
-- `contract(D)`: the history with the operations in `D` dropped. Each survivor's parents are its
-  parent list with each dropped parent replaced by that parent's parents, the same done to them,
-  and duplicates after the first removed. Its id changes exactly when some proper ancestor is
-  in `D`. `contract(D₁)` and then `contract(D₂)` is `contract(D₁ ∪ D₂)`.
-- Hub: `dropped`, the records it took, in order, each a set of operations dropped at once.
-  `D_hub` is their union. `pruned`, how many of its first records it has pruned, keeping of them
-  only their count and digest, which a push's records must match; `P_hub` is their union, and
-  the hub remembers `D_hub \ P_hub`. A hub that goes back to a head goes back to the records it
-  had then, and how many it had pruned.
-- Node: `D_node`, what it dropped, by its own `jj op abandon` or by applying the hub's records;
-  `pending = D_node \ D_hub`, as far as it knows.
-
-Each party shows `contract(D)` of what it has, for its own `D`. A head is never in its holder's
-dropped set: the hub never takes such a head, and a node never advances to one.
-If the known hub head is dropped locally, advancement adds all its surviving images to the
-local frontier and merges them with the machine's work. It does not wait for the machine
-that originally published the drop, which may have left successfully before hub rollback.
-
-Steps:
-
-- `Abandon(D)`, on a node through `jj op abandon`: `D` is below the node's heads, holds none of
-  them and not the root. `D_node := D_node ∪ D`.
-- Every `Push` and `Fetch` carries the records its node took, as a count and a digest, and
-  names the node's machine. The hub refuses a push whose records aren't its own: its ids aren't
-  the hub's. Nor does it take a new head it remembers dropping. A node never pushes a head that
-  a record it took drops.
-- `Supersede`: a `Push` that also carries `pending`, from a node that has every record of the
-  hub and pending drops. The node first writes the fix-up on its single head and pushes that,
-  reusing restoring work already written. If its head is already the hub's, it writes a
-  neutral child so that accepting the push can publish the pending drops. The child keeps
-  the current view and adds no work or saved payload; retries reuse it.
-  The hub answers it as any `Push`, checking the compare-and-swap against
-  `contract(D_hub ∪ pending)`: every surviving image of the expected head must be an ancestor
-  of the new head, and the image must be nonempty. The expected head need not be an original
-  ancestor of the new head. It also requires the new head not to be among `pending`; on
-  accepting, it appends `pending`
-  as a record, needing no id it pruned.
-- `Adopt`: a node that lacks some of the hub's records, none of whose heads they drop, applies
-  them: `D_node := D_node ∪ D_hub`, renaming what it has and what it pends. A node whose
-  pending drops the hub's history no longer has under those ids, after the hub went back or took
-  another record, renames them to the hub's history first.
-- `Prune(k)`, on the hub, once every node has held the hub's first `k` records: `pruned :=
-  k`. It no longer knows their ids, nor can it send those records. The Rust hub remembers what
-  each machine's last request said it took, and prunes all its records, `k = |dropped|`, once
-  every copy the hive hasn't forgotten, and every machine joining it that it has heard from in
-  the last day, has said it took them, and never in the hour after it opens the hive's store
-  ([design.md, "What an abandon costs the hub"](design.md#what-an-abandon-costs-the-hub)).
-- A `Fetched` reply carries the hub's records the node lacks, or, if the node's records aren't
-  its first ones, all it remembers, with `pruned`'s count and digest. A node takes any reply
-  about the head it knows, however old, so it may take fewer records than it took. One that
-  has held records that start with those, now or before, takes the hub's records after them,
-  having dropped what they drop; it ignores a reply it can't complete from the records it holds
-  now, as the next starts from `pruned`. One that never held them can never take the hub's,
-  and may hold operations they drop: it stops. Except a node with nothing of the hive's, as one
-  that has just joined, which takes the hub's records from there, holding the first `pruned` by
-  their count and digest alone; and one that holds records so, which, from a hub that went back
-  or was made again and has pruned nothing, takes the hub's records, all whole, in their
-  place.
-
-Whole records also carry canonical metadata for the operations they name, with their parent
-operation closure and views. These bodies travel as extra operation-bundle material, outside
-the `OpEntry` list of the current head's history. A receiver stores them before holding a
-record, even when that history list is empty, without staging or realizing them. A supersede
-uploads the same metadata for its pending names, so a replacement hub can send the record
-again. Missing record metadata prevents publication, rather than leaving an unexportable
-record at the hub. Pruning drops names, not these canonical bodies.
-
-Before reading its heads, a node with pending drops names them against the raw known hub
-history by immutable original identity. It does this again after adopting records: adoption
-can turn lost records into pending drops after the fetch has already staged the hub's history.
-A record clears a pending drop of the same original even when its raw name differs. These
-name changes write no local operation. Historical inverse-name caches alone are insufficient:
-a node that first saw a survivor after an abandon may never have held its older name.
-
-Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
-it drops a head, prepare it and advance once the known head is local, even if an old head
-already descends from it. That advance atomically takes the prepared records and replaces the
-dropped heads. A cached fix-up accepted after rollback can be an ancestor of a dropped
-operation, so ancestry alone cannot make this advance unnecessary. If the node has pending
-drops and the hub's records, supersede, instead of an ordinary push.
-
-Properties of the relation in `formal/Musubi/Supersede.lean`, which accepts a push through the
-surviving images of the hub's head, advances a node to what survives of a head it dropped, and
-takes prepared records together with the frontier they leave:
-
-- **DroppedGrows**: `D_node` only grows; `D_hub` too while the hub doesn't go back.
-- **SupersededGone**: an id that a node's dropped set has superseded is never again the id of an
-  operation that node shows; on the hub, while it doesn't go back.
-- **HeadsSurvive**: no head is in its holder's dropped set, and every operation a node made and
-  hasn't dropped is below one of its heads.
-- **DroppedNeverHead**: once the hub has dropped an operation, it never takes it as its head
-  again while it doesn't go back, though it may have pruned it, whatever it prunes.
-- **BehindRefused**: a node that hasn't dropped an operation the hub pruned has no supersede the
-  hub takes.
-- **HubChain**: each head the hub accepts has every surviving image of the one before below it;
-  once the hub's dropped set stops growing, it descends from the one before.
-- Liveness, for a policy that advances, adopts and pushes only along original ancestry
-  (`SPStepR`): once users stop and the hub stops going back, from a state whose accepted heads
-  form an original-ancestry chain and where every dropped operation is below a head of a node
-  that dropped it, if every node has dropped what the hub pruned, as pruning only records every
-  node has taken ensures, every node reaches `heads = {hub.head}` and `D_node = D_hub`, which
-  then holds every operation any node dropped, though the hub sends only the records it
-  remembers.
-
-The properties of the protocol without abandons that rest on original ancestry, such as
-**HubMonotone** and **MergeOwnership**, are not proved for runs with abandons. A push that drops
-the hub's head can leave that head below no later head in original ancestry, and this model's
-liveness from the states after it is not proved. The asynchronous convergence theorem below
-covers them under its premises, which are assumed only from a record cut on: such a push adds to
-the hub's drops, so it comes before that cut.
-
-This model is separate from the raw-namespace asynchronous convergence refinement in
-`FineAssembly.hive_converges_observed` ([#78](https://github.com/bos/jj-musubi/issues/78)). The
-latter derives convergence under explicit source, recovery and fairness contracts, including
-finitely many automatic semantic writes. [Conformance](conformance.md) states the executable
-and native boundary coverage and the limits of that correspondence.
+The protocol has no step that drops operations. A node whose op log loses operations the hub has
+accepted, as `jj op abandon` does, doesn't pass that on: before it pushes or advances, it checks
+that its op heads still reach the hub head it fetched from last and the head it last pushed that
+the hub took, and if they don't, it stops, sending the hub nothing. The hub's history only
+grows, so the properties above hold of every node that carries on. Abandoning operations the hub
+hasn't accepted, or ones from before the node joined, changes nothing the hive has
+([design.md, "Lost history"](design.md#lost-history)).
 
 ## Translation layer
 

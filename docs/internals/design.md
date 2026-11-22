@@ -221,8 +221,7 @@ A copy that goes away without `musubi leave`, as a short-lived machine's does, w
 stay in its hive for good: every machine would go on showing its last working copy, and the hub
 counting it. So a hive forgets copies: `musubi forget` forgets another machine's, and `musubi
 leave` this machine's own. Forgetting is soft: a copy that is still there comes back as soon as it
-is used, unless the hub has since pruned records of `jj op abandon` it never took ([What an
-abandon costs the hub](#what-an-abandon-costs-the-hub)).
+is used.
 
 ### Presence
 
@@ -255,8 +254,10 @@ workspaces in its head's view, which are therefore the present ones.
 
 Presence is computed from an operation's parents and its work or forget marker. A merge keeps
 each parent's latest work unless another parent has seen and forgotten it. Work is named by its
-original identity so contraction cannot change the answer ([Presence through an
-abandon](#presence-through-an-abandon)). Generation numbers bound the ancestry queries, and a
+original identity (`musubi.original-parents`), not by an operation's id, which an earlier
+release changed by contracting history; an operation it rewrote may carry the presence it had
+(`musubi.presence`), which is read in place of the one its new parents give. History that was
+never contracted reads the same either way. Generation numbers bound the ancestry queries, and a
 cache avoids walking the whole history on each sync.
 [conformance.md, "Presence"](conformance.md#presence) describes the check against the model.
 
@@ -296,10 +297,9 @@ A workspace of this machine's whose name has a `/`, as `feat/x`, stays here, unp
 - Realizing, musubi keeps in this machine's view the workspaces it takes for this machine's
   (`own_of_view`): every one but those the canonical view gives other machines, and those named
   as a known machine could be shown (`names_other_machine`; `laptop`, `laptop-1a2b` and so on),
-  which `jj undo`, a restore or a trim brings back, unless this machine records the name as its
-  own (`private_workspace_names`). After a full trim the canonical view has no other machine's
-  workspaces to go by, and the namespace context the trim recorded stands for the views the
-  operation started from. `show_other_workspaces` drops the rest.
+  which `jj undo` or a restore brings back, unless this machine records the name as its own
+  (`private_workspace_names`) or has a working copy for it, as below.
+  `show_other_workspaces` drops the rest.
 - A `/` name this machine has a working copy for (`has_working_copy_here`, from jj's workspace
   store) is its own, which it doesn't publish, even where the hive shows another machine's
   workspace by that name: musubi makes no working copies for other machines' workspaces.
@@ -335,44 +335,25 @@ laptop's move of it meanwhile.
 
 A machine the hive has forgotten keeps its own working copies. When it realizes an operation whose
 canonical view leaves it out, it keeps its workspaces as the realization of the parent with its
-latest work had them (`Presence::worked`), following the operation's rewrites
-(`with_own_workspaces`). So at a merge of a forget that saw its latest work with an operation that
-saw only earlier work, it keeps the workspaces the forget's realization had. A parent whose
-history has every other parent's latest work by the machine, none of it its own latest, has later
-work, even if an abandon has dropped that since: a forget that saw a rename the machine then
-abandoned still has the newer names, beside a line of history that saw only the work before the
-rename. Otherwise, work an abandon removed is below surviving concrete work for this choice, as it
-is for presence; an erased older marker cannot make the selector fall back to a parent with
-obsolete workspace names. It keeps them so too at work by it that another machine wrote, a
-[fix-up](#the-fix-up)'s, where it is present: a machine that had forgotten it wrote that view
-without its workspaces, and only its own operations remove them. Where another machine rewrote its
-working-copy commit, as one can while no other machine sees it as a working copy, it follows the
-rewrite (`replace_abandoned_working_copies`). Where the forget abandoned an empty working-copy
-commit, it stays on the hidden commit, since a new one would be an empty commit of no one's on
-every other machine. jj's next snapshot, or any command that rewrites `@`, makes a new visible
-commit of it, and that work publishes the machine's workspaces again. No other machine sees the
-commit as a working copy, so jj doesn't rebase it when another machine rewrites or abandons its
-parents, and the snapshot would bring them back. So the machine rebases it itself, as jj would
-have rebased a working-copy commit it saw, writing it hidden and recording no rewrite, in an
-operation that isn't its work, so that it stays forgotten (`replace_abandoned_working_copies`).
-
-When contraction leaves a root parent with no private bindings, realization takes them from
-the exact native heads, qualified before their aliases are read and merged over their native
-bases. An active receipt supplies its captured bindings only while those exact heads remain.
-This also applies to realization ahead of a receipt. Before publication, each unpublished
-operation is rendered again from its actual selected physical parents, following only that
-operation's rewrites. One current native binding snapshot supplies the erased root basis for
-the whole preparation. An unchanged canonical id cannot make a cached binding override a
-later native rename or deletion, including deletion of every owned workspace.
-
-Cached unpublished suffixes stop at actual published counterparts or exact native counterparts
-prepared for the same receipt and captured heads. A preferred but unpublished alias alone is
-no authority. Changed physical parents supply fresh per-machine fields; unchanged parents keep
-a cached operation's own export observations. Each operation checks its full inputs, so a
-partial rewrite followed by restart needs no separate rebuild progress. Publication rechecks its
-exact head set under the operation-head lock, and the colocated lock where applicable, retrying
-preparation outside those locks if a native command published meanwhile. Cleanup releases them
-before taking a workspace lock.
+latest work had them (`latest_work_parent`, by `Presence::worked`), following the operation's
+rewrites (`with_own_workspaces`). So at a merge of a forget that saw its latest work with an
+operation that saw only earlier work, it keeps the workspaces the forget's realization had. A
+parent whose history has every other parent's latest work by the machine, none of it its own
+latest, has the later work, even if an earlier release's contraction has erased that work since,
+so that no operation stands for it. Otherwise the parent whose surviving work includes every
+other's has it, and erased work counts as below surviving work, as in presence. It keeps them so
+too at work by it that another machine wrote, as an earlier release's fix-up was, where it is
+present: a machine that had forgotten it wrote that view without its workspaces, and only its own
+operations remove them. Where another machine rewrote its working-copy commit, as one can while no
+other machine sees it as a working copy, it follows the rewrite
+(`replace_abandoned_working_copies`). Where the forget abandoned an empty working-copy commit, it
+stays on the hidden commit, since a new one would be an empty commit of no one's on every other
+machine. jj's next snapshot, or any command that rewrites `@`, makes a new visible commit of it,
+and that work publishes the machine's workspaces again. No other machine sees the commit as a
+working copy, so jj doesn't rebase it when another machine rewrites or abandons its parents, and
+the snapshot would bring them back. So the machine rebases it itself, as jj would have rebased a
+working-copy commit it saw, writing it hidden and recording no rewrite, in an operation that isn't
+its work, so that it stays forgotten (`replace_abandoned_working_copies`).
 
 ### Leaving
 
@@ -490,7 +471,7 @@ preflight time; they cannot inspect offline copies or prevent later local edits.
 
 HTTP(S) credentials are removed from hints and URLs in jj's operation arguments unconditionally.
 Canonicalization uses immutable recorded metadata and never reads current configuration when
-translating an old operation. Sync never applies configuration or restores it in a fix-up.
+translating an old operation. Sync never applies configuration.
 
 ## Ordering: one hub, one canonical head
 
@@ -500,19 +481,19 @@ X. A's merge rebases Y onto the rewritten X, giving Y'. B's merge does the same,
 and Y'' have different committer timestamps, so they are different commits, and the hive ends up
 with a spurious divergent change.
 
-The hub keeps a single canonical head. Ordinary pushes are fast-forward updates; an operation
-abandon contracts the history as described in [Abandoning operations](#abandoning-operations).
-A node pushes by uploading what the hub lacks and asking it to compare-and-swap the canonical
-head from H to H',
-which the hub does only if H' descends from H and everything H' refers to is stored. A node pulls
-by fetching the operations between its last-known canonical head and the current one, realizing
-them in topological order, and publishing the realization of the new head. If the node has local
-operations the canonical head lacks, its push fails; it pulls, jj merges its local heads, which
-include the new realization, and it pushes the merge. So each merge is made exactly once, by the
-node that owns the concurrent local work, the same outcome as two jj processes on one machine:
-every merge has a parent that only its creator had, so two machines never make the same one.
-[protocol.md](protocol.md) specifies these steps, and the [formal model](../../formal/README.md)
-proves this and the protocol's other safety properties.
+The hub keeps a single canonical head. Pushes are fast-forward updates: the hub never rewrites
+history, and a copy that has lost history the hub has stops instead ([Lost
+history](#lost-history)). A node pushes by uploading what the hub lacks and asking it to
+compare-and-swap the canonical head from H to H', which the hub does only if H' descends from H
+and everything H' refers to is stored. A node pulls by fetching the operations between its
+last-known canonical head and the current one, realizing them in topological order, and publishing
+the realization of the new head. If the node has local operations the canonical head lacks, its
+push fails; it pulls, jj merges its local heads, which include the new realization, and it pushes
+the merge. So each merge is made exactly once, by the node that owns the concurrent local work,
+the same outcome as two jj processes on one machine: every merge has a parent that only its
+creator had, so two machines never make the same one. [protocol.md](protocol.md) specifies these
+steps, and the [formal model](../../formal/README.md) proves this and the protocol's other safety
+properties.
 
 Notifications are hints: the hub announces each new canonical head, but nodes also compare heads
 with it whenever they connect, and periodically, so correctness never depends on receiving one.
@@ -579,8 +560,8 @@ Object replies are checked for completeness even when empty: after a hub remake,
 no longer know the requested operations. A node still missing required commits restarts from a
 fresh fetch rather than retrying object requests against the old head. An accepted fetch base is
 usable only while its required commits remain locally available; otherwise the node fetches
-from the root. This matters after `jj util gc`, which can collect objects from an abandoned
-base's original view even when its surviving local image is present.
+from the root. This matters after `jj util gc`, which can collect objects an old base's view
+refers to.
 
 ### git backend
 
@@ -734,8 +715,8 @@ the node syncs the rest of its history.
 
 A repository that previously shared canonical history carries that history when it joins
 again, even into another hive. Replacing it with a join on the root would make its accepted
-base unreachable, falsely indicating an op abandon, and lose the ownership of other machines'
-workspaces. Joining records fresh work if needed to make this copy present again.
+base unreachable, falsely indicating lost history ([Lost history](#lost-history)). Joining records
+fresh work if needed to make this copy present again.
 
 Carrying history does not bring every old member into a different hive. The join forgets copies
 absent from the target hive, except the joining copy itself; copies already present or joining
@@ -887,19 +868,18 @@ write. This is provenance, not a durable network acknowledgement.
 
 Cleanup selects whole operations known never to have been offered. It never enlarges a user's
 selection. Before contracting native parents, freeze each survivor's source intent in
-`musubi.publication-intent` and preserve its namespace context. These hash-visible annotations
-are a separate body transformation from `Contract.cpar`; infer no new intent from the new
-parent relation. Declared roots must also be predecessor-record keys. Changed operations
-receive new physical identities, and preparation refuses coalescing identities.
+`musubi.publication-intent`. This hash-visible annotation is a separate body transformation from
+`Contract.cpar`; infer no new intent from the new parent relation. Declared roots must also be
+predecessor-record keys. Changed operations receive new physical identities, and preparation
+refuses coalescing identities.
 
 A fresh checkpoint retains the exact current view and every intentional commit version, with
 intentional predecessor links connected across removed automatic versions. It records genuine
-new local work and the local lease, expected Git-ref values, workspace namespace and private
-ownership. It does not invent activity for other copies. Before installing its op head under
-the op-head lock, canonicalize and read the prepared native bodies. Require exact current view,
-expected values and namespace/private ownership, full foreign causal presence, each survivor's
-view and frozen intent, retained intentional commit references, and the exact content set and
-bytes promised by the preview. Compare source heads again; an error leaves them untouched.
+new local work, the local lease and expected Git-ref values. It does not invent activity for other
+copies. Before installing its op head under the op-head lock, canonicalize and read the prepared
+native bodies. Require exact current view, expected values, full foreign causal presence, each
+survivor's view and frozen intent, retained intentional commit references, and the exact content
+set and bytes promised by the preview. Compare source heads again; an error leaves them untouched.
 
 Workspace records move only when their exact working-copy commit survives. A command finishing
 later on old ancestry may reintroduce recovery history, which is checked by the same gate.
@@ -911,473 +891,53 @@ contract. The existing sync safety checks remain applicable to permitted sends. 
 conditional on publication holds eventually being resolved, disabled, or approved; the existing
 convergence theorem does not prove that a user will resolve a deliberate hold.
 
-## Abandoning operations
+## Lost history
 
 `jj op abandon` removes operations from the operation log. jj keeps every view, so the repository
-is as it was at each operation that stays, but it rewrites every operation after the removed
-ones, with a new id, since an operation's id hashes its parents. musubi replicates it: the
-operations go from every machine and the hub, and their old ids, and those of the operations
-after them, never come back.
+is as it was at each operation that stays, but it rewrites every operation after the removed ones
+with a new id, since an operation's id hashes its parents. musubi doesn't pass that on.
+Replicating it would remove nothing a user wanted gone, because musubi never deletes an object
+([git backend](#git-backend)): a committed secret stays in the hub's store and on every machine's
+disk until someone runs a pruning gc there. And syncing what an abandon left would put the removed
+operations back on every machine, under ids of their own. So a copy that loses history the hive
+has stops syncing, and the hive carries on without it. The hub never learns of the abandon, and
+the other machines keep the operations.
 
-### Contraction
+A sync notices it where it reads the op heads, before it rewrites or publishes anything. The
+heads, canonicalized, must reach two operations: the hub's head this copy accepted last (its fetch
+base), and the head it pushed last that the hub took. A base the canonical store doesn't have, as
+after a hub was made again, or the root, says nothing, so neither is watched. A realization whose
+parents no longer reach every parent of the canonical operation it stands for is lost history too.
+Either raises one error, "this repository lost history the hive has (was `jj op abandon` run?)"
+(`NodeError::UnreachableHistory`, `NodeError::RewrittenRealization`). The copy publishes and
+changes nothing. The check reads the heads, not a record of what was done, so every later look
+finds the same loss, and retrying or rejoining doesn't help. `musubi status` shows the message. If
+the user brings the operations back, as `jj op integrate` can, the heads reach them again and the
+copy syncs on. Otherwise they make a new copy and bring their work across ([troubleshooting.md,
+"Rescue work in a new copy"](../troubleshooting.md#rescue-work-in-a-new-copy)).
 
-An operation's nonparent content need not be unique: jj can make equal views, metadata and
-commit predecessors at different places in history. Reparenting one can otherwise recreate
-another's exact bytes and id, including an id the hive dropped. Each fresh canonical operation
-therefore records its initial canonical parents in `musubi.original-parents`, replacing any
-caller-supplied value. Contraction preserves that attribute verbatim. The original operation's
-hash is recomputed by removing the attribute and restoring those parents; the original parents
-are identity material and need not remain stored or reachable after an abandon.
+These are not lost history:
 
-Contraction requires at most one version of each original in its input history, even in the
-ancestry it need not rewrite. The hub enforces this when accepting a history and rejects an
-alternate version of a dropped original. The original-parent attribute preserves identity; it
-is not proof that a peer followed the protocol.
+- **History from before the join.** The join operation's parent is the root, so nothing below it
+  is watched, and `jj op abandon` there rewrites only the operations above it. The join point
+  is recognized by what identifies it apart from its parents, its view, metadata and rewrites
+  (`fingerprint`), which an abandon doesn't change, so it still stands for the join operation.
+  `op_abandon_of_pre_join_history_is_harmless` pins this.
+- **Operations not yet sent.** Nothing the hub accepted depends on them, so abandoning them,
+  or everything before the first sync, changes nothing the hive has
+  (`op_abandon_of_unpublished_operations_stays_here`,
+  `abandoning_everything_before_the_first_sync_syncs_on`). jj rewrites the realizations that
+  sat beside such an operation onto its parents. A realization on other parents is accepted
+  while its parents still reach every parent of its canonical operation, and `reparent_late`
+  puts it back on them. `musubi sync --prune` removes unsent operations on purpose
+  ([Snapshot publication budgets](#snapshot-publication-budgets)).
+- **`jj undo`, `jj redo` and `jj op restore`.** They add operations and lose none.
 
-A local survivor carries its canonical identity through rewriting. Unmarked jj rewrites whose
-identity musubi has established are retained as source aliases too: an in-flight command may
-still write on them. These facts must survive loss of the disposable translation cache, so a
-restart cannot mistake a renamed operation for new work.
-The alias records identity alone. Rebuilding the translation cache walks its parents before
-recording it there, so that realization does not write another copy of an existing ancestor.
-An alias whose identity has not been superseded is reparented and marked with that identity
-before its descendants are normalized.
-That marker carries the private workspace ownership inherited through its native parents too:
-future ownership walks stop at the marked operation.
-The identities retained for an interrupted head move obey the same rule. Recovery walks the
-settled target heads before moving workspaces; it does not cache their saved identities as
-completed ancestry walks. Cache rows distinguish this guarantee from older disposable entries,
-which are ignored and rebuilt.
-An older marked realization below a delayed command also keeps its original identity when its
-native parents still map exactly to that stored operation's parents. An unmarked ancestor on
-renamed parents is first checked against an already stored original on its raw parent identities.
-The command above it uses the current images of those identities. Reparenting skips bodies
-superseded since they were queued: the counted rewrite already supplied their replacements.
-
-The hive's history drops a set of canonical operations. Each surviving operation's parent list
-has every dropped parent replaced, where it stands, by that parent's own parents, themselves so
-replaced, and then each duplicate after the first removed. A survivor whose parents change gets a
-new id, and so does every operation after it; the others keep theirs. Dropping one set and then
-another gives the same ids as dropping both at once, in either order
-(`formal/Musubi/Contract.lean`). So two machines' abandons taken in either order, or an abandon
-published again to a hub that lost it, reach the same history.
-
-This isn't jj's own rewrite. jj's `op_walk::reparent_range` puts every operation outside the
-abandoned range that has a parent anywhere in `::abandon_heads` on the range's root, which moves
-concurrent branches as well, and two such abandons give different ids in different orders.
-Where the two differ, as for a branch of the operation log that forks inside the range and
-merges after it, musubi rewrites the abandoning machine's local operations again to match
-contraction.
-
-A workspace's recorded operation is its snapshot basis: its view must still name the exact
-working-copy commit whose tree the files were based on. musubi chooses a surviving operation
-with the same workspace and commit, preferring the contracted image. If none exists, it keeps
-the old record so jj can snapshot local edits against the correct tree. A later native stale
-recovery can bring back old operation history, as described under known jj limitations in
-[races.md](races.md).
-
-A full trim can also leave unpublished native operations on the operation root, with none
-of the canonical parents that identified foreign workspace aliases. Before moving those
-heads, musubi records `musubi.workspace-context`: the observed local-name bindings and known
-machine keys from the last accepted namespace, scoped to this machine. It preserves the
-actual root parents, without reconstructing erased native ancestry. The rewritten operations
-carry this evidence, and the counted source records also bind the old unstamped native ids
-so delayed commands and translation-cache loss use the same interpretation.
-
-The first surviving operation above the root uses these bindings to distinguish local
-workspaces from foreign aliases, but presence still comes from its real parents and work.
-Each subsequent fix-up WORK
-restores that copy's workspace bindings from the native view as it restores its last use;
-a following forget removes them again. Descendants inherit the context only on the capturing
-machine. Its exact foreign bindings apply only to aliases already in their native parents,
-so a new local workspace can reuse a forgotten foreign alias. Other machines consume the
-canonical views and render the canonical keys in their own namespaces.
-
-A command can also finish on a native parent that still exists while a pending trim has
-already changed that parent's canonical image. Before interpreting the command on its new
-canonical parents, musubi derives its source namespace from the original canonical parents.
-This records translation evidence only: their old membership and workspace bindings do not
-become the new operation's parents or presence. Literal names actually owned in that source
-view reserve their prefixes even if the command is bringing a forgotten copy back. The
-source copy is always a known identity in this namespace, even at the operation root or when
-all bindings belong to other copies. Knowing its identity does not assert its presence.
-
-A receiving machine also captures and canonicalizes the exact native heads that exist when
-it prepares a trim, before contracting them. This covers commands that finished after the
-policy last inspected its heads. These operations still have their actual source parents,
-so ordinary canonicalization and contraction preserve their namespace and presence. The
-held renaming also records their undropped native source identities, keeping delayed commands
-on those original ids consistent after translation-cache loss.
-
-Accepted base and push can both have contracted to root while later materialized operations
-still name stored canonical sources. Those immutable source tips remain anchors for noticing
-native trims after cache loss. Unchanged markers map back exactly; a marker whose parents jj
-changed enters the same counterpart and contraction path. Even if another branch still reaches
-the original tip, the changed marker is inspected: the surviving branch then prevents a drop,
-and the out-of-place physical operation is repaired on its original canonical parents.
-
-### Presence through an abandon
-
-Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is
-worked out from the history below an operation, which contraction changes. Dropping a copy's
-work below an operation would leave the copy absent there, though the view has its workspaces;
-dropping a forget would bring the copy back there, though the view lacks them. A machine would
-then realize the operation, or another machine's operation on it, as presence there has it,
-and make a view jj never makes: one with a machine's HEAD but none of its workspaces, or one
-without the workspace a forgotten copy keeps for itself.
-
-So presence at every operation that survives is what it was. Presence names work by its
-original identity, which contraction keeps, not by its id. Contraction stamps an operation it
-rewrites with its presence, in `musubi.presence`, where the presence worked out from its new
-parents would be another, and only there; at a stamped operation presence is the stamp, and at
-any other it is worked out as before. Work that no operation stands for any more, as the
-abandon dropped it, counts as seen below every operation that doesn't keep it: a merge keeps it
-only where every parent does, so a copy that left stays gone when a line of history from before
-the abandon is merged. Whether an operation is stamped, and with what, depends only on its new
-parents and what is gone, so dropping one set and then another stamps, and so names, every
-operation as dropping both at once does. `formal/Musubi/PresenceContract.lean` models the rule,
-and proves that and that presence at every surviving operation is as it was
-([formal/README.md](../../formal/README.md), "Presence through a contraction"); the
-conformance tests check the Rust against it. The stamp is no part of an operation's original
-identity, and a fresh operation never has one. A copy is named in it by its machine key, which
-has no whitespace (an operation naming a copy by anything else is no copy's work), and a work
-by its original identity, so every presence can be written as a stamp; a machine or hub
-refuses an operation received with a stamp that doesn't read, as presence there and after it
-couldn't be worked out. Of two works an abandon dropped, neither counts as before the other.
-
-### Publishing an abandon
-
-jj's own reparenting can also recreate an earlier local id. When the surviving local history
-cannot distinguish which published original was dropped, musubi refuses before recording drops
-or moving heads. The error names `jj op integrate <operation>` to restore the missing history;
-`jj op restore` restores only a view.
-
-Inference uses the operation's full nonparent content, recorded against its immutable canonical
-original before publication. Equal timestamps alone cannot establish identity. This evidence is
-kept separately from the translation cache and survives jj gc; missing or ambiguous evidence
-causes a refusal rather than a guessed drop.
-
-A machine notices an abandon when canonical operations it had published are no longer
-reachable from its op heads. It watches the operation it fetches from, and its own last push from
-the moment it learns that the hub took it, from a reply that names it or among what it fetches: it
-moves the base to the push only at its next step, which a sync cut short or a lost reply delays. A
-sync polls the hub before it reads the op heads, so that it knows by then. It matches surviving
-operations against both accepted histories together: a push may contain a survivor above a
-base dropped in full. Matching against the older base first and stopping there mistakes that
-survivor for new work, losing its original identity and presence. Where the surviving head
-is unpublished work and all accepted history was trimmed, its pre-trim state comes from a
-maximal accepted descendant of the surviving mapped ancestor. The older saved base must not
-shadow a newer accepted push, whose presence and expected refs are the state to preserve. It looks
-before
-anything else reads the op heads, to merge or canonicalize them, since an op head read before may
-be one of jj's rewrites that musubi then replaces. What was dropped is each canonical operation it
-had that no reachable local operation now stands for. A realization stands for the canonical
-operation its `musubi.canonical` names, even with its parents changed; any other local operation
-for the one that is the same but for its parents. The machine names the dropped set as the hub
-does: an operation that an abandon not yet published rewrote, as one it kept above what it
-dropped, by the name it had before, which the hub still uses. It records the dropped set as
-pending, writes the fix-up (below) on its head, and pushes it with the dropped set: a *supersede*.
-The hub takes it with the push, in the push's compare-and-swap, and computes the rewritten history
-itself, so the push carries only the machine's new operations. A supersede that loses the race, to
-another push or another supersede, is rewritten by what won, and pushed again.
-
-If the accepted histories already contract to the root, a new native command can lose every
-mapped ancestor in a further full trim. Its immutable pre-trim twin, matched by full nonparent
-content, supplies the missing input. The adapter reconstructs that twin on its actual historical
-parents, anchored by a validated realization, join or established source, before normalizing
-it through the applied and pending drops. An older accepted view cannot supply its namespace:
-the unpublished command may have forgotten a foreign workspace and created its own under the
-same literal name. Conflicting twins are refused. If gc removed that input, the command is
-translated as it is: none of its names with a `/` is this machine's own to publish.
-
-So too where the abandon keeps history below: a command not yet published that jj moved off an
-operation the abandon drops, onto operations that stay, stands for its twin there, given a
-canonical form on the parents it had and contracted like any other operation. Judged on its new
-parents, it would make every name the dropped operations' views had and theirs lack, as one a sync
-showed again after this machine forgot another machine's workspace, and the workspace would become
-this machine's own. Only a twin on operations with canonical forms, one of them among what the
-abandon drops, is what the command was before it: one on an operation an earlier abandon or trim
-rewrote, as a `jj --at-op` command can be, started from other views. Where abandons moved the
-command more than once, the twin furthest up the history, by its own parents, is the one jj first
-moved; twins that can't be ordered so do as well if they are judged alike. A command whose twins
-disagree, or whose twin can't be translated, is taken as it is.
-
-Recovered sources go through the ordinary abandon calculation, fix-up and counted source
-binding. Historical twins retain their original canonical correspondence; the root rewrite
-names its surviving image. On restart, completing a workspace move uses the preferred physical
-realization even when the canonical identity stayed the same. A saved identity alone is neither
-a completed parent walk nor a completed workspace move.
-
-A machine publishes the drop of a push even if the hub has since gone back and lost it: another
-machine may have taken the push first, and would push it again. That costs a record and a
-[fix-up](#the-fix-up), and only after the hub loses heads.
-
-### Taking the hub's
-
-If the prepared base is the root, because a trim removed the old base or the hub lost records this
-copy held, publication carries the current physical heads' per-machine Git fields into the
-incoming local tips, merged as jj merges those heads. The root has none of this copy's Git state.
-So too where the records drop one of this copy's op heads, as another machine's `jj op abandon` of
-this machine's latest operation does: what takes its place is below it, without the Git record
-that operation made, such as its commit's HEAD, which jj's own abandon keeps in the views after
-it. Either way, this happens after realization, under the colocated lock: a realization may be
-cached from before the records arrived, or a jj command may have changed Git state since it was
-made. Shared views and parents stay as the contraction names them. If other heads remain, their
-shared payloads are merged before the first export. Exporting the incoming tip first could move
-Git backward, then merge its record forward without writing Git again. A failed merge publishes
-nothing. The next jj command therefore does not import unchanged Git refs or HEAD as moves. An
-incoming tip where this copy is known but forgotten has the same missing authority for its private
-Git record, even with a non-root accepted base. If that tip retains a currently owned private
-workspace, publication refreshes its complete Git record from the current physical heads too.
-Ownership comes from the tip's qualified local bindings, not matching names alone; other incoming
-tips keep their normal inheritance. Ordinary realization still inherits its parents' per-machine
-fields.
-
-The hub keeps the dropped sets it took, in order, each a *record* naming operations by the ids
-they had before it. A machine that lacks some of the hub's records applies them in order. It
-rewrites the history it has from the hub, and its own operations the hub lacks, by contraction.
-It reparents each local operation, which keeps the operation's view and per-machine fields, so
-nothing is exported to `.git` and no ref moves; and it renames its own pending drops. It applies
-a record only once none of its heads is dropped by it. When a record drops a head, the machine
-prepares the record and fetches the hub's current history. Advancing to its surviving images
-takes the record as part of the head move. This also handles a hub rollback to a head the
-machine has dropped locally. So applying a record never leaves a machine two heads to
-merge, and never repeats a merge another machine made. The hub never takes a head it has
-dropped, and a machine never advances to one.
-
-A drop declaration always names an original, including one retained in custody after a lost
-reply. Its expansion into surviving parents is not another name for that original. When a
-record names a version already dropped locally, only images with that same original can be
-added to the dropped set. Likewise, a singleton expansion can provide a hub name only if its
-original matches: otherwise it would rename a surviving parent as the dropped child.
-
-A machine takes the records that a reply about the head it knows announces, however old the
-reply: after a restart, or from a hive made again, that can be fewer records than it took, or
-others. What the records it took drop and the hub's don't then stands among its pending drops,
-to publish once it has taken the hub's, unless they drop it too. The same holds for records it
-received and kept in custody before writing history they explain, even if it never took them.
-These are the ways pending drops grow without a new abandon. A machine publishes them again
-only to a hub that lacks them, having gone back or been made again: a hub that pruned them
-refuses its push, its records not being the hub's, and the machine takes them back with the
-hub's ([What an abandon costs the hub](#what-an-abandon-costs-the-hub)). So the records a hub
-appends are bounded by new drops and what a hub that went back lost.
-
-Taking records has three ordering requirements:
-
-- Before preparing any local rewrite, save the received records in custody. Custody is not an
-  acknowledgement that they have been applied. If the hub loses them, the machine remains
-  responsible for publishing their drops again.
-- Recheck the op heads before applying the prepared rewrite. A concurrent jj command may have
-  added work on the old history; that work must be renamed too before it can be published.
-- Save the applied records, renamings, pending drops and head-move intent together before
-  moving heads. Recovery must finish a partially published move and update workspace records,
-  even after another crash or translation-cache loss, while retaining newer jj work.
-
-These requirements keep every locally removed operation accounted for by an applied record or a
-pending drop. They also let record adoption finish as part of advancing the repository; callers
-must then discard plans based on the old record state. [conformance.md](conformance.md) describes
-the adapter and native recovery checks.
-
-Each machine keeps, for every id a record superseded, the id or ids it became, and translation
-renames through it. An operation that a `jj` command wrote on a superseded operation, having
-loaded the repository before the record arrived, is canonicalized with its parents renamed;
-musubi then reparents it locally too, before anything merges it. musubi also moves each other
-workspace's recorded operation to its rewrite, which `jj op abandon` itself doesn't do, and
-the one `jj op abandon` ran in too, if another operation came after that workspace's last
-command. It finds the rewrite through the renamings; for an operation not yet published, which
-no renaming names, it looks for jj's rewrite of it, which differs only in its parents. A `jj`
-command that merges such an operation with the rewritten head before musubi reparents it merges
-against an older common ancestor, as jj does after a local `jj op abandon` ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)).
-
-Each machine's dropped set, and the hub's, only grows, the hub's while it doesn't go back. So an
-id once superseded on a machine never again names an operation it has, whether the operation
-comes back through a rejoin, an offline machine or a command that started before the abandon. A
-hub that goes back loses the records it took after the head it goes back to, and an offline
-machine that never saw them can then push old ids to it. The machines that have the records
-publish them again, renamed to the hub's history, and the hive converges with every machine's
-drops on every machine. [formal/README.md](../../formal/README.md), "Abandoned operations",
-lists the theorems.
-
-jj can bring back what `jj op abandon` dropped before musubi notices the abandon: a command in a
-working copy the abandon left at an operation it rewrote integrates that operation, with
-`snapshot.auto-update-stale` ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
-A later abandon below can then move what came back onto other parents, so that operations
-standing for the hive's are elsewhere than the hive has them, though none is dropped. musubi
-then puts its history back as the hive has it, as after a restart partway through a rewrite,
-and publishes nothing: what jj brought back stays, as it does on one machine.
-
-Rewriting local operations after an abandon saves where the op heads and workspaces move, by
-local operation, before any head moves, as taking records does. A restart finishes the move
-from that saved plan alone. Working it out again would need the translation cache, which may
-be gone, and jj may since have removed the only old head that reached an operation the rewrite
-names. Op heads a jj command made in place of all of those the plan moves from are left to the
-ordinary abandon check, as are op heads that changed between working out the move and making it
-([Moving op heads](#moving-op-heads)).
-
-Several local operations can stand for one canonical operation when musubi rewrites them: jj's
-rewrite of it, its realization, and the realization of an operation a record dropped, which
-stands for what the drop replaced it with, the dropped operation's parents. Each rewrite keeps
-the view and metadata of one of them, its template. A stand-in for a dropped operation, told by
-the record having dropped its original rather than renamed it, is the template only where
-neither the others nor the translation map have one; among the rest the lowest id is, never an
-order a map happens to give. Otherwise the dropped operation's description and view would come
-back.
-
-### The fix-up
-
-musubi works some state out from the history rather than from views: which copies are present,
-each copy's latest work and forget-after, the machines the hive has known (and so the names other
-machines' workspaces show under), and the expected value of a conflicted
-remote bookmark. Presence, and with it the machines known, is as it was ([Presence through an
-abandon](#presence-through-an-abandon)), but a copy's latest work may be work the abandon
-dropped, whose time can no longer be read, and the rest would change. So the machine
-that publishes a dropped set first writes, on its head, a fix-up that puts it back as it was at
-its head before the abandon:
-
-- work by every copy whose latest work or forget-after the abandon dropped, including a copy
-  lost entirely when the whole accepted base becomes the root, one operation each,
-  recording that work's time and forget-after, then a forget of it again if it is forgotten at
-  the op head the fix-up is written on, which may have operations the rewritten history lacks,
-  as a forget not yet published. A copy absent from that head's known copies keeps its presence
-  from before the abandon; surviving concrete work or forget-after takes precedence over the
-  saved values. The machine decides that as the fix-up starts, and saves it
-  before writing anything, keeping it through a fix-up that replaces this one: written again
-  after a crash, the fix-up would find its own work at the op head, and the copy present;
-- in the first operation, the conflicted remote bookmarks' expected
-  values as they were. These are worked out when the machine notices the abandon, and until
-  the fix-up is written, every export of the machine's refs takes them as known at the op head
-  they were worked out at.
-
-Each operation is work by one copy or a forget, as presence requires, and `Presence.lean` proves
-what each does to which copies are present (`fixup_present`, `pass_present`): each copy ends as
-it was.
-The state is then as it was at the head and from there on, and a copy whose latest work was
-dropped has work again that merges keep. An operation from before the abandon keeps presence as
-it was, but the rest of the rewritten history's own state, so `jj op restore` to one can
-resolve a conflicted remote bookmark to the other side.
-
-The machine remembers that it wrote this restoring work, so a failed push or restart reuses
-it. The hub can nevertheless acquire the same head without its dropped set: another machine
-may have received the operation before holding its records, then published it after a hub
-rollback. If the machine still has pending drops and its single head equals the hub's, it
-writes a fresh child to publish them. This child keeps its parent's view and records only the
-fix-up marker: it replays no saved work, forget or expected values, and is not work
-by a copy. A lost request reuses that child too. Before writing it the machine checks that its
-current head still equals the head the core observed; a concurrent change makes the core
-poll and reconsider instead.
-
-`jj util gc` removes only data that is no longer reachable locally, so it needs no special
-handling. Neither the hub nor the nodes ever delete an object, and the daemon's own cleanup on a
-machine ([git backend](#git-backend)) deletes only operations that no op head reaches.
-
-### What an abandon costs the hub
-
-The hub keeps in memory the records it took, every id they dropped, and, for every id they
-superseded, the id or ids it became. It needs them to send a machine the records it lacks, to
-rename such a machine's fetch base, and to refuse a push whose new head is an old id. It writes a
-rewrite of each operation a record renames and keeps the old one, and a record's line in the
-`heads` log names every operation it drops. On opening a hive's store, the hub takes every record
-in the log again, working out each contraction as it first did.
-
-A record renames every operation after one it drops. In a hive that is nearly every operation
-since the oldest one dropped, because merges tie every machine's work back together. So
-rewriting recent operations costs little after the full identity check described above, but
-trimming the history (`jj op abandon ..X`) leaves
-the hub no smaller. The dropped operations' ids still take the memory that the operations did.
-The kept operations' old ids are added, and every kept operation is stored twice.
-
-So that a trim makes the hub smaller, the hub prunes the records every machine has taken, as
-`Supersede.lean` models. Every push and fetch carries the records its machine took, as a count and
-a digest, and names the machine, and the hub remembers, in memory, what each machine said last; a
-hub that restarts waits to hear from each again. It waits for every copy the hive hasn't
-forgotten: those present at its head, as the history it holds says ([Presence](#presence)), and
-any machine joining, one the history doesn't know or one that asked the hub to join the hive, that
-has said what it took in the last day, as a machine joining does before the hub accepts its first
-push. Its first fetch realizes the hive's history, and its first push may then not land for hours,
-if the machine sleeps meanwhile; a join that fails holds pruning back for a day. A copy that left
-and runs `musubi join` again is known to the history but not present until its push lands, as a
-copy the hive forgot is, whose daemon may go on saying what it took; only the joining copy sends
-the hub the Join request, which the hub records in memory for the hive's thread, and which counts
-until the copy is present at the head. So a forgotten copy whose `musubi join` failed after the
-hub took it, before its push, is waited for while it goes on saying what it took, until a day
-after it falls silent: a harmless exception, since it is waited for only while it lags. A hub that
-opens a hive's store, as after a restart, no longer knows which machines were joining, so it
-prunes nothing for an hour, as if each had said what it took just before: a machine that is online
-says so again within minutes, pruning only saves memory, and nothing need be written to remember
-them. A hive's thread that opens its store again after a panic keeps what it knew of the machines,
-which the panic leaves as it was, so that a peer whose requests panic the hub can't keep it from
-pruning. Once every machine it waits for has said it took every record the hub has, those records,
-their ids and the old ids they renamed matter only to a machine coming back from before them. The
-hub then forgets them, keeping only their count and digest, which a push's records must match, and
-writes the `heads` log again, starting with that count and digest and naming every head as the
-history now names it, so that opening takes no pruned record again. It prunes after any request
-that leaves it able to, all of its records at once: the model allows any first records every
-machine has taken, and pruning all of them leaves nothing to replay.
-
-It keeps the old operations themselves, and the rewrites, in its canonical store: deleting them
-would mean compacting the store's log, whose views are deltas against the one before ([Size limits
-and chunking](#size-limits-and-chunking)). So a trim frees the records' memory, their words in the
-`heads` log and the work of replaying them on opening, but not the old operations' disk.
-
-A hub that has pruned an id can't refuse a push to it by the id. The check of each push's
-records keeps it out instead: a push whose records are the hub's comes from a machine that took
-every record the hub pruned, and a machine never pushes an operation that a record it took
-drops, which it asserts before every push. A buggy machine that did could make the hub take
-back an operation it pruned, which nothing the hub checks would catch: the protocol trusts every
-machine that can reach the hub, as with any history it pushes. `Supersede.lean` proves that,
-whatever the hub prunes, it never takes a head it dropped while it doesn't go back
-(`dropped_never_head`), as long as no machine names such an operation; and that every machine
-still converges when the hub prunes only records every machine has taken
-(`eventually_convergesS`, `Exec.sexec_allPruned`).
-
-What this means for a machine:
-
-- One that is offline, and that the hive hasn't forgotten, holds pruning back until it syncs.
-- Once the hive forgets a copy, the hub no longer waits for it, so forgetting is no longer soft
-  ([Copies that go away](#copies-that-go-away)) for a copy behind what the hub has pruned. It
-  never took the records the hub pruned, which the hub can no longer send, and it may hold
-  operations they drop, under ids the hub no longer knows (`behind_not_carried`). Its next
-  fetch says so, and it stops, with the message for a history that no longer matches the hive's:
-  a new copy takes its work. So does a copy that left, if the hub pruned while it was out,
-  before it ran `musubi join` again; from then on the hub waits for it as for a copy new to the
-  hive (`a_copy_joining_again_is_waited_for`,
-  `hub::tests::pruning_waits_for_recent_joins_and_restart_grace`).
-- So does a copy joining whose first sync realized the hive's history but stopped before its
-  first push landed, and that the hub then didn't hear from for a day, or that was away when
-  the hub restarted and for an hour after: the hub no longer waits for it. A copy new to the
-  hive has had nothing reach the hive until its push lands, and the history doesn't know it. It
-  could join again on the root from its view as it is, but merging that view with the hive's
-  against the root's, rather than against the head it realized, would bring back the commits
-  the hive abandoned since, and those it rewrote as divergent changes; so it stops instead
-  (`hub::tests::pruning_waits_for_recent_joins_and_restart_grace` checks expiry;
-  `a_forgotten_copy_behind_pruned_records_stops` checks the native refusal).
-- One that took the records the hub pruned, but holds fewer now, takes the hub's from them all
-  the same. A machine takes the records an old reply announces ([Taking the
-  hub's](#taking-the-hubs)), which may be fewer than it said it took, and the hub may prune
-  them meanwhile. The hub prunes only records every machine said it took, and each said so of
-  records it held then, so a machine keeps, in its `records.json`, the records it took and no
-  longer holds: among those and the ones it holds, it finds the ones the hub pruned by their
-  count and digest, and takes the hub's after them, dropping what it had left to publish of
-  them. A reply that it can't complete from the records it holds, as one to a request sent
-  before it took fewer, it ignores: the reply to its next request starts from the pruned ones.
-  `Exec.sexec_announced_held` proves that every machine the hub waits for has held what it
-  pruned. But a machine that joined after a prune, holding the pruned records only by their
-  count and digest, no longer finds them once it has taken other records whole in their place
-  (below): if the hub's pruned records start with those again and it holds fewer, it stops, as
-  lacking records the hub pruned. The model, whose machines are fixed, has no such machine.
-- One that joins after a prune starts from the hub's records where it pruned them, holding
-  their count and digest but none of the pruned ids, as the `Fetched` reply carries them.
-  Only a machine with nothing of the hive's may: one that joined on the root, and has taken no
-  records, pushed nothing and realized nothing since, as its `records.json` says. It holds
-  nothing they drop. The model, whose machines are fixed, doesn't cover joining.
-- A hub that goes back to before a prune, as when a power cut loses the `heads` log it wrote,
-  names the records again, and every machine carries on. One made again, or gone back further, has
-  lost records that a machine that joined after a prune knows only by count and digest, and can't
-  publish again; the machines that took them whole publish them again, but perhaps as fewer
-  records, whose digest that machine can't match. Holding nothing they drop, it takes the hub's
-  records whole in their place, provided the hub has pruned none: whichever of them drops what it
-  has, it drops by name. If the hub has pruned some meanwhile, it stops.
+`op_abandon_of_published_history_stops_that_copy` pins the stop: the copy publishes nothing,
+carries on failing, and leaves its history as it was, while another machine syncs on. A base out
+of reach where jj rewrote nothing, which no abandon explains, stops the copy the same way
+(`an_unexplained_lost_base_pauses_without_dropping`). [races.md, "Operation
+history"](races.md#operation-history) has the other races.
 
 ## Transport
 
@@ -1503,8 +1063,7 @@ Repository loads and merges use jj-lib's repo loader and op-heads lock, so concu
 commands participate in the same reconciliation. In colocated repositories, realization also
 holds jj's import/export lock while rereading the local heads, merging, exporting and
 publishing. Publishing only the exported merge prevents a later jj import from mistaking
-musubi's ref update for a git change. When taking abandonment records, this merge uses the
-heads as the rewritten history names them. Commands in secondary workspaces do not all take
+musubi's ref update for a git change. Commands in secondary workspaces do not all take
 the colocated import/export lock; [races.md](races.md#remotes) records that limitation.
 
 Merges load the same system, user, repo and workspace configuration as jj, including identity
@@ -1514,8 +1073,7 @@ repository identity and working-copy state stay local
 ([What is replicated](#what-is-replicated)).
 
 Publication follows dependency order: objects, views, operations with their ancestors, and only
-then the op head. Together with the record-taking order in [Taking the hub's](#taking-the-hubs),
-this keeps published history readable across interruption and restart.
+then the op head. This keeps published history readable across interruption and restart.
 [Conformance](conformance.md) states which native boundaries are checked against the models.
 
 ### Moving op heads

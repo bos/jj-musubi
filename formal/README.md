@@ -65,17 +65,17 @@ is `formal/.lake/build/bin/oracle`.
 
 ## What is proved of convergence, and what is tested
 
-`Safety.lean` proves the protocol's safety properties of every reachable state of the
-asynchronous model: lost, duplicated, delayed and reordered messages, and crashes. `Liveness.lean`,
+`Safety.lean` proves the protocol's safety properties of every reachable state of the asynchronous
+model: lost, duplicated, delayed and reordered messages, and crashes. `Liveness.lean`,
 `Merged.lean` and `Regress.lean` prove that the policy converges: every atomic policy exchange
-that succeeds lowers a measure, so a run of them ends with every node at the hub's head, also
-when the hub goes back to an earlier head. `Merged.lean` shows that merged exchanges have the same
+that succeeds lowers a measure, so a run of them ends with every node at the hub's head, also when
+the hub goes back to an earlier head. `Merged.lean` shows that merged exchanges have the same
 measure, and `pstep_reachable` embeds each policy step in the asynchronous model.
 
 None of this says that an asynchronous run, with its retries and replies that arrive late or
 never, takes those policy steps. Convergence of the running system is tested, not proved: the
 e2e search checks it at the end of every generated case, and the races and the fault tests check
-the parts. The proofs of that bridge, built on the replicated `jj op abandon` records, were
+the parts. The proofs of that bridge were built on the replicated `jj op abandon` records and were
 deleted with them. Rebuilding one on `Exec` is a separate project.
 
 ## Files
@@ -422,11 +422,11 @@ model takes the expected value as given with each operation.
 ### Expected values from history (`Expected.lean`)
 
 `Expected.decide` models the ordered history rule in `node/git.rs`: a cached value before a
-recorded fix-up value; a deterministic side at a join; the first parent with the same target;
-otherwise a single parent's resolved value or its own expectation; otherwise a deterministic
-side. `ExpectedExec.latest` selects the latest committer time, then greatest commit id, among
-positive present terms. The history walk does not choose merge bases: jj has already used
-them to construct each operation's target.
+recorded `musubi.expected` value; a deterministic side at a join; the first parent with the same
+target; otherwise a single parent's resolved value or its own expectation; otherwise a
+deterministic side. `ExpectedExec.latest` selects the latest committer time, then greatest commit
+id, among positive present terms. The history walk does not choose merge bases: jj has already
+used them to construct each operation's target.
 
 - `eval_congr_on`: corresponding relevant observations under an operation renaming give
   equal expectations. Its domain need only contain the start and the parents the walk follows;
@@ -437,7 +437,7 @@ them to construct each operation's target.
   fuel exhaustion (`none`).
 - `eval_without_known_agrees`: removing correct memoized answers leaves successful walks
   equal, even with different fuel. It assumes each memoized answer is the uncached walk's
-  result; pending pre-contraction values instead need authoritative history checkpoints.
+  result; recorded checkpoints instead need authoritative history.
 - `conflicted_import_agrees_of_history`: two reachable slot states bound to the present results
   of those computations satisfy `conflicted_import_agrees`, without taking equality of `E`
   as an independent hypothesis. Matching bookmark targets, no external git move and successful
@@ -445,13 +445,13 @@ them to construct each operation's target.
 
 `expected_history_conforms_to_model` runs the shipping history walk on operation DAGs in a
 real jj store and compares it with the oracle, including joins, restored conflicts, effective
-parents during contraction recognition, checkpoints, three parents and minimal criss-cross
+parents, checkpoints, three parents and minimal criss-cross
 ancestry. The finite oracle calls the same `eval` the theorems prove properties of, rather
 than an unproved executable copy. jj's ref algebra remains tested laws in `ref_laws`.
 
 This is a conditional history-computation theorem, not a proof that every translation or
-fix-up supplies corresponding observations. In particular, the producer and persistence of
-pre-contraction checkpoint values, and correspondence of merged targets and ordered parents,
+cleanup checkpoint supplies corresponding observations. In particular, the producer and
+persistence of checkpoint values, and correspondence of merged targets and ordered parents,
 remain obligations of the realization. Three-parent and criss-cross DAGs
 are covered as inputs to this computation; their complete import/export runs and jj's
 recursive merge-base construction remain outside the slot state machine. See

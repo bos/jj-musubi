@@ -1,7 +1,7 @@
 //! Which copies are present at canonical operations (see `crate::presence`), worked out from
 //! a canonical store, for a node and for a hub alike. Presence names work by its original
 //! identity, which a contraction keeps, and at an operation a contraction stamped it is the
-//! stamp (docs/internals/design.md, "Presence through an abandon").
+//! stamp (docs/internals/design.md, "Presence").
 
 use std::cmp::Ordering;
 use std::collections::HashMap;

@@ -246,22 +246,14 @@ mutants-adapter *args: oracle
     #!/usr/bin/env bash
     set -euo pipefail
     filter='test(/^node::tests::/) | test(/^adapter::/) | test(/^objects::/)'
-    filter+=' | test(/^fetch_base::/)'
-    filter+=' | test(=history::a_forgotten_copy_behind_pruned_records_stops)'
-    filter+=' | test(=history::a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup)'
-    # The LocalRepo state only the jj repository keeps, which the core's model leaves out.
-    filter+=' | test(=history::lost_records_follow_an_older_name_the_receiver_never_held)'
-    filter+=' | test(=history::record_bodies_keep_pending_drops_named_after_hub_rollback)'
-    filter+=' | test(=history::records_fetched_without_operations_keep_their_bodies)'
-    filter+=' | test(=history::received_records_survive_departure_and_drop_local_aliases)'
-    filter+=' | test(=history::lost_received_records_preserve_work_before_the_fixup_arrives)'
-    filter+=' | test(=history::abandoning_a_push_the_hub_just_accepted_drops_it)'
-    filter+=' | test(=history::abandoning_a_push_whose_acceptance_was_lost_drops_it)'
+    filter+=' | test(=history::op_abandon_of_published_history_stops_that_copy)'
+    filter+=' | test(=history::an_unexplained_lost_base_pauses_without_dropping)'
     filter+=' | test(/^publication::/)'
-    hooks='heads_for|store_record_ops|has_record_receipts|pushing|permit_publication|learned'
+    # The LocalRepo state only the jj repository keeps, which the core's model leaves out.
+    hooks='pushing|permit_publication|learned'
     MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle cargo mutants \
         --package musubi-sync --file crates/musubi-sync/src/node.rs \
-        --re "history_lost|>::(accepted_base|is_ancestor|prepare_records|objects_missing|$hooks)" \
+        --re "history_lost|NodeAdapter::(read_heads|note_accepted)|>::(accepted_base|is_ancestor|objects_missing|$hooks)" \
         --test-tool nextest --build-timeout 600 --timeout 120 \
         --output mutants.out-adapter "$@" \
         -- --max-fail 1:immediate --lib --test races --test it -E "$filter"

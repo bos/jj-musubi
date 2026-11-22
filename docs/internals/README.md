@@ -73,9 +73,6 @@ The crates, from the bottom up:
   [publication](../../crates/musubi-jj/src/node/publication.rs) module accounts for snapshot
   content, binds approvals to outgoing history and limits, and prepares cleanup of unpublished
   operations.
-  Its [supersede](../../crates/musubi-jj/src/node/supersede.rs) module holds record
-  state and naming; submodules handle persistence, normalization, detecting abandons, rewriting
-  local operations, receiving records, and fix-ups.
   [objects](../../crates/musubi-jj/src/objects/mod.rs) moves commits and trees, and
   [format_guard.rs](../../crates/musubi-jj/src/format_guard.rs) refuses operations from a
   newer jj.

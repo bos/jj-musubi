@@ -12,17 +12,7 @@ three targets, apply jj's merge, and check the three equations the model assumes
 pool of commit symbols makes equalities and conflicts common.
 
 [Presence](../../crates/musubi-jj/tests/it/presence.rs) separates a generated history,
-`computed` by the implementation, from `modelled` by the oracle. The same history also checks
-that contraction preserves presence.
-
-[Contraction](../../crates/musubi-jj/src/canonical/contract.rs) checks several laws on one
-generated history and one store. `ContractionCase` describes the graph and the two drop sets;
-`ContractedGraph` computes the expected parent expansion and structural identities directly
-from that graph. It does not traverse rewritten store operations to obtain its answer. The
-test composes image lists and compares sequential dropping with union for every operation,
-including the root and dropped operations. It also checks lookup order, survivor identity,
-parent expansion and presence. Sharing a case exercises the laws together without repeating
-the fixture.
+`computed` by the implementation, from `modelled` by the oracle.
 
 ## Protocol histories
 
@@ -37,24 +27,22 @@ their effects into model steps. `Environment` names the additional actions allow
 | `StorageFailures` | Storage boundary faults | Lean where representable; Rust throughout |
 
 [The safety laws](../../crates/musubi-core/tests/support/world/properties.rs) compose node
-safety, hub monotonicity and drop consistency. Their exceptions sit beside the assumptions
-that justify them. `quiesce` then makes delivery reliable and checks eventual convergence and
-retention; with an oracle it also checks the model's decreasing progress measures. A targeted
-prefix can feed a rare state into the same generated walk and the same final checks.
+safety and hub monotonicity. Their exceptions sit beside the assumptions that justify them.
+`quiesce` then makes delivery reliable and checks eventual convergence and retention; with an
+oracle it also checks the model's decreasing progress measures. A targeted prefix can feed a rare
+state into the same generated walk and the same final checks.
 
 [Refs conformance](../../crates/musubi-sync/tests/races/refs.rs) composes a `Realization`
 ([scenario.rs](../../crates/musubi-sync/tests/races/refs/scenario.rs)) from the peer's
 `RefCommand`, its order relative to local work, physical export access, and an optional local
 command. The same scenarios serve the [regression
-examples](../../crates/musubi-sync/tests/races/refs/examples.rs) and the generated rules.
-Each phase captures its history, checks the peer's native command, then compares realization
-with the model; a bookmark move cannot carry an unrelated fetch target. [The
+examples](../../crates/musubi-sync/tests/races/refs/examples.rs) and the generated rules. Each
+phase captures its history, checks the peer's native command, then compares realization with the
+model; a bookmark move cannot carry an unrelated fetch target. [The
 model](../../crates/musubi-sync/tests/races/refs/model.rs) holds `SharedRefs`, which names the
-shared fields being compared, and `judge`, which only compares the real repository with the
-model; the state machine's `check` moves the snapshots on separately, and `ModelAtOperation`
-pairs each model snapshot with its native operation. The one example that is not a scenario,
-[taking another machine's abandon](../../crates/musubi-sync/tests/races/refs/abandon.rs),
-drives the sync by hand, which `Realization` cannot express.
+shared fields being compared, and `judge`, which only compares the real repository with the model;
+the state machine's `check` moves the snapshots on separately, and `ModelAtOperation` pairs each
+model snapshot with its native operation.
 
 ## Real repository histories
 
@@ -142,7 +130,7 @@ necessary. Native operation classification has one owner beside those key defini
 keep each workspace's name authentication, binding, birth witness and presence together. Their
 transition table states which facts each action changes or retains. Authenticating a name does
 not authenticate its current binding. The derivation explicitly orders inheritance, observed
-bindings, trim repair, command or merge evidence, membership reconciliation and authentication.
+bindings, command or merge evidence, membership reconciliation and authentication.
 A rejected native witness carries its missing prerequisite into the final mismatch explanation,
 so an absent source can be distinguished from a replay whose complete result differed.
 

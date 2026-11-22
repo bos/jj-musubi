@@ -430,7 +430,7 @@ pub struct World {
     /// The key of every copy a machine forgot, with the forget's `merge_key`, until the hub's
     /// history has the forget and shows the copy again, by work it did since: an abandon can
     /// drop the forget from the history, but not its effect (docs/internals/design.md,
-    /// "Presence through an abandon").
+    /// "Presence").
     forgot: BTreeMap<String, SourceKey>,
     /// What each machine saw at its op heads, when it last looked.
     seen: Vec<Option<(Vec<String>, Seen)>>,

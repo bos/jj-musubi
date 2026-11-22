@@ -25,7 +25,7 @@ After every attempt it checks:
 - The hub's head is closed and descends from its previous head.
 - Its sequence advances exactly once for the only possible new head, even across retries.
 - An error leaves the logical `(seq, head)` unchanged; imported content may remain.
-- A successful reply reports the actual head, sequence and records. An acceptance is about
+- A successful reply reports the actual head and sequence. An acceptance is about
   the requested new head. Only a newly accepted head is published, with matching contents.
 - Once failures stop and the upload is complete, a matching push of a descendant is accepted;
   a stale expectation or sibling is rejected. Replaying that upload changes no head or
@@ -43,8 +43,7 @@ source contracts and environmental assumptions.
 The graph has exactly three operations: root `0`, operation `1` with parent `0`, and
 operation `2` with parent either `0` or `1`. Each nonroot operation requires one distinct
 object. Initially the closed head is `1`, sequence `1`; only its operation and object are
-stored. There are no other writers during or between calls. Every push is from one fixed
-machine, `n`, whose empty-record report is remembered even when the push fails.
+stored. There are no other writers during or between calls.
 
 Every push announces operations `[1, 2]` and carries both operations in its attachment, with
 standalone views and no view deltas that could lack a base. The requested new head is `2`;
@@ -66,9 +65,8 @@ The adapter's choices follow these contracts, traced through
 | `store_ops`, `store_objects` | On success, retain everything offered. On error, retain any subset offered, including none or all. Never remove existing content. |
 | `is_closed`, `descends` | Return the graph's exact answer or an error; change no state. |
 | `set_head` | Error with the logical head unchanged, or success setting the requested pair. Caller obligations (closed descendant, next sequence) are assertions, never assumptions. |
-| `head`, `records`, `pruned`, `reported`, `is_dropped` | Exact, infallible observations. Records are always empty, and nothing is dropped or pruned. |
-| `report` | Infallibly remembers the fixed machine's empty-record report, including on a failed push. |
-| Fetch-only methods and `prune` | Unreachable assertions: this harness exercises only pushes. |
+| `head` | Exact, infallible observation. |
+| Fetch-only methods | Unreachable assertions: this harness exercises only pushes. |
 
 `HubAdapter::store_ops` imports operations before checking the announced ids; the harness
 always supplies those ids. `CanonicalStore::import_operations` can store earlier batches
@@ -87,8 +85,7 @@ For an ordinary push, `HubStore::set_head` appends the head log and computes acc
 before changing its in-memory history. Errors there can leave log/index effects with the
 logical head unchanged. The harness abstracts those effects away, retries against the same
 logical adapter, and proves nothing about reopening it, torn files, power loss, or recovery.
-It adds no hub durability requirement. No supersedes, record adoption or pruning are included;
-the empty digest represents the unchanged empty-record state, and only equality is observed.
+It adds no hub durability requirement.
 
 The graph, storage contents and closure/ancestry queries are the harness's trusted finite
 abstraction. The production adapters, bundle validation, content hashes, real object graphs,

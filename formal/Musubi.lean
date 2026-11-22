@@ -27,5 +27,7 @@ import Musubi.Copies
 import Musubi.Names
 import Musubi.OpHeads
 import Musubi.OpHeadsRace
+import Musubi.Realize
+import Musubi.RealizeJson
 import Musubi.Axioms
 

@@ -21,6 +21,7 @@ import Musubi.Copies
 import Musubi.Names
 import Musubi.Contract
 import Musubi.OpHeadsRace
+import Musubi.Realize
 import Musubi.Publication
 
 open Lean Elab Command in
@@ -272,3 +273,22 @@ open Musubi
 #assert_axioms OpHeads.Race.check_step
 #assert_axioms OpHeads.Race.Trace.landing_before_the_lock
 #assert_axioms OpHeads.Race.Trace.landing_during_the_move
+
+-- Realization against jj (`Realize.lean`).
+#assert_axioms Realize.Reach.inv
+#assert_axioms Realize.load_dom
+#assert_axioms Realize.log_kept
+#assert_axioms Realize.nothing_lost
+#assert_axioms Realize.publish_shows_merge
+#assert_axioms Realize.shown_step
+#assert_axioms Realize.settled_shows
+#assert_axioms Realize.crash_harmless
+#assert_axioms Realize.crash_invisible
+#assert_axioms Realize.musubi_writes
+#assert_axioms Realize.ops_known
+#assert_axioms Realize.quiet_check_passes
+#assert_axioms Realize.finishes
+#assert_axioms Realize.own_workspace_kept
+#assert_axioms Realize.others_workspace_appears
+#assert_axioms Realize.settled_sound
+#assert_axioms Realize.mem_keptE

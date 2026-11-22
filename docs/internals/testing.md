@@ -1054,11 +1054,13 @@ records, which hold what the import took. If plain jj leaves each bookmark, remo
 and tag the rule can't explain, and its record, as the import did, the import passes. Commits
 both imports wrote match by change id, description and parents' change ids, since each has
 its command's time; any other commit, such as an older version of a rebased one, matches only
-itself (`e2e_imports_follow_what_jj_makes_of_a_git_move`). The copy's commands take no seed
-from the tested repositories. Otherwise the check walks back from the import to the operation
-that left the record differing from `.git`, and the failure names it and says what plain jj
-made instead. Imports of
-git's HEAD
+itself (`e2e_imports_follow_what_jj_makes_of_a_git_move`). That rests on jj's incrementally
+built operation index, which keeps a commit a later rebase hid, so the harness never reindexes
+or gcs a repository; and each subject the rule can't explain must name a ref in the parent's
+view, the import's or plain jj's, so that a naming mismatch fails instead of passing. The
+copy's commands take no seed from the tested repositories. Otherwise the check walks back from
+the import to the operation that left the record differing from `.git`, and the failure names
+it and says what plain jj made instead. Imports of git's HEAD
 ("import git head"), which move a workspace's working copy onto what HEAD has, are checked the
 same way against jj's record of each workspace's HEAD (`git_heads`). git moves HEAD only where
 it is still a symbolic ref to the branch git moves, as in a new repository until jj first writes

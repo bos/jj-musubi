@@ -393,6 +393,17 @@ impl NodeRepo {
             self.late.push(id.clone());
         }
         if parents != wanted && !self.reaches_all(&parents, &wanted)? {
+            if !OpAttrs(&op.metadata.attributes).has_original_parents() {
+                // An operation this machine wrote, which musubi rewrote and marked
+                // (`reparent_late`, `with_per_machine`), cut off from what its canonical
+                // operation stands on by `jj op abandon` below it. Translate it afresh, on the
+                // parents it has, as an unmarked one: whether the abandon took history the hub
+                // has is for the fetch base and the accepted push to say
+                // (`NodeAdapter::read_heads`).
+                let mut op = op.clone();
+                OpAttrs(&mut op.metadata.attributes).remove_canonical();
+                return self.write_canonical(id, &op, parents);
+            }
             // For the daemon's log: the error says what a user needs.
             tracing::info!(
                 "operation {} realizes canonical operation {} but no longer has its parents",

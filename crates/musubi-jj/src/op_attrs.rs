@@ -41,6 +41,13 @@ impl<M: Borrow<BTreeMap<String, String>>> OpAttrs<M> {
     pub fn has_intent(&self) -> bool {
         self.has(INTENT_ATTRIBUTE)
     }
+
+    /// Whether this records the parents a canonical operation was written with, as every
+    /// canonical operation, and so every realization of one, does. An operation this machine
+    /// wrote doesn't, even where musubi marked it with its canonical operation.
+    pub fn has_original_parents(&self) -> bool {
+        self.has(origin::ORIGINAL_PARENTS)
+    }
 }
 
 /// Readers whose answer borrows from the attributes themselves, not from the view.
@@ -90,6 +97,10 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
 
     pub fn set_canonical(&mut self, id: &CanonicalOp) {
         self.set(CANONICAL_ATTRIBUTE, id.0.hex());
+    }
+
+    pub fn remove_canonical(&mut self) {
+        self.0.borrow_mut().remove(CANONICAL_ATTRIBUTE);
     }
 
     pub fn remove_reconciled_from(&mut self) {

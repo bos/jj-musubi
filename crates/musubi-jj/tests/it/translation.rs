@@ -203,6 +203,62 @@ fn commit(repo: &TestRepo, file: &str, message: &str) {
     repo.jj(&["commit", "-m", message]);
 }
 
+/// `jj op abandon` of this machine's work that the hub hasn't got loses no history the hive has,
+/// even below musubi's rewrite of a merge. Received work merged beside a command's operation goes
+/// onto that operation's parent when the operation is abandoned; musubi puts it back, rewriting
+/// the merge and marking the rewrite with the merge's canonical form; abandoning the work below
+/// then leaves the mark on other parents. The operation-head schedule search found this with
+/// `--unpublished --receive --abandon`.
+#[test]
+fn abandoning_own_work_below_a_rewritten_merge_keeps_syncing() {
+    let env = TestEnv::new();
+    let (alpha, beta) = (env.init_repo("alpha"), env.init_repo("beta"));
+    let (mut sender, mut receiver) = (open(&alpha), open(&beta));
+    let joined = single_canonical_head(&mut receiver);
+    sync(&receiver, &mut sender, &joined);
+    let head = |repo: &TestRepo| {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "-n1",
+            "--no-graph",
+            "-T",
+            "id",
+        ])
+    };
+    beta.jj(&["describe", "-m", "unpublished"]);
+    let unpublished = head(&beta);
+    beta.jj(&["describe", "-m", "first"]);
+    let first = head(&beta);
+    receiver.canonical_heads().unwrap();
+    alpha.jj(&["describe", "-m", "received"]);
+    let received = single_canonical_head(&mut sender);
+    sync(&sender, &mut receiver, &received);
+    beta.jj(&["--ignore-working-copy", "op", "abandon", &first]);
+    receiver.settle().unwrap();
+    receiver.canonical_heads().unwrap();
+    beta.jj(&["--ignore-working-copy", "op", "abandon", &unpublished]);
+    receiver.settle().unwrap();
+    let [now] = receiver.canonical_heads().unwrap().try_into().unwrap();
+    let work = |repo: &TestRepo| {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "all()",
+            "--no-graph",
+            "-T",
+            "description",
+        ])
+    };
+    for kept in ["first", "received"] {
+        assert!(work(&beta).contains(kept), "{kept}");
+    }
+    sync(&receiver, &mut sender, &now);
+    assert!(work(&alpha).contains("first"));
+}
+
 #[test]
 fn realized_bookmark_moves_survive_colocated_import() {
     let env = TestEnv::new();

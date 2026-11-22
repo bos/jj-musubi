@@ -49,6 +49,8 @@ mod legacy;
 mod presence;
 mod publication;
 mod realize;
+#[cfg(test)]
+mod realize_laws;
 mod rewrites;
 mod translate;
 mod view;

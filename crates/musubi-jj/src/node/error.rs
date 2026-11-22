@@ -224,6 +224,10 @@ pub enum NodeError {
     /// as after `jj op abandon`. Which, the log says.
     #[error("{HISTORY_GONE}")]
     RewrittenRealization,
+    /// This copy has an own workspace with a `/` in its name, which it doesn't sync while it
+    /// does: other machines' workspaces show by names of that form.
+    #[error("{0}")]
+    SlashedWorkspaces(super::SlashedWorkspaces),
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

@@ -217,6 +217,8 @@ impl NodeAdapter {
     fn read_heads(&mut self) -> anyhow::Result<Vec<OpId>> {
         // Compatibility until 2027-02-21: remove with `NodeRepo::refuse_legacy_drops`.
         self.repo.refuse_legacy_drops()?;
+        // Before canonicalizing them, which takes no name with a `/` for this machine's own.
+        self.repo.refuse_slashed_workspaces()?;
         self.repo.settle()?;
         let heads = op_ids(self.repo.canonical_heads()?);
         let accepted_push = match fs::read_to_string(&self.accepted_push_path) {
@@ -381,6 +383,17 @@ pub fn history_lost(err: &anyhow::Error) -> bool {
         matches!(
             cause.downcast_ref::<NodeError>(),
             Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization)
+        )
+    })
+}
+
+/// Whether `err` is that this copy has a workspace with a `/` in its name, which it doesn't sync
+/// while it has: renaming the workspace, a local operation, lets it sync again.
+pub fn slashed_workspaces(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<NodeError>(),
+            Some(NodeError::SlashedWorkspaces(_))
         )
     })
 }

@@ -31,6 +31,7 @@ impl NodeRepo {
     /// (`own_of_view`) and that it has no working copy for (`has_working_copy_here`). Returns
     /// whether it wrote an operation, which then needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
+        self.refuse_slashed_workspaces()?;
         let repo = self.merged_repo()?;
         let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         if canonical == *self.canonical.root_operation_id() {

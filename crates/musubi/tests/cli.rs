@@ -3998,10 +3998,14 @@ fn a_new_hive_doesnt_inherit_members() {
 
 /// Copies that left a hive can start another together, each keeping its work, a linked
 /// workspace's included. What the first copy to leave still shows of the old hive, another
-/// machine's working copy, doesn't become its own in the new hive.
+/// machine's working copy, doesn't become its own in the new hive. A linked workspace whose
+/// name has a `/` keeps its repository from syncing, and from starting a hive, until it is
+/// renamed: `musubi sync`, `musubi status` and `musubi create` say what to run, and the daemon
+/// syncs again once it is.
 #[test]
 fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     let mut daemons = Daemons::default();
@@ -4015,18 +4019,50 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
         linked.to_str().unwrap(),
     ]);
     fs::write(linked.join("linked-work"), "saved work").unwrap();
-    let mut describe = alpha.program(Path::new("jj"));
-    describe
-        .args(["describe", "-m", "linked work"])
-        .current_dir(&linked);
-    run(&env, &logs, describe);
+    let in_linked = |args: &[&str]| {
+        let mut command = alpha.program(Path::new("jj"));
+        command.args(args).current_dir(&linked);
+        run(&env, &logs, command)
+    };
+    in_linked(&["describe", "-m", "linked work"]);
     for repo in [&alpha, &beta] {
         repo.write_file("saved-work", repo.machine());
         repo.jj(&["describe", "-m", "saved local work"]);
     }
+    let other = env.root().join("alpha other");
+    alpha.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "tmp/y",
+        other.to_str().unwrap(),
+    ]);
+    let refused = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    insta::assert_snapshot!(refused, @r#"
+    Error: this repository can't sync while its workspaces local/linked and tmp/y have a "/" in their names
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked (local/linked) and '$ROOT/alpha other' (tmp/y), with no "/" in the new names.
+    "#);
+    // Its directory gone, as on a disk not mounted, a workspace is forgotten instead.
+    fs::remove_dir_all(&other).unwrap();
+    let (_, warnings) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(warnings, @r#"
+    Warning: This repository can't sync while its workspaces local/linked and tmp/y have a "/" in their names.
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked (local/linked), with no "/" in the new name. tmp/y's directory ('$ROOT/alpha other') is missing: run `jj workspace forget tmp/y`.
+    "#);
+    alpha.jj(&["workspace", "forget", "tmp/y"]);
+    // Leaving tells the hive, which takes a sync.
+    let refused = musubi_fails(&env, &logs, &alpha, &["leave"]);
+    insta::assert_snapshot!(refused, @r#"
+    Error: this repository can't sync while its workspace local/linked has a "/" in its name
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name. Or run `musubi leave --force` to leave without sending this copy's last work.
+    "#);
+    // The daemon, which found the same, syncs once the workspace is renamed.
+    in_linked(&["workspace", "rename", "linked"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &beta, &["sync"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
+    let (_, warnings) = status_in(&env, &logs, &alpha);
+    assert_eq!(warnings, "");
     let head = [
         "--ignore-working-copy",
         "log",
@@ -4036,9 +4072,7 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
         "-T",
         "commit_id",
     ];
-    let mut linked_head = alpha.program(Path::new("jj"));
-    linked_head.args(head).current_dir(&linked);
-    let mut commits = vec![run(&env, &logs, linked_head)];
+    let mut commits = vec![in_linked(&head)];
     musubi_in(&env, &logs, &alpha, &["leave"]);
     musubi_in(&env, &logs, &beta, &["leave"]);
     for repo in [&alpha, &beta] {
@@ -4047,12 +4081,20 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     // Having left first, alpha didn't hear beta leave.
     let names = alpha.jj(&["workspace", "list", "-T", NAMES]);
     assert!(names.lines().any(|name| name == "beta/beta"), "{names}");
+    // Nor does a hive start from a repository with such a workspace.
+    in_linked(&["workspace", "rename", "local/linked"]);
+    let refused = musubi_fails(&env, &logs, &alpha, &["create", "again"]);
+    insta::assert_snapshot!(refused, @r#"
+    Error: this repository can't sync while its workspace local/linked has a "/" in its name
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name.
+    "#);
+    in_linked(&["workspace", "rename", "linked"]);
     musubi_in(&env, &logs, &alpha, &["create", "again"]);
     musubi_in(&env, &logs, &beta, &["join", "--hive", "again"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     for (repo, expected) in [
-        (&alpha, vec!["alpha", "local/linked", "beta/beta"]),
-        (&beta, vec!["beta", "alpha/alpha"]),
+        (&alpha, vec!["alpha", "linked", "beta/beta"]),
+        (&beta, vec!["beta", "alpha/alpha", "alpha/linked"]),
     ] {
         let names = repo.jj(&["workspace", "list", "-T", NAMES]);
         let actual: std::collections::BTreeSet<_> = names.lines().collect();
@@ -4071,18 +4113,6 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
             assert_eq!(found, *commit);
         }
     }
-    // alpha keeps its own `local/linked`, which no other machine shows, and says why.
-    let (_, warnings) = status_in(&env, &logs, &alpha);
-    insta::assert_snapshot!(warnings, @r#"
-    Warning: Other machines don't show workspace local/linked@, because its name has a "/".
-    Hint: Run `jj workspace rename <new name>`, with no "/", in local/linked's directory (`jj workspace root --name local/linked`).
-    "#);
-    // jj displays Windows paths without the verbatim prefix canonicalize adds.
-    let displayed = alpha.jj(&["workspace", "root", "--name", "local/linked"]);
-    assert_eq!(
-        Path::new(displayed.trim()).canonicalize().unwrap(),
-        linked.canonicalize().unwrap()
-    );
 }
 
 /// A `file://` URL for `path`, which git, unlike for a plain path, fetches from as from any

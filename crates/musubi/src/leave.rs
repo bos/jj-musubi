@@ -77,16 +77,28 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
         return Ok(());
     }
     let (located, hive, entry) = the_copy(ui, start, socket)?;
+    // Telling the hive that this copy leaves takes a sync, which a workspace name with a `/`
+    // stops, before anything changes: renaming the workspace is quick, and leaves with the
+    // copy's last work, which `--force` leaves out.
+    let slashed = match located.refuse_slashed_workspaces(true) {
+        Err(err) if !force => return Err(err),
+        slashed => slashed,
+    };
     // So that the daemon doesn't sync it meanwhile.
     let served = stop_serving(&entry.key, socket)?;
     let name = hive.display_name();
-    let told = match snapshot(&located) {
+    let told = match slashed.map(|()| snapshot(&located)) {
         Err(err) => Err((
+            format!("tell hive {name} that this repository leaves"),
+            "`musubi leave --force` leaves without telling the hive",
+            err,
+        )),
+        Ok(Err(err)) => Err((
             "record what changed in the working copy".to_owned(),
             "if the working copy is stale, `jj workspace update-stale` updates it",
             err,
         )),
-        Ok(()) => tell_the_hive(ui, &located, &hive).map_err(|err| {
+        Ok(Ok(())) => tell_the_hive(ui, &located, &hive).map_err(|err| {
             (
                 format!("tell hive {name} that this repository leaves"),
                 "`musubi leave --force` leaves without telling the hive",

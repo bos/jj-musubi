@@ -580,6 +580,155 @@ fn renamed_workspace_shows_renamed() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/laptop"]);
 }
 
+/// Machine `index`'s own workspace `name`, at `dir` under the hive's root.
+fn add_workspace(hive: &Fixture, index: usize, name: &str, dir: &str) -> musubi_testutil::TestRepo {
+    let path = hive.env.root().join(dir);
+    hive.repo(index)
+        .jj(&["workspace", "add", "--name", name, path.to_str().unwrap()]);
+    hive.repo(index).another_copy(&path)
+}
+
+/// Checks that machine `index`'s sync is refused for its workspaces with a `/` in their names,
+/// as `refusal` says.
+fn assert_refused(hive: &mut Fixture, index: usize, refusal: &str) {
+    let err = hive.hive.sync(index).unwrap_err();
+    assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
+    assert_eq!(format!("{err:#}"), refusal);
+}
+
+/// A copy doesn't sync while it has a workspace of its own with a `/` in its name, as
+/// `feat/x`: other machines show each other's workspaces by names of that form. It publishes
+/// nothing, and other copies sync on. Its directory being away, as on a disk not mounted,
+/// changes nothing, and a workspace forgotten with `jj workspace forget`, which leaves jj's
+/// record of its directory, no longer counts. Renamed without the `/`, the workspace shows
+/// everywhere, where it is, and the copy syncs on.
+#[test]
+fn a_slash_in_a_workspace_name_stops_its_copy_syncing_until_renamed() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let feat = add_workspace(&hive, 0, "feat/x", "alpha-feat");
+    feat.write_file("from-alpha", "alpha's feat/x");
+    feat.jj(&["describe", "-m", "alpha's feat/x"]);
+    let own = hive.workspaces(0)["feat/x"].clone();
+    add_workspace(&hive, 0, "beta/z", "alpha-beta-z");
+    let head = hive.hive.hub_head();
+    assert_refused(
+        &mut hive,
+        0,
+        "this repository can't sync while its workspaces beta/z and feat/x have a \"/\" in \
+         their names",
+    );
+    assert_eq!(hive.hive.hub_head(), head);
+    // Nor does it take `beta/z` for one of beta's that `jj undo` brought back, and drop it.
+    assert!(hive.node(0).show_other_workspaces().is_err());
+    assert!(names(&hive, 0).contains(&"beta/z".to_owned()));
+    hive.commit(1, "b", "from beta");
+    hive.hive.sync(1).unwrap();
+    let shown = names(&hive, 1);
+    assert!(!shown.iter().any(|name| name.contains("feat")), "{shown:?}");
+
+    hive.repo(0).jj(&["workspace", "forget", "beta/z"]);
+    let refusal = "this repository can't sync while its workspace feat/x has a \"/\" in its name";
+    assert_refused(&mut hive, 0, refusal);
+    let path = hive.env.root().join("alpha-feat");
+    let away = hive.env.root().join("alpha-feat-away");
+    std::fs::rename(&path, &away).unwrap();
+    assert_refused(&mut hive, 0, refusal);
+    std::fs::rename(&away, &path).unwrap();
+    assert!(!hive.visible(0).iter().any(|c| c.ends_with("from beta")));
+
+    feat.jj(&["workspace", "rename", "feat-x"]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.workspaces(1).get("alpha/feat-x"), Some(&own));
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("from beta")));
+    hive.assert_converged();
+}
+
+/// A workspace added as `beta/x` during a sync stops it at its next step: before it sends
+/// the commands that added it, and, where it realizes beta's work adding its `x`, after the
+/// realization was made, before it is published. Published beside it, beta's `x`, shown as
+/// `beta/x` too, would be one workspace with alpha's to jj's merge, and alpha's directory would
+/// snapshot into beta's working copy. Renamed, alpha's stays alpha's, and beta's is shown as
+/// `beta/x`; neither working copy moves.
+#[test]
+fn a_workspace_with_a_slash_added_during_a_sync_stops_it() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+
+    for realizing in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        let beta_x = add_workspace(&hive, 1, "x", "beta-x");
+        beta_x.write_file("from-beta", "beta's x");
+        beta_x.jj(&["describe", "-m", "beta's x"]);
+        let theirs = hive.workspaces(1)["x"].clone();
+        if realizing {
+            hive.hive.sync(1).unwrap();
+        }
+        hive.hive.fetch(0).unwrap();
+        let member = &mut hive.hive.members[0];
+        while !member.adapter.is_local(&member.core.known().head).unwrap() {
+            let step = member.core.step(&mut member.adapter).unwrap();
+            assert!(matches!(step, Step::Realized(_)), "{step:?}");
+        }
+        let alpha_x = add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+        let own = hive.workspaces(0)["beta/x"].clone();
+        let head = hive.hive.hub_head();
+        let member = &mut hive.hive.members[0];
+        let err = member.core.step(&mut member.adapter).unwrap_err();
+        assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
+        assert_eq!(hive.hive.hub_head(), head, "realizing: {realizing}");
+        assert_eq!(hive.workspaces(0).get("beta/x"), Some(&own));
+
+        alpha_x.jj(&["workspace", "rename", "alpha-x"]);
+        hive.sync();
+        hive.sync();
+        beta_x.jj(&["status"]);
+        let alpha = hive.workspaces(0);
+        assert_eq!(alpha.get("alpha-x"), Some(&own), "{alpha:?}");
+        assert_eq!(alpha.get("beta/x"), Some(&theirs), "{alpha:?}");
+        let beta = hive.workspaces(1);
+        assert_eq!(beta.get("x"), Some(&theirs), "{beta:?}");
+        assert_eq!(beta.get("alpha/alpha-x"), Some(&own), "{beta:?}");
+        hive.assert_converged();
+    }
+}
+
+/// A workspace of alpha's own named `beta/x` isn't taken for beta's, which beta hasn't got.
+#[test]
+fn a_workspace_with_a_slash_of_ones_own_is_not_another_machines() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+    hive.hive.sync(0).unwrap_err();
+    let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
+    assert!(!slashed.is_theirs("beta/x"));
+}
+
+/// A known limitation (docs/internals/races.md, "Workspaces"): alpha forgets beta's workspace
+/// `beta/beta` here and adds one of its own by that name, then works in it before renaming it,
+/// as the refusal says. Canonicalized after the rename, the commands run in it take the name
+/// for beta's workspace, as the hive shows it, and beta's working copy moves to alpha's commit.
+/// This fails once the limitation goes away; then the row changes with it.
+#[test]
+fn work_in_a_workspace_named_like_one_forgotten_here_moves_that_one_once_renamed() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    let own = add_workspace(&hive, 0, "beta/beta", "alpha-beta");
+    own.write_file("from-alpha", "alpha's work");
+    own.jj(&["describe", "-m", "alpha's beta/beta"]);
+    let alphas = hive.workspaces(0)["beta/beta"].clone();
+    assert_refused(
+        &mut hive,
+        0,
+        "this repository can't sync while its workspace beta/beta has a \"/\" in its name",
+    );
+    own.jj(&["workspace", "rename", "mine"]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.workspaces(0).get("mine"), Some(&alphas));
+    assert_eq!(hive.workspaces(1).get("beta"), Some(&alphas));
+}
+
 /// Three machines with the same hostname: musubi tells them apart by a random suffix, and
 /// shows the two others on each machine as `mac-xxxx/default` and `mac-yyyy/default`.
 #[test]
@@ -636,22 +785,15 @@ fn two_machines_sharing_a_hostname_show_each_other_qualified() {
 }
 
 /// An operation that forgot the workspace it was made in is realized under the name that
-/// workspace shows by, as every other operation is, though the view no longer names it.
-/// Here alpha has a workspace `beta/x` of its own, so it shows beta as `beta-1a2b`. Under
-/// the plain name, `beta/beta`, which alpha can have too, `jj undo` in that workspace of
-/// alpha's would take beta's operation for its own.
+/// workspace shows by, `beta/beta`, as every other operation is, though the view no longer
+/// names it. Under the plain name, `beta`, `jj undo` in a workspace of alpha's of that name
+/// would take beta's operation for its own.
 #[test]
 fn an_operation_that_forgot_its_workspace_keeps_its_name() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
-    let path = hive.env.root().join("alpha-beta-x");
-    let path = path.to_str().unwrap().to_owned();
-    hive.repo(0)
-        .jj(&["workspace", "add", "--name", "beta/x", &path]);
-    hive.sync();
     hive.repo(1).jj(&["workspace", "forget", "beta"]);
     hive.sync();
     hive.sync();
-    let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(1));
     let template = r#"description.first_line() ++ "\t" ++ workspace_name ++ "\n""#;
     let ops = hive
         .repo(0)
@@ -660,7 +802,7 @@ fn an_operation_that_forgot_its_workspace_keeps_its_name() {
         .lines()
         .find(|line| line.starts_with("forget workspace beta"))
         .unwrap_or_else(|| panic!("no forget in {ops:?}"));
-    assert_eq!(forget, format!("forget workspace beta\t{qualified}/beta@"));
+    assert_eq!(forget, "forget workspace beta\tbeta/beta@");
 }
 
 /// Other machines' working copies are never git refs, so nothing git does can drop them
@@ -701,9 +843,7 @@ fn git_never_sees_other_machines_working_copies() {
 /// on it, and abandons the restore, with no sync between, so alpha's node never sees the
 /// restore. jj moves the command onto the restore's
 /// parent, whose view has no `beta/beta`, while its own view has it; but the name has a `/`, so
-/// it is never alpha's own, and stays the first beta's. A workspace alpha
-/// then adds as `beta/x`, and renames to `beta/y`, stays alpha's, through other machines' work
-/// arriving, and no other machine shows it, as it has a `/`.
+/// it is never alpha's own, and stays the first beta's.
 #[test]
 fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -748,31 +888,6 @@ fn abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs() {
         assert!(
             shown.iter().all(|name| !name.starts_with("alpha/beta")),
             "machine {index} shows {shown:?}"
-        );
-    }
-
-    let path = hive.env.root().join("alpha-beta-x");
-    hive.repo(0).jj(&[
-        "workspace",
-        "add",
-        "--name",
-        "beta/x",
-        path.to_str().unwrap(),
-    ]);
-    hive.sync();
-    hive.repo(0)
-        .another_copy(&path)
-        .jj(&["workspace", "rename", "beta/y"]);
-    hive.commit(1, "b2", "beta again");
-    hive.sync();
-    hive.sync();
-    hive.assert_converged();
-    assert!(names(&hive, 0).contains(&"beta/y".to_owned()));
-    for index in 1..3 {
-        let shown = names(&hive, index);
-        assert!(
-            shown.iter().all(|name| !name.starts_with("alpha/beta")),
-            "{shown:?}"
         );
     }
 }
@@ -827,51 +942,4 @@ fn abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs() {
             "machine {index} shows {shown:?}"
         );
     }
-}
-
-/// alpha adds a workspace `beta/x` of its own, runs a command, and abandons the two operations
-/// of the add (`jj op abandon`), with no sync between. jj moves the command onto the add's
-/// parent, whose view lacks `beta/x`, and keeps the workspace in the command's view, as it does
-/// on one machine. alpha has a working copy for it, so it stays alpha's, through beta's work
-/// arriving; and no machine shows it, as its name has a `/`.
-#[test]
-fn abandoning_the_add_of_an_own_workspace_keeps_it_here() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    hive.sync();
-    let last_op = |hive: &Fixture| {
-        hive.repo(0).jj(&[
-            "--ignore-working-copy",
-            "--no-integrate-operation",
-            "op",
-            "log",
-            "--no-graph",
-            "-n1",
-            "-T",
-            "id",
-        ])
-    };
-    let before = last_op(&hive);
-    let path = hive.env.root().join("alpha-beta-x");
-    hive.repo(0).jj(&[
-        "workspace",
-        "add",
-        "--name",
-        "beta/x",
-        path.to_str().unwrap(),
-    ]);
-    let added = last_op(&hive);
-    hive.repo(0).jj(&["new", "-m", "after the add"]);
-    hive.repo(0)
-        .jj(&["op", "abandon", &format!("{before}..{added}")]);
-    hive.commit(1, "b", "from beta");
-    hive.sync();
-    hive.sync();
-    let shown = names(&hive, 0);
-    assert!(shown.contains(&"beta/x".to_owned()), "{shown:?}");
-    let shown = names(&hive, 1);
-    assert!(
-        shown.iter().all(|name| !name.starts_with("alpha/beta")),
-        "{shown:?}"
-    );
-    hive.assert_converged();
 }

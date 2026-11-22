@@ -171,6 +171,7 @@ impl NodeRepo {
         canonical: &CanonicalOp,
         published: &HashMap<CanonicalOp, LocalOp>,
     ) -> Result<LocalOp, NodeError> {
+        self.refuse_slashed_workspaces()?;
         let order = self
             .canonical
             .ancestors_until(std::slice::from_ref(canonical), |id| {

@@ -18,6 +18,7 @@ use bytes::Bytes;
 use musubi_hub::activity::Report;
 use musubi_hub::hub_dir::HiveId;
 use musubi_sync::driver::NodeDriver;
+use musubi_sync::node::slashed_workspaces;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -359,6 +360,8 @@ struct Attempt {
     synced: Synced,
     /// Whether publication was held before it.
     held_before: bool,
+    /// Why the sync before it failed, if it did.
+    error_before: Option<String>,
 }
 
 /// One copy served in its hive, from opening it until something calls for starting over.
@@ -572,6 +575,7 @@ impl<'a> Session<'a> {
         // Reconnecting during the sync, which may miss announcements, calls for another.
         self.reconnections.seen();
         let held_before = self.status.publication_held();
+        let error_before = self.status.snapshot().error;
         let result = self.driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&self.driver);
@@ -584,6 +588,7 @@ impl<'a> Session<'a> {
             result,
             synced,
             held_before,
+            error_before,
         }
     }
 
@@ -594,6 +599,7 @@ impl<'a> Session<'a> {
             result,
             synced,
             held_before,
+            error_before,
         } = attempt;
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
@@ -639,6 +645,16 @@ impl<'a> Session<'a> {
                     self.gc_checked = Some(std::time::Instant::now());
                     collect_garbage(&self.located);
                 }
+                Ok(Flow::Again)
+            }
+            // Renaming a workspace with a `/` in its name wakes the next sync, so there's no
+            // need to retry here.
+            Err(err) if slashed_workspaces(&err) => {
+                if error_before.as_deref() != Some(format!("{err:#}").as_str()) {
+                    tracing::warn!("{err:#}");
+                }
+                self.retry = false;
+                self.backoff.reset();
                 Ok(Flow::Again)
             }
             Err(err) if publication_held(&err) => {

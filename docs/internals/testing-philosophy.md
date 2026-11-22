@@ -171,6 +171,6 @@ what doesn't gets fixed, with a test that would have shown it.
 ## Keeping docs in step
 
 [testing.md](testing.md), [races.md](races.md), [conformance.md](conformance.md) and
-[formal/README.md](../../formal/README.md) name tests and say what each checks, and
-`crates/musubi-sync/tests/e2e_search/coverage.rs` lists the race catalogue's tests. A change to a
-test updates them.
+[formal/README.md](../../formal/README.md) name tests and say what each checks. A change to a
+test updates them, and a new rule of the search goes in the list of rules
+`crates/musubi-sync/tests/e2e_search/coverage.rs` reports as never fired.

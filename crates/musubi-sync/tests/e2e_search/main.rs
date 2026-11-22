@@ -2,9 +2,8 @@
 //! state machine drives two or three real colocated repositories, each a musubi node of an
 //! in-process hive, through local `jj` work, workspaces, forgotten and new copies, a shared
 //! `origin`, git-side work, partial syncs, and faults, then syncs to a fixed point and checks
-//! that the hive converged. `coverage` maps race catalogue rows (docs/internals/races.md) to
-//! suggested rules and reports concrete native witnesses separately from that exploration
-//! guidance.
+//! that the hive converged. `coverage` prints the rules and events that never fired in a test
+//! (with `--no-capture`).
 //!
 //! After every rule, every op head of every repository a sync or fault touched loads, every `jj`
 //! command and sync step must succeed (but for stops a user gets past as the error says:
@@ -21,9 +20,7 @@
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with
 //! `cargo nextest run -p musubi-sync --profile search`; each shard has its own example
-//! database under `target/tmp/e2e_search/`. Each test writes `coverage-v2-<test>.txt` and
-//! `counts-v2-<test>.json` there, separating rule activity, approximate exploration guidance
-//! and native race witnesses from completed cases (printed with `--no-capture`). Environment:
+//! database under `target/tmp/e2e_search/`. Environment:
 //!
 //! - `MUSUBI_SEARCH_CASES`: test cases per shard (default 8; a case takes up to a few minutes when
 //!   several shards run at once);
@@ -59,6 +56,7 @@ mod view;
 mod world;
 
 use std::io::Write as _;
+use std::path::PathBuf;
 
 use hegel::HealthCheck;
 use hegel::NondeterminismStrictness;
@@ -129,7 +127,9 @@ impl Config {
             // The smoke test is the same on every run.
             None => settings.derandomize(true).database(None),
             Some(shard) => {
-                let database = coverage::dir().join(format!("examples-shard-{shard}"));
+                let database = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                    .join("e2e_search")
+                    .join(format!("examples-shard-{shard}"));
                 settings = settings.database(Some(database.to_string_lossy().into_owned()));
                 // Without `MUSUBI_SEARCH_SEED`, `HEGEL_SEED` or else a random seed.
                 if let Some(seed) = std::env::var("MUSUBI_SEARCH_SEED")
@@ -146,10 +146,8 @@ impl Config {
 
 #[hegel::standalone_function(config.settings())]
 fn search(tc: TestCase, config: Config) {
-    let case = coverage::start_case();
     let setup = draw_setup(&tc);
     walk(tc, config, setup, |_, _| {});
-    case.passed();
 }
 
 /// The hive a case of `search` starts from.
@@ -231,7 +229,6 @@ fn e2e_join_after_upstream_rewrite() {
 /// The independent jj replay and import checks must accept the fetch and its replication.
 #[hegel::standalone_function(config.settings())]
 fn join_after_upstream_rewrite(tc: TestCase, config: Config) {
-    let case = coverage::start_case();
     walk(
         tc,
         config,
@@ -254,7 +251,6 @@ fn join_after_upstream_rewrite(tc: TestCase, config: Config) {
             );
         },
     );
-    case.passed();
 }
 
 #[test]

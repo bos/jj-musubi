@@ -25,7 +25,6 @@ impl World {
     /// captured by those actors; the final workspace exercise then checks new writes from
     /// every workspace. Keep this order: resetting the ledger earlier would lose evidence.
     pub fn converge(&mut self) {
-        crate::coverage::interrupt_races();
         self.record("converge".to_owned());
         self.settle();
         self.check_converged_history();

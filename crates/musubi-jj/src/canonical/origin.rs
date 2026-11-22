@@ -16,6 +16,20 @@ pub(crate) const ORIGINAL_PARENTS: &str = "musubi.original-parents";
 /// The presence an earlier release's contraction kept at an operation it rewrote, where the
 /// presence worked out from its new parents would differ. Nothing writes it now, but hives keep
 /// their operations, so it is still read.
+///
+/// Compatibility until 2027-02-21: remove this, its removal in `fresh` and `identity`,
+/// `OpAttrs::presence`, `presence::read_stamp`, `presence::check_stamp` and its call in
+/// `CanonicalStore::verify_operation`, `crate::presence::Presence::from_stamp` (`to_stamp`
+/// stays, for `cleanup.rs`), `presence::stamp_name`, the stamp case of the `None` operation of
+/// `presence::Work` with the code that handles it (`work_below`, `Walked::of`,
+/// `NodeRepo::last_work`; `Work::unnamed` also uses `None`, for work that is no operation's, so
+/// the field stays an `Option` there unless that changes too), this module's header sentence
+/// about the stamp, and the sentences of `docs/internals/design.md` about stamps and erased work
+/// (under "Presence" and where workspaces follow latest work). The tests that go are
+/// `an_earlier_releases_presence_stamp_still_reads`,
+/// `realize::concrete_work_keeps_the_namespace_after_a_deletion`, the reading half of
+/// `stamps_read_back_and_only_as_written`, and the stamp parts of
+/// `original_parent_encoding_is_pinned_and_cannot_be_supplied_by_a_caller`.
 pub(crate) const PRESENCE: &str = "musubi.presence";
 
 pub(super) fn fresh(op: &Operation) -> Operation {

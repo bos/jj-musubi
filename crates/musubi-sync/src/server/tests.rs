@@ -37,9 +37,6 @@ const INJECTED: &str = "injected panic after accepting a head";
 #[derive(Default)]
 pub(super) struct WorkerHooks {
     opens: AtomicUsize,
-    /// How many machines the hub remembered having said what they took, and how many it knew
-    /// to be joining, as of the last time it opened the store.
-    remembered: Mutex<(usize, usize)>,
     /// Whether to panic once the hub accepts a head.
     armed: AtomicBool,
     accepted: Mutex<Option<(u64, OpId)>>,
@@ -49,9 +46,8 @@ pub(super) struct WorkerHooks {
 }
 
 impl WorkerHooks {
-    pub(super) fn opened(&self, service: &HubService) {
+    pub(super) fn opened(&self) {
         self.opens.fetch_add(1, Ordering::SeqCst);
-        *self.remembered.lock().unwrap() = service.hub().remembered();
     }
 
     pub(super) fn handled(&self, service: &HubService, notice: Option<&HeadNotice>) {
@@ -325,25 +321,12 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     assert!(accepted.0 > 0);
     let store = HubStore::open(&hive_dir).unwrap();
     assert_eq!(store.head(), (accepted.0, &accepted.1));
-    assert!(
-        store
-            .missing_closure(&accepted.1, &store.uncontracted())
-            .unwrap()
-            .is_empty()
-    );
-    let records = HubAdapter::new(store, &hive_dir).unwrap();
-    let records = musubi_core::hub::HubStorage::records(&records);
+    assert!(store.missing_closure(&accepted.1).unwrap().is_empty());
 
     // An error reply must not promise rollback: fetch the accepted head on the SAME worker.
     let fetch = HubRequest::Protocol(Request::Fetch {
-        machine: NodeRepo::open(&alpha.repo_path(), &alpha.settings())
-            .unwrap()
-            .machine()
-            .key()
-            .to_owned(),
         base: vec![0; 64],
         haves: WireAttachment::Haves(vec![]),
-        records,
     });
     let reply = client
         .request(
@@ -362,11 +345,6 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     // A healthy retained service could answer too; count the actual construction to prove
     // the catch path discarded it. Removing `let_go` must fail this assertion.
     assert_eq!(recovery.opens.load(Ordering::SeqCst), 2);
-    // The new one remembers what alpha said it took before the panic, so it doesn't wait again
-    // for machines that may be joining, as after a restart; and that alpha asked to join the
-    // hive (`create_hive`), which the hive's thread took up at alpha's first request: the
-    // panic came before the hub, pruning, could see alpha's push land and stop waiting for it.
-    assert_eq!(*recovery.remembered.lock().unwrap(), (1, 1));
     assert!(notices.next().now_or_never().is_none());
 
     let mut gamma_driver = driver(&gamma, client.clone(), &other_hive);
@@ -405,12 +383,7 @@ async fn a_worker_reopens_its_service_after_a_panic() {
         let notice = Envelope::<HeadNotice>::decode(&message.payload).unwrap();
         let head = OpId::new(notice.head);
         assert!(notice.seq > last.0);
-        assert!(
-            store
-                .missing_closure(&head, &store.uncontracted())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store.missing_closure(&head).unwrap().is_empty());
         assert!(
             store
                 .canonical()

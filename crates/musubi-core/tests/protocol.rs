@@ -17,13 +17,11 @@ use std::rc::Rc;
 
 use hegel::TestCase;
 use hegel::generators as gs;
-use musubi_core::hub::CasOutcome;
 use musubi_core::hub::HubStorage;
 use musubi_core::hub::Push;
 use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use serde_json::Value;
 use serde_json::json;
@@ -32,7 +30,7 @@ use support::storage::Timing;
 use support::world::World;
 
 /// Which additional actions a generated case admits. All three environments include local
-/// work, arbitrary network delivery, abandonment and crashes. False replies exceed the
+/// work, arbitrary network delivery and crashes. False replies exceed the
 /// Lean model's honest-hub assumptions; storage failures keep the oracle until a partial
 /// effect leaves its abstraction.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -139,7 +137,6 @@ impl Seq {
 enum Interrupted {
     Poll,
     Exchange,
-    Prune,
     Delivery,
 }
 
@@ -166,17 +163,6 @@ impl Machine {
         let parent = tc.draw(gs::sampled_from(candidates));
         let objs = tc.draw(gs::integers::<usize>().max_value(2));
         world.user_op(node, parent, objs);
-    }
-
-    /// `jj op abandon` of some of the operations below a node's heads.
-    #[rule(weight = 2)]
-    fn op_abandon(&mut self, tc: TestCase) {
-        let mut world = self.world.borrow_mut();
-        let node = tc.draw(node_ids(&world));
-        let candidates = world.abandonable(node);
-        tc.assume(!candidates.is_empty());
-        let ops = tc.draw(gs::subsequences(candidates).min_size(1));
-        world.op_abandon(node, ops);
     }
 
     #[rule(weight = 4)]
@@ -225,7 +211,7 @@ impl Machine {
         let mut world = self.world.borrow_mut();
         let node = tc.draw(node_ids(&world));
         let expected = tc.draw(gs::sampled_from(world.accepted_heads()));
-        let new = tc.draw(gs::sampled_from(world.nameable_ops(node)));
+        let new = tc.draw(gs::sampled_from(world.local_ops(node)));
         world.rogue_push(node, expected, new);
     }
 
@@ -260,19 +246,6 @@ impl Machine {
         let reply = false_reply_to(&tc, &world, node);
         let own = tc.draw(gs::booleans());
         world.false_reply(node, reply, own);
-    }
-
-    /// The hub prunes its records, once every node has said it took them all: sometimes
-    /// once the hive has converged, every node having fetched last, telling the hub it took
-    /// them, so that what follows meets a hub that has pruned.
-    #[rule]
-    fn prune(&mut self, tc: TestCase) {
-        let mut world = self.world.borrow_mut();
-        let converge = tc.draw(gs::booleans());
-        if converge {
-            world.quiesce();
-        }
-        world.prune();
     }
 
     /// Every crash, weighted as the six were when each was a rule of its own, so that the
@@ -323,7 +296,7 @@ impl Machine {
         ]));
         let at = tc.draw(gs::integers::<usize>().min_value(1).max_value(24));
         let pending = world.undelivered();
-        let mut actions = vec![Interrupted::Poll, Interrupted::Exchange, Interrupted::Prune];
+        let mut actions = vec![Interrupted::Poll, Interrupted::Exchange];
         if !pending.is_empty() {
             actions.push(Interrupted::Delivery);
         }
@@ -332,7 +305,6 @@ impl Machine {
         match interrupted {
             Interrupted::Poll => world.poll_now(node),
             Interrupted::Exchange => world.exchange(node, 1),
-            Interrupted::Prune => world.prune(),
             Interrupted::Delivery => {
                 let message = tc.draw(gs::sampled_from(pending));
                 world.deliver(message);
@@ -362,8 +334,6 @@ fn check_safety(tc: &TestCase, world: &World) {
 #[hegel::test_helper]
 fn false_reply_to(tc: &TestCase, world: &World, node: usize) -> Reply<u64, Vec<u64>> {
     let (ops, objs) = world.hub_stored();
-    // The node's own records, so that the reply is judged on its operations alone.
-    let (records, records_from, pruned) = world.node_records(node);
     let head = tc.draw(gs::sampled_from(ops.as_slice()));
     let sequence = tc.draw(gs::sampled_from(Seq::ALL.as_slice()));
     let seq = sequence.value(world, node);
@@ -385,7 +355,6 @@ fn false_reply_to(tc: &TestCase, world: &World, node: usize) -> Reply<u64, Vec<u
                 kind: head_kind,
                 seq,
                 head,
-                records,
             }
         }
         FalseReply::Fetched => {
@@ -409,10 +378,6 @@ fn false_reply_to(tc: &TestCase, world: &World, node: usize) -> Reply<u64, Vec<u
                     .collect(),
                 ops_attachment: vec![],
                 objects: some_of(tc, "objects", &objs),
-                records,
-                records_from,
-                new_records: vec![],
-                pruned,
             }
         }
         FalseReply::Objects => Reply::Objects {
@@ -475,12 +440,6 @@ fn run_from(
     let mut world = world.borrow_mut();
     world.quiesce();
     check_safety(&tc, &world);
-    // Every node has said, fetching last, that it took every record: the hub prunes them, and
-    // the hive still converges.
-    world.prune();
-    assert_eq!(world.hub_pruned(), world.hub_records().len());
-    world.quiesce();
-    check_safety(&tc, &world);
     // What the search reaches: with `HEGEL_STATISTICS=1`, Hegel reports the share of cases that
     // took each kind of action.
     for kind in world
@@ -517,93 +476,6 @@ fn conformance(tc: TestCase) {
     if let Some(oracle) = run(tc, Some(Oracle::kept()), Environment::Protocol) {
         oracle.keep();
     }
-}
-
-/// A head the hub accepted through what survives of the one before need not reach it. Once
-/// the hub has forgotten objects only that one reached, going back there would leave a hub
-/// without what its head needs. The environment explicitly chooses a remake, and every
-/// node's work reaches the new one; native detection of the damaged interval is not modeled.
-#[test]
-fn going_back_past_an_acceptance_through_survivors_remakes_the_hub() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    for parent in 0..3 {
-        world.user_op(0, parent, 1);
-        world.exchange(0, 0);
-    }
-    world.op_abandon(0, vec![2]);
-    while world.hub_records().is_empty() {
-        world.exchange(0, 0);
-    }
-    fetch(&mut world, 1);
-    world.exchange(1, 0);
-    world.user_op(1, 0, 1);
-    world.hub_goes_back(2);
-    world.poll_now_checked(1);
-    for _ in 0..16 {
-        world.exchange_checked(1, 0);
-    }
-    // Node 1 published the drop, through what survives of 2, which its head doesn't reach.
-    assert!(world.hub_seq() > 2);
-    assert!(world.hub_records().iter().flatten().any(|&op| op == 2));
-    world.hub_forget();
-    let lost = world.objects(2);
-    assert!(!lost.is_empty());
-    assert!(lost.iter().all(|&obj| !world.hub_has_object(obj)));
-    assert!(!world.hub_closed(2));
-    world.hub_goes_back(2);
-    assert!(world.remade_for_rollback);
-    assert_eq!((world.hub_seq(), world.hub_head()), (0, 0));
-    world.quiesce();
-    world.check_invariants();
-}
-
-/// Generated sequences seldom reach a node that knows a head it dropped and lacks what
-/// survives of it: one that took the hub's records before realizing that history, when the
-/// hub then goes back to that head. Each case here starts there, generated, and goes on as
-/// `conformance` does, so that advancing to what survives, the hub accepting a push through
-/// it, and switching to prepared records are checked against the Lean model with the rest.
-#[hegel::test]
-fn survivor_advance_conformance(tc: TestCase) {
-    let oracle = Some(Oracle::kept());
-    if let Some(oracle) = run_from(tc, oracle, Environment::Protocol, dropped_known) {
-        oracle.keep();
-    }
-}
-
-/// Node 0 makes a few operations, one on another, and drops some of those below its head;
-/// node 1 takes the records without that history, perhaps with work of its own; the hub goes
-/// back to one of the dropped operations; and node 1 hears of it and takes a few steps first.
-/// One crash.
-#[hegel::test_helper]
-fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
-    let length = tc.draw(gs::integers::<u64>().min_value(3).max_value(5));
-    for parent in 0..length {
-        let objs = tc.draw(gs::integers::<usize>().max_value(1));
-        world.user_op(0, parent, objs);
-        world.exchange(0, 0);
-    }
-    let dropped = tc.draw(gs::subsequences((1..length).collect::<Vec<u64>>()).min_size(1));
-    world.op_abandon(0, dropped.clone());
-    while world.hub_records().is_empty() {
-        world.exchange(0, 0);
-    }
-    fetch(world, 1);
-    world.exchange(1, 0);
-    let own_ops = tc.draw(gs::integers::<usize>().max_value(2));
-    for _ in 0..own_ops {
-        let parent = tc.draw(gs::sampled_from(world.local_ops(1)));
-        world.user_op(1, parent, 0);
-    }
-    let back_to = tc.draw(gs::sampled_from(dropped));
-    world.hub_goes_back(back_to);
-    // Node 1 hears of it first, and takes some steps, before anything else happens: each, as
-    // `quiesce`'s, makes the measures fall.
-    world.poll_now_checked(1);
-    let exchanges = tc.draw(gs::integers::<usize>().max_value(12));
-    for _ in 0..exchanges {
-        world.exchange_checked(1, 0);
-    }
-    1
 }
 
 /// Storage errors are observed before recovery, then the daemon's reopen/restart is
@@ -670,212 +542,26 @@ fn lost_acceptance_and_delayed_fetch_make_progress() {
     world.check_invariants();
 }
 
-/// A peer can publish a surviving ancestor while dropping a later operation. A follower
-/// still at that dropped head must take the records without waiting for another push.
+/// A fetch marks a newly learned head accepted before changing knowledge. Old fetches
+/// can still carry data, but must not mark another head accepted.
+/// This checks filtering in `handle`, before `handle_reply`'s separate rollback recovery.
 #[test]
-fn records_dropping_a_head_are_taken_when_the_hub_is_its_ancestor() {
-    use std::collections::BTreeSet;
-
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 0);
-    world.quiesce();
-    world.user_op(0, 1, 0);
-    world.quiesce();
-    assert_eq!(world.heads(1), &BTreeSet::from([2]));
-
-    world.user_op(0, 2, 0);
-    world.op_abandon(0, vec![2]);
-    world.hub_goes_back(0);
-    let request = world.net_len();
-    world.rogue_push(0, 0, 1);
-    world.deliver(request);
-    assert_eq!(world.hub_head(), 1);
-    assert_eq!(world.hub_records(), &[vec![2]]);
-
-    world.poll_now(1);
-    assert!(
-        world.node_step(1, 0),
-        "the dropped head must not block adoption"
-    );
-    assert_eq!(world.applied(1), &[vec![2]]);
-    assert_eq!(world.heads(1), &BTreeSet::from([1]));
-    assert!(!world.node_step(1, 0));
-    world.check_invariants();
-}
-
-/// The trait endpoint recorded by the real-repository orphan-realization regression:
-/// equal head and records, a cached restoring payload, and a pending collateral drop.
-/// This is a local write-boundary test, not a full-state original-ancestry projection.
-#[test]
-fn cached_restoration_still_publishes_a_pending_drop_at_the_known_head() {
-    use musubi_core::message::Request;
-    use musubi_core::node::{NodeCore, Step};
+fn fetched_replies_mark_only_new_heads() {
+    use musubi_core::node::{Handled, NodeCore};
     use support::model::{FakeRepo, ROOT, Univ};
+    use support::storage::{Fallible, Faults};
 
-    let univ = Rc::new(RefCell::new(Univ::new()));
-    let mut repo = FakeRepo::new(univ.clone(), 0);
-    let (dropped, _) = repo.user_op(ROOT, 0);
-    let (head, _) = repo.user_op(ROOT, 0);
-    repo.heads = [head].into();
-    repo.abandon(&[dropped]);
-    repo.fixup_cached = true;
-    let records = univ.borrow_mut().record_state(&[]);
-    let mut core = NodeCore::new(ROOT);
-    let learn = |core: &mut NodeCore<u64>, repo: &mut FakeRepo| {
-        core.handle_reply(
-            repo,
-            Reply::Head {
-                kind: HeadKind::Head,
-                seq: 1,
-                head,
-                records: records.clone(),
-            },
-        )
-        .unwrap();
-    };
-    learn(&mut core, &mut repo);
-    let answer = Oracle::spawn().call(&json!({"op": "retryPublication",
-        "pending": [dropped], "written": true, "aligned": false, "headKnown": true}));
-    assert_eq!(answer["restoring"], false);
-    assert_eq!(answer["tip"], true);
-    let Step::Superseded {
-        fixup: Some(tip),
-        push,
-    } = core.step(&mut repo).unwrap()
-    else {
-        panic!("cached state must not strand the pending drop");
-    };
-    let Request::Push {
-        new,
-        expected,
-        dropped: payload,
-        ..
-    } = push
-    else {
-        panic!("not a push");
-    };
-    assert_eq!((expected, new, payload), (head, tip, vec![dropped]));
-    assert_ne!(tip, head);
-    assert_eq!(univ.borrow().parents[tip as usize], [head]);
-    // The first request is lost before delivery. Core restart keeps repository state.
-    core.restart();
-    learn(&mut core, &mut repo);
-    let Step::Superseded { fixup: None, push } = core.step(&mut repo).unwrap() else {
-        panic!("retry must reuse the existing tip");
-    };
-    let Request::Push { new, .. } = push else {
-        panic!("not a push");
-    };
-    assert_eq!(new, tip);
-}
-
-/// A stale head must not change the records that gate a pending supersede. Only an
-/// acceptance can supply the missing record without fetching its actual grouping.
-/// This checks `handle`; `handle_reply` may restart first when its own call detects rollback.
-#[test]
-fn head_replies_update_records_only_for_the_known_pair() {
-    use musubi_core::message::Request;
-    use musubi_core::node::{Handled, NodeCore, Step};
-    use support::model::{FakeRepo, ROOT, Univ};
-
-    // Newer pairs are learned; an equal sequence about another head is an old history.
-    for (seq, same_head, takes_records) in [
+    for (seq, same_head, learns) in [
         (1, true, false),
         (1, false, false),
-        (2, true, true),
+        (2, true, false),
         (2, false, false),
         (3, true, true),
         (3, false, true),
     ] {
-        for kind in [HeadKind::Head, HeadKind::Notify, HeadKind::Accepted] {
-            let univ = Rc::new(RefCell::new(Univ::new()));
-            let mut repo = FakeRepo::new(univ.clone(), 0);
-            let (dropped, _) = repo.user_op(ROOT, 0);
-            let (head, _) = repo.user_op(dropped, 0);
-            let empty = univ.borrow_mut().record_state(&[]);
-            let next = univ.borrow_mut().record_state(&[vec![dropped]]);
-            let mut core = NodeCore::new(ROOT);
-            core.handle(
-                &mut repo,
-                Reply::Head {
-                    kind: HeadKind::Head,
-                    seq: 2,
-                    head,
-                    records: empty,
-                },
-            )
-            .unwrap();
-            repo.abandon(&[dropped]);
-            let named = if same_head { head } else { ROOT };
-            let handled = core
-                .handle(
-                    &mut repo,
-                    Reply::Head {
-                        kind,
-                        seq,
-                        head: named,
-                        records: next,
-                    },
-                )
-                .unwrap();
-            if seq == 3 {
-                assert_eq!(
-                    handled,
-                    Handled::Learned {
-                        kind,
-                        seq,
-                        head: named
-                    }
-                );
-                assert_eq!(core.known(), &Head { seq, head: named });
-            } else {
-                assert_eq!(handled, Handled::Ignored);
-                assert_eq!(core.known(), &Head { seq: 2, head });
-            }
-            let step = core.step(&mut repo).unwrap();
-            if !takes_records {
-                // The old announcement must not block publication of the local drop.
-                let Step::Superseded { push, .. } = step else {
-                    panic!("old pair changed record bookkeeping: {seq}, {same_head}, {kind:?}");
-                };
-                assert!(matches!(push, Request::Push { dropped: d, .. } if d == [dropped]));
-            } else if kind == HeadKind::Accepted {
-                assert_eq!(step, Step::Adopted);
-                assert_eq!(repo.applied, [vec![dropped]]);
-            } else {
-                let Step::Send(requests) = step else {
-                    panic!("a notification cannot acknowledge our drop: {step:?}");
-                };
-                assert!(matches!(&requests[..], [Request::Fetch { .. }]));
-                assert!(repo.applied.is_empty());
-            }
-        }
-    }
-}
-
-/// A fetch marks a newly learned head accepted before changing knowledge. Old fetches
-/// can still carry data, but must not mark another head accepted or replace current records.
-/// This checks filtering in `handle`, before `handle_reply`'s separate rollback recovery.
-#[test]
-fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
-    use musubi_core::node::{Handled, NodeCore, Step};
-    use support::model::{FakeRepo, ROOT, Univ};
-    use support::storage::{Fallible, Faults};
-
-    for (seq, same_head, takes_records, learns) in [
-        (1, true, false, false),
-        (1, false, false, false),
-        (2, true, true, false),
-        (2, false, false, false),
-        (3, true, true, true),
-        (3, false, true, true),
-    ] {
         let univ = Rc::new(RefCell::new(Univ::new()));
         let mut repo = FakeRepo::new(univ.clone(), 0);
-        let (dropped, _) = repo.user_op(ROOT, 0);
-        let (head, _) = repo.user_op(dropped, 0);
-        let empty = univ.borrow_mut().record_state(&[]);
-        let next = univ.borrow_mut().record_state(&[vec![dropped]]);
+        let (head, _) = repo.user_op(ROOT, 0);
         let mut core = NodeCore::new(ROOT);
         core.handle(
             &mut repo,
@@ -883,14 +569,12 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
                 kind: HeadKind::Head,
                 seq: 2,
                 head,
-                records: empty.clone(),
             },
         )
         .unwrap();
         let faults = Rc::new(RefCell::new(Faults::default()));
         // Count storage effects without injecting a failure.
         faults.borrow_mut().arm(usize::MAX, Timing::Before);
-        repo.stored_record_ops = Some(vec![]);
         let mut repo = Fallible::new(repo, faults.clone());
         let named = if same_head { head } else { ROOT };
         let handled = core
@@ -902,10 +586,6 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
                     ops: vec![],
                     ops_attachment: vec![],
                     objects: vec![],
-                    records: next,
-                    records_from: 0,
-                    new_records: vec![vec![dropped]],
-                    pruned: empty,
                 },
             )
             .unwrap();
@@ -915,15 +595,6 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
             .iter()
             .filter(|&&call| call == "node.learned")
             .count();
-        assert_eq!(
-            repo.stored_record_ops,
-            Some(if takes_records {
-                vec![vec![dropped]]
-            } else {
-                vec![]
-            }),
-            "record bodies must be retained even with no current-head operations: {seq}, {same_head}"
-        );
         assert_eq!(marks, usize::from(learns), "{seq}, {same_head}");
         if learns {
             assert_eq!(
@@ -939,83 +610,6 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
             assert_eq!(handled, Handled::Ignored);
             assert_eq!(core.known(), &Head { seq: 2, head });
         }
-        let step = core.step(&mut repo).unwrap();
-        assert_eq!(
-            step,
-            if takes_records {
-                Step::Adopted
-            } else {
-                Step::Idle
-            },
-            "{seq}, {same_head}"
-        );
-        assert_eq!(
-            repo.applied,
-            if takes_records {
-                vec![vec![dropped]]
-            } else {
-                vec![]
-            }
-        );
-    }
-}
-
-/// While received records await reconciliation, a node takes the hub's records again even
-/// when they equal those it applied, which clears the receipts; without receipts it has
-/// nothing to take. A real repository keeps receipts in custody, so that records a hub lost
-/// still become pending drops (`RecordEpoch.lean`), which the model's atomic node never
-/// reaches. Ignoring `has_record_receipts` in `note_announced` or in `step` fails this.
-#[test]
-fn record_receipts_retake_records_equal_to_those_applied() {
-    use musubi_core::message::Records;
-    use musubi_core::node::{LocalRepo as _, NodeCore, Step};
-    use support::model::{FakeRepo, ROOT, Univ};
-
-    for receipts in [false, true] {
-        let univ = Rc::new(RefCell::new(Univ::new()));
-        let mut repo = FakeRepo::new(univ.clone(), 0);
-        let (dropped, _) = repo.user_op(ROOT, 0);
-        let (head, _) = repo.user_op(dropped, 0);
-        let empty = univ.borrow_mut().record_state(&[]);
-        let applied = univ.borrow_mut().record_state(&[vec![dropped]]);
-        repo.adopt(&Records {
-            base: empty.clone(),
-            records: vec![vec![dropped]],
-        })
-        .unwrap();
-        repo.record_receipts = receipts;
-        let mut core = NodeCore::new(ROOT);
-        core.handle(
-            &mut repo,
-            Reply::Head {
-                kind: HeadKind::Head,
-                seq: 1,
-                head,
-                records: applied.clone(),
-            },
-        )
-        .unwrap();
-        core.handle(
-            &mut repo,
-            Reply::Fetched {
-                seq: 1,
-                head,
-                ops: vec![],
-                ops_attachment: vec![],
-                objects: vec![],
-                records: applied,
-                records_from: 0,
-                new_records: vec![vec![dropped]],
-                pruned: empty,
-            },
-        )
-        .unwrap();
-        if receipts {
-            assert_eq!(core.step(&mut repo).unwrap(), Step::Adopted);
-            assert!(!repo.record_receipts, "taking records clears the receipts");
-        }
-        assert_eq!(core.step(&mut repo).unwrap(), Step::Idle, "{receipts}");
-        assert_eq!(repo.applied, vec![vec![dropped]], "{receipts}");
     }
 }
 
@@ -1148,10 +742,7 @@ fn regress_scenario_conformance() {
     }
     let fetch_all = |node: usize| json!({"kind": "fetchAll", "node": node, "base": 0, "haves": []});
     let hub_fetch = |node: usize| json!({"kind": "hubFetch", "node": node, "base": 0, "haves": []});
-    let send_d = |node: usize| json!({"kind": "sendD", "node": node});
-    let send_sup = |node: usize, new: u64| json!({"kind": "sendSup", "node": node, "new": new});
     let push = |kind: &str, node: usize, op: u64| json!({"kind": kind, "node": node, "ops": [op], "objs": [], "expected": 0, "new": op});
-    let accept = |node: usize, op: u64| json!({"kind": "hubSupAccept", "node": node, "ops": [op], "objs": [], "expected": 0, "new": op, "applied": [], "dropped": []});
     let learn = |node: usize, kind: &str, head: u64| json!({"kind": "learn", "node": node, "headKind": kind, "seq": 1, "head": head});
     let (recv_ops, recv_objs, realize, advance, merge, lose_known) = (
         |node: usize, op: u64| json!({"kind": "recvOps", "node": node, "ops": [op]}),
@@ -1166,13 +757,10 @@ fn regress_scenario_conformance() {
         user_op(0),
         user_op(2),
         push("pushAll", 0, 1),
-        send_sup(0, 1),
-        accept(0, 1),
-        send_d(0),
+        push("hubPushAccept", 0, 1),
         learn(0, "accepted", 1),
         fetch_all(1),
         hub_fetch(1),
-        send_d(1),
         learn(1, "head", 1),
         recv_ops(1, 1),
         recv_objs(1),
@@ -1180,13 +768,10 @@ fn regress_scenario_conformance() {
         advance(1),
         json!({"kind": "hubRegress", "seq": 0}),
         push("pushAll", 2, 2),
-        send_sup(2, 2),
-        accept(2, 2),
-        send_d(2),
+        push("hubPushAccept", 2, 2),
         lose_known(0),
         fetch_all(0),
         hub_fetch(0),
-        send_d(0),
         learn(0, "head", 2),
         recv_ops(0, 2),
         recv_objs(0),
@@ -1195,7 +780,6 @@ fn regress_scenario_conformance() {
         merge(0),
         lose_known(1),
         hub_fetch(1),
-        send_d(1),
         learn(1, "head", 2),
         recv_ops(1, 2),
         recv_objs(1),
@@ -1233,120 +817,12 @@ fn remade_hive_conformance() {
     }
 }
 
-/// A node abandons operations the hub has, and publishes the abandon with a fix-up operation;
-/// the other node takes the hub's record. Through the core and the oracle.
-#[test]
-fn supersede_conformance() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 1);
-    world.user_op(0, 1, 1);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    world.quiesce();
-    world.check_invariants();
-    assert_eq!(world.hub_records(), [vec![1]]);
-    assert!(
-        world
-            .trace
-            .iter()
-            .any(|action| action["kind"] == "adopt" && action["node"] == 1),
-        "node 1 did not take the record: {:#?}",
-        world.trace
-    );
-}
-
-/// Two nodes abandon operations concurrently: whichever supersede the hub takes first, the
-/// other is pushed again after it, and the hub ends up with both records.
-#[test]
-fn concurrent_supersedes_conformance() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.user_op(0, 2, 0);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    world.op_abandon(1, vec![2]);
-    world.quiesce();
-    world.check_invariants();
-    assert_eq!(world.hub_records().len(), 2);
-}
-
-/// A remake lets a machine republish two drops as one record. Another machine still has
-/// the same dropped union in two records: adoption changes only its ordered records.
-#[test]
-fn regrouped_records_conformance() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.user_op(0, 2, 0);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    world.quiesce();
-    world.op_abandon(0, vec![2]);
-    world.quiesce();
-    assert_eq!(world.hub_records(), [vec![1], vec![2]]);
-
-    world.remake();
-    // Only machine 0 talks to the remade hub, and republishes both drops at once.
-    world.poll_now(0);
-    for _ in 0..20 {
-        world.exchange(0, 0);
-        if world.hub_records() == [vec![1, 2]] {
-            break;
-        }
-    }
-    assert_eq!(world.hub_records(), [vec![1, 2]]);
-    assert_eq!(world.dropped(1), world.dropped(0));
-    world.poll_now(1);
-    let before = world.measure().unwrap().smeasure;
-    let drops = world.dropped(1).clone();
-    let trace = world.trace.len();
-    world.node_step(1, 0);
-    assert_eq!(world.trace[trace]["kind"], "adopt");
-    assert_eq!(world.dropped(1), &drops);
-    let after = world.measure().unwrap().smeasure;
-    assert_eq!(&before[..8], &after[..8]);
-    assert_eq!(after[8] + 1, before[8]);
-    world.quiesce();
-    world.check_invariants();
-}
-
-/// A push whose node hasn't taken the hub's latest record is refused, even from the hub's
-/// head: its ids aren't the hub's. The node never sends one knowingly, so the test answers
-/// one itself.
-#[test]
-fn a_push_without_the_hubs_records_is_refused() {
-    let mut world = World::new(1, None);
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    world.quiesce();
-    assert_eq!(world.hub_records(), [vec![1]]);
-    let head = world.hub_head();
-    world.user_op(0, head, 0);
-    let new = *world.local_ops(0).last().unwrap();
-    assert_eq!(world.answer_push(head, new, &[], &[]), CasOutcome::Refused);
-    assert_eq!(world.hub_head(), head);
-}
-
-/// A hub whose storage answers `Push::answer`'s checks as it is told. Its records are a
-/// `RecordState`, compared whole by the hub. What an accept does to them is the backend's,
-/// and not modelled here: `set_head` moves only the sequence and the head.
+/// A hub whose storage answers `Push::answer`'s checks as it is told.
 struct Scripted {
     seq: u64,
     head: u32,
-    records: RecordState,
-    dropped: bool,
     closed: bool,
     descends: bool,
-}
-
-fn record_state(count: u64, digest: u8) -> RecordState {
-    RecordState {
-        count,
-        digest: vec![digest],
-    }
 }
 
 impl HubStorage for Scripted {
@@ -1361,36 +837,10 @@ impl HubStorage for Scripted {
         }
     }
 
-    fn set_head(&mut self, seq: u64, head: &u32, _: &[u32]) -> Result<(), Infallible> {
+    fn set_head(&mut self, seq: u64, head: &u32) -> Result<(), Infallible> {
         self.seq = seq;
         self.head = *head;
         Ok(())
-    }
-
-    fn records(&self) -> RecordState {
-        self.records.clone()
-    }
-
-    fn pruned(&self) -> RecordState {
-        record_state(0, 0)
-    }
-
-    fn records_since(&self, _: &RecordState) -> Result<(u64, Vec<Vec<u32>>), Infallible> {
-        unreachable!("a push asks for no records")
-    }
-
-    fn is_dropped(&self, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
-        Ok(self.dropped)
-    }
-
-    fn report(&mut self, _: &str, _: &RecordState) {}
-
-    fn reported(&self, _: &str) -> Option<RecordState> {
-        None
-    }
-
-    fn prune(&mut self, _: u64) -> Result<(), Infallible> {
-        unreachable!("a push prunes nothing")
     }
 
     fn store_ops(&mut self, _: &[u32], _: &()) -> Result<(), Infallible> {
@@ -1409,74 +859,58 @@ impl HubStorage for Scripted {
         unreachable!("a push sends no objects back")
     }
 
-    fn is_closed(&self, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
+    fn is_closed(&self, _: &u32) -> Result<bool, Infallible> {
         Ok(self.closed)
     }
 
-    fn descends(&self, _: &u32, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
+    fn descends(&self, _: &u32, _: &u32) -> Result<bool, Infallible> {
         Ok(self.descends)
     }
 }
 
 /// `Push::answer` takes each of its paths as the Lean model's raw `rawPush` does, on raw ids,
-/// for every answer its storage can give and for records the hub's, or another count or
-/// digest of them: the outcome, and the hub's head and sequence after. Whether the records
-/// match is the hub's whole comparison of them, never one of counts.
+/// for every answer its storage can give: the outcome, and the hub's head and sequence
+/// after. The model's push may carry records and drops; this hub's never do.
 #[test]
 fn raw_push_answers_as_the_model() {
     let mut oracle = Oracle::spawn();
-    let hub = record_state(2, 0xaa);
-    let offered = [
-        hub.clone(),
-        record_state(2, 0xbb),
-        record_state(3, 0xaa),
-        record_state(3, 0xbb),
-    ];
     let mut seen = std::collections::BTreeSet::new();
-    for records in &offered {
-        for case in 0..64u8 {
-            let bit = |n: u8| case & (1 << n) != 0;
-            let mut storage = Scripted {
-                seq: 5,
-                head: 10,
-                records: hub.clone(),
-                dropped: bit(0),
-                closed: bit(1),
-                descends: bit(2),
-            };
-            let expected = if bit(3) { 10 } else { 9 };
-            let new = if bit(4) { 10 } else { 11 };
-            let dropped: &[u32] = if bit(5) { &[7] } else { &[] };
-            let (outcome, _) = Push {
-                machine: "n",
-                ops: &[],
-                ops_attachment: &(),
-                objects: &(),
-                expected: &expected,
-                new: &new,
-                records,
-                dropped,
-            }
-            .answer(&mut storage)
-            .unwrap();
-            let reply = oracle.call(&json!({
-                "op": "rawPush", "seq": 5, "head": 10,
-                "expected": expected, "new": new, "dropped": dropped,
-                "recordsMatch": *records == hub, "isDropped": bit(0),
-                "isClosed": bit(1), "descends": bit(2),
-            }));
-            assert_eq!(reply["ok"], true, "{reply}");
-            let name = format!("{outcome:?}");
-            assert_eq!(reply["outcome"], name, "{records:?}, case {case}: {reply}");
-            seen.insert(name);
-            assert_eq!(
-                (reply["seq"].as_u64(), reply["head"].as_u64()),
-                (Some(storage.seq), Some(u64::from(storage.head))),
-                "{records:?}, case {case}: {reply}"
-            );
+    for case in 0..16u8 {
+        let bit = |n: u8| case & (1 << n) != 0;
+        let mut storage = Scripted {
+            seq: 5,
+            head: 10,
+            closed: bit(0),
+            descends: bit(1),
+        };
+        let expected = if bit(2) { 10 } else { 9 };
+        let new = if bit(3) { 10 } else { 11 };
+        let (outcome, _) = Push {
+            ops: &[],
+            ops_attachment: &(),
+            objects: &(),
+            expected: &expected,
+            new: &new,
         }
+        .answer(&mut storage)
+        .unwrap();
+        let reply = oracle.call(&json!({
+            "op": "rawPush", "seq": 5, "head": 10,
+            "expected": expected, "new": new, "dropped": [],
+            "recordsMatch": true, "isDropped": false,
+            "isClosed": bit(0), "descends": bit(1),
+        }));
+        assert_eq!(reply["ok"], true, "{reply}");
+        let name = format!("{outcome:?}");
+        assert_eq!(reply["outcome"], name, "case {case}: {reply}");
+        seen.insert(name);
+        assert_eq!(
+            (reply["seq"].as_u64(), reply["head"].as_u64()),
+            (Some(storage.seq), Some(u64::from(storage.head))),
+            "case {case}: {reply}"
+        );
     }
-    assert_eq!(seen.len(), 5, "every outcome: {seen:?}");
+    assert_eq!(seen.len(), 4, "every outcome: {seen:?}");
 }
 
 /// The recovery choice reads a raw graph, locality, bodies and per-operation objects, not
@@ -1486,6 +920,7 @@ fn raw_push_answers_as_the_model() {
 fn raw_recovery_choices_and_calls_match_the_model() {
     use musubi_core::hub;
     use musubi_core::node::{LocalRepo as _, NodeCore, Step};
+    use std::collections::BTreeSet;
     use support::model::{FakeHub, FakeRepo, Op, ROOT, SharedUniv, Univ};
 
     fn snapshot(repo: &FakeRepo, core: &NodeCore<Op>, raw: &[Op]) -> Value {
@@ -1510,10 +945,10 @@ fn raw_recovery_choices_and_calls_match_the_model() {
     }
 
     let mut oracle = Oracle::spawn();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for prefix in 0..=2u64 {
         for head_case in 0..3 {
-            for bits in 0..64u8 {
+            for bits in 0..16u8 {
                 let bit = |n: u8| bits & (1 << n) != 0;
                 let univ = SharedUniv::new(RefCell::new(Univ::new()));
                 for parent in 0..2 {
@@ -1544,49 +979,33 @@ fn raw_recovery_choices_and_calls_match_the_model() {
                             .extend(univ.borrow().objs[op as usize].iter().copied());
                     }
                 }
-                if bit(4) {
-                    if prefix == 0 || repo.heads.contains(&1) {
-                        continue;
-                    }
-                    repo.abandon(&[1]);
-                }
                 let mut hub = FakeHub::new(univ.clone());
                 hub.ops.extend([1, 2]);
                 hub.objs = univ.borrow().objs_of([1, 2]);
-                hub.set_head(1, &2, &[]).unwrap();
-                let mut heard = hub.records();
-                if bit(5) {
-                    heard.digest.push(0xff);
-                }
+                hub.set_head(1, &2).unwrap();
                 let mut core = NodeCore::new(ROOT);
-                // A Head, not Accepted, stores exactly this heard record state and announces
-                // no records. There are no concurrent commands or receipts in these cases.
                 core.handle_reply(
                     &mut repo,
                     Reply::Head {
                         kind: HeadKind::Head,
                         seq: 1,
                         head: 2,
-                        records: heard.clone(),
                     },
                 )
                 .unwrap();
                 let raw = [0, 1, 2];
                 for _ in 0..3 {
                     let before = snapshot(&repo, &core, &raw);
-                    let images: Vec<Op> =
-                        univ.borrow().images(&repo.dropped, 2).into_iter().collect();
-                    let pending = !repo.pending().unwrap().is_empty();
+                    // Nothing is dropped: all that survives of the known head is itself.
+                    let images: Vec<Op> = vec![2];
                     let known_local = repo.is_local(&2).unwrap();
                     let mut query = json!({
                         "op": "rawControl", "known": 2, "rawClosure": raw,
                         "images": images, "before": before,
                         "primitives": {
                             "announced": false, "dropHead": false,
-                            "differ": heard != repo.records().unwrap(), "pending": pending,
-                            "headIsKnown": repo.heads.len() == 1 && repo.heads.contains(&2),
-                            // FakeRepo writes a fresh fix-up or uses a distinct head; no
-                            // concurrent command can make it decline the marker here.
+                            "differ": false, "pending": false,
+                            "headIsKnown": repo.heads == BTreeSet::from([2]),
                             "newIsKnown": false,
                         },
                     });
@@ -1603,10 +1022,6 @@ fn raw_recovery_choices_and_calls_match_the_model() {
                             "realize"
                         }
                         Step::Advanced(_) => "advance",
-                        Step::Superseded { .. } => {
-                            stop = true;
-                            "push"
-                        }
                         Step::Send(requests) => {
                             stop = true;
                             if requests
@@ -1631,7 +1046,6 @@ fn raw_recovery_choices_and_calls_match_the_model() {
                                 }
                             }
                         }
-                        Step::Adopted => panic!("the setup announced no records"),
                     };
                     if ["merge", "realize", "advance", "fetch", "objects"].contains(&choice) {
                         query["kind"] = json!(choice);
@@ -1657,174 +1071,11 @@ fn raw_recovery_choices_and_calls_match_the_model() {
     }
     assert_eq!(
         seen,
+        // A node whose known head is local fetches only for records, which no node has
+        // now: the model's `poll` choice is never taken.
         [
-            "advance", "fetch", "idle", "merge", "objects", "poll", "push", "realize"
+            "advance", "fetch", "idle", "merge", "objects", "push", "realize"
         ]
         .into()
     );
-}
-
-/// The hub prunes its records once every node has said it took them all, and not before: then
-/// it no longer refuses a push by a pruned id, but still by its records. More abandons after
-/// it are taken, and pruned too. Through the core and the oracle.
-#[test]
-fn prune_conformance() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    // Node 0 publishes the abandon; node 1, which hasn't taken it, holds pruning back.
-    while world.hub_records().is_empty() {
-        world.exchange(0, 0);
-    }
-    world.poll_now(0);
-    world.prune();
-    assert_eq!(world.hub_pruned(), 0);
-    world.quiesce();
-    world.prune();
-    assert_eq!(world.hub_pruned(), 1);
-    let head = world.hub_head();
-    // Not refused by its id, which the hub no longer knows, but by its records.
-    assert_eq!(
-        world.answer_push(head, 1, &[vec![1]], &[]),
-        CasOutcome::Rejected
-    );
-    assert_eq!(world.answer_push(head, 1, &[], &[]), CasOutcome::Refused);
-    world.user_op(1, head, 0);
-    let new = *world.local_ops(1).last().unwrap();
-    world.op_abandon(1, vec![head]);
-    world.quiesce();
-    world.check_invariants();
-    assert_eq!(world.hub_records().len(), 2, "{:#?}", world.trace);
-    world.prune();
-    assert_eq!(world.hub_pruned(), 2);
-    assert!(world.local_ops(0).contains(&new));
-    world.quiesce();
-    world.check_invariants();
-}
-
-/// Node 1 asks the hub for its records, and the reply is held up; meanwhile node 0 abandons an
-/// operation, both nodes take the record, and the hub prunes it.
-fn prune_after_held_reply(world: &mut World, remade: bool) -> Vec<usize> {
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.quiesce();
-    if remade {
-        world.op_abandon(0, vec![1]);
-        world.quiesce();
-        // The hive is made again: node 0 publishes the abandon again, after the reply.
-        world.remake();
-    }
-    let sent = world.net_len();
-    world.poll(1);
-    world.deliver(sent);
-    let held: Vec<usize> = world
-        .undelivered()
-        .into_iter()
-        .filter(|&index| index > sent)
-        .collect();
-    if !remade {
-        world.op_abandon(0, vec![1]);
-    }
-    world.quiesce();
-    world.prune();
-    assert_eq!(world.hub_pruned(), 1);
-    held
-}
-
-/// A node that restarts takes the reply held up since before the hub pruned its record, which
-/// tells it of no records, as about the head it knows: it takes none. Having held the record
-/// the hub pruned, it then takes the hub's records from there, though the hub knows that
-/// record only by its count and digest. Without that, the node stops for good, as
-/// lacking records the hub pruned. With the hive made again in between, the reply comes from
-/// the hub made again, at its root, before the node took the records again: the node takes it
-/// as after a restart, but the hub it prunes on went back and took them again. Through the core
-/// and the oracle.
-#[test]
-fn a_node_takes_records_from_a_pruned_prefix_it_held() {
-    for remade in [false, true] {
-        let mut world = World::new(2, Some(Oracle::spawn()));
-        let held = prune_after_held_reply(&mut world, remade);
-        world.crash_node(1);
-        for index in held {
-            world.deliver(index);
-        }
-        world.node_step(1, 0);
-        assert!(world.applied(1).is_empty(), "remade: {remade}");
-        world.quiesce();
-        world.check_invariants();
-        assert_eq!(world.applied(1), [vec![1]], "remade: {remade}");
-    }
-}
-
-/// A push with the hub's records is refused if its new head is one the hub dropped, or one
-/// the push itself drops. A node never names an operation a record it took drops, so neither
-/// conformance nor the model reaches the first; the hub checks it anyway, while it remembers
-/// dropping the operation.
-#[test]
-fn a_push_to_a_dropped_head_is_refused() {
-    let mut world = World::new(1, None);
-    world.user_op(0, 0, 0);
-    world.user_op(0, 1, 0);
-    world.quiesce();
-    world.op_abandon(0, vec![1]);
-    world.quiesce();
-    assert_eq!(world.hub_records(), [vec![1]]);
-    let head = world.hub_head();
-    let records = [vec![1]];
-    assert_eq!(
-        world.answer_push(head, 1, &records, &[]),
-        CasOutcome::Refused
-    );
-    world.user_op(0, head, 0);
-    let new = *world.local_ops(0).last().unwrap();
-    assert_eq!(
-        world.answer_push(head, new, &records, &[new]),
-        CasOutcome::Refused
-    );
-    assert_eq!(world.hub_head(), head);
-}
-
-/// A node never advances to a head it dropped, but to what survives of it: here one it took
-/// from the hub's records, which the hub then lost, going back to that head. It realizes what
-/// survives, merges it with any work of its own, and publishes the drop itself, rather than
-/// waiting for the node that dropped it, which here never syncs again before quiescing.
-#[test]
-fn a_node_advances_to_what_survives_of_a_head_it_dropped() {
-    for own_work in [true, false] {
-        let mut world = World::new(2, Some(Oracle::spawn()));
-        for parent in 0..3 {
-            world.user_op(0, parent, 0);
-            world.exchange(0, 0);
-        }
-        // Node 0 drops 2, between 1 and its head 3, and publishes the drop.
-        world.op_abandon(0, vec![2]);
-        while world.hub_records().is_empty() {
-            world.exchange(0, 0);
-        }
-        // Node 1 fetches the hub's head and records, and takes them: its only head is the root.
-        fetch(&mut world, 1);
-        world.exchange(1, 0);
-        assert!(world.dropped(1).contains(&2));
-        if own_work {
-            world.user_op(1, 0, 0);
-        }
-        world.hub_goes_back(2);
-        // Node 1 hears that the hub went back to 2, and goes on from 1, which survives it,
-        // each step making the measures fall, as in `quiesce`.
-        world.poll_now_checked(1);
-        for _ in 0..16 {
-            world.exchange_checked(1, 0);
-        }
-        assert!(!world.heads(1).contains(&2), "own work: {own_work}");
-        assert_ne!(world.hub_head(), 2, "own work: {own_work}");
-        assert!(
-            world.hub_records().iter().flatten().any(|&op| op == 2),
-            "own work: {own_work}"
-        );
-        world.check_invariants();
-        world.quiesce();
-        world.check_invariants();
-    }
 }

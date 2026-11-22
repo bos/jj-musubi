@@ -10,9 +10,7 @@ use std::collections::BTreeSet;
 use musubi_core::message::Head;
 
 use super::super::model::Op;
-use super::super::model::ROOT;
 use super::super::model::Univ;
-use super::super::model::flat;
 use super::World;
 
 impl World {
@@ -33,7 +31,7 @@ impl World {
     }
 
     /// The hub is closed; each node is closed and has only justified operations and
-    /// knowledge; accepted heads advance; and no participant drops its own head or root.
+    /// knowledge; and accepted heads advance.
     pub fn check_invariants(&self) {
         let univ = self.univ.borrow();
         assert!(self.hub.closed(self.hub.head), "HubClosed");
@@ -42,7 +40,6 @@ impl World {
             self.check_node_safety(&univ, &accepted, n);
         }
         self.check_hub_monotonicity(&univ);
-        self.check_drop_consistency();
     }
 
     /// Locality, NodeClosed and KnownIsHubHistory, including staged operations and the
@@ -91,46 +88,14 @@ impl World {
         );
     }
 
-    /// Each accepted head descends from the one before, or is above everything that
-    /// survives of it when accepting through a contraction (`hubSupAccept`'s `acceptDrops`).
+    /// Each accepted head descends from the one before.
     fn check_hub_monotonicity(&self, univ: &Univ) {
-        for (seq, pair) in (1..).zip(self.hist.windows(2)) {
-            if self.contracted_accepts.contains(&seq) {
-                let drops = flat(&self.hub.record_hist[seq as usize]);
-                assert!(
-                    univ.below(&drops, pair[0], pair[1]),
-                    "HubMonotone, contracted"
-                );
-            } else {
-                assert!(univ.is_ancestor(pair[0], pair[1]), "HubMonotone");
-            }
+        for pair in self.hist.windows(2) {
+            assert!(univ.is_ancestor(pair[0], pair[1]), "HubMonotone");
         }
     }
 
-    /// `SInv`: no head is in its holder's dropped set, the root is in none, and taking a
-    /// record drops everything it names.
-    fn check_drop_consistency(&self) {
-        let hub_dropped = self.hub.dropped();
-        assert!(
-            !hub_dropped.contains(&self.hub.head),
-            "the hub's head is dropped"
-        );
-        assert!(!hub_dropped.contains(&ROOT), "the hub dropped the root");
-        for (n, repo) in self.repos.iter().enumerate() {
-            assert!(
-                repo.heads.iter().all(|head| !repo.dropped.contains(head)),
-                "node {n} has a head it dropped"
-            );
-            assert!(!repo.dropped.contains(&ROOT), "node {n} dropped the root");
-            assert!(
-                flat(&repo.applied).is_subset(&repo.dropped),
-                "node {n} took records it doesn't drop"
-            );
-        }
-    }
-
-    /// Every node has the hub's head and sequence, and has taken exactly its records and
-    /// dropped exactly what those records name.
+    /// Every node has the hub's head and sequence.
     pub fn converged(&self) -> bool {
         self.repos.iter().zip(&self.cores).all(|(repo, core)| {
             repo.heads == BTreeSet::from([self.hub.head])
@@ -139,8 +104,6 @@ impl World {
                         seq: self.hub.seq,
                         head: self.hub.head,
                     }
-                && repo.applied == self.hub.records
-                && repo.dropped == self.hub.dropped()
         })
     }
 }

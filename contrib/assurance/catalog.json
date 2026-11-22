@@ -440,8 +440,7 @@
       "detail": "Damaged tails must read whole records correctly or detect damage.",
       "code": [
         "crates/musubi-jj/src/canonical/log.rs",
-        "crates/musubi-jj/src/translation_map.rs",
-        "crates/musubi-jj/src/records.rs"
+        "crates/musubi-jj/src/translation_map.rs"
       ],
       "evidence": [
         "e53",
@@ -1471,10 +1470,6 @@
       "path": "crates/musubi-jj/src/protobuf.rs",
       "symbol": null
     },
-    "crates/musubi-jj/src/records.rs": {
-      "path": "crates/musubi-jj/src/records.rs",
-      "symbol": null
-    },
     "crates/musubi-jj/src/ref_locks.rs": {
       "path": "crates/musubi-jj/src/ref_locks.rs",
       "symbol": null
@@ -1913,7 +1908,6 @@
     "crates/musubi-jj/src/op_id.rs": "history",
     "crates/musubi-jj/src/presence.rs": "history",
     "crates/musubi-jj/src/protobuf.rs": "protocol",
-    "crates/musubi-jj/src/records.rs": "history",
     "crates/musubi-jj/src/ref_locks.rs": "coordination",
     "crates/musubi-jj/src/remote_url.rs": "protocol",
     "crates/musubi-jj/src/translation_map.rs": "storage",

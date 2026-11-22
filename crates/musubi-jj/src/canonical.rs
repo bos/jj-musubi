@@ -48,7 +48,6 @@ use thiserror::Error;
 
 use self::codec::ViewCodec;
 pub use self::contract::Contraction;
-pub use self::contract::current;
 use self::log::Log;
 pub use self::presence::PresenceMemo;
 pub use self::presence::Work;
@@ -1401,63 +1400,6 @@ mod tests {
         let mut op = Operation::make_root(view_id);
         op.parents = vec![parent.0.clone()];
         op
-    }
-
-    #[test]
-    fn record_metadata_arrives_without_current_operations_or_parent_views() {
-        let dir = musubi_testutil::tempdir();
-        let root_commit = CommitId::from_bytes(&[0; 20]);
-        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
-        let root = sender.root_operation_id().clone();
-        let parent_view = sender.write_view(&view_with_heads(30)).unwrap();
-        let parent = sender
-            .write_operation(&operation(&root, parent_view.clone()))
-            .unwrap();
-        let dropped_view = sender.write_view(&view_with_heads(31)).unwrap();
-        let dropped = sender
-            .write_operation(&operation(&parent, dropped_view.clone()))
-            .unwrap();
-        let bundle = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-        // The normal history delta may be empty, or share an ancestor with the metadata.
-        for (i, normal) in [vec![], vec![parent.clone()]].into_iter().enumerate() {
-            let receiver = CanonicalStore::open(
-                &dir.path().join(format!("receiver-{i}")),
-                root_commit.clone(),
-            )
-            .unwrap();
-            sender
-                .export_operations_with_records(
-                    &normal,
-                    std::slice::from_ref(&dropped),
-                    bundle.path(),
-                )
-                .unwrap();
-            let imported = receiver.import_operations(bundle.path()).unwrap();
-            assert_eq!(
-                imported.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                [&parent, &dropped]
-            );
-            assert_eq!(
-                receiver
-                    .record_operations(std::slice::from_ref(&dropped))
-                    .unwrap(),
-                [parent.clone(), dropped.clone()]
-            );
-            assert_eq!(
-                receiver.read_view(&parent_view).unwrap(),
-                view_with_heads(30)
-            );
-            assert_eq!(
-                receiver.read_view(&dropped_view).unwrap(),
-                view_with_heads(31)
-            );
-        }
-        let absent = CanonicalOp(OperationId::from_bytes(&[99; 64]));
-        assert!(
-            sender
-                .export_operations_with_records(&[], &[absent], bundle.path())
-                .is_err()
-        );
     }
 
     /// jj writes a set in hash order, so two stores can hold different bytes for the same

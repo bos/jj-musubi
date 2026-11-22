@@ -14,8 +14,6 @@ use anyhow::bail;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
-use musubi_core::message::RecordState;
-use musubi_core::message::Records;
 use musubi_core::message::Request;
 use musubi_core::node::LocalRepo;
 use musubi_core::node::NodeCore;
@@ -23,10 +21,6 @@ use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::node::REALIZE_AT_ONCE;
 use musubi_jj::op_id::CanonicalOp;
-use musubi_jj::records::HubOp;
-use musubi_jj::records::Record;
-use musubi_jj::records::RecordDigest;
-use musubi_jj::records::RecordPrefix;
 
 use crate::Attachment;
 use crate::OpId;
@@ -84,10 +78,6 @@ pub struct NodeAdapter {
     /// The operations whose objects were staged last, with every commit they require:
     /// what checking that those objects are all here asks about next.
     staged_commits: Option<(HashSet<OpId>, Vec<CommitId>)>,
-    /// The hub's records as it last announced them. A node takes none: the hub's names for
-    /// operations are the names there are, so it only remembers what it was told, for the
-    /// hub to see that this node has them, and drops them with a restart.
-    ignored: Records<OpId>,
     publication: RefCell<musubi_jj::node::PublicationCache>,
 }
 
@@ -109,7 +99,6 @@ impl NodeAdapter {
             staged: HashMap::new(),
             staged_children: HashMap::new(),
             staged_commits: None,
-            ignored: no_records(),
             publication: RefCell::default(),
         })
     }
@@ -385,50 +374,13 @@ fn op_ids(ops: Vec<CanonicalOp>) -> Vec<OpId> {
     ops.into_iter().map(|op| op.0).collect()
 }
 
-/// Records from the core, in hub names.
-fn records_of(records: &[Vec<OpId>]) -> Vec<Record> {
-    records
-        .iter()
-        .map(|record| Record::new(record.iter().map(|op| HubOp(canonical(op)))))
-        .collect()
-}
-
-/// No records: what a node has taken before the hub announces any.
-fn no_records() -> Records<OpId> {
-    let none = RecordPrefix::none();
-    Records {
-        base: state_of(none.count, &none.digest),
-        records: vec![],
-    }
-}
-
-/// The records the core's `base` stands for.
-fn prefix_of(base: &RecordState) -> RecordPrefix {
-    RecordPrefix {
-        count: base.count,
-        digest: RecordDigest::from_bytes(&base.digest),
-    }
-}
-
-/// The state of records whose digest is `digest`, as the protocol carries it.
-fn state_of(count: u64, digest: &RecordDigest) -> RecordState {
-    RecordState {
-        count,
-        digest: digest.bytes().to_vec(),
-    }
-}
-
 /// Whether `err` is that this repository lost history the hive has, as after `jj op abandon`,
 /// which no retry gets past.
 pub fn history_lost(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<NodeError>(),
-            Some(
-                NodeError::UnreachableHistory
-                    | NodeError::RewrittenRealization
-                    | NodeError::PrunedRecords
-            )
+            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization)
         )
     })
 }
@@ -437,10 +389,6 @@ impl LocalRepo for NodeAdapter {
     type Op = OpId;
     type Attachment = Attachment;
     type Error = anyhow::Error;
-
-    fn machine(&self) -> String {
-        self.repo.machine().key().to_owned()
-    }
 
     fn heads(&mut self) -> anyhow::Result<Vec<OpId>> {
         // jj never makes an operation the hub accepted unreachable from the op heads except
@@ -497,15 +445,6 @@ impl LocalRepo for NodeAdapter {
         let mut have_ops = self.local_frontier(ops)?;
         have_ops.extend(self.canonical_heads()?);
         self.haves_beyond_base(&have_ops)
-    }
-
-    fn store_record_ops(
-        &mut self,
-        _records: &[Vec<OpId>],
-        _attachment: &Attachment,
-    ) -> anyhow::Result<()> {
-        // A node takes no records, so it needs none of what they name.
-        Ok(())
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
@@ -691,65 +630,6 @@ impl LocalRepo for NodeAdapter {
         Ok(())
     }
 
-    fn applied_records(&self) -> anyhow::Result<Records<OpId>> {
-        Ok(self.ignored.clone())
-    }
-
-    fn has_record_receipts(&self) -> anyhow::Result<bool> {
-        Ok(false)
-    }
-
-    fn records(&self) -> anyhow::Result<RecordState> {
-        self.records_state(&self.ignored)
-    }
-
-    fn records_state(&self, records: &Records<OpId>) -> anyhow::Result<RecordState> {
-        let digest = records_of(&records.records)
-            .iter()
-            .fold(prefix_of(&records.base).digest, |digest, record| {
-                digest.then(record)
-            });
-        Ok(state_of(records.count(), &digest))
-    }
-
-    fn pending(&self) -> anyhow::Result<Vec<OpId>> {
-        Ok(vec![])
-    }
-
-    fn prepare_records(&mut self, _records: &Records<OpId>) -> anyhow::Result<bool> {
-        // They drop none of this node's op heads: it takes no records.
-        Ok(false)
-    }
-
-    fn adopt(&mut self, records: &Records<OpId>) -> anyhow::Result<()> {
-        // Earlier releases published records, which a hub made by one keeps announcing until it
-        // drops them. This node renames nothing by them, so it only notes them.
-        self.ignored = records.clone();
-        Ok(())
-    }
-
-    fn fresh(&self) -> anyhow::Result<bool> {
-        // Whatever it is told it has taken it as if from the start: it holds no operation they
-        // drop.
-        Ok(true)
-    }
-
-    fn share(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn held(&self, _prefix: &RecordState) -> anyhow::Result<Option<Records<OpId>>> {
-        Ok(None)
-    }
-
-    fn lacks_pruned(&self) -> anyhow::Error {
-        NodeError::PrunedRecords.into()
-    }
-
-    fn is_dropped(&self, _op: &OpId) -> anyhow::Result<bool> {
-        Ok(false)
-    }
-
     fn pushing(&mut self, head: &OpId) -> anyhow::Result<()> {
         self.repo.record_publication_offer(&canonical(head))?;
         write_op(&self.pushed_path, head)
@@ -778,11 +658,6 @@ impl LocalRepo for NodeAdapter {
 
     fn learned(&mut self, head: &OpId) -> anyhow::Result<()> {
         self.note_accepted(std::slice::from_ref(head))
-    }
-
-    fn write_fixup(&mut self, _publish_from: Option<&OpId>) -> anyhow::Result<Option<OpId>> {
-        // This node drops nothing, so it has no fix-up to write.
-        Ok(None)
     }
 }
 

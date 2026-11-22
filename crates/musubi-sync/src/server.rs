@@ -28,18 +28,17 @@ use musubi_hub::activity::summarize;
 use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
-use musubi_hub::hub_dir::Joins;
 use musubi_hub::hub_dir::Opened;
 use musubi_hub::hub_dir::Refusal;
 use musubi_hub::hub_dir::open_whole;
 use musubi_hub::index::HiveIndex;
 use musubi_hub::store::HubStore;
+use musubi_hub::store::StoreError;
 use musubi_transport::Message;
 use musubi_transport::Transport;
 
 use crate::OpId;
 use crate::hub::HubAdapter;
-use crate::hub::Machines;
 use crate::service::HubService;
 use crate::wire::Envelope;
 use crate::wire::HUB_TOKEN;
@@ -364,14 +363,7 @@ fn spawn_worker(
             // Everything this thread logs is about this hive. At error level, the span stays
             // on under any filter that shows anything.
             let _span = tracing::error_span!("hive", id = %id).entered();
-            // The machines joining the hive, which the thread takes from here without taking the
-            // hub at every request.
-            let joins = hubs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .joins(&id)
-                .unwrap_or_default();
-            let mut slot = Slot::Closed(None);
+            let mut slot = Slot::Closed;
             while let Ok(message) = receiver.recv() {
                 #[cfg(test)]
                 if let Some(hold) = &hold {
@@ -397,7 +389,6 @@ fn spawn_worker(
                 let hive = Hive {
                     id: &id,
                     dir: &dir,
-                    joins: &joins,
                     hubs: &hubs,
                     activity: &activity,
                     #[cfg(test)]
@@ -503,7 +494,6 @@ struct Served {
 struct Hive<'a> {
     id: &'a HiveId,
     dir: &'a Path,
-    joins: &'a Joins,
     hubs: &'a Mutex<HubDir>,
     activity: &'a Mutex<Activity>,
     #[cfg(test)]
@@ -512,56 +502,37 @@ struct Hive<'a> {
 
 /// A hive's service, as its thread holds it between requests.
 enum Slot {
-    /// Not open, with what the hub knew of the hive's machines when it last let go of the
-    /// service, if it did.
-    Closed(Option<Machines>),
+    Closed,
     Open(Box<HubService>),
 }
 
 impl Slot {
     fn service(&self) -> Option<&HubService> {
         match self {
-            Self::Closed(_) => None,
+            Self::Closed => None,
             Self::Open(service) => Some(service),
         }
     }
 
     /// The hive's service, opening its store first if need be.
     fn open(&mut self, hive: &Hive<'_>) -> anyhow::Result<&mut HubService> {
-        let machines = match self {
-            Self::Open(service) => return Ok(service),
-            // Taken only once the service is open: failing, the next request opens it with them.
-            Self::Closed(machines) => {
-                let service = open_service(hive)?;
-                let machines = machines.take();
-                *self = Self::Open(Box::new(service));
-                machines
+        if let Self::Closed = self {
+            *self = Self::Open(Box::new(open_service(hive)?));
+            #[cfg(test)]
+            if let Some(hooks) = hive.hooks {
+                hooks.opened();
             }
-        };
+        }
         let Self::Open(service) = self else {
             unreachable!("opened above")
         };
-        // In the slot already, so that a panic from here on lets go of what it recalled.
-        if let Some(machines) = machines {
-            service.recall(machines);
-        }
-        #[cfg(test)]
-        if let Some(hooks) = hive.hooks {
-            hooks.opened(service);
-        }
         Ok(service)
     }
 
-    /// Drops the service, which a panic may have left half-changed, keeping what it knew of the
-    /// hive's machines for the service that opens the store next: forgetting that, the hub would
-    /// wait for machines that may be joining as after a restart, and a peer whose requests panic
-    /// it could keep it from pruning for good.
+    /// Drops the service, which a panic may have left half-changed: the next request opens
+    /// the store afresh.
     fn let_go(&mut self) {
-        if let Self::Open(_) = self
-            && let Self::Open(service) = std::mem::replace(self, Self::Closed(None))
-        {
-            *self = Self::Closed(Some(service.into_machines()));
-        }
+        *self = Self::Closed;
     }
 }
 
@@ -578,11 +549,14 @@ fn open_service(hive: &Hive<'_>) -> anyhow::Result<HubService> {
     let store = match open_whole(dir)? {
         Opened::Whole(store) => *store,
         Opened::Damaged(why) => {
-            lock_activity(activity).troubled(
-                id,
-                &format!("its store was damaged, so the hub made it again: {why}"),
-                Instant::now(),
-            );
+            // Compatibility until 2027-02-21: remove with `StoreError::RecordsLog`, keeping
+            // the second message.
+            let what = if matches!(why, StoreError::RecordsLog(_)) {
+                "the hub made it again for this release"
+            } else {
+                "its store was damaged, so the hub made it again"
+            };
+            lock_activity(activity).troubled(id, &format!("{what}: {why}"), Instant::now());
             hubs.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remake(id, &why)?;
@@ -605,7 +579,6 @@ fn serve_one(
 ) -> anyhow::Result<Served> {
     let Hive {
         id,
-        joins,
         hubs,
         activity,
         #[cfg(test)]
@@ -613,21 +586,11 @@ fn serve_one(
         ..
     } = *hive;
     let service = slot.open(hive)?;
-    // The machines that asked the hub to join the hive since its last request, which it then
-    // waits for before pruning, until their first push lands.
-    for machine in &joins.take() {
-        service.joining(machine);
-    }
     let before = service.hub().store().head().1.clone();
     let (reply, notice) = service.handle_bytes(&message.payload, max_payload)?;
     #[cfg(test)]
     if let Some(hooks) = hooks {
         hooks.handled(service, notice.as_ref());
-    }
-    // Whatever the request was, it may have been the last a machine had to make: one saying
-    // it took every record, or the push that made a copy no longer present.
-    if let Err(err) = service.prune() {
-        tracing::warn!("could not prune the records: {err:#}");
     }
     let head = service.hub().store().head().0;
     let received = message.payload.len();

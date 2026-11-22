@@ -128,11 +128,6 @@ impl Oracle {
         Measure {
             measure: numbers(&reply, "measure"),
             rmeasure: numbers(&reply, "rmeasure"),
-            smeasure: {
-                let mut measure = numbers(&reply, "smeasure");
-                measure.push(reply["recordLag"].as_u64().expect("record lag"));
-                measure
-            },
             converged: reply["converged"] == true,
         }
     }
@@ -157,12 +152,10 @@ pub struct Measure {
     /// `measure` of `Liveness.lean`, proved to fall only from states the hub reached
     /// without going back.
     pub measure: Vec<u64>,
-    /// `rmeasure` of `Regress.lean`, which falls whether or not it has, while no node has
-    /// dropped anything.
+    /// `rmeasure` of `Regress.lean`, which falls whether or not it has.
     pub rmeasure: Vec<u64>,
-    /// `recordMeasureE`: `smeasure` followed by the number of record mismatches.
-    pub smeasure: Vec<u64>,
-    /// `recordConvergedE`: set-based convergence and ordered-record agreement.
+    /// `convergedE`. The oracle's state carries no dropped sets or records here, so its
+    /// `recordConvergedE` is that.
     pub converged: bool,
 }
 

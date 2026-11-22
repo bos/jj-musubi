@@ -9,10 +9,8 @@ use std::time::SystemTime;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
 use musubi_core::hub::HubStorage as _;
-use musubi_core::hub::Notice;
 use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::Outcome;
@@ -23,7 +21,6 @@ use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
-use crate::hub::Machines;
 use crate::remote::REQUEST_TIMEOUT;
 use crate::remote::WINDOW;
 use crate::remote::chunk_deadline;
@@ -99,8 +96,6 @@ struct Answered {
 struct HiveState {
     seq: u64,
     head: OpId,
-    records: RecordState,
-    pruned: RecordState,
 }
 
 impl HubService {
@@ -152,29 +147,6 @@ impl HubService {
         let (blob, len) = self.prepared.insert_bytes(bytes)?;
         self.served.remove(&blob);
         Ok((blob, len))
-    }
-
-    /// Takes up what the hub knew of the hive's machines when it last let go of the service
-    /// ([`HubAdapter::recall`]).
-    pub fn recall(&mut self, machines: Machines) {
-        self.hub.recall(machines);
-    }
-
-    /// What the hub knows of the hive's machines ([`HubAdapter::into_machines`]).
-    pub fn into_machines(self) -> Machines {
-        self.hub.into_machines()
-    }
-
-    /// Has the hub wait for `machine`, which asked it to join the hive, before pruning
-    /// ([`HubAdapter::joining`]).
-    pub fn joining(&mut self, machine: &str) {
-        self.hub.joining(machine);
-    }
-
-    /// Prunes the hive's records, once every machine it waits for has taken them
-    /// ([`HubAdapter::prune`]). Returns how many it has pruned, if it pruned any now.
-    pub fn prune(&mut self) -> anyhow::Result<Option<u64>> {
-        self.hub.prune()
     }
 
     /// How many protocol requests the hub has worked out an answer to, rather than replayed.
@@ -282,24 +254,19 @@ impl HubService {
         }
     }
 
-    /// What a protocol request's answer depends on, besides the request: the hive's head and
-    /// records. The operations and objects in `closure(head)` don't change while the head
-    /// doesn't, and the hub only ever adds the rest.
+    /// What a protocol request's answer depends on, besides the request: the hive's head.
+    /// The operations and objects in `closure(head)` don't change while the head doesn't, and
+    /// the hub only ever adds the rest.
     fn hive_state(&self) -> HiveState {
         let Head { seq, head } = self.hub.head();
-        HiveState {
-            seq,
-            head,
-            records: self.hub.records(),
-            pruned: self.hub.pruned(),
-        }
+        HiveState { seq, head }
     }
 
     /// The reply the hub gave to the same request, if it gave one recently, the hive is as
     /// it was then, and the blobs the reply names are still here: what answering again would
     /// say, without the work. A node sends a request again when the reply didn't come in
     /// time, as when the hub took longer than that to prepare it. Whatever the repeat
-    /// uploaded is let go, and its machine counts as having reported again.
+    /// uploaded is let go.
     fn replay(
         &mut self,
         key: &BlobId,
@@ -321,18 +288,6 @@ impl HubService {
                 return Ok(None);
             }
             self.served.remove(blob);
-        }
-        let (machine, records) = match request {
-            Request::Fetch {
-                machine, records, ..
-            }
-            | Request::Push {
-                machine, records, ..
-            } => (Some(machine), Some(records)),
-            Request::GetObjects { .. } => (None, None),
-        };
-        if let (Some(machine), Some(records)) = (machine, records) {
-            self.hub.report(machine, records);
         }
         for blob in request_blobs(request) {
             self.uploads.remove(&blob);
@@ -439,7 +394,7 @@ impl HubService {
             Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
             _ => Outcome::Other,
         };
-        if let Some(Notice { seq, head, .. }) = &handled.publish {
+        if let Some(Head { seq, head }) = &handled.publish {
             tracing::info!(
                 "accepted {pushed} operations; the head is now {seq} ({})",
                 short(head)
@@ -458,13 +413,10 @@ impl HubService {
                 })
             },
         )?;
-        let notice = handled
-            .publish
-            .map(|Notice { seq, head, records }| HeadNotice {
-                seq,
-                head: head.to_bytes(),
-                records,
-            });
+        let notice = handled.publish.map(|Head { seq, head }| HeadNotice {
+            seq,
+            head: head.to_bytes(),
+        });
         Ok((HubReply::Protocol(reply), notice))
     }
 
@@ -534,9 +486,7 @@ fn log_request(request: &Request<OpId, Attachment>) -> usize {
 
 fn log_reply(reply: &Reply<OpId, Attachment>) {
     match reply {
-        Reply::Head {
-            kind, seq, head, ..
-        } => {
+        Reply::Head { kind, seq, head } => {
             tracing::debug!("answered {kind}: {seq} ({})", short(head));
         }
         Reply::Fetched { seq, head, ops, .. } => tracing::debug!(
@@ -547,7 +497,6 @@ fn log_reply(reply: &Reply<OpId, Attachment>) {
         Reply::Objects { for_ops, .. } => {
             tracing::debug!("sent the objects of {} operations", for_ops.len());
         }
-        Reply::Refused { .. } => tracing::debug!("refused a push: other records"),
     }
 }
 

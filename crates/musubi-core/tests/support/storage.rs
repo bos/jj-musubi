@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use musubi_core::hub::HubStorage;
-use musubi_core::message::{Head, OpEntry, RecordState, Records};
+use musubi_core::message::{Head, OpEntry};
 use musubi_core::node::LocalRepo;
 use serde_json::{Value, json};
 
@@ -195,39 +195,18 @@ impl HubStorage for Fallible<FakeHub> {
     fn head(&self) -> Head<Op> {
         self.inner.head()
     }
-    fn records(&self) -> RecordState {
-        self.inner.records()
-    }
-
-    fn pruned(&self) -> RecordState {
-        self.inner.pruned()
-    }
-    fn report(&mut self, machine: &str, records: &RecordState) {
-        self.inner.report(machine, records);
-    }
-    fn reported(&self, machine: &str) -> Option<RecordState> {
-        self.inner.reported(machine)
-    }
-    fn prune(&mut self, count: u64) -> Result<(), StorageError> {
-        self.enter("hub.prune", false, false)?;
-        infallible(self.inner.prune(count));
-        Ok(())
-    }
-
     reads! {
-        records_since(records: &RecordState) -> (u64, Vec<Vec<Op>>) = "hub.records_since";
-        is_dropped(op: &Op, dropped: &[Op]) -> bool = "hub.is_dropped";
         ops_since(head: &Op, base: &Op) -> (Vec<OpEntry<Op>>, Vec<Obj>) = "hub.ops_since";
         objects_for(ops: &[Op], base: &Op, haves: &Vec<Obj>) -> Vec<Obj> = "hub.objects_for";
-        is_closed(op: &Op, dropped: &[Op]) -> bool = "hub.is_closed";
-        descends(ancestor: &Op, op: &Op, dropped: &[Op]) -> bool = "hub.descends";
+        is_closed(op: &Op) -> bool = "hub.is_closed";
+        descends(ancestor: &Op, op: &Op) -> bool = "hub.descends";
     }
 
-    fn set_head(&mut self, seq: u64, head: &Op, dropped: &[Op]) -> Result<(), StorageError> {
-        // HubStore appends before updating its in-memory head. Failures during that append,
-        // contraction or indexing need its real log/cache state, not an invented atomic commit.
+    fn set_head(&mut self, seq: u64, head: &Op) -> Result<(), StorageError> {
+        // HubStore appends before updating its in-memory head. Failures during that append or
+        // indexing need its real log/cache state, not an invented atomic commit.
         self.enter("hub.set_head", false, false)?;
-        infallible(self.inner.set_head(seq, head, dropped));
+        infallible(self.inner.set_head(seq, head));
         Ok(())
     }
 
@@ -265,13 +244,6 @@ impl LocalRepo for Fallible<FakeRepo> {
     type Attachment = Vec<Obj>;
     type Error = StorageError;
 
-    fn machine(&self) -> String {
-        self.inner.machine()
-    }
-    fn lacks_pruned(&self) -> StorageError {
-        panic!("the fixed-node model cannot lack pruned records")
-    }
-
     reads! {
         is_local(op: &Op) -> bool = "node.is_local";
         is_ancestor(ancestor: &Op, op: &Op) -> bool = "node.is_ancestor";
@@ -283,20 +255,8 @@ impl LocalRepo for Fallible<FakeRepo> {
         staged_parents(op: &Op) -> Option<Vec<Op>> = "node.staged_parents";
         objects_missing(ops: &[Op]) -> Vec<Op> = "node.objects_missing";
         accepted_base() -> Op = "node.accepted_base";
-        applied_records() -> Records<Op> = "node.applied_records";
-        records() -> RecordState = "node.records";
-        pending() -> Vec<Op> = "node.pending";
-        records_state(records: &Records<Op>) -> RecordState = "node.records_state";
-        fresh() -> bool = "node.fresh";
-        held(prefix: &RecordState) -> Option<Records<Op>> = "node.held";
-        is_dropped(op: &Op) -> bool = "node.is_dropped";
     }
 
-    fn share(&mut self) -> Result<(), StorageError> {
-        self.enter("node.share", false, false)?;
-        infallible(self.inner.share());
-        Ok(())
-    }
     fn pushing(&mut self, head: &Op) -> Result<(), StorageError> {
         self.enter("node.pushing", false, false)?;
         infallible(self.inner.pushing(head));
@@ -311,11 +271,6 @@ impl LocalRepo for Fallible<FakeRepo> {
     fn heads(&mut self) -> Result<Vec<Op>, StorageError> {
         self.enter("node.heads", false, false)?;
         Ok(infallible(self.inner.heads()))
-    }
-
-    fn prepare_records(&mut self, records: &Records<Op>) -> Result<bool, StorageError> {
-        self.enter("node.prepare_records", false, false)?;
-        Ok(infallible(self.inner.prepare_records(records)))
     }
 
     fn merge_heads(&mut self) -> Result<(), StorageError> {
@@ -349,23 +304,6 @@ impl LocalRepo for Fallible<FakeRepo> {
         self.faults.borrow().finish(hit)
     }
 
-    fn store_record_ops(
-        &mut self,
-        records: &[Vec<Op>],
-        attachment: &Vec<Obj>,
-    ) -> Result<(), StorageError> {
-        // The abstract universe already holds every immutable body; still observe the
-        // request so that current-head filtering cannot silently omit record metadata.
-        infallible(self.inner.store_record_ops(records, attachment));
-        Ok(())
-    }
-
-    fn has_record_receipts(&self) -> Result<bool, StorageError> {
-        // No fault point: the generated runs hold no receipts, and one would shift every
-        // storage countdown after it.
-        Ok(infallible(self.inner.has_record_receipts()))
-    }
-
     fn stage_objects(&mut self, ops: &[Op], objs: &Vec<Obj>) -> Result<(), StorageError> {
         let hit = self.enter("node.stage_objects", !objs.is_empty(), objs.len() > 1)?;
         let prefix;
@@ -395,10 +333,7 @@ impl LocalRepo for Fallible<FakeRepo> {
     fn advance(&mut self, op: &Op) -> Result<(), StorageError> {
         let hit = self.enter("node.advance", true, false)?;
         infallible(self.inner.advance(op));
-        self.effect(|| {
-            let advanced = self.inner.last_advance.as_ref().expect("advanced");
-            advanced.action(self.inner.index)
-        });
+        self.effect(|| json!({"kind": "advance", "node": self.inner.index}));
         self.faults.borrow().finish(hit)
     }
 
@@ -406,24 +341,5 @@ impl LocalRepo for Fallible<FakeRepo> {
         let hit = self.enter("node.set_accepted_base", true, false)?;
         infallible(self.inner.set_accepted_base(op));
         self.faults.borrow().finish(hit)
-    }
-
-    fn adopt(&mut self, records: &Records<Op>) -> Result<(), StorageError> {
-        let hit = self.enter("node.adopt", true, false)?;
-        infallible(self.inner.adopt(records));
-        self.effect(
-            || json!({"kind": "adopt", "node": self.inner.index, "records": records.records}),
-        );
-        self.faults.borrow().finish(hit)
-    }
-
-    fn write_fixup(&mut self, publish_from: Option<&Op>) -> Result<Option<Op>, StorageError> {
-        let hit = self.enter("node.write_fixup", true, false)?;
-        let result = infallible(self.inner.write_fixup(publish_from));
-        if let Some((_, parent)) = self.inner.last_fixup {
-            self.effect(|| json!({"kind": "userOp", "node": self.inner.index, "parent": parent, "objs": []}));
-        }
-        self.faults.borrow().finish(hit)?;
-        Ok(result)
     }
 }

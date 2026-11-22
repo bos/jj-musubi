@@ -1,4 +1,4 @@
-//! A node's side of the protocol (docs/internals/protocol.md, "Node" and "Supersedes").
+//! A node's side of the protocol (docs/internals/protocol.md, "Node").
 //!
 //! [`NodeCore`] holds the node's volatile protocol state and implements the policy. Its
 //! persistent state lives in the [`LocalRepo`]: the jj repository in production, a model of
@@ -14,44 +14,27 @@ use std::hash::Hash;
 use crate::message::Head;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
-use crate::message::RecordState;
-use crate::message::Records;
 use crate::message::Reply;
 use crate::message::Request;
 
 /// A node's persistent state, in canonical terms.
 ///
-/// Some methods keep state only the jj repository has: names of pending drops to reconcile,
-/// record bodies and received records, and what this node pushed and may publish. The core's
-/// model keeps none of it: it leaves some to their default bodies, and implements the others
-/// only so that a test can observe or set them. Tests with real
+/// Some methods keep state only the jj repository has: what this node pushed and may
+/// publish. The core's model leaves them to their default bodies. Tests with real
 /// repositories cover what the jj repository does in them: docs/internals/conformance.md,
-/// "Record custody and recovery" and "Snapshot publication", and the rows of
-/// docs/internals/races.md on abandoning a push and on holding a publication.
+/// "Snapshot publication", and the rows of docs/internals/races.md on holding a publication.
 pub trait LocalRepo {
     type Op: Clone + Ord + Hash + Debug;
     type Attachment;
     type Error;
 
-    /// This node's machine key, which names it to the hub.
-    fn machine(&self) -> String;
-
     /// The canonical forms of the local op heads (canonicalizing any new local operations).
     fn heads(&mut self) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// Reads the heads and names pending drops against the known hub history, after
-    /// noticing any local abandonment. This renames bookkeeping, not local history.
-    /// The core's model gives each operation one name, so it has nothing to rename.
-    fn heads_for(&mut self, _known: &Self::Op) -> Result<Vec<Self::Op>, Self::Error> {
-        self.heads()
-    }
-
-    /// Whether `op` is present locally, as an original or a realization; or, if this node
-    /// dropped it, whether all its history has in place of it is.
+    /// Whether `op` is present locally, as an original or a realization.
     fn is_local(&self, op: &Self::Op) -> Result<bool, Self::Error>;
 
-    /// Whether `ancestor ∈ anc*(op)`, for local `op`; or, if this node dropped `ancestor`,
-    /// whether all its history has in place of it is.
+    /// Whether `ancestor ∈ anc*(op)`, for local `op`.
     fn is_ancestor(&self, ancestor: &Self::Op, op: &Self::Op) -> Result<bool, Self::Error>;
 
     /// Has jj merge the op heads, as any `jj` command would.
@@ -86,16 +69,6 @@ pub trait LocalRepo {
         attachment: &Self::Attachment,
     ) -> Result<(), Self::Error>;
 
-    /// Stores the canonical bodies and parent closure of whole records without staging
-    /// them as ancestors of the current head, which a reply with no current operations
-    /// brings in no other way. Fails if a record names an operation that neither this node
-    /// nor `attachment` has.
-    fn store_record_ops(
-        &mut self,
-        records: &[Vec<Self::Op>],
-        attachment: &Self::Attachment,
-    ) -> Result<(), Self::Error>;
-
     /// Stores received objects for `for_ops`.
     fn stage_objects(
         &mut self,
@@ -111,17 +84,12 @@ pub trait LocalRepo {
     /// `git`.
     fn objects_missing(&self, ops: &[Self::Op]) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// Realizes a staged operation whose parents are local and whose objects are available;
-    /// or, if this node dropped it, nothing: what it has in place of it is local already.
+    /// Realizes a staged operation whose parents are local and whose objects are available.
     fn realize(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
-    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`), or, if this node
-    /// dropped it, what its history has in place of it: `heads := max(heads ∪ images(op))`,
-    /// the operations below it that survive the drop. A real repository may also merge that
-    /// head set, as `merge_heads` would: model this as advance followed by an environment
-    /// merge, not as a sync step that creates a canonical operation.
-    /// Advancing while records are prepared takes them and replaces any heads they drop
-    /// with their surviving images, even if `op` was already below an old head.
+    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`). A real repository
+    /// may also merge that head set, as `merge_heads` would: model this as advance followed
+    /// by an environment merge, not as a sync step that creates a canonical operation.
     fn advance(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
     /// A local operation the hub has accepted, reachable from the op heads, used as the
@@ -130,59 +98,6 @@ pub trait LocalRepo {
     fn accepted_base(&self) -> Result<Self::Op, Self::Error>;
 
     fn set_accepted_base(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
-
-    /// The hub's records this node took last.
-    fn applied_records(&self) -> Result<Records<Self::Op>, Self::Error>;
-
-    /// Whether received records still need reconciliation. The jj repository keeps them before
-    /// realizing their history, so that it can recover them even when the hub announces the
-    /// same records this node already applied.
-    fn has_record_receipts(&self) -> Result<bool, Self::Error>;
-
-    /// The state of [`Self::applied_records`].
-    fn records(&self) -> Result<RecordState, Self::Error>;
-
-    /// The state of `records`: their count, and their digest, which this node computes as the
-    /// hub does.
-    fn records_state(&self, records: &Records<Self::Op>) -> Result<RecordState, Self::Error>;
-
-    /// What this node dropped that the records it took don't drop: what it has yet to
-    /// publish, sorted. Empty if nothing.
-    fn pending(&self) -> Result<Vec<Self::Op>, Self::Error>;
-
-    /// Gets ready to take `records`, the hub's: names what this node has as the hub does,
-    /// beside what it has, without changing its op heads, so that it can realize and advance
-    /// to the hub's head first. Returns whether they drop one of the op heads.
-    fn prepare_records(&mut self, records: &Records<Self::Op>) -> Result<bool, Self::Error>;
-
-    /// Takes the hub's records, none of which drops an op head: drops what they drop, and
-    /// names what this node has as the hub does. What else this node dropped stays pending.
-    /// Their base is this node's, or none, or this node is [fresh](Self::fresh).
-    fn adopt(&mut self, records: &Records<Self::Op>) -> Result<(), Self::Error>;
-
-    /// Whether this node has nothing of the hive's: it joined on the root, has taken no
-    /// records, and has neither pushed nor realized anything since. Only such a node may take
-    /// the hub's records from those the hub pruned, knowing only their count and digest: it
-    /// holds no operation they drop.
-    fn fresh(&self) -> Result<bool, Self::Error>;
-
-    /// This node is about to push to the hub, or to realize one of the hub's operations: from
-    /// now on it is no longer [fresh](Self::fresh).
-    fn share(&mut self) -> Result<(), Self::Error>;
-
-    /// The records whose count and digest are `prefix`, as this node took them, if it ever
-    /// held them: the first of those it holds now, or of records it took before an older
-    /// announcement gave it fewer, or others. Having held them, it dropped what they drop, so
-    /// it may take the hub's records from those the hub pruned (docs/internals/design.md,
-    /// "What an abandon costs the hub"). Their base is this node's, or none.
-    fn held(&self, prefix: &RecordState) -> Result<Option<Records<Self::Op>>, Self::Error>;
-
-    /// The error that says this node lacks records the hub pruned, so that it can never take
-    /// the hub's, nor sync again.
-    fn lacks_pruned(&self) -> Self::Error;
-
-    /// Whether this node dropped `op`, an operation the hub named.
-    fn is_dropped(&self, op: &Self::Op) -> Result<bool, Self::Error>;
 
     /// This node is about to push `head`.
     fn pushing(&mut self, _head: &Self::Op) -> Result<(), Self::Error> {
@@ -205,20 +120,6 @@ pub trait LocalRepo {
     fn learned(&mut self, _head: &Self::Op) -> Result<(), Self::Error> {
         Ok(())
     }
-
-    /// Writes the fix-up on the single op head, before a supersede, and returns it
-    /// (docs/internals/design.md, "The fix-up"); or `None` if the head already descends
-    /// from the one for what this node has yet to publish. With `publish_from`, if that
-    /// restoring work is cached and the current head still equals the given known head,
-    /// writes a neutral child so the pending drops have a distinct head to publish. That
-    /// child preserves current state rather than replaying the cached restoring work.
-    /// It declines the child only when the head it would write on is not the one
-    /// [`heads_for`](Self::heads_for) returned, and stays so: a backend that declined at the
-    /// head it returned would have [`NodeCore::step`] poll for ever.
-    fn write_fixup(
-        &mut self,
-        publish_from: Option<&Self::Op>,
-    ) -> Result<Option<Self::Op>, Self::Error>;
 }
 
 /// What [`NodeCore::step`] did.
@@ -231,14 +132,6 @@ pub enum Step<O, A> {
     Realized(O),
     Advanced(O),
     Send(Vec<Request<O, A>>),
-    /// Took the hub's records.
-    Adopted,
-    /// Wrote the fix-up, if it hadn't, and pushes it, or the head, with what this node
-    /// dropped.
-    Superseded {
-        fixup: Option<O>,
-        push: Request<O, A>,
-    },
 }
 
 /// What [`NodeCore::handle`] did with a reply.
@@ -254,8 +147,6 @@ pub enum Handled<O> {
     },
     /// Staged the objects of an `Objects` reply.
     StagedObjects(Vec<O>),
-    /// The hub refused a push: this node's records aren't the hub's.
-    Refused,
     /// Ignored: stale, or about another head, or not all reachable from the head it names.
     Ignored,
 }
@@ -267,11 +158,6 @@ pub struct NodeCore<O> {
     /// and its objects are available. Planned by one walk, rather than one per step, for
     /// `known.head`, and dropped with it.
     plan: VecDeque<O>,
-    /// The hub's records as of the newest head this node heard of, or as a refusal said.
-    hub_records: Option<RecordState>,
-    /// The hub's records, all of them, where they aren't this node's: to take once none of
-    /// them drops an op head.
-    announced: Option<Records<O>>,
 }
 
 /// What [`NodeCore::survey`] found below `known.head`.
@@ -294,8 +180,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             },
             root,
             plan: VecDeque::new(),
-            hub_records: None,
-            announced: None,
         }
     }
 
@@ -315,32 +199,17 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         R: LocalRepo<Op = O>,
     {
         Ok(Request::Fetch {
-            machine: repo.machine(),
             base: repo.accepted_base()?,
             haves: repo.fetch_haves()?,
-            records: repo.records()?,
         })
     }
 
-    /// Takes the next policy step (docs/internals/protocol.md, "Policy" and "Supersedes").
+    /// Takes the next policy step (docs/internals/protocol.md, "Policy").
     pub fn step<R>(&mut self, repo: &mut R) -> Result<Step<O, R::Attachment>, R::Error>
     where
         R: LocalRepo<Op = O>,
     {
-        let heads = repo.heads_for(&self.known.head)?;
-        // Take the hub's records first. Where they drop a head, advancing finishes taking
-        // them even if the hub's head is already below that old, dropped head.
-        let mut records_drop_head = false;
-        if let Some(records) = self.announced.take()
-            && (records != repo.applied_records()? || repo.has_record_receipts()?)
-        {
-            if !repo.prepare_records(&records)? {
-                repo.adopt(&records)?;
-                return Ok(Step::Adopted);
-            }
-            records_drop_head = true;
-            self.announced = Some(records);
-        }
+        let heads = repo.heads()?;
         if heads.len() >= 2 {
             repo.merge_heads()?;
             return Ok(Step::Merged);
@@ -355,7 +224,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 self.plan = survey.plan;
             }
             let op = self.plan.pop_front().expect("planned above");
-            repo.share()?;
             repo.realize(&op)?;
             return Ok(Step::Realized(op));
         }
@@ -364,10 +232,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         for head in &heads {
             descends |= repo.is_ancestor(&known, head)?;
         }
-        if records_drop_head || !descends {
-            // Never to a head this node dropped, but to what its history has in place of it,
-            // which the hub accepted too: the drop is then this node's to publish, beside its
-            // own work, rather than waiting for another machine to move the hub past it.
+        if !descends {
             repo.advance(&known)?;
             repo.set_accepted_base(&known)?;
             return Ok(Step::Advanced(known));
@@ -378,82 +243,30 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         if self.known.seq > 0 && repo.accepted_base()? != known {
             repo.set_accepted_base(&known)?;
         }
-        let records = repo.records()?;
-        let dropped = repo.pending()?;
-        let differ = match &self.hub_records {
-            Some(hub) => *hub != records,
-            // A supersede writes the fix-up first, so it waits to know the hub's records, as
-            // after a restart: the hub may have taken this node's drops already.
-            None => !dropped.is_empty(),
-        };
-        if differ {
-            // The hub refuses what this node would push, its ids not being the hub's, until
-            // this node takes the hub's records, which a fetch brings.
-            return Ok(if self.announced.is_some() {
-                Step::Idle
-            } else {
-                Step::Send(vec![self.poll(repo)?])
-            });
-        }
         // Not two or more heads, and op heads are never empty.
-        let head = heads[0].clone();
-        if dropped.is_empty() {
-            if head == known {
-                return Ok(Step::Idle);
-            }
-            // `known ∈ anc*(head)`: push, uploading what the hub lacks with it.
-            return Ok(Step::Send(vec![self.push(repo, &head, records, vec![])?]));
+        let head = &heads[0];
+        if *head == known {
+            return Ok(Step::Idle);
         }
-        // A supersede: the fix-up, pushed with what this node dropped.
-        let fixup = repo.write_fixup((head == known).then_some(&known))?;
-        let new = fixup.clone().unwrap_or(head);
-        if new == known {
-            // The fix-up written was the known head itself, which marks it written, so the
-            // next write is a neutral tip (`write_known` in formal/Musubi/NodeSettle.lean). Or
-            // the backend declined the tip, the head it writes on not being what `heads_for`
-            // read: a command landed in between, or the backend merged in a head it hid. That
-            // head stays, unless it is abandoned, which the next step advances past, so the
-            // next step does not decline at it. A decline repeats only while commands keep
-            // landing between those two reads, never on its own.
-            // Refresh, rather than report idle while these drops still need publishing.
-            return Ok(Step::Send(vec![self.poll(repo)?]));
-        }
-        let push = self.push(repo, &new, records, dropped)?;
-        Ok(Step::Superseded { fixup, push })
+        // `known ∈ anc*(head)`: push, uploading what the hub lacks with it.
+        Ok(Step::Send(vec![self.push(repo, head)?]))
     }
 
     /// A `Push` of `head`, which descends from `known.head`, uploading what the hub lacks.
-    fn push<R>(
-        &self,
-        repo: &mut R,
-        head: &O,
-        records: RecordState,
-        dropped: Vec<O>,
-    ) -> Result<Request<O, R::Attachment>, R::Error>
+    fn push<R>(&self, repo: &mut R, head: &O) -> Result<Request<O, R::Attachment>, R::Error>
     where
         R: LocalRepo<Op = O>,
     {
-        // Once the hub has pruned the record that dropped it, nothing but this keeps it from
-        // taking back what this node pushes (docs/internals/design.md, "What an abandon costs
-        // the hub"): a bug here must be loud.
-        assert!(
-            !repo.is_dropped(head)?,
-            "pushing {head:?}, which this node dropped"
-        );
-        repo.share()?;
         let known = self.known.head.clone();
         let ops = repo.ops_between(head, &known)?;
         repo.permit_publication(&ops, &known)?;
         repo.pushing(head)?;
         Ok(Request::Push {
-            machine: repo.machine(),
             ops_attachment: repo.ops_attachment(&ops)?,
             objects: repo.objects_attachment(&ops, &known)?,
             ops,
             expected: known,
             new: head.clone(),
-            records,
-            dropped,
         })
     }
 
@@ -556,22 +369,13 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         R: LocalRepo<Op = O>,
     {
         match reply {
-            Reply::Head {
-                kind,
-                seq,
-                head,
-                records,
-            } => {
+            Reply::Head { kind, seq, head } => {
                 if seq > self.known.seq {
                     // First, so that a failure leaves the reply to be taken again.
                     repo.learned(&head)?;
                     self.learn(seq, head.clone());
-                    self.note_records(repo, kind, records)?;
                     Ok(Handled::Learned { kind, seq, head })
                 } else {
-                    if seq == self.known.seq && head == self.known.head {
-                        self.note_records(repo, kind, records)?;
-                    }
                     Ok(Handled::Ignored)
                 }
             }
@@ -581,10 +385,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 ops,
                 ops_attachment,
                 objects,
-                records,
-                records_from,
-                new_records,
-                pruned,
             } => {
                 if seq > self.known.seq {
                     repo.learned(&head)?;
@@ -593,12 +393,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                     self.learn(seq, head.clone());
                     self.known.clone()
                 });
-                if seq == self.known.seq && head == self.known.head {
-                    if !new_records.is_empty() {
-                        repo.store_record_ops(&new_records, &ops_attachment)?;
-                    }
-                    self.note_announced(repo, records, records_from, new_records, pruned)?;
-                }
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
                 // MergeOwnership, depend on (docs/internals/protocol.md, "Fetch").
                 if ops.is_empty() || head != self.known.head || !all_reach(&head, &ops) {
@@ -623,119 +417,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 repo.stage_objects(&for_ops, &attachment)?;
                 Ok(Handled::StagedObjects(for_ops))
             }
-            Reply::Refused { records } => {
-                self.hub_records = Some(records);
-                Ok(Handled::Refused)
-            }
         }
-    }
-
-    /// Takes in the hub's records as of the head this node knows, from a reply of `kind`.
-    /// Where the hub accepted this node's own push, taking its pending drops as the next
-    /// record, this node takes that record too. Not from a notification: another node may have
-    /// dropped the same, and this node takes the hub's records as the hub announces them, in
-    /// a reply to its own request, which a notification isn't.
-    fn note_records<R>(
-        &mut self,
-        repo: &R,
-        kind: HeadKind,
-        records: RecordState,
-    ) -> Result<(), R::Error>
-    where
-        R: LocalRepo<Op = O>,
-    {
-        if kind == HeadKind::Accepted && records != repo.records()? {
-            let dropped = repo.pending()?;
-            if !dropped.is_empty() {
-                let mut all = repo.applied_records()?;
-                all.records.push(dropped);
-                if records == repo.records_state(&all)? {
-                    self.announced = Some(all);
-                }
-            }
-        }
-        self.hub_records = Some(records);
-        Ok(())
-    }
-
-    /// Takes in the hub's records from a `Fetched` reply about the head this node knows:
-    /// `new_records`, from the `from`th on, and `pruned`, the count and digest of the first
-    /// ones, which the hub no longer has. Fails if this node never held those, unless it is
-    /// fresh, and then starts from them.
-    fn note_announced<R>(
-        &mut self,
-        repo: &R,
-        records: RecordState,
-        from: u64,
-        new_records: Vec<Vec<O>>,
-        pruned: RecordState,
-    ) -> Result<(), R::Error>
-    where
-        R: LocalRepo<Op = O>,
-    {
-        let mine = repo.applied_records()?;
-        // This node's first `count` records, if it knows them: not those it knows only by
-        // their count and digest, nor more than it has.
-        let first = |count: u64| {
-            let kept = count.checked_sub(mine.base.count)?;
-            let kept = usize::try_from(kept).ok()?;
-            (kept <= mine.records.len()).then(|| Records {
-                base: mine.base.clone(),
-                records: mine.records[..kept].to_vec(),
-            })
-        };
-        let mut all = match first(from) {
-            Some(mut all) => {
-                all.records.extend(new_records.iter().cloned());
-                Some(all)
-            }
-            None => None,
-        };
-        if let Some(candidate) = &all
-            && repo.records_state(candidate)? != records
-        {
-            all = None;
-        }
-        let Some(all) = all else {
-            // The hub's records from those it pruned, which this node took, or held before an
-            // older announcement, after a restart or from a hub made again, gave it fewer: the
-            // hub prunes only records every node said it took, so it dropped what they drop
-            // (`Exec.sexec_announced_held`). That includes none, whose records a node with
-            // records it knows only by their count and digest takes whole where a hub that
-            // went back or was made again has pruned nothing. A fresh node, which has nothing
-            // of the hive's, starts from them as the hub keeps them.
-            let held = repo.held(&pruned)?;
-            if from == pruned.count {
-                let base = match &held {
-                    Some(held) => Some(held.clone()),
-                    None => repo.fresh()?.then(|| Records {
-                        base: pruned.clone(),
-                        records: vec![],
-                    }),
-                };
-                if let Some(mut base) = base {
-                    base.records.extend(new_records);
-                    if repo.records_state(&base)? == records {
-                        self.announced = Some(base);
-                        self.hub_records = Some(records);
-                        return Ok(());
-                    }
-                }
-            }
-            if held.is_some() {
-                // Records this node can't complete from those it holds now, as they answer a
-                // request sent before it took others: the reply to its next request starts
-                // from those the hub pruned. A reply to a request sent since never lands here:
-                // this node digests records as the hub does, so it completes the hub's from
-                // those it held (`Exec.fresh_record_reply_completes`, for a hub that never
-                // goes back; one made again has pruned none, which every node holds).
-                return Ok(());
-            }
-            return Err(repo.lacks_pruned());
-        };
-        self.announced = (all != mine || repo.has_record_receipts()?).then_some(all);
-        self.hub_records = Some(records);
-        Ok(())
     }
 
     /// Whether `reply`, to this node's own request, says that the hub has gone back: to a
@@ -752,20 +434,17 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 kind: HeadKind::Notify,
                 ..
             }
-            | Reply::Objects { .. }
-            | Reply::Refused { .. } => return false,
+            | Reply::Objects { .. } => return false,
             Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => (*seq, head),
         };
         seq < self.known.seq || (seq == self.known.seq && *head != self.known.head)
     }
 
     /// Adopts `(seq, head)`. A plan made for the head known before may realize operations
-    /// that aren't in `anc*(head)`, if the hub went back, so it goes, and so do the records
-    /// known as of it.
+    /// that aren't in `anc*(head)`, if the hub went back, so it goes.
     fn learn(&mut self, seq: u64, head: O) {
         self.known = Head { seq, head };
         self.plan.clear();
-        self.hub_records = None;
     }
 
     /// Takes a reply to this node's own request, as [`Self::handle`] does, having first
@@ -814,18 +493,8 @@ fn all_reach<O: Hash + Eq>(head: &O, ops: &[OpEntry<O>]) -> bool {
 mod tests {
     use super::*;
 
-    const NO_RECORDS: RecordState = RecordState {
-        count: 0,
-        digest: vec![],
-    };
-
     fn head(kind: HeadKind, seq: u64, head: u32) -> Reply<u32, ()> {
-        Reply::Head {
-            kind,
-            seq,
-            head,
-            records: NO_RECORDS,
-        }
+        Reply::Head { kind, seq, head }
     }
 
     #[test]
@@ -849,21 +518,14 @@ mod tests {
             ops: vec![],
             ops_attachment: (),
             objects: (),
-            records: NO_RECORDS,
-            records_from: 0,
-            new_records: vec![],
-            pruned: NO_RECORDS,
         };
         assert!(core.hub_went_back(&fetched(0, 0)));
         assert!(!core.hub_went_back(&fetched(4, 40)));
-        // A notification can be stale, and an `Objects` reply or a refusal names no head.
+        // A notification can be stale, and an `Objects` reply names no head.
         assert!(!core.hub_went_back(&head(HeadKind::Notify, 3, 30)));
         assert!(!core.hub_went_back(&Reply::<u32, ()>::Objects {
             for_ops: vec![],
             attachment: (),
-        }));
-        assert!(!core.hub_went_back(&Reply::<u32, ()>::Refused {
-            records: NO_RECORDS
         }));
     }
 }

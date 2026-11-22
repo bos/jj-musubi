@@ -20,7 +20,6 @@ use std::path::Path;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::HubActivity;
@@ -36,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -126,11 +125,6 @@ pub enum HubRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one reply at a time, decoded and taken apart at once: boxing it would only make \
-              every match on it longer"
-)]
 pub enum HubReply {
     Protocol(WireReply),
     /// The real reply is the content of this blob; fetch it with `GetChunk`.
@@ -236,8 +230,6 @@ pub enum HubWideReply {
 pub struct HeadNotice {
     pub seq: u64,
     pub head: WireId,
-    /// The hub's records as of `head`.
-    pub records: RecordState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,16 +322,9 @@ pub fn map_request<O, A, P, B>(
     mut attachment: impl FnMut(A) -> anyhow::Result<B>,
 ) -> anyhow::Result<Request<P, B>> {
     Ok(match request {
-        Request::Fetch {
-            machine,
-            base,
-            haves,
-            records,
-        } => Request::Fetch {
-            machine,
+        Request::Fetch { base, haves } => Request::Fetch {
             base: id(base),
             haves: attachment(haves)?,
-            records,
         },
         Request::GetObjects {
             for_ops,
@@ -351,23 +336,17 @@ pub fn map_request<O, A, P, B>(
             haves: attachment(haves)?,
         },
         Request::Push {
-            machine,
             ops,
             ops_attachment,
             objects,
             expected,
             new,
-            records,
-            dropped,
         } => Request::Push {
-            machine,
             ops: ops.into_iter().map(&mut id).collect(),
             ops_attachment: attachment(ops_attachment)?,
             objects: attachment(objects)?,
             expected: id(expected),
             new: id(new),
-            records,
-            dropped: dropped.into_iter().map(&mut id).collect(),
         },
     })
 }
@@ -379,16 +358,10 @@ pub fn map_reply<O, A, P, B>(
     mut attachment: impl FnMut(A) -> anyhow::Result<B>,
 ) -> anyhow::Result<Reply<P, B>> {
     Ok(match reply {
-        Reply::Head {
-            kind,
-            seq,
-            head,
-            records,
-        } => Reply::Head {
+        Reply::Head { kind, seq, head } => Reply::Head {
             kind,
             seq,
             head: id(head),
-            records,
         },
         Reply::Fetched {
             seq,
@@ -396,10 +369,6 @@ pub fn map_reply<O, A, P, B>(
             ops,
             ops_attachment,
             objects,
-            records,
-            records_from,
-            new_records,
-            pruned,
         } => Reply::Fetched {
             seq,
             head: id(head),
@@ -412,15 +381,7 @@ pub fn map_reply<O, A, P, B>(
                 .collect(),
             ops_attachment: attachment(ops_attachment)?,
             objects: attachment(objects)?,
-            records,
-            records_from,
-            new_records: new_records
-                .into_iter()
-                .map(|record| record.into_iter().map(&mut id).collect())
-                .collect(),
-            pruned,
         },
-        Reply::Refused { records } => Reply::Refused { records },
         Reply::Objects {
             for_ops,
             attachment: a,

@@ -11,8 +11,6 @@ use std::rc::Rc;
 use musubi_core::hub::HubStorage;
 use musubi_core::message::Head;
 use musubi_core::message::OpEntry;
-use musubi_core::message::RecordState;
-use musubi_core::message::Records;
 use musubi_core::node::LocalRepo;
 
 pub type Op = u64;
@@ -26,9 +24,6 @@ pub struct Univ {
     pub objs: Vec<Vec<Obj>>,
     pub creator: Vec<Option<usize>>,
     next_obj: Obj,
-    /// Every list of records a party has taken, so that a list's index is its digest: equal
-    /// digests, equal records, as a real digest makes all but certain.
-    record_lists: Vec<Vec<Vec<Op>>>,
 }
 
 impl Univ {
@@ -38,40 +33,7 @@ impl Univ {
             objs: vec![vec![]],
             creator: vec![None],
             next_obj: 0,
-            record_lists: vec![vec![]],
         }
-    }
-
-    /// The state of a list of records.
-    pub fn record_state(&mut self, records: &[Vec<Op>]) -> RecordState {
-        let digest = match self.record_lists.iter().position(|list| list == records) {
-            Some(index) => index,
-            None => {
-                self.record_lists.push(records.to_vec());
-                self.record_lists.len() - 1
-            }
-        };
-        RecordState {
-            count: records.len() as u64,
-            digest: digest.to_le_bytes().to_vec(),
-        }
-    }
-
-    /// The records `state` is the state of, if `record_state` made it.
-    pub fn records_of(&self, state: &RecordState) -> Option<&[Vec<Op>]> {
-        let index = usize::from_le_bytes(state.digest.as_slice().try_into().ok()?);
-        let records = self.record_lists.get(index)?;
-        (records.len() as u64 == state.count).then_some(records.as_slice())
-    }
-
-    /// The state of `records` after the records `base` is the state of.
-    pub fn record_state_after(&mut self, base: &RecordState, records: &[Vec<Op>]) -> RecordState {
-        let mut all = self
-            .records_of(base)
-            .expect("a base's count and digest made by record_state")
-            .to_vec();
-        all.extend(records.iter().cloned());
-        self.record_state(&all)
     }
 
     pub fn next(&self) -> Op {
@@ -133,41 +95,9 @@ impl Univ {
             .filter(|&x| !set.iter().any(|&y| y != x && self.is_ancestor(x, y)))
             .collect()
     }
-
-    /// What survives of `op` once `dropped` is: `op` itself, if it isn't dropped, or else
-    /// what survives of each of its parents (`Contract.exp`, as a set).
-    pub fn images(&self, dropped: &BTreeSet<Op>, op: Op) -> BTreeSet<Op> {
-        let mut images = BTreeSet::new();
-        let mut seen = BTreeSet::new();
-        let mut stack = vec![op];
-        while let Some(x) = stack.pop() {
-            if !seen.insert(x) {
-                continue;
-            }
-            if dropped.contains(&x) {
-                stack.extend(self.parents[x as usize].iter().copied());
-            } else {
-                images.insert(x);
-            }
-        }
-        images
-    }
-
-    /// `belowB`: something survives of `a` once `dropped` is, and all of it is below `b`.
-    /// Original ancestry, where `a` survives (`below_survivor_iff`).
-    pub fn below(&self, dropped: &BTreeSet<Op>, a: Op, b: Op) -> bool {
-        let images = self.images(dropped, a);
-        let ancestors = self.ancestors(b);
-        !images.is_empty() && images.iter().all(|p| ancestors.contains(p))
-    }
 }
 
 pub type SharedUniv = Rc<RefCell<Univ>>;
-
-/// What a list of records drops.
-pub fn flat(records: &[Vec<Op>]) -> BTreeSet<Op> {
-    records.iter().flatten().copied().collect()
-}
 
 /// The hub's persistent state.
 pub struct FakeHub {
@@ -176,17 +106,6 @@ pub struct FakeHub {
     pub objs: BTreeSet<Obj>,
     pub head: Op,
     pub seq: u64,
-    /// The records, oldest first. The model keeps them all, the ones the hub pruned standing
-    /// for their count and digest, which is all the real hub keeps of them.
-    pub records: Vec<Vec<Op>>,
-    /// The records as of the head accepted at each sequence number.
-    pub record_hist: Vec<Vec<Vec<Op>>>,
-    /// How many of its first records the hub has pruned.
-    pub pruned: usize,
-    /// How many it had pruned as of the head accepted at each sequence number.
-    pub pruned_hist: Vec<usize>,
-    /// What each machine last said it took, in memory.
-    pub reports: BTreeMap<String, RecordState>,
 }
 
 impl FakeHub {
@@ -197,27 +116,7 @@ impl FakeHub {
             objs: BTreeSet::new(),
             head: ROOT,
             seq: 0,
-            records: vec![],
-            record_hist: vec![vec![]],
-            pruned: 0,
-            pruned_hist: vec![0],
-            reports: BTreeMap::new(),
         }
-    }
-
-    /// What the records drop.
-    pub fn dropped(&self) -> BTreeSet<Op> {
-        flat(&self.records)
-    }
-
-    /// What the records the hub remembers drop.
-    pub fn remembered(&self) -> BTreeSet<Op> {
-        flat(&self.records[self.pruned..])
-    }
-
-    /// The hub restarts, forgetting what it keeps only in memory.
-    pub fn restart(&mut self) {
-        self.reports.clear();
     }
 
     pub fn closed(&self, op: Op) -> bool {
@@ -241,66 +140,9 @@ impl HubStorage for FakeHub {
         }
     }
 
-    fn set_head(&mut self, seq: u64, head: &Op, dropped: &[Op]) -> Result<(), Infallible> {
-        let had = self.dropped();
-        let record: Vec<Op> = dropped
-            .iter()
-            .filter(|op| !had.contains(op))
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if !record.is_empty() {
-            self.records.push(record);
-        }
+    fn set_head(&mut self, seq: u64, head: &Op) -> Result<(), Infallible> {
         self.seq = seq;
         self.head = *head;
-        assert_eq!(seq as usize, self.record_hist.len());
-        self.record_hist.push(self.records.clone());
-        self.pruned_hist.push(self.pruned);
-        Ok(())
-    }
-
-    fn records(&self) -> RecordState {
-        self.univ.borrow_mut().record_state(&self.records)
-    }
-
-    fn pruned(&self) -> RecordState {
-        self.univ
-            .borrow_mut()
-            .record_state(&self.records[..self.pruned])
-    }
-
-    fn records_since(&self, records: &RecordState) -> Result<(u64, Vec<Vec<Op>>), Infallible> {
-        let count = records.count as usize;
-        let prefix = (self.pruned..=self.records.len()).contains(&count)
-            && self.univ.borrow_mut().record_state(&self.records[..count]) == *records;
-        let from = if prefix { count } else { self.pruned };
-        Ok((from as u64, self.records[from..].to_vec()))
-    }
-
-    fn is_dropped(&self, op: &Op, dropped: &[Op]) -> Result<bool, Infallible> {
-        Ok(self.remembered().contains(op) || dropped.contains(op))
-    }
-
-    fn report(&mut self, machine: &str, records: &RecordState) {
-        self.reports.insert(machine.to_owned(), records.clone());
-    }
-
-    fn reported(&self, machine: &str) -> Option<RecordState> {
-        self.reports.get(machine).cloned()
-    }
-
-    fn prune(&mut self, count: u64) -> Result<(), Infallible> {
-        let count = count as usize;
-        assert!(
-            (self.pruned..=self.records.len()).contains(&count),
-            "prune {count} of {} records, {} pruned",
-            self.records.len(),
-            self.pruned
-        );
-        self.pruned = count;
-        self.pruned_hist[self.seq as usize] = count;
         Ok(())
     }
 
@@ -344,53 +186,12 @@ impl HubStorage for FakeHub {
             .collect())
     }
 
-    /// The model's operations are their originals, which dropping renames nothing of.
-    fn is_closed(&self, op: &Op, _: &[Op]) -> Result<bool, Infallible> {
+    fn is_closed(&self, op: &Op) -> Result<bool, Infallible> {
         Ok(self.closed(*op))
     }
 
-    /// As the real hub compares, through what survives of `ancestor` once everything its
-    /// records ever dropped, pruned or not, and the push's drops are (`acceptDrops`).
-    fn descends(&self, ancestor: &Op, op: &Op, dropped: &[Op]) -> Result<bool, Infallible> {
-        let mut drops = self.dropped();
-        drops.extend(dropped.iter().copied());
-        Ok(self.univ.borrow().below(&drops, *ancestor, *op))
-    }
-}
-
-/// How a node's last advance moved its heads, which says which model action it is.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Advanced {
-    /// To the hub's head, as the original-history model's `advance`.
-    Plain,
-    /// To what survives of a head this node dropped (`advance`).
-    Images,
-    /// While the hub's records are prepared and drop a head: every head and the hub's head
-    /// as those records name them, taking the records at once (`advancePrepared`), as a real
-    /// repository does in switching to them.
-    Prepared(Vec<Vec<Op>>),
-}
-
-impl Advanced {
-    /// The model action of `node`'s advance.
-    pub fn action(&self, node: usize) -> serde_json::Value {
-        match self {
-            Self::Plain | Self::Images => serde_json::json!({"kind": "advance", "node": node}),
-            Self::Prepared(records) => {
-                let records: Vec<Vec<Op>> = records
-                    .iter()
-                    .map(|record| {
-                        record
-                            .iter()
-                            .copied()
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect()
-                    })
-                    .collect();
-                serde_json::json!({"kind": "advancePrepared", "node": node, "records": records})
-            }
-        }
+    fn descends(&self, ancestor: &Op, op: &Op) -> Result<bool, Infallible> {
+        Ok(self.univ.borrow().is_ancestor(*ancestor, *op))
     }
 }
 
@@ -412,11 +213,6 @@ pub struct FakeRepo {
     /// real repository does in files and `git` processes.
     pub staged_reads: Cell<usize>,
     pub object_checks: Cell<usize>,
-    /// Canonical record bodies requested even when no current-head operations are staged.
-    pub stored_record_ops: Option<Vec<Vec<Op>>>,
-    /// Received records a real repository holds in custody, which taking records clears. The
-    /// stateful model tests leave this false: the model's node takes records atomically.
-    pub record_receipts: bool,
     /// Crash before writing the next objects to stage: a real repository writes operations
     /// and objects separately.
     pub crash_before_objects: bool,
@@ -424,23 +220,6 @@ pub struct FakeRepo {
     /// operations while `crash_before_objects` is armed, so an `Objects` reply, which stages
     /// no operations, is not lost.
     objects_lost: bool,
-    /// What this node dropped, by `jj op abandon` or the hub's records.
-    pub dropped: BTreeSet<Op>,
-    /// The hub's records this node took last.
-    pub applied: Vec<Vec<Op>>,
-    /// Every list of the hub's records this node has taken, `applied` among them, and none to
-    /// begin with (the model's `held`).
-    pub held: Vec<Vec<Vec<Op>>>,
-    /// The fix-up the last `write_fixup` wrote: `(id, parent)`.
-    pub last_fixup: Option<(Op, Op)>,
-    /// The recorded receipt/rollback endpoint has already restored its payload. The
-    /// stateful model tests leave this false, using their eager restoring abstraction.
-    pub fixup_cached: bool,
-    /// The hub's records `prepare_records` got ready to take, which drop a head, until
-    /// `adopt` takes some: a real repository names the hub's history as they do meanwhile.
-    pub prepared: Option<Vec<Vec<Op>>>,
-    /// How the last `advance` moved the heads.
-    pub last_advance: Option<Advanced>,
 }
 
 impl FakeRepo {
@@ -464,36 +243,9 @@ impl FakeRepo {
             last_merge: None,
             staged_reads: Cell::new(0),
             object_checks: Cell::new(0),
-            stored_record_ops: None,
-            record_receipts: false,
             crash_before_objects: false,
             objects_lost: false,
-            dropped: BTreeSet::new(),
-            applied: vec![],
-            held: vec![vec![]],
-            last_fixup: None,
-            fixup_cached: false,
-            prepared: None,
-            last_advance: None,
         }
-    }
-
-    /// `jj op abandon` drops `ops`.
-    pub fn abandon(&mut self, ops: &[Op]) {
-        self.dropped.extend(ops.iter().copied());
-    }
-
-    /// The operations `jj op abandon` may drop: below the heads, but not a head, nor the root.
-    pub fn abandonable(&self) -> Vec<Op> {
-        let univ = self.univ.borrow();
-        let mut below = BTreeSet::new();
-        for &head in &self.heads {
-            below.extend(univ.ancestors(head));
-        }
-        below
-            .into_iter()
-            .filter(|op| *op != ROOT && !self.heads.contains(op))
-            .collect()
     }
 
     /// `UserOp(p)`: a `jj` command based at `parent` writes a new operation.
@@ -511,42 +263,21 @@ impl FakeRepo {
     }
 }
 
-impl FakeRepo {
-    /// Takes the hub's `records`: drops what they drop, as the ones taken last.
-    fn take(&mut self, records: &[Vec<Op>]) {
-        self.dropped.extend(flat(records));
-        self.applied = records.to_vec();
-        self.prepared = None;
-        self.record_receipts = false;
-        if !self.held.contains(&self.applied) {
-            self.held.push(self.applied.clone());
-        }
-    }
-}
-
 impl LocalRepo for FakeRepo {
     type Op = Op;
     type Attachment = Vec<Obj>;
     type Error = Infallible;
 
-    fn machine(&self) -> String {
-        self.index.to_string()
-    }
-
     fn heads(&mut self) -> Result<Vec<Op>, Infallible> {
         Ok(self.heads.iter().copied().collect())
     }
 
-    /// The model keeps every operation's original, dropped or not, and realizes it whole:
-    /// one this node dropped is local once realized, when all that survives of it is too. A
-    /// real repository need not realize it, having what survives in its place.
     fn is_local(&self, op: &Op) -> Result<bool, Infallible> {
         Ok(self.lops.contains(op))
     }
 
-    /// Or, for an `ancestor` this node dropped, whether all that survives of it is below `op`.
     fn is_ancestor(&self, ancestor: &Op, op: &Op) -> Result<bool, Infallible> {
-        Ok(self.univ.borrow().below(&self.dropped, *ancestor, *op))
+        Ok(self.univ.borrow().is_ancestor(*ancestor, *op))
     }
 
     fn merge_heads(&mut self) -> Result<(), Infallible> {
@@ -593,13 +324,6 @@ impl LocalRepo for FakeRepo {
             self.sops.insert(entry.id, entry.parents.clone());
         }
         self.objects_lost = self.crash_before_objects;
-        Ok(())
-    }
-
-    fn store_record_ops(&mut self, records: &[Vec<Op>], _: &Vec<Obj>) -> Result<(), Infallible> {
-        if let Some(stored) = &mut self.stored_record_ops {
-            stored.extend_from_slice(records);
-        }
         Ok(())
     }
 
@@ -650,46 +374,13 @@ impl LocalRepo for FakeRepo {
         Ok(())
     }
 
-    /// `heads := max(heads ∪ images(op))`: `op` itself, or what survives of it if this node
-    /// dropped it. While records it prepared drop a head, every head and `op` are named as
-    /// those records name them, and the records taken with them, as a real repository
-    /// switches to them: never one without the other.
+    /// `heads := max(heads ∪ {op})`.
     fn advance(&mut self, op: &Op) -> Result<(), Infallible> {
-        let prepared = self
-            .prepared
-            .clone()
-            .filter(|records| self.heads.iter().any(|head| flat(records).contains(head)));
-        let univ = self.univ.clone();
-        let univ = univ.borrow();
-        if let Some(records) = prepared {
-            let mut drops = self.dropped.clone();
-            drops.extend(flat(&records));
-            let mut named = BTreeSet::new();
-            for &x in self.heads.iter().chain([op]) {
-                named.extend(univ.images(&drops, x));
-            }
-            assert!(
-                !named.is_empty() && named.is_subset(&self.lops),
-                "advance {op}: not local"
-            );
-            self.heads = univ.maximal(&named);
-            self.take(&records);
-            self.last_advance = Some(Advanced::Prepared(records));
-            return Ok(());
-        }
-        let images = univ.images(&self.dropped, *op);
-        assert!(
-            !images.is_empty() && images.is_subset(&self.lops),
-            "advance {op}: not local"
-        );
+        assert!(self.lops.contains(op), "advance {op}: not local");
+        let univ = self.univ.borrow();
         let mut heads = self.heads.clone();
-        heads.extend(images);
+        heads.insert(*op);
         self.heads = univ.maximal(&heads);
-        self.last_advance = Some(if self.dropped.contains(op) {
-            Advanced::Images
-        } else {
-            Advanced::Plain
-        });
         Ok(())
     }
 
@@ -700,98 +391,5 @@ impl LocalRepo for FakeRepo {
     fn set_accepted_base(&mut self, op: &Op) -> Result<(), Infallible> {
         self.base = *op;
         Ok(())
-    }
-
-    /// Every record, none by its count and digest alone: the model's machines are fixed, so
-    /// none joins after the hub prunes.
-    fn applied_records(&self) -> Result<Records<Op>, Infallible> {
-        Ok(Records {
-            base: self.univ.borrow_mut().record_state(&[]),
-            records: self.applied.clone(),
-        })
-    }
-
-    fn has_record_receipts(&self) -> Result<bool, Infallible> {
-        Ok(self.record_receipts)
-    }
-
-    fn records(&self) -> Result<RecordState, Infallible> {
-        Ok(self.univ.borrow_mut().record_state(&self.applied))
-    }
-
-    fn records_state(&self, records: &Records<Op>) -> Result<RecordState, Infallible> {
-        Ok(self
-            .univ
-            .borrow_mut()
-            .record_state_after(&records.base, &records.records))
-    }
-
-    fn pending(&self) -> Result<Vec<Op>, Infallible> {
-        let applied = flat(&self.applied);
-        Ok(self.dropped.difference(&applied).copied().collect())
-    }
-
-    fn prepare_records(&mut self, records: &Records<Op>) -> Result<bool, Infallible> {
-        assert_eq!(
-            records.base.count, 0,
-            "records with a base, for a node not fresh"
-        );
-        let dropped = flat(&records.records);
-        let drops_head = self.heads.iter().any(|head| dropped.contains(head));
-        self.prepared = drops_head.then(|| records.records.clone());
-        Ok(drops_head)
-    }
-
-    fn adopt(&mut self, records: &Records<Op>) -> Result<(), Infallible> {
-        assert!(
-            !self.prepare_records(records)?,
-            "adopt: records drop a head"
-        );
-        self.take(&records.records);
-        Ok(())
-    }
-
-    /// The first of a list this node has taken, as the model's `heldPrefix` finds them.
-    fn held(&self, prefix: &RecordState) -> Result<Option<Records<Op>>, Infallible> {
-        let mut univ = self.univ.borrow_mut();
-        let Some(first) = univ.records_of(prefix).map(<[Vec<Op>]>::to_vec) else {
-            return Ok(None);
-        };
-        if !self.held.iter().any(|list| list.starts_with(&first)) {
-            return Ok(None);
-        }
-        Ok(Some(Records {
-            base: univ.record_state(&[]),
-            records: first,
-        }))
-    }
-
-    fn fresh(&self) -> Result<bool, Infallible> {
-        Ok(false)
-    }
-
-    fn share(&mut self) -> Result<(), Infallible> {
-        Ok(())
-    }
-
-    /// Never: the hub prunes only what every node has taken.
-    fn lacks_pruned(&self) -> Infallible {
-        panic!("node {} lacks records the hub pruned", self.index)
-    }
-
-    fn is_dropped(&self, op: &Op) -> Result<bool, Infallible> {
-        Ok(self.dropped.contains(op))
-    }
-
-    fn write_fixup(&mut self, publish_from: Option<&Op>) -> Result<Option<Op>, Infallible> {
-        assert_eq!(self.heads.len(), 1, "fix-up on more than one head");
-        let parent = *self.heads.first().expect("one head");
-        self.last_fixup = None;
-        if self.fixup_cached && publish_from != Some(&parent) {
-            return Ok(None);
-        }
-        let (op, _) = self.user_op(parent, 0);
-        self.last_fixup = Some((op, parent));
-        Ok(Some(op))
     }
 }

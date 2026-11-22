@@ -34,7 +34,6 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub::HubStorage as _;
 use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_jj::node::NodeRepo;
@@ -118,13 +117,8 @@ fn hub_survives_malformed_requests(tc: TestCase) {
         .0
         .to_bytes();
     let fetch = encode(HubRequest::Protocol(Request::Fetch {
-        machine: "laptop".to_owned(),
-        base: root.clone(),
+        base: root,
         haves: WireAttachment::None,
-        records: RecordState {
-            count: 0,
-            digest: root,
-        },
     }));
     let (reply, _) = hub.handle_bytes(&fetch, MAX_PAYLOAD).unwrap();
     match Envelope::<HubReply>::decode(&reply).unwrap() {
@@ -1907,13 +1901,6 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
         let count = tc.draw(gs::integers::<usize>().max_value(3));
         (0..count).map(|_| id(tc, seen, heads)).collect()
     };
-    let records = |tc: &TestCase| {
-        let count = tc.draw(gs::integers::<u64>().max_value(2));
-        RecordState {
-            count,
-            digest: id(tc, seen, heads),
-        }
-    };
     let protocol_kind = tc.draw(gs::sampled_from(vec![
         ProtocolKind::Fetch,
         ProtocolKind::GetObjects,
@@ -1921,10 +1908,8 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
     ]));
     match protocol_kind {
         ProtocolKind::Fetch => Request::Fetch {
-            machine: "laptop".to_owned(),
             base: id(tc, seen, heads),
             haves: attachment(tc, seen, heads),
-            records: records(tc),
         },
         ProtocolKind::GetObjects => Request::GetObjects {
             for_ops: ids(tc),
@@ -1932,14 +1917,11 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
             haves: attachment(tc, seen, heads),
         },
         ProtocolKind::Push => Request::Push {
-            machine: "laptop".to_owned(),
             ops: ids(tc),
             ops_attachment: attachment(tc, seen, heads),
             objects: attachment(tc, seen, heads),
             expected: id(tc, seen, heads),
             new: id(tc, seen, heads),
-            records: records(tc),
-            dropped: ids(tc),
         },
     }
 }
@@ -2352,12 +2334,12 @@ fn check_head(hub: &HubService, before: &Head<OpId>) {
             before.seq
         );
         assert!(
-            adapter.descends(&before.head, &head, &[]).unwrap(),
+            adapter.descends(&before.head, &head).unwrap(),
             "the head moved to an operation that doesn't descend from it"
         );
     }
     assert!(
-        adapter.is_closed(&head, &[]).unwrap(),
+        adapter.is_closed(&head).unwrap(),
         "the head's closure is incomplete"
     );
 }

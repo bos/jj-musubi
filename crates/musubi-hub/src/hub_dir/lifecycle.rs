@@ -67,8 +67,8 @@ impl HubDir {
             return Err(err.into());
         }
         tracing::warn!(
-            "hive {} ({id}) was corrupt ({why}), and is made again, empty, for its machines to \
-             fill; the corrupt store is in {}, until a day from now once they have",
+            "hive {} ({id}) is made again, empty, for its machines to fill ({why}); the old \
+             store is in {}, until a day from now once they have",
             hive.meta.name,
             aside.display()
         );

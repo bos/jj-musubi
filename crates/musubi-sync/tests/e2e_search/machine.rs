@@ -925,17 +925,6 @@ impl Search<'_> {
         self.note(&tc);
     }
 
-    /// A power cut on the hub's machine just after it pruned its records: it loses the
-    /// `heads` log it wrote pruning, and everything after, and comes back with the one before.
-    #[rule]
-    fn hub_loses_prune(&mut self, tc: TestCase) {
-        self.may_fault(&tc);
-        tc.assume(self.world.hub_pruned_since_restart());
-        self.fault("hub_loses_prune");
-        self.world.hub_loses_prune();
-        self.note(&tc);
-    }
-
     /// The hub finds its store corrupt, as a power cut can leave it, and makes the hive
     /// again, empty.
     #[rule]
@@ -943,15 +932,6 @@ impl Search<'_> {
         self.may_fault(&tc);
         self.fault("remake_hub");
         self.world.remake_hub();
-        self.note(&tc);
-    }
-
-    /// An hour passes on the hub: it stops waiting, before pruning, for machines that may have
-    /// been joining when it opened its store, as after `restart_hub`.
-    #[rule]
-    fn an_hour_passes(&mut self, tc: TestCase) {
-        fired("an_hour_passes");
-        self.world.an_hour_passes();
         self.note(&tc);
     }
 

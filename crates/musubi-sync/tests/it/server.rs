@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::Report;
@@ -387,30 +386,19 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
     writer.view(&[1; 64], &view).unwrap();
     writer.finish().unwrap();
     let push = Request::Push {
-        machine: "laptop".to_owned(),
         ops: vec![vec![2; 64]],
         ops_attachment: WireAttachment::Inline(std::fs::read(&bundle).unwrap()),
         objects: WireAttachment::None,
         expected: vec![0; 64],
         new: vec![2; 64],
-        records: RecordState {
-            count: 0,
-            digest: vec![0; 64],
-        },
-        dropped: vec![],
     };
     match hive_request(&*client, hive.as_str(), HubRequest::Protocol(push)).await {
         HubReply::Error(err) => assert!(err.contains("the hub failed"), "{err}"),
         other => panic!("unexpected reply {other:?}"),
     }
     let fetch = Request::Fetch {
-        machine: "laptop".to_owned(),
         base: vec![0; 64],
         haves: WireAttachment::Haves(vec![]),
-        records: RecordState {
-            count: 0,
-            digest: vec![0; 64],
-        },
     };
     assert!(matches!(
         hive_request(&*client, hive.as_str(), HubRequest::Protocol(fetch)).await,

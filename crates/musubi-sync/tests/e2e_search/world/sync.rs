@@ -5,17 +5,13 @@
 use std::fs;
 
 use jj_lib::object_id::ObjectId as _;
-use musubi_core::hub::HubStorage as _;
-use musubi_core::hub::Notice;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::Step;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
-use musubi_sync::hub::WAIT_AFTER_OPENING;
-
-use crate::coverage::fired;
 
 use super::World;
 
@@ -54,7 +50,6 @@ impl World {
         self.observe_operation_sources(m);
         self.touched.insert(m);
         self.merge_local_heads(m);
-        let pruned = self.fx.hive.hub.store().pruned();
         let forgotten = self.forgotten_working_copies(m);
         let steps = loop {
             let input = self.git_record_input(m);
@@ -65,7 +60,6 @@ impl World {
                 Err(err) => self.recover(m, "sync", &err),
             }
         };
-        self.note_pruning(pruned);
         self.note_forgotten_rebase(m, forgotten);
         self.record_merges(m);
         // A fully driven sync also finishes an unpublished-only trim, which produces
@@ -88,12 +82,10 @@ impl World {
                 .unwrap_or_default()
         ));
         self.merge_local_heads(m);
-        let pruned = self.fx.hive.hub.store().pruned();
         // Progress stops here either way: a partial sync that pauses has nothing to retry.
         if let Err(err) = self.try_sync_partial(m, steps, lose, None) {
             self.recover(m, "partial sync", &err);
         }
-        self.note_pruning(pruned);
         self.record_merges(m);
     }
 
@@ -107,11 +99,9 @@ impl World {
             self.machine(m)
         ));
         self.merge_local_heads(m);
-        let pruned = self.fx.hive.hub.store().pruned();
         if let Err(err) = self.try_sync_partial(m, usize::MAX, None, Some(count)) {
             self.recover(m, "partial sync", &err);
         }
-        self.note_pruning(pruned);
         self.record_merges(m);
     }
 
@@ -169,15 +159,14 @@ impl World {
                 }
                 // Advancing finishes writing what was realized.
                 Step::Advanced(_) if realizing.is_some() => break,
-                Step::Superseded { push, .. } => deliver(self, push)?,
-                Step::Merged | Step::Advanced(_) | Step::Adopted => {}
+                Step::Merged | Step::Advanced(_) => {}
             }
         }
         Ok(())
     }
 
-    /// Delivers a request to the hub, which then prunes if it can, and its reply back (unless
-    /// lost), then any new head to every node, as `Hive` does.
+    /// Delivers a request to the hub, and its reply back (unless lost), then any new head to
+    /// every node, as `Hive` does.
     fn deliver(
         &mut self,
         m: usize,
@@ -192,13 +181,12 @@ impl World {
                 .core
                 .handle_reply(&mut member.adapter, handled.reply)?;
         }
-        if let Some(Notice { seq, head, records }) = handled.publish {
+        if let Some(Head { seq, head }) = handled.publish {
             for member in &mut hive.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,
                     seq,
                     head: head.clone(),
-                    records: records.clone(),
                 };
                 member.core.handle(&mut member.adapter, notify)?;
             }
@@ -214,20 +202,15 @@ impl World {
 
     /// Crashes the hub, which reopens its store.
     pub fn restart_hub(&mut self) {
-        if self.fx.hive.hub.store().pruned() > 0 {
-            fired("restart_hub:after_prune");
-        }
         self.record("hub: restart".to_owned());
-        self.restarted_since_prune = true;
         if let Err(err) = self.fx.hive.restart_hub() {
             self.fail(&format!("restarting the hub: {err:#}"));
         }
     }
 
-    /// Whether a power cut can send the hub back: it accepted a head since the one it wrote
-    /// its log whole at.
+    /// Whether a power cut can send the hub back: it accepted a head.
     pub fn hub_can_go_back(&self) -> bool {
-        self.hub_seq() > self.fx.hive.oldest_head()
+        self.hub_seq() > 0
     }
 
     pub fn hub_seq(&self) -> u64 {
@@ -237,85 +220,18 @@ impl World {
     /// Has the hub lose its last `lost` heads, but not its root, as a power cut can make
     /// it, and restarts it.
     pub fn hub_goes_back(&mut self, lost: usize) {
-        if self.fx.hive.hub.store().pruned() > 0 {
-            fired("hub_goes_back:after_prune");
-        }
         self.record(format!("hub: goes back {lost}"));
-        self.restarted_since_prune = true;
-        let seq = self
-            .hub_seq()
-            .saturating_sub(lost as u64)
-            .max(self.fx.hive.oldest_head());
+        let seq = self.hub_seq().saturating_sub(lost as u64);
         if let Err(err) = self.fx.hive.hub_goes_back(seq) {
             self.fail(&format!("restarting the hub: {err:#}"));
         }
     }
 
-    /// Whether the hub has pruned its records since it last restarted.
-    pub fn hub_pruned_since_restart(&self) -> bool {
-        self.fx.hive.pruned_since_restart()
-    }
-
-    /// Has the hub lose the `heads` log its latest prune wrote, and everything after it, as a
-    /// power cut just after the prune can make it, and restarts it: it names the records it
-    /// pruned again.
-    pub fn hub_loses_prune(&mut self) {
-        self.record("hub: loses its prune".to_owned());
-        self.restarted_since_prune = true;
-        match self.fx.hive.hub_loses_prune() {
-            Ok(true) => {}
-            Ok(false) => self.fail("the hub had no prune to lose"),
-            Err(err) => self.fail(&format!("restarting the hub: {err:#}")),
-        }
-    }
-
-    /// Moves the hub's clock on an hour ([`WAIT_AFTER_OPENING`]).
-    pub fn an_hour_passes(&mut self) {
-        self.record("hub: an hour passes".to_owned());
-        self.fx.hive.hub.age(WAIT_AFTER_OPENING);
-    }
-
     /// Makes the hive again, empty, as a hub does whose store is corrupt.
     pub fn remake_hub(&mut self) {
-        if self.fx.hive.hub.store().pruned() > 0 {
-            fired("remake_hub:after_prune");
-        }
         self.record("hub: made again".to_owned());
         if let Err(err) = self.fx.hive.remake_hub() {
             self.fail(&format!("making the hive again: {err:#}"));
-        }
-    }
-
-    /// Notes, for coverage, what the hub did about pruning during a sync that started with
-    /// `before` of its records pruned: whether it pruned, and did so for the first time since it
-    /// restarted, which it does only once an hour has passed; and whether a copy the hive forgot
-    /// had taken what it pruned; or, if not, whether a copy the hive shows that hasn't said it
-    /// took the hub's records held it back, where another had.
-    fn note_pruning(&mut self, before: usize) {
-        let hub = &self.fx.hive.hub;
-        let pruned = hub.store().pruned();
-        let shown = self.fx.shown_machines();
-        let keys: Vec<String> = (0..self.nodes()).map(|m| self.fx.machine_key(m)).collect();
-        if pruned > before {
-            fired("prune");
-            if std::mem::take(&mut self.restarted_since_prune) {
-                fired("prune:after_restart");
-            }
-            self.trace
-                .push(format!("hub: pruned the first {pruned} records"));
-            for key in &keys {
-                if !shown.contains(key) {
-                    fired("prune:forgotten_behind");
-                }
-            }
-        } else if !hub.store().records().is_empty() {
-            let records = hub.records();
-            let reported = |key: &String| hub.reported(key).as_ref() == Some(&records);
-            if keys.iter().any(reported)
-                && keys.iter().any(|key| shown.contains(key) && !reported(key))
-            {
-                fired("prune:held_back");
-            }
         }
     }
 

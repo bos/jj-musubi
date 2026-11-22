@@ -228,44 +228,6 @@ impl CanonicalStore {
         Ok(writer.finish()?)
     }
 
-    /// Exports operations with the canonical bodies needed to rename record names later.
-    /// The extra bodies are metadata, including their parents and views; receivers must
-    /// not stage or realize them merely because they occur in the bundle.
-    pub fn export_operations_with_records(
-        &self,
-        ops: &[CanonicalOp],
-        record_ops: &[CanonicalOp],
-        out: &Path,
-    ) -> Result<(), CanonicalError> {
-        if record_ops.is_empty() {
-            return self.export_operations(ops, out);
-        }
-        let mut exported = self.record_operations(record_ops)?;
-        let mut seen: HashSet<CanonicalOp> = exported.iter().cloned().collect();
-        exported.extend(ops.iter().filter(|op| seen.insert((*op).clone())).cloned());
-        self.export_operations(&exported, out)
-    }
-
-    /// The complete operation ancestry of record names, parents first. Unlike
-    /// `ancestors_until`, missing bodies or views are errors: a record holder must be able
-    /// to rename every name after a later rollback, without realizing its old history.
-    pub fn record_operations(
-        &self,
-        record_ops: &[CanonicalOp],
-    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
-        let ops = self.ancestors_until(record_ops, |_| false)?;
-        for id in record_ops.iter().chain(&ops) {
-            let op = self.read_operation(id)?;
-            if !self.has_view(&op.view_id) {
-                self.read_view(&op.view_id)?;
-            }
-            for parent in &op.parents {
-                self.read_operation(&CanonicalOp(parent.clone()))?;
-            }
-        }
-        Ok(ops)
-    }
-
     /// Verifies and stores the views and operations of a bundle written by
     /// [`Self::export_operations`]. Returns the operations in bundle order, each with its
     /// parents if this stored it, or `None` if it was stored already.

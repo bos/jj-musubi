@@ -8,12 +8,7 @@
 //!   operations require, and backend extras entries a receiver cannot derive from them.
 //! - `simple/` (simple backend): store files, as in a simple-backend repository.
 //! - `heads`: the log of accepted heads, one `<seq> <operation id>` line each, appended
-//!   before any reply that depends on it. Its last line is the current head. A head accepted
-//!   with a record, a supersede's, has the record's operation ids after it on its line, so
-//!   that a log cut short loses heads and records together (docs/internals/design.md,
-//!   "Abandoning operations"). Once the hub has pruned its records, the log starts with a
-//!   `pruned <count> <digest>` line, and names every head as the records left the history
-//!   then; it is written again whole at each prune.
+//!   before any reply that depends on it. Its last line is the current head.
 //!
 //! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
 //! so one that loses its state is made again, empty, and they fill it (see "Replacing the
@@ -22,7 +17,6 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -35,7 +29,6 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
-use musubi_jj::canonical::Contraction;
 use musubi_jj::canonical::PresenceMemo;
 use musubi_jj::canonical::Work;
 use musubi_jj::objects::Backend;
@@ -46,9 +39,6 @@ use musubi_jj::objects::ObjectStore;
 use musubi_jj::objects::SimpleStore;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::presence::Presence;
-use musubi_jj::records::HubOp;
-use musubi_jj::records::Record;
-use musubi_jj::records::RecordDigest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -61,6 +51,13 @@ pub enum StoreError {
     Io { path: PathBuf, source: io::Error },
     #[error("corrupt head file {0}")]
     CorruptHead(PathBuf),
+    // Compatibility until 2027-02-21: remove with `RECORDS_PRUNED` and `read_heads`'s check
+    // for records: such a log then reads as corrupt.
+    #[error(
+        "head file {0} has the records of a release that passed `jj op abandon` on to other \
+         machines"
+    )]
+    RecordsLog(PathBuf),
     #[error("unknown backend {0:?}")]
     UnknownBackend(String),
 }
@@ -101,44 +98,10 @@ pub struct HubStore {
     /// Unique originals in the accepted history, indexed once at acceptance.
     accepted_origins: HashMap<OperationId, OperationId>,
     /// `hist`: the head accepted at each sequence number, the root operation at 0 and the
-    /// head now last. Each as the records now name it, or as it was, if they dropped it.
+    /// head now last.
     history: Vec<OperationId>,
-    /// How many of its first records the hub has pruned, keeping of them only this, and
-    /// their digest, `digests[0]`.
-    pruned: usize,
-    /// The records after those, in the order they were taken, and the digest of the pruned
-    /// ones and of each first so many after them.
-    records: Vec<Record>,
-    digests: Vec<RecordDigest>,
-    /// What each operation the records superseded became when one did: its rewrite, or for a
-    /// dropped one, what its parents were then, which later records may have superseded
-    /// ([`HubStore::current`] composes them). None that a pruned record superseded.
-    superseded: HashMap<OperationId, Vec<OperationId>>,
-    /// Every operation a record named, but a pruned one.
-    named: HashSet<OperationId>,
-    /// The original identity of every operation a record dropped, but a pruned one.
-    named_origins: HashSet<OperationId>,
     /// Which copies are present at the head, as worked out last.
     presences: Arc<PresenceMemo>,
-}
-
-/// What the history becomes with more dropped: what [`HubStore::contract`] works out.
-pub struct Contracted {
-    dropped_origins: HashSet<OperationId>,
-    /// The head whose history this is.
-    pub head: OperationId,
-    pub dropped: Vec<OperationId>,
-    pub images: HashMap<OperationId, Vec<OperationId>>,
-}
-
-impl Contracted {
-    /// What `op` becomes.
-    pub fn image(&self, op: &OperationId) -> Vec<OperationId> {
-        self.images
-            .get(op)
-            .cloned()
-            .unwrap_or_else(|| vec![op.clone()])
-    }
 }
 
 impl HubStore {
@@ -164,7 +127,7 @@ impl HubStore {
         fs::write(&path, backend.name()).map_err(io_err(&path))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let root = canonical.root_operation_id().0.clone();
-        append_head(dir, 0, &root, &[])?;
+        append_head(dir, 0, &root)?;
         Self::open(dir)
     }
 
@@ -175,8 +138,7 @@ impl HubStore {
         let backend =
             Backend::parse(&name).ok_or_else(|| StoreError::UnknownBackend(name.into_owned()))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
-        let (pruned, history) = read_heads(dir)?;
-        let (pruned, digest) = pruned.unwrap_or((0, RecordDigest::root()));
+        let history = read_heads(dir)?;
         let mut store = Self {
             dir: dir.to_owned(),
             backend,
@@ -184,44 +146,12 @@ impl HubStore {
             accepted: HashMap::new(),
             accepted_origins: HashMap::new(),
             history: vec![],
-            pruned,
-            records: vec![],
-            digests: vec![digest],
-            superseded: HashMap::new(),
-            named: HashSet::new(),
-            named_origins: HashSet::new(),
             presences: Arc::default(),
         };
-        for (head, record) in history {
-            if !record.is_empty() {
-                let record: Vec<HubOp> = record.into_iter().map(hub_op).collect();
-                let contracted = store.contract(&record)?;
-                store.take(contracted);
-            }
+        for head in history {
             store.accept(head)?;
         }
         Ok(store)
-    }
-
-    /// The records the hub remembers, those after the ones it pruned, oldest first.
-    pub fn records(&self) -> &[Record] {
-        &self.records
-    }
-
-    /// How many records the hub has taken, pruned or not.
-    pub fn record_count(&self) -> usize {
-        self.pruned + self.records.len()
-    }
-
-    /// How many of its first records the hub has pruned.
-    pub fn pruned(&self) -> usize {
-        self.pruned
-    }
-
-    /// The digest of the first `count` records, if there are as many and the hub hasn't
-    /// pruned more.
-    pub fn digest(&self, count: usize) -> Option<&RecordDigest> {
-        self.digests.get(count.checked_sub(self.pruned)?)
     }
 
     /// Which copies are present at the head, those whose work it has but for work a forget
@@ -229,150 +159,6 @@ impl HubStore {
     pub fn presence(&self) -> Result<Arc<Presence<Work>>, StoreError> {
         let head = CanonicalOp(self.head().1.clone());
         Ok(self.presences.presence(&self.canonical, &head)?)
-    }
-
-    /// Prunes every record the hub has: forgets their ids, the ids they superseded and the
-    /// original identities they dropped, keeping their count and digest, and writes the `heads` log again, so that opening the
-    /// store takes none of them again. A head they dropped stays in the history as the first
-    /// accepted operation of what it became, or the root (docs/internals/design.md, "What an
-    /// abandon costs the hub").
-    pub fn prune(&mut self) -> Result<(), StoreError> {
-        if self.records.is_empty() {
-            return Ok(());
-        }
-        let root = self.canonical.root_operation_id().0.clone();
-        let renamed: Vec<OperationId> = self
-            .history
-            .iter()
-            .map(|head| {
-                if self.accepted.contains_key(head) {
-                    return head.clone();
-                }
-                self.current(head)
-                    .into_iter()
-                    .find(|op| self.accepted.contains_key(op))
-                    .unwrap_or_else(|| root.clone())
-            })
-            .collect();
-        let digest = self.digests.last().expect("the pruned digest").clone();
-        let pruned = self.record_count();
-        write_heads(&self.dir, (pruned, &digest), &renamed)?;
-        self.history = renamed;
-        self.pruned = pruned;
-        self.records.clear();
-        self.digests = vec![digest];
-        self.superseded = HashMap::new();
-        self.named = HashSet::new();
-        self.named_origins = HashSet::new();
-        Ok(())
-    }
-
-    /// How many ids of the history before the records' renamings the hub keeps in memory:
-    /// what the records dropped and superseded, and the original identities they dropped.
-    pub fn remembered_ids(&self) -> usize {
-        self.named.len() + self.superseded.len() + self.named_origins.len()
-    }
-
-    /// Whether the records dropped or superseded `op`: it was, or is, no operation of the
-    /// history as they name it.
-    pub fn is_superseded(&self, op: &OperationId) -> bool {
-        self.named.contains(op) || self.superseded.contains_key(op)
-    }
-
-    /// Composes the cached renamings of `op`, returning it unchanged when none names it.
-    /// A drop outside the accepted head's closure has no cached image; `is_superseded`
-    /// still recognizes it as dropped.
-    pub fn current(&self, op: &OperationId) -> Vec<OperationId> {
-        musubi_jj::canonical::current(&self.superseded, op)
-    }
-
-    /// The history with `dropped` dropped too: every accepted operation's image, the rewrites
-    /// written to the store. Every newly named drop must have its canonical metadata:
-    /// receivers need it to rename that name if the hub later loses the record.
-    pub fn contract(&self, dropped: &[HubOp]) -> Result<Contracted, StoreError> {
-        let dropped: Vec<OperationId> = dropped
-            .iter()
-            .map(|op| op.0.0.clone())
-            .filter(|op| !self.is_superseded(op))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        self.canonical
-            .record_operations(&dropped.iter().cloned().map(CanonicalOp).collect::<Vec<_>>())?;
-        let mut contraction =
-            Contraction::new(&self.canonical, dropped.iter().cloned().map(CanonicalOp))?
-                .sharing(self.presences.clone());
-        let head = self.head().1.clone();
-        if !contraction.is_empty() {
-            contraction.images(&self.canonical, &CanonicalOp(head.clone()))?;
-        }
-        let images = contraction
-            .into_images()
-            .into_iter()
-            .map(|(old, new)| (old.0, new.into_iter().map(|op| op.0).collect()))
-            .collect();
-        let dropped_origins = dropped
-            .iter()
-            .filter(|id| self.canonical.has_operation(&CanonicalOp((*id).clone())))
-            .map(|id| self.canonical.original_id(&CanonicalOp(id.clone())))
-            .collect::<Result<_, _>>()?;
-        Ok(Contracted {
-            dropped_origins,
-            head,
-            dropped,
-            images,
-        })
-    }
-
-    /// Takes a contraction as the next record: renames the history and what is accepted.
-    fn take(&mut self, contracted: Contracted) {
-        let Contracted {
-            dropped,
-            images,
-            dropped_origins,
-            ..
-        } = contracted;
-        if dropped.is_empty() {
-            return;
-        }
-        let image = |op: &OperationId| images.get(op).cloned().unwrap_or_else(|| vec![op.clone()]);
-        self.accepted_origins.retain(|_, op| {
-            if dropped.contains(op) {
-                return false;
-            }
-            if let Some(rewrite) = images.get(op).and_then(|ops| ops.first()) {
-                *op = rewrite.clone();
-            }
-            true
-        });
-        self.named_origins.extend(dropped_origins);
-        let accepted = std::mem::take(&mut self.accepted);
-        for (op, seq) in accepted {
-            if let Some(images) = images.get(&op) {
-                if let [rewrite] = images.as_slice()
-                    && !dropped.contains(&op)
-                {
-                    self.accepted.insert(rewrite.clone(), seq);
-                }
-            } else {
-                self.accepted.insert(op, seq);
-            }
-        }
-        for head in &mut self.history {
-            if let [rewrite] = image(head).as_slice()
-                && !dropped.contains(head)
-            {
-                *head = rewrite.clone();
-            }
-        }
-        // Composed on lookup, so that opening, which takes every record again, costs their
-        // size rather than its square.
-        self.superseded.extend(images);
-        self.named.extend(dropped.iter().cloned());
-        let record = Record::new(dropped.into_iter().map(hub_op));
-        let digest = self.digests.last().expect("the root digest").then(&record);
-        self.digests.push(digest);
-        self.records.push(record);
     }
 
     pub fn head(&self) -> (u64, &OperationId) {
@@ -400,32 +186,15 @@ impl HubStore {
         self.accepted.contains_key(op)
     }
 
-    /// The history with nothing more dropped: the contraction that changes nothing.
-    pub fn uncontracted(&self) -> Contracted {
-        Contracted {
-            dropped_origins: HashSet::new(),
-            head: self.head().1.clone(),
-            dropped: vec![],
-            images: HashMap::new(),
-        }
-    }
-
-    /// Replaces the head, taking `contracted`'s record with it, if it drops anything. The
-    /// caller has checked that `new` is closed and descends from the current head, once that
-    /// is dropped.
-    pub fn set_head(
-        &mut self,
-        seq: u64,
-        new: &OperationId,
-        contracted: Contracted,
-    ) -> Result<(), StoreError> {
+    /// Replaces the head. The caller has checked that `new` is closed and descends from the
+    /// current head.
+    pub fn set_head(&mut self, seq: u64, new: &OperationId) -> Result<(), StoreError> {
         assert_eq!(
             seq,
             self.history.len() as u64,
             "heads are accepted in sequence"
         );
-        append_head(&self.dir, seq, new, &contracted.dropped)?;
-        self.take(contracted);
+        append_head(&self.dir, seq, new)?;
         self.accept(new.clone())?;
         // Upkeep, which a push mustn't fail over.
         if let Err(err) = self.mark_head(new) {
@@ -495,11 +264,8 @@ impl HubStore {
         base: &OperationId,
     ) -> Result<Vec<OperationId>, StoreError> {
         let (Some(head_seq), Some(base_seq)) = (self.head_seq(head), self.head_seq(base)) else {
-            // A base the records superseded, from a node behind them, stands for what it is
-            // now: everything below it that is left.
-            let bases = self.current(base);
             let excluded: HashSet<OperationId> = self
-                .ancestors_until(&bases, |_| false)?
+                .ancestors_until(std::slice::from_ref(base), |_| false)?
                 .into_iter()
                 .collect();
             return self.ancestors_until(std::slice::from_ref(head), |id| excluded.contains(id));
@@ -564,21 +330,7 @@ impl HubStore {
     /// Accepted operations are closed (HubClosed), so the check covers only what is new:
     /// the walk stops at accepted operations, and so does the walk over objects, at the
     /// commits of those it reached and of the head.
-    ///
-    /// The history is taken as it is once it drops what `contracted` drops
-    /// ([`Self::uncontracted`] for nothing more): its rewrites of accepted operations are
-    /// closed as those are, with the same views.
-    pub fn missing_closure(
-        &self,
-        op: &OperationId,
-        contracted: &Contracted,
-    ) -> Result<Vec<String>, StoreError> {
-        let rewrites: HashSet<&OperationId> = contracted
-            .images
-            .iter()
-            .filter(|(old, _)| !contracted.dropped.contains(old))
-            .filter_map(|(_, images)| images.first())
-            .collect();
+    pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
         let mut missing = vec![];
         let mut reached = vec![];
         let mut boundary = BTreeSet::from([self.head().1.clone()]);
@@ -589,11 +341,7 @@ impl HubStore {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if self.is_superseded(&id) || contracted.dropped.contains(&id) {
-                missing.push(format!("operation {} was abandoned", id.hex()));
-                continue;
-            }
-            if self.accepted.contains_key(&id) || rewrites.contains(&id) {
+            if self.accepted.contains_key(&id) {
                 boundary.insert(id);
                 continue;
             }
@@ -603,17 +351,8 @@ impl HubStore {
                 continue;
             }
             let (operation, origin) = self.canonical.read_operation_and_original(&canonical)?;
-            let dropped_here = contracted.dropped_origins.contains(&origin);
-            let accepted_id = self.accepted_origins.get(&origin).map(|old| {
-                contracted
-                    .images
-                    .get(old)
-                    .and_then(|images| images.first())
-                    .unwrap_or(old)
-            });
-            if self.named_origins.contains(&origin)
-                || dropped_here
-                || accepted_id.is_some_and(|other| *other != id)
+            let accepted_id = self.accepted_origins.get(&origin);
+            if accepted_id.is_some_and(|other| *other != id)
                 || origins
                     .insert(origin, id.clone())
                     .is_some_and(|other| other != id)
@@ -648,55 +387,42 @@ impl HubStore {
     }
 }
 
-/// `op`, a canonical operation the hub names, as the protocol names it.
-fn hub_op(op: OperationId) -> HubOp {
-    HubOp(CanonicalOp(op))
-}
-
-/// A head as the log has it, with the record it was accepted with, if any.
-type LoggedHead = (OperationId, Vec<OperationId>);
-
-/// How many records the hub pruned, and their digest, as the log has them.
-type LoggedPruned = Option<(usize, RecordDigest)>;
-
-/// The first line of a log of a hub that pruned its records.
-const PRUNED_PREFIX: &str = "pruned ";
+// Compatibility until 2027-02-21: remove, with `StoreError::RecordsLog`.
+/// The first line of the log of a hub from 0.47, which passed `jj op abandon` on as records,
+/// once it pruned them.
+const RECORDS_PRUNED: &str = "pruned ";
 
 /// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hive
 /// is made again rather than recovered (see "Replacing the hub" in docs/internals/design.md).
-fn read_heads(dir: &Path) -> Result<(LoggedPruned, Vec<LoggedHead>), StoreError> {
+fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
     let path = dir.join("heads");
     let bytes = fs::read(&path).map_err(io_err(&path))?;
     let Ok(text) = String::from_utf8(bytes) else {
         return Err(StoreError::CorruptHead(path));
     };
+    // Whole ids only: a line torn and another appended after it can read as a short one.
+    let id = |hex: &str| OperationId::try_from_hex(hex).filter(|id| id.as_bytes().len() == 64);
     let mut heads = vec![];
-    let mut lines = text.split_terminator('\n').peekable();
-    let mut pruned = None;
-    if let Some(line) = lines.next_if(|line| line.starts_with(PRUNED_PREFIX)) {
-        let mut words = line[PRUNED_PREFIX.len()..].split(' ');
-        let count = words.next().and_then(|count| count.parse::<usize>().ok());
-        let digest = words
-            .next()
-            .filter(|hex| hex.len() == RecordDigest::root().bytes().len() * 2)
-            .and_then(jj_lib::hex_util::decode_hex);
-        match (count, digest, words.next()) {
-            (Some(count), Some(digest), None) => {
-                pruned = Some((count, RecordDigest::from_bytes(&digest)));
-            }
-            _ => return Err(StoreError::CorruptHead(path)),
-        }
-    }
-    for line in lines {
-        // Whole ids only: a line torn and another appended after it can read as a short one.
-        let id = |hex: &str| OperationId::try_from_hex(hex).filter(|id| id.as_bytes().len() == 64);
+    for line in text.split_terminator('\n') {
         let mut words = line.split(' ');
         let seq = words.next().and_then(|seq| seq.parse::<usize>().ok());
         let head = words.next().and_then(id);
-        let record: Option<Vec<OperationId>> = words.map(id).collect();
-        match (seq, head, record) {
-            (Some(seq), Some(head), Some(record)) if seq == heads.len() => {
-                heads.push((head, record));
+        let rest: Vec<&str> = words.collect();
+        match (seq, head) {
+            (Some(seq), Some(head)) if seq == heads.len() && rest.is_empty() => heads.push(head),
+            // Compatibility until 2027-02-21: remove this arm, with `StoreError::RecordsLog`.
+            // 0.47 logged the record a head was accepted with after it, and the count and
+            // digest of the records it pruned first. Its heads before a record are named as
+            // they were before the record dropped operations, so the log can't be read
+            // without them: the hive is made again, as one whose store is corrupt is, and its
+            // machines fill it.
+            (Some(seq), Some(_))
+                if seq == heads.len() && rest.iter().all(|hex| id(hex).is_some()) =>
+            {
+                return Err(StoreError::RecordsLog(path));
+            }
+            _ if heads.is_empty() && line.starts_with(RECORDS_PRUNED) => {
+                return Err(StoreError::RecordsLog(path));
             }
             _ => return Err(StoreError::CorruptHead(path)),
         }
@@ -704,25 +430,7 @@ fn read_heads(dir: &Path) -> Result<(LoggedPruned, Vec<LoggedHead>), StoreError>
     if heads.is_empty() || !text.ends_with('\n') {
         return Err(StoreError::CorruptHead(path));
     }
-    Ok((pruned, heads))
-}
-
-/// Writes the log of accepted heads again, whole: `pruned`, how many records the hub pruned
-/// and their digest, then each head, with no record.
-fn write_heads(
-    dir: &Path,
-    (count, digest): (usize, &RecordDigest),
-    heads: &[OperationId],
-) -> Result<(), StoreError> {
-    let mut text = format!(
-        "{PRUNED_PREFIX}{count} {}\n",
-        jj_lib::hex_util::encode_hex(digest.bytes())
-    );
-    for (seq, head) in heads.iter().enumerate() {
-        writeln!(text, "{seq} {}", head.hex()).expect("writing to a String");
-    }
-    let path = dir.join("heads");
-    musubi_jj::files::replace(&path, text.as_bytes()).map_err(io_err(&path))
+    Ok(heads)
 }
 
 /// Whether `err`, opening a store, means it is corrupt, as a power cut can leave one, rather
@@ -730,6 +438,8 @@ fn write_heads(
 pub fn is_corrupt(err: &StoreError) -> bool {
     match err {
         StoreError::CorruptHead(_) | StoreError::UnknownBackend(_) => true,
+        // Compatibility until 2027-02-21: remove with `StoreError::RecordsLog`.
+        StoreError::RecordsLog(_) => true,
         StoreError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         // An operation or view that won't decode; not one that couldn't be read.
         StoreError::Canonical(err) => !err.unreadable(),
@@ -737,24 +447,14 @@ pub fn is_corrupt(err: &StoreError) -> bool {
     }
 }
 
-fn append_head(
-    dir: &Path,
-    seq: u64,
-    head: &OperationId,
-    record: &[OperationId],
-) -> Result<(), StoreError> {
+fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreError> {
     let path = dir.join("heads");
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(io_err(&path))?;
-    let mut line = format!("{seq} {}", head.hex());
-    for op in record {
-        line.push(' ');
-        line.push_str(&op.hex());
-    }
-    line.push('\n');
+    let line = format!("{seq} {}\n", head.hex());
     // In one write, not writeln!'s four, so that a process killed partway seldom tears it.
     file.write_all(line.as_bytes()).map_err(io_err(&path))
 }
@@ -763,31 +463,35 @@ fn append_head(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::fmt::Write as _;
+
     use hegel::TestCase;
     use hegel::generators as gs;
 
     use super::*;
 
-    /// A log written again, pruned, reads back as written, its count and digest first; with
-    /// its first line torn, it is corrupt.
+    /// The log of a 0.47 hub that took records, with a record's ids after the head it was
+    /// accepted with, or that pruned them, starting with their count and digest, makes the
+    /// store corrupt, so that the hub makes the hive again: its heads before a record are
+    /// named as they were before the record dropped operations.
+    ///
+    /// Compatibility until 2027-02-21: remove with `StoreError::RecordsLog`.
     #[test]
-    fn a_pruned_log_reads_back() {
+    fn a_log_with_records_makes_the_hive_again() {
         let dir = tempfile::tempdir().unwrap();
-        let heads: Vec<OperationId> = (0..3).map(|i| OperationId::new(vec![i; 64])).collect();
-        let digest = RecordDigest::root().then(&Record::new([hub_op(heads[1].clone())]));
-        write_heads(dir.path(), (1, &digest), &heads).unwrap();
-        let (pruned, read) = read_heads(dir.path()).unwrap();
-        assert_eq!(pruned, Some((1, digest)));
-        let read: Vec<OperationId> = read.into_iter().map(|(head, _)| head).collect();
-        assert_eq!(read, heads);
-        let path = dir.path().join("heads");
-        let text = fs::read_to_string(&path).unwrap();
-        let first = text.find('\n').unwrap();
-        fs::write(&path, format!("{}{}", &text[..first - 1], &text[first..])).unwrap();
-        assert!(matches!(
-            read_heads(dir.path()),
-            Err(StoreError::CorruptHead(_))
-        ));
+        let ids: Vec<String> = (0..3)
+            .map(|i| OperationId::new(vec![i; 64]).hex())
+            .collect();
+        let digest = "ab".repeat(64);
+        for text in [
+            format!("0 {}\n1 {} {}\n", ids[0], ids[1], ids[2]),
+            format!("pruned 1 {digest}\n0 {}\n1 {}\n", ids[0], ids[1]),
+        ] {
+            fs::write(dir.path().join("heads"), &text).unwrap();
+            let err = read_heads(dir.path()).unwrap_err();
+            assert!(matches!(err, StoreError::RecordsLog(_)), "{text}: {err}");
+            assert!(is_corrupt(&err));
+        }
     }
 
     /// A log cut where a line ends, keeping one, reads as the heads before the cut; cut
@@ -797,19 +501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let count = tc.draw(gs::integers::<u8>().min_value(1).max_value(12));
         let heads: Vec<OperationId> = (0..count).map(|i| OperationId::new(vec![i; 64])).collect();
-        // Sometimes the log of a hub that pruned its records, which starts with their count
-        // and digest: a cut that keeps only that line keeps no head.
-        let pruned_log = tc.draw(gs::booleans());
-        let pruned = pruned_log.then(|| (3, RecordDigest::root().then(&Record::new([]))));
         let mut text = String::new();
-        if let Some((count, digest)) = &pruned {
-            writeln!(
-                text,
-                "{PRUNED_PREFIX}{count} {}",
-                jj_lib::hex_util::encode_hex(digest.bytes())
-            )
-            .unwrap();
-        }
         let mut ends = vec![text.len()];
         for (seq, head) in heads.iter().enumerate() {
             writeln!(text, "{seq} {}", head.hex()).unwrap();
@@ -828,10 +520,7 @@ mod tests {
         fs::write(dir.path().join("heads"), &text[..cut]).unwrap();
         match ends.iter().position(|&end| end == cut) {
             Some(lines) if lines > 0 => {
-                let (read_pruned, read) = read_heads(dir.path()).unwrap();
-                assert_eq!(read_pruned, pruned);
-                let read: Vec<OperationId> = read.into_iter().map(|(head, _)| head).collect();
-                assert_eq!(read, heads[..lines]);
+                assert_eq!(read_heads(dir.path()).unwrap(), heads[..lines]);
             }
             _ => assert!(matches!(
                 read_heads(dir.path()),

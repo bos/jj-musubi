@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::hash::Hash;
 use std::sync::Arc;
 
 use jj_lib::object_id::ObjectId as _;
@@ -273,49 +272,6 @@ impl Contraction {
     pub fn into_images(self) -> HashMap<CanonicalOp, Vec<CanonicalOp>> {
         self.images
     }
-}
-
-/// What `op` is now, where `superseded` has what each operation a contraction superseded
-/// became then: what it became, each superseded since replaced in turn by what that became,
-/// the first of each kept. Each contraction renames only what none before it superseded, so
-/// each has one entry, and composing them on lookup costs only the entries met, where
-/// composing each into every entry before it costs, over many, the square of their number.
-pub fn current<Op: Clone + Eq + Hash>(superseded: &HashMap<Op, Vec<Op>>, op: &Op) -> Vec<Op> {
-    if !superseded.contains_key(op) {
-        return vec![op.clone()];
-    }
-    // What each one met is now, worked out once: histories merge, and so do renamings.
-    let mut now: HashMap<&Op, Vec<Op>> = HashMap::new();
-    let mut started = HashSet::new();
-    let mut stack = vec![(op, false)];
-    while let Some((id, expanded)) = stack.pop() {
-        if now.contains_key(id) {
-            continue;
-        }
-        let Some(became) = superseded.get(id) else {
-            now.insert(id, vec![id.clone()]);
-            continue;
-        };
-        if expanded {
-            let mut seen = HashSet::new();
-            let ops = became
-                .iter()
-                .flat_map(|b| now.get(b).cloned().unwrap_or_default())
-                .filter(|op| seen.insert(op.clone()))
-                .collect();
-            now.insert(id, ops);
-            continue;
-        }
-        // Met again before it is worked out, below itself: a contraction never names as
-        // superseded what it or one after it made, so only a corrupt map loops, and the loop
-        // is cut where it closes.
-        if !started.insert(id) {
-            continue;
-        }
-        stack.push((id, true));
-        stack.extend(became.iter().rev().map(|b| (b, false)));
-    }
-    now.remove(op).unwrap_or_default()
 }
 
 #[cfg(test)]

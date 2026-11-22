@@ -224,10 +224,6 @@ pub enum NodeError {
     /// as after `jj op abandon`. Which, the log says.
     #[error("{HISTORY_GONE}")]
     RewrittenRealization,
-    /// The hub pruned records of dropped operations that this machine never took. A node takes
-    /// no records now, so none raises this: it goes with the records in the protocol.
-    #[error("{HISTORY_GONE}")]
-    PrunedRecords,
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

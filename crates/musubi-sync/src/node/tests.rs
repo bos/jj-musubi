@@ -10,7 +10,6 @@ fn permanent_history_loss_survives_error_context() {
     for cause in [
         NodeError::UnreachableHistory,
         NodeError::RewrittenRealization,
-        NodeError::PrunedRecords,
     ] {
         let error = anyhow::Error::new(cause);
         assert!(history_lost(&error), "{error:#}");

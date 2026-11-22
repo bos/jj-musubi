@@ -5,12 +5,10 @@
 use crate::hub::CasOutcome;
 use crate::hub::HandledBy;
 use crate::hub::HubStorage;
-use crate::hub::Notice;
 use crate::hub::Push;
 use crate::message::Head;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
-use crate::message::RecordState;
 use crate::message::Reply;
 
 /// Root 0, operation 1 (parent 0), operation 2 (parent 0 or 1). Each nonroot operation
@@ -22,7 +20,6 @@ struct Storage {
     head: u8,
     seq: u64,
     faults: bool,
-    reported: bool,
 }
 
 impl Storage {
@@ -68,8 +65,7 @@ impl HubStorage for Storage {
         }
     }
 
-    fn set_head(&mut self, seq: u64, head: &u8, dropped: &[u8]) -> Result<(), ()> {
-        assert!(dropped.is_empty());
+    fn set_head(&mut self, seq: u64, head: &u8) -> Result<(), ()> {
         if self.fail() {
             return Err(());
         }
@@ -80,36 +76,6 @@ impl HubStorage for Storage {
         self.seq = seq;
         self.head = *head;
         Ok(())
-    }
-
-    fn records(&self) -> RecordState {
-        RecordState {
-            count: 0,
-            digest: vec![],
-        }
-    }
-
-    fn pruned(&self) -> RecordState {
-        self.records()
-    }
-
-    fn report(&mut self, machine: &str, records: &RecordState) {
-        assert_eq!(machine, "n");
-        assert_eq!(*records, self.records());
-        self.reported = true;
-    }
-
-    fn reported(&self, machine: &str) -> Option<RecordState> {
-        (self.reported && machine == "n").then(|| self.records())
-    }
-
-    fn prune(&mut self, _: u64) -> Result<(), ()> {
-        unreachable!("push does not prune records")
-    }
-
-    fn is_dropped(&self, _: &u8, dropped: &[u8]) -> Result<bool, ()> {
-        assert!(dropped.is_empty());
-        Ok(false)
     }
 
     fn store_ops(&mut self, ops: &[u8], attachment: &u8) -> Result<(), ()> {
@@ -126,8 +92,7 @@ impl HubStorage for Storage {
         result
     }
 
-    fn is_closed(&self, op: &u8, dropped: &[u8]) -> Result<bool, ()> {
-        assert!(dropped.is_empty());
+    fn is_closed(&self, op: &u8) -> Result<bool, ()> {
         if self.fail() {
             Err(())
         } else {
@@ -135,17 +100,12 @@ impl HubStorage for Storage {
         }
     }
 
-    fn descends(&self, ancestor: &u8, op: &u8, dropped: &[u8]) -> Result<bool, ()> {
-        assert!(dropped.is_empty());
+    fn descends(&self, ancestor: &u8, op: &u8) -> Result<bool, ()> {
         if self.fail() {
             Err(())
         } else {
             Ok(self.descends_from(*ancestor, *op))
         }
-    }
-
-    fn records_since(&self, _: &RecordState) -> Result<(u64, Vec<Vec<u8>>), ()> {
-        unreachable!("push does not fetch records")
     }
 
     fn ops_since(&self, _: &u8, _: &u8) -> Result<(Vec<OpEntry<u8>>, u8), ()> {
@@ -159,20 +119,15 @@ impl HubStorage for Storage {
 
 fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
     let before = storage.head();
-    let records = storage.records();
     let result: Result<(CasOutcome, HandledBy<Storage>), ()> = Push {
-        machine: "n",
         ops: &[1, 2],
         ops_attachment: &3,
         objects: &objects,
         expected: &expected,
         new: &2,
-        records: &records,
-        dropped: &[],
     }
     .answer(storage);
 
-    assert!(storage.reported);
     kani::cover!(
         result.is_err() && before == (1, 1) && storage.objects & 2 != 0,
         "an error retains uploaded objects before acceptance"
@@ -189,17 +144,10 @@ fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
             kani::cover!(outcome == CasOutcome::Rejected, "a rejected push");
             kani::cover!(outcome == CasOutcome::Accepted, "a new acceptance");
             kani::cover!(outcome == CasOutcome::Idempotent, "an idempotent retry");
-            let Reply::Head {
-                kind,
-                seq,
-                head,
-                records,
-            } = handled.reply
-            else {
-                panic!("matching records and no drops cannot be refused");
+            let Reply::Head { kind, seq, head } = handled.reply else {
+                panic!("a push is answered with a head");
             };
             assert_eq!(Head { seq, head }, storage.head());
-            assert_eq!(records, storage.records());
             assert_eq!(kind == HeadKind::Accepted, storage.head == 2);
             if objects == 3 && storage.head != 2 {
                 assert_eq!(kind, HeadKind::Rejected);
@@ -208,7 +156,7 @@ fn attempt(storage: &mut Storage, expected: u8, objects: u8) {
             if outcome == CasOutcome::Accepted {
                 assert_eq!(before, Head { seq: 1, head: 1 });
                 assert_eq!(expected, before.head);
-                assert_eq!(handled.publish, Some(Notice { seq, head, records }));
+                assert_eq!(handled.publish, Some(Head { seq, head }));
             } else {
                 assert_eq!(storage.head(), before);
                 assert!(handled.publish.is_none());
@@ -230,7 +178,6 @@ fn push_storage_retries() {
         head: 1,
         seq: 1,
         faults: true,
-        reported: false,
     };
     let expected = if kani::any() { 0 } else { 1 };
     let objects = kani::any::<u8>() & 3;

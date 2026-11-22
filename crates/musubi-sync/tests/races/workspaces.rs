@@ -305,7 +305,6 @@ fn forgotten_working_copies_follow_a_moved_parent() {
 /// later operation did.
 #[test]
 fn forgotten_working_copies_can_be_abandoned() {
-    use musubi_core::hub::HubStorage as _;
     use musubi_core::node::{LocalRepo as _, Step};
     use musubi_jj::op_id::CanonicalOp;
 
@@ -326,15 +325,13 @@ fn forgotten_working_copies_can_be_abandoned() {
     for _ in 0..24 {
         let member = &mut hive.hive.members[1];
         assert_eq!(member.core.known().head, target);
-        let before = member.adapter.heads_for(&target).unwrap();
+        let before = member.adapter.heads().unwrap();
         assert_eq!(before.len(), 1);
-        assert!(member.adapter.pending().unwrap().is_empty());
-        assert_eq!(member.adapter.records().unwrap(), hive.hive.hub.records());
         match member.core.step(&mut member.adapter).unwrap() {
             Step::Realized(_) => {}
             Step::Advanced(_) => {
                 assert!(member.adapter.is_ancestor(&before[0], &target).unwrap());
-                let after = member.adapter.heads_for(&target).unwrap();
+                let after = member.adapter.heads().unwrap();
                 assert_eq!(after.len(), 1);
                 assert_ne!(after[0], target);
                 let cleanup = member
@@ -345,7 +342,6 @@ fn forgotten_working_copies_can_be_abandoned() {
                     .unwrap();
                 assert_eq!(cleanup.parents, vec![target.clone()]);
                 assert!(cleanup.metadata.description.contains("new working copy"));
-                assert!(member.adapter.pending().unwrap().is_empty());
                 advanced = true;
                 break;
             }

@@ -103,14 +103,6 @@ impl NodeDriver {
                     tracing::debug!("realized {}", short(&op));
                 }
                 Step::Advanced(op) => tracing::debug!("advanced to {}", short(&op)),
-                Step::Adopted => tracing::info!("took the hive's dropped operations"),
-                Step::Superseded { fixup, push } => {
-                    if let Some(fixup) = fixup {
-                        tracing::debug!("wrote the fix-up {}", short(&fixup));
-                    }
-                    tracing::info!("publishing the operations this machine dropped");
-                    self.deliver(push).await?;
-                }
             }
             steps += 1;
         }
@@ -182,8 +174,8 @@ impl NodeDriver {
         // Pushing again would send the same, and get the same answer.
         anyhow::ensure!(
             !incomplete,
-            "the hub refused this machine's work: it lacks something the work needs, or brings \
-             back operations `jj op abandon` removed (the hub's log says which)"
+            "the hub refused this machine's work: it lacks something the work needs, or repeats \
+             an operation the hive has (the hub's log says which)"
         );
         Ok(())
     }
@@ -194,7 +186,6 @@ impl NodeDriver {
             kind: HeadKind::Notify,
             seq: notice.seq,
             head: OpId::new(notice.head),
-            records: notice.records,
         };
         log_handled(&self.core.handle(&mut self.adapter, reply)?);
         Ok(())
@@ -234,6 +225,5 @@ fn log_handled(handled: &Handled<OpId>) {
             tracing::debug!("staged the objects of {} operations", ops.len());
         }
         Handled::Ignored => tracing::debug!("nothing new"),
-        Handled::Refused => tracing::debug!("the hub took other records first"),
     }
 }

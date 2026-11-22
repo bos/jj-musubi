@@ -6,11 +6,9 @@ use std::collections::BTreeSet;
 
 use musubi_core::hub;
 use musubi_core::hub::CasOutcome;
-use musubi_core::hub::Notice;
 use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
-use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::Handled;
@@ -19,7 +17,6 @@ use musubi_core::node::Step;
 use serde_json::Value;
 use serde_json::json;
 
-use super::model::Advanced;
 use super::model::FakeHub;
 use super::model::FakeRepo;
 use super::model::Obj;
@@ -27,7 +24,6 @@ use super::model::Op;
 use super::model::ROOT;
 use super::model::SharedUniv;
 use super::model::Univ;
-use super::model::flat;
 use super::oracle::Measure;
 use super::oracle::Oracle;
 use super::storage::{Fallible, Faults, SharedFaults, StorageError, Timing};
@@ -40,14 +36,9 @@ type Rep = Reply<Op, Vec<Obj>>;
 
 #[derive(Clone, Debug)]
 enum Payload {
-    /// A request, and for a `Push`, the records its node had taken and what it had dropped
-    /// when it sent it: what the model's supersede carries (`sendSup`).
-    Request(usize, Req, Option<Sup>),
+    Request(usize, Req),
     Reply(usize, Rep),
 }
-
-/// The records a node had taken, and everything it had dropped.
-type Sup = (Vec<Vec<Op>>, Vec<Op>);
 
 /// A message in flight: what the Rust side actually sent, and its Lean model form, which is
 /// several messages for a `Fetched` reply.
@@ -89,17 +80,6 @@ pub struct World {
     /// The operations false replies and a lying hub's replies have carried, which a node
     /// misled may have, though the hub never accepted them.
     offered: BTreeSet<Op>,
-    /// Whether any node has dropped anything: the measure of `Liveness.lean`, which knows
-    /// nothing of supersedes, falls only before.
-    dropped_any: bool,
-    /// The sequence numbers of the heads the hub accepted through what survives of the head
-    /// it had, not as its descendant in the original history (`hubSupAccept`).
-    contracted_accepts: BTreeSet<u64>,
-    /// Whether any step left the original-history model: such an acceptance, an advance to
-    /// what survives of a dropped head, or one as prepared records name the history.
-    contracted: bool,
-    /// Whether the hub was remade where going back would have left it at a head it lacks.
-    pub remade_for_rollback: bool,
 }
 
 /// What of a node `World::quiesce` watches across an exchange.
@@ -107,8 +87,6 @@ struct NodeView {
     lops: BTreeSet<Op>,
     heads: BTreeSet<Op>,
     known: (u64, Op),
-    dropped: BTreeSet<Op>,
-    applied: Vec<Vec<Op>>,
     crash_pending: bool,
 }
 
@@ -178,10 +156,6 @@ impl World {
             lost: vec![],
             misled: vec![false; nodes],
             offered: BTreeSet::new(),
-            dropped_any: false,
-            contracted_accepts: BTreeSet::new(),
-            contracted: false,
-            remade_for_rollback: false,
         };
         if let Some(oracle) = &mut world.oracle {
             world.oracle_state = oracle.reset(nodes);
@@ -201,14 +175,6 @@ impl World {
 
     pub fn local_ops(&self, node: usize) -> Vec<Op> {
         self.repos[node].lops.iter().copied().collect()
-    }
-
-    /// The local operations `node` can name in a push: those no record it took drops, which
-    /// the root is always among.
-    pub fn nameable_ops(&self, node: usize) -> Vec<Op> {
-        let repo = &self.repos[node];
-        let taken: BTreeSet<Op> = flat(&repo.applied).into_iter().collect();
-        repo.lops.difference(&taken).copied().collect()
     }
 
     pub fn net_len(&self) -> usize {
@@ -282,18 +248,6 @@ impl World {
         self.act(json!({"kind": "userOp", "node": node, "parent": parent, "objs": objs}));
     }
 
-    /// The operations `jj op abandon` on `node` may drop.
-    pub fn abandonable(&self, node: usize) -> Vec<Op> {
-        self.repos[node].abandonable()
-    }
-
-    /// `jj op abandon` on `node` drops `ops`.
-    pub fn op_abandon(&mut self, node: usize, ops: Vec<Op>) {
-        self.repos[node].abandon(&ops);
-        self.dropped_any |= !ops.is_empty();
-        self.act(json!({"kind": "abandon", "node": node, "ops": sorted(ops)}));
-    }
-
     // Node side.
 
     /// The poll timer: send a `Fetch`.
@@ -308,14 +262,10 @@ impl World {
     /// One policy step. Returns whether anything happened.
     pub fn node_step(&mut self, node: usize, merge_objs: usize) -> bool {
         let before = self.storage_begin();
-        let burst_before = self.oracle.as_ref().map(|_| {
-            (
-                self.cores[node].known().head,
-                self.repos[node].applied.clone(),
-                self.repos[node].dropped.clone(),
-                self.burst_state(node),
-            )
-        });
+        let burst_before = self
+            .oracle
+            .as_ref()
+            .map(|_| (self.cores[node].known().head, self.burst_state(node)));
         self.repos[node].merge_objs = merge_objs;
         let heads_before: Vec<Op> = self.repos[node].heads.iter().copied().collect();
         let step = match self.cores[node].step(&mut self.repos[node]) {
@@ -328,11 +278,7 @@ impl World {
         let burst_kind = match &step {
             Step::Merged => Some(("merge", None)),
             Step::Realized(op) => Some(("realize", Some(*op))),
-            Step::Advanced(_)
-                if !matches!(self.repos[node].last_advance, Some(Advanced::Prepared(_))) =>
-            {
-                Some(("advance", None))
-            }
+            Step::Advanced(_) => Some(("advance", None)),
             _ => None,
         };
         match step {
@@ -344,36 +290,15 @@ impl World {
                 self.act(json!({"kind": "merge", "node": node, "parents": parents, "objs": objs}));
             }
             Step::Realized(op) => self.act(json!({"kind": "realize", "node": node, "opId": op})),
-            Step::Advanced(_) => {
-                let advanced = self.repos[node].last_advance.take().expect("advanced");
-                self.contracted |= advanced != Advanced::Plain;
-                self.act(advanced.action(node));
-            }
+            Step::Advanced(_) => self.act(json!({"kind": "advance", "node": node})),
             Step::Send(requests) => {
                 for request in requests {
                     self.check_upload(node, &request);
                     self.send_request(node, request);
                 }
             }
-            Step::Adopted => {
-                let records = records_json(&self.repos[node].applied);
-                self.act(json!({"kind": "adopt", "node": node, "records": records}));
-            }
-            Step::Superseded { fixup, push } => {
-                if let Some(fixup) = fixup {
-                    let (op, parent) = self.repos[node].last_fixup.take().unwrap();
-                    assert_eq!(op, fixup);
-                    self.act(json!({"kind": "userOp", "node": node, "parent": parent, "objs": []}));
-                }
-                self.check_upload(node, &push);
-                self.send_request(node, push);
-            }
         }
-        if let (Some((known, applied, dropped, before)), Some((kind, op))) =
-            (burst_before, burst_kind)
-            && self.repos[node].applied == applied
-            && self.repos[node].dropped == dropped
-        {
+        if let (Some((known, before)), Some((kind, op))) = (burst_before, burst_kind) {
             let after = self.burst_state(node);
             let reply = self.oracle.as_mut().unwrap().call(&json!({
                 "op": "localBurst", "node": node, "known": known,
@@ -396,18 +321,12 @@ impl World {
     fn send_request(&mut self, node: usize, request: Req) {
         let univ = self.univ.clone();
         let univ = univ.borrow();
-        let repo = &self.repos[node];
-        let sup = (
-            repo.applied.clone(),
-            repo.dropped.iter().copied().collect::<Vec<_>>(),
-        );
-        let (actions, model, sup) = match &request {
+        let (action, model) = match &request {
             Request::Fetch { base, haves, .. } => {
                 let haves = sorted(haves.iter().copied());
                 (
-                    vec![json!({"kind": "fetchAll", "node": node, "base": base, "haves": haves})],
-                    vec![json!({"msg": "fetch", "node": node, "base": base, "haves": haves})],
-                    None,
+                    json!({"kind": "fetchAll", "node": node, "base": base, "haves": haves}),
+                    json!({"msg": "fetch", "node": node, "base": base, "haves": haves}),
                 )
             }
             Request::GetObjects { for_ops, haves, .. } => {
@@ -418,9 +337,8 @@ impl World {
                         .filter(|o| !haves.contains(o)),
                 );
                 (
-                    vec![json!({"kind": "fetchObjs", "node": node, "objs": objs})],
-                    vec![json!({"msg": "getObjs", "node": node, "objs": objs})],
-                    None,
+                    json!({"kind": "fetchObjs", "node": node, "objs": objs}),
+                    json!({"msg": "getObjs", "node": node, "objs": objs}),
                 )
             }
             Request::Push {
@@ -428,51 +346,30 @@ impl World {
                 objects,
                 expected,
                 new,
-                records,
-                dropped,
                 ..
             } => {
-                // Keep the one actual packet tied to its send-time source, rather than
-                // reconstructing an unrelated supersede that merely names the same head.
-                assert_eq!(univ.records_of(records), Some(sup.0.as_slice()));
-                let applied = flat(&sup.0);
-                let pending: BTreeSet<_> = dropped.iter().copied().collect();
-                assert_eq!(
-                    repo.dropped,
-                    applied.union(&pending).copied().collect::<BTreeSet<_>>()
-                );
-                assert!(applied.is_disjoint(&pending));
                 let (ops, objs) = (sorted(ops.iter().copied()), sorted(objects.iter().copied()));
                 (
-                    vec![
-                        json!({"kind": "pushAll", "node": node, "ops": ops, "objs": objs,
-                            "expected": expected, "new": new}),
-                        json!({"kind": "sendSup", "node": node, "new": new}),
-                    ],
-                    vec![
-                        json!({"msg": "push", "node": node, "ops": ops, "objs": objs,
-                            "expected": expected, "new": new}),
-                        sup_json(node, &sup, *new),
-                    ],
-                    Some(sup),
+                    json!({"kind": "pushAll", "node": node, "ops": ops, "objs": objs,
+                        "expected": expected, "new": new}),
+                    json!({"msg": "push", "node": node, "ops": ops, "objs": objs,
+                        "expected": expected, "new": new}),
                 )
             }
         };
         drop(univ);
-        self.send(model, Payload::Request(node, request, sup));
-        self.act_all(actions);
+        self.send(vec![model], Payload::Request(node, request));
+        self.act(action);
     }
 
-    /// A policy `Push` uses its actual send-time snapshot and uploads exactly the model's
-    /// `upOps` and `upObjs`. The separate rogue-push rule deliberately bypasses policy.
+    /// A policy `Push` uploads exactly the model's `upOps` and `upObjs`. The separate
+    /// rogue-push rule deliberately bypasses policy.
     fn check_upload(&mut self, node: usize, request: &Req) {
         let Request::Push {
             ops,
             objects,
             expected,
             new,
-            records,
-            dropped,
             ..
         } = request
         else {
@@ -483,22 +380,6 @@ impl World {
         let Some(oracle) = &mut self.oracle else {
             return;
         };
-        let applied = self.univ.borrow().records_of(records).unwrap().to_vec();
-        let reply = oracle.call(&json!({
-            "op": "pushSnapshot", "node": node,
-            "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
-            "expected": expected, "new": new, "knownSeq": self.cores[node].known().seq,
-            "applied": records_json(&applied), "pending": dropped,
-        }));
-        assert_eq!(reply["ok"], true, "push snapshot failed: {reply}");
-        assert_eq!(
-            reply["matches"], true,
-            "packet differs from its source: {reply}"
-        );
-        assert_eq!(
-            reply["allDropped"],
-            json!(sorted(self.repos[node].dropped.iter().copied()))
-        );
         let (up_ops, up_objs) = oracle.upload(node, *new);
         assert_eq!(
             (sorted(ops.iter().copied()), sorted(objects.iter().copied())),
@@ -509,21 +390,14 @@ impl World {
     }
 
     /// A push the policy would never make: `Cas(expected, new)` for any local `new`, without
-    /// uploading anything. The model allows it, so the hub must defend itself. `new` is no
-    /// operation a record the node took drops: a node never names one, which the hub can't
-    /// refuse once it has pruned the record.
+    /// uploading anything. The model allows it, so the hub must defend itself.
     pub fn rogue_push(&mut self, node: usize, expected: Op, new: Op) {
-        use musubi_core::node::LocalRepo as _;
-        let repo = &self.repos[node];
         let request = Request::Push {
-            machine: repo.machine(),
             ops: vec![],
             ops_attachment: vec![],
             objects: vec![],
             expected,
             new,
-            records: repo.records().unwrap(),
-            dropped: repo.pending().unwrap(),
         };
         self.send_request(node, request);
     }
@@ -606,19 +480,16 @@ impl World {
 
     fn deliver_payload(&mut self, payload: Payload) {
         match payload {
-            Payload::Request(node, request, sup) => self.hub_handle(node, request, sup),
+            Payload::Request(node, request) => self.hub_handle(node, request),
             Payload::Reply(node, reply) => self.node_handle(node, reply, false),
         }
     }
 
-    fn hub_handle(&mut self, node: usize, request: Req, sup: Option<Sup>) {
+    fn hub_handle(&mut self, node: usize, request: Req) {
         let before = self.storage_begin();
-        let actions = match &request {
-            Request::Fetch { base, haves, .. } => vec![
-                json!({"kind": "hubFetch", "node": node, "base": base,
-                    "haves": sorted(haves.iter().copied())}),
-                json!({"kind": "sendD", "node": node}),
-            ],
+        let action = match &request {
+            Request::Fetch { base, haves, .. } => json!({"kind": "hubFetch", "node": node,
+                "base": base, "haves": sorted(haves.iter().copied())}),
             Request::GetObjects { for_ops, haves, .. } => {
                 let objs = sorted(
                     self.univ
@@ -627,27 +498,21 @@ impl World {
                         .into_iter()
                         .filter(|o| !haves.contains(o)),
                 );
-                vec![json!({"kind": "hubGetObjs", "node": node, "objs": objs})]
+                json!({"kind": "hubGetObjs", "node": node, "objs": objs})
             }
             Request::Push {
-                machine,
                 ops,
                 ops_attachment,
                 objects,
                 expected,
                 new,
-                records,
-                dropped,
             } => {
                 let push = hub::Push {
-                    machine,
                     ops,
                     ops_attachment,
                     objects,
                     expected,
                     new,
-                    records,
-                    dropped,
                 };
                 let (outcome, handled) = match push.answer(&mut self.hub) {
                     Ok(result) => result,
@@ -656,35 +521,16 @@ impl World {
                         return;
                     }
                 };
-                let (applied, all_dropped) = sup.expect("a push carries a supersede");
-                let action = |kind: &str| {
-                    json!({"kind": kind, "node": node,
-                        "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
-                        "expected": expected, "new": new})
+                let kind = match outcome {
+                    CasOutcome::Idempotent => "hubPushIdem",
+                    CasOutcome::Accepted => "hubPushAccept",
+                    CasOutcome::Rejected => "hubPushReject",
+                    CasOutcome::Incomplete => "hubPushIncomplete",
                 };
-                let with_sup = |kind: &str| {
-                    let mut action = action(kind);
-                    action["applied"] = records_json(&applied);
-                    action["dropped"] = json!(sorted(all_dropped.iter().copied()));
-                    action
-                };
-                let actions = match outcome {
-                    CasOutcome::Idempotent => vec![action("hubPushIdem")],
-                    CasOutcome::Accepted => vec![
-                        with_sup("hubSupAccept"),
-                        json!({"kind": "sendD", "node": node}),
-                    ],
-                    CasOutcome::Rejected => vec![with_sup("hubPushReject")],
-                    CasOutcome::Incomplete => vec![action("hubPushIncomplete")],
-                    CasOutcome::Refused => vec![with_sup("hubPushRefuse")],
-                };
-                let announced = outcome == CasOutcome::Accepted;
-                let contracted = announced && !self.univ.borrow().is_ancestor(*expected, *new);
-                self.reply_and_act(node, handled.reply, actions, handled.publish, announced);
-                if contracted {
-                    self.contracted_accepts.insert(self.hub.seq);
-                    self.contracted = true;
-                }
+                let action = json!({"kind": kind, "node": node,
+                    "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
+                    "expected": expected, "new": new});
+                self.reply_and_act(node, handled.reply, action, handled.publish);
                 return;
             }
         };
@@ -695,21 +541,12 @@ impl World {
                 return;
             }
         };
-        self.reply_and_act(node, handled.reply, actions, handled.publish, false);
+        self.reply_and_act(node, handled.reply, action, handled.publish);
     }
 
     /// Sends `reply`, and the notifications of a head the hub `publish`es, with the model
-    /// `actions` the hub took. A `Fetched` reply carries the hub's records, and so does the
-    /// reply to a push it accepted, if `announced`: from the records state it carries, and
-    /// the records the node had, the node knows them all.
-    fn reply_and_act(
-        &mut self,
-        node: usize,
-        reply: Rep,
-        actions: Vec<Value>,
-        publish: Option<Notice<Op>>,
-        announced: bool,
-    ) {
+    /// `action` the hub took.
+    fn reply_and_act(&mut self, node: usize, reply: Rep, action: Value, publish: Option<Head<Op>>) {
         // A storage error must never be reported as a successful publication. Check the
         // actual adapter, even when a prior partial import retired this case's oracle.
         match &reply {
@@ -722,7 +559,7 @@ impl World {
             }
             _ => {}
         }
-        if let Some(Notice { seq, head, .. }) = &publish {
+        if let Some(Head { seq, head }) = &publish {
             assert_eq!(
                 (*seq, *head),
                 (self.hub.seq, self.hub.head),
@@ -733,20 +570,10 @@ impl World {
                 "hub published a head without its required data"
             );
         }
-        let records =
-            json!({"msg": "dropped", "node": node, "records": records_json(&self.hub.records)});
         let model = match &reply {
-            Reply::Head {
-                kind, seq, head, ..
-            } => {
-                let mut model = vec![
-                    json!({"msg": "head", "node": node, "headKind": kind_name(*kind), "seq": seq, "head": head}),
-                ];
-                if announced {
-                    model.push(records);
-                }
-                model
-            }
+            Reply::Head { kind, seq, head } => vec![
+                json!({"msg": "head", "node": node, "headKind": kind_name(*kind), "seq": seq, "head": head}),
+            ],
             Reply::Fetched {
                 seq,
                 head,
@@ -757,17 +584,15 @@ impl World {
                 json!({"msg": "head", "node": node, "headKind": "head", "seq": seq, "head": head}),
                 json!({"msg": "ops", "node": node, "ops": sorted(ops.iter().map(|e| e.id))}),
                 json!({"msg": "objs", "node": node, "objs": sorted(objects.iter().copied())}),
-                records,
             ],
             Reply::Objects { attachment, .. } => {
                 vec![
                     json!({"msg": "objs", "node": node, "objs": sorted(attachment.iter().copied())}),
                 ]
             }
-            Reply::Refused { .. } => vec![],
         };
         self.send(model, Payload::Reply(node, reply));
-        if let Some(Notice { seq, head, records }) = publish {
+        if let Some(Head { seq, head }) = publish {
             assert_eq!(seq as usize, self.hist.len());
             self.hist.push(head);
             for target in 0..self.nodes() {
@@ -775,13 +600,12 @@ impl World {
                     kind: HeadKind::Notify,
                     seq,
                     head,
-                    records: records.clone(),
                 };
                 let model = json!({"msg": "head", "node": target, "headKind": "notify", "seq": seq, "head": head});
                 self.send(vec![model], Payload::Reply(target, reply));
             }
         }
-        self.act_all(actions);
+        self.act(action);
     }
 
     /// Has `node` take `reply`: `own` if it answers the request the node just sent, which
@@ -791,7 +615,7 @@ impl World {
         let known_before = self.known(node);
         let incoming = match &reply {
             Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => Some((*seq, *head)),
-            Reply::Objects { .. } | Reply::Refused { .. } => None,
+            Reply::Objects { .. } => None,
         };
         let restarted = own && self.cores[node].hub_went_back(&reply);
         let head_kind = match &reply {
@@ -801,7 +625,7 @@ impl World {
         let objects = match &reply {
             Reply::Objects { attachment, .. } => sorted(attachment.iter().copied()),
             Reply::Fetched { objects, .. } => sorted(objects.iter().copied()),
-            Reply::Head { .. } | Reply::Refused { .. } => vec![],
+            Reply::Head { .. } => vec![],
         };
         let mut actions = vec![];
         let handled = if own {
@@ -860,7 +684,7 @@ impl World {
                 actions.push(json!({"kind": "recvObjs", "node": node, "objs": objects}));
                 self.act_all(actions);
             }
-            Handled::Ignored | Handled::Refused => {
+            Handled::Ignored => {
                 if !actions.is_empty() {
                     self.act_all(actions);
                 }
@@ -898,29 +722,11 @@ impl World {
     /// the later ones (`hubRegress`). Going back to where it is changes nothing, and the
     /// properties that need a hub that never went back still hold.
     pub fn hub_goes_back(&mut self, seq: u64) {
-        // A head it accepted through what survives of the one before need not reach that one,
-        // whose objects it may have forgotten since: going back there leaves no hub that
-        // works. This harness explicitly chooses a maintainer's remake recovery; it does
-        // not claim that native startup detects every missing historical object.
-        if !self.hub.closed(self.hist[seq as usize]) {
-            self.trace
-                .push(json!({"marker": "rollback to an incomplete head: remake"}));
-            self.remade_for_rollback = true;
-            self.remake();
-            return;
-        }
         let lost: Vec<Op> = self.hist.drain(seq as usize + 1..).collect();
         self.went_back |= !lost.is_empty();
-        self.contracted_accepts.retain(|&accepted| accepted <= seq);
         self.lost.extend((seq + 1..).zip(lost));
         self.hub.head = self.hist[seq as usize];
         self.hub.seq = seq;
-        self.hub.record_hist.truncate(seq as usize + 1);
-        self.hub.records = self.hub.record_hist[seq as usize].clone();
-        self.hub.pruned_hist.truncate(seq as usize + 1);
-        self.hub.pruned = self.hub.pruned_hist[seq as usize];
-        // A hub goes back by restarting.
-        self.hub.restart();
         self.act(json!({"kind": "hubRegress", "seq": seq}));
     }
 
@@ -928,44 +734,8 @@ impl World {
         self.hub.head
     }
 
-    pub fn dropped(&self, node: usize) -> &BTreeSet<Op> {
-        &self.repos[node].dropped
-    }
-
-    /// The hub's records `node` took last.
-    pub fn applied(&self, node: usize) -> &[Vec<Op>] {
-        &self.repos[node].applied
-    }
-
     pub fn heads(&self, node: usize) -> &BTreeSet<Op> {
         &self.repos[node].heads
-    }
-
-    /// The hub's answer to a push of `new`, which needs nothing uploaded, from `expected`,
-    /// with `records`, taken straight from the hub, outside the network and the model.
-    pub fn answer_push(
-        &mut self,
-        expected: Op,
-        new: Op,
-        records: &[Vec<Op>],
-        dropped: &[Op],
-    ) -> CasOutcome {
-        let records = self.univ.borrow_mut().record_state(records);
-        let push = hub::Push {
-            machine: "outside",
-            ops: &[],
-            ops_attachment: &vec![],
-            objects: &vec![],
-            expected: &expected,
-            new: &new,
-            records: &records,
-            dropped,
-        };
-        push.answer(&mut self.hub).unwrap().0
-    }
-
-    pub fn hub_records(&self) -> &[Vec<Op>] {
-        &self.hub.records
     }
 
     pub fn hub_seq(&self) -> u64 {
@@ -973,25 +743,7 @@ impl World {
     }
 
     pub fn crash_hub(&mut self) {
-        self.hub.restart();
         self.act(json!({"kind": "crashHub"}));
-    }
-
-    /// The hub prunes its records, if every node has said it took them all (`prune`).
-    pub fn prune(&mut self) {
-        let before = self.storage_begin();
-        let nodes: Vec<String> = (0..self.nodes()).map(|n| n.to_string()).collect();
-        match hub::prune(&mut self.hub, nodes) {
-            Ok(Some(count)) => self.act(json!({"kind": "prune", "count": count})),
-            Ok(None) => {}
-            // Server upkeep logs the error and keeps the adapter; the request succeeds.
-            Err(error) => self.storage_failed(None, before, error, vec![]),
-        }
-    }
-
-    /// How many of its records the hub has pruned.
-    pub fn hub_pruned(&self) -> usize {
-        self.hub.pruned
     }
 
     pub fn take_oracle(&mut self) -> Option<Oracle> {
@@ -1008,9 +760,6 @@ impl World {
     /// its head's. A real hub replays every head it logged on opening its store, which needs
     /// their operations, not their objects.
     pub fn hub_forget(&mut self) {
-        // Where the heads in its history are each above the one before in the original
-        // history, as before any acceptance through what survives, the operations any of them
-        // reaches are those its head reaches.
         let univ = self.univ.borrow();
         let mut keep = BTreeSet::new();
         for &head in &self.hist {
@@ -1040,9 +789,7 @@ impl World {
     /// (docs/internals/protocol.md, "Fetch"): staging operations the hub never accepted is how
     /// Locality would break. Unless a false reply told it of a head that reaches `op`.
     pub fn rogue_ops_reply(&mut self, node: usize, head: Op, op: Op) {
-        use musubi_core::node::LocalRepo as _;
         let parents = self.univ.borrow().parents[op as usize].clone();
-        let repo = &self.repos[node];
         // Not newer than what the node knows, or it would believe the head too.
         let reply = Reply::Fetched {
             seq: self.cores[node].known().seq,
@@ -1050,10 +797,6 @@ impl World {
             ops: vec![OpEntry { id: op, parents }],
             ops_attachment: vec![],
             objects: vec![],
-            records: repo.records().unwrap(),
-            records_from: repo.applied.len() as u64,
-            new_records: vec![],
-            pruned: self.hub.univ.borrow_mut().record_state(&[]),
         };
         self.offered.insert(op);
         let handled = self.cores[node]
@@ -1063,15 +806,6 @@ impl World {
             self.misled[node] || handled == Handled::Ignored,
             "node {node} accepted a lying hub's reply: {handled:?}"
         );
-    }
-
-    /// The records `node` has taken, how many, and the state of none, which it starts with,
-    /// for a buggy hub's replies to agree with it on.
-    pub fn node_records(&self, node: usize) -> (RecordState, u64, RecordState) {
-        use musubi_core::node::LocalRepo as _;
-        let repo = &self.repos[node];
-        let none = self.univ.borrow_mut().record_state(&[]);
-        (repo.records().unwrap(), repo.applied.len() as u64, none)
     }
 
     /// What the hub stores, accepted or not, for a buggy hub's replies to be made of.
@@ -1121,7 +855,6 @@ impl World {
                 self.offered.extend(ops.iter().map(|entry| entry.id));
             }
             Reply::Objects { for_ops, .. } => self.offered.extend(for_ops.iter().copied()),
-            Reply::Refused { .. } => {}
         }
         self.trace.push(
             json!({"kind": "falseReply", "node": node, "own": own, "reply": format!("{reply:?}")}),
@@ -1130,8 +863,7 @@ impl World {
     }
 
     /// The operations the hub has accepted, before going back or since: below any head it
-    /// accepted, not only its head, which an acceptance through what survives of the head
-    /// before it need not descend from.
+    /// accepted, not only its head, which may have lost heads since.
     fn ever_accepted(&self, univ: &Univ) -> BTreeSet<Op> {
         let mut accepted = BTreeSet::new();
         for &head in self
@@ -1162,9 +894,8 @@ impl World {
     ///
     /// With an oracle, it checks the policy against the liveness proofs as it goes
     /// (docs/internals/conformance.md, "Liveness"): each exchange that changes a node's
-    /// operations, heads, `known`, dropped set or applied records makes the refined measure
-    /// fall, and one that doesn't leaves it where it was or lower. The older measures are
-    /// checked only before drops, and `measure` only before the hub has gone back too.
+    /// operations, heads or `known` makes `rmeasure` fall, and one that doesn't leaves it where
+    /// it was or lower; `measure` is checked only before the hub has gone back.
     pub fn quiesce(&mut self) {
         self.trace.push(json!({"marker": "quiesce"}));
         let mut measure = self.measure();
@@ -1202,15 +933,8 @@ impl World {
                 }
                 let univ = self.univ.borrow();
                 let accepted = univ.ancestors(self.hub.head);
-                // Through what survives, every operation the hub hasn't dropped; and in the
-                // original history, where no step left it, every one.
-                let dropped = self.hub.dropped();
                 assert!(
-                    (0..univ.next()).all(|x| accepted.contains(&x) || dropped.contains(&x)),
-                    "converged, but not every operation that survives was accepted"
-                );
-                assert!(
-                    self.contracted || (0..univ.next()).all(|x| accepted.contains(&x)),
+                    (0..univ.next()).all(|x| accepted.contains(&x)),
                     "converged, but not every operation was accepted"
                 );
                 return;
@@ -1226,15 +950,6 @@ impl World {
     pub fn measure(&mut self) -> Option<Measure> {
         let measure = self.oracle.as_mut().map(Oracle::measure);
         if let Some(measure) = &measure {
-            let record_lag = self
-                .repos
-                .iter()
-                .filter(|repo| repo.applied != self.hub.records)
-                .count() as u64;
-            assert_eq!(
-                measure.smeasure[8], record_lag,
-                "record lag differs from Lean"
-            );
             assert_eq!(
                 measure.converged,
                 self.converged(),
@@ -1252,16 +967,13 @@ impl World {
             lops: repo.lops.clone(),
             heads: repo.heads.clone(),
             known: self.known(node),
-            dropped: repo.dropped.clone(),
-            applied: repo.applied.clone(),
             crash_pending: repo.crash_before_objects,
         })
     }
 
-    /// After one of `node`'s exchanges in `quiesce`: the measure falls if the exchange
-    /// changed the node, and does not rise if it didn't. Only the record-aware measure must
-    /// fall for an exchange that changes applied records alone. The older measures apply
-    /// only before drops, and `measure` only before the hub has gone back too.
+    /// After one of `node`'s exchanges in `quiesce`: the measures fall if the exchange
+    /// changed the node, and do not rise if it didn't; `measure` only before the hub has
+    /// gone back.
     fn check_measure(
         &mut self,
         node: usize,
@@ -1278,41 +990,24 @@ impl World {
         if crashed {
             return;
         }
-        let changed = (&before.lops, &before.heads, before.known, &before.dropped)
-            != (&after.lops, &after.heads, after.known, &after.dropped);
-        let records_changed = before.applied != after.applied;
+        let changed =
+            (&before.lops, &before.heads, before.known) != (&after.lops, &after.heads, after.known);
         let fell = |old: &Vec<u64>, new: &Vec<u64>| {
             if changed { new < old } else { new <= old }
         };
         let what = if changed { "fall" } else { "stay or fall" };
         assert!(
-            self.went_back || self.dropped_any || fell(&old.measure, &new.measure),
+            self.went_back || fell(&old.measure, &new.measure),
             "node {node}'s exchange did not make the measure {what}: {:?} to {:?}\ntrace:\n{}",
             old.measure,
             new.measure,
             self.compact_trace()
         );
         assert!(
-            self.dropped_any || fell(&old.rmeasure, &new.rmeasure),
+            fell(&old.rmeasure, &new.rmeasure),
             "node {node}'s exchange did not make rmeasure {what}: {:?} to {:?}\ntrace:\n{}",
             old.rmeasure,
             new.rmeasure,
-            self.compact_trace()
-        );
-        let what = if changed || records_changed {
-            "fall"
-        } else {
-            "stay or fall"
-        };
-        assert!(
-            if changed || records_changed {
-                new.smeasure < old.smeasure
-            } else {
-                new.smeasure <= old.smeasure
-            },
-            "node {node}'s exchange did not make the record measure {what}: {:?} to {:?}\ntrace:\n{}",
-            old.smeasure,
-            new.smeasure,
             self.compact_trace()
         );
     }
@@ -1332,7 +1027,6 @@ impl World {
                 json!({
                     "lops": repo.lops, "lobj": repo.lobj, "heads": repo.heads,
                     "known": [seq, head], "sops": repo.sops.keys().collect::<Vec<_>>(), "sobj": repo.sobj,
-                    "dropped": repo.dropped, "applied": records_json(&repo.applied),
                 })
             })
             .collect();
@@ -1350,7 +1044,6 @@ impl World {
                 ("ops".to_owned(), Value::Array(ops)),
                 ("hub".to_owned(), json!({
                     "ops": self.hub.ops, "objs": self.hub.objs, "head": self.hub.head, "seq": self.hub.seq,
-                    "records": records_json(&self.hub.records), "pruned": self.hub.pruned,
                 })),
                 ("nodes".to_owned(), Value::Array(nodes)),
                 ("net".to_owned(), Value::Array(net.into_values().cloned().collect())),
@@ -1361,25 +1054,10 @@ impl World {
     }
 }
 
-/// Records as the model's JSON has them: in order, each sorted.
-fn records_json(records: &[Vec<Op>]) -> Value {
-    json!(
-        records
-            .iter()
-            .map(|record| sorted(record.iter().copied()))
-            .collect::<Vec<_>>()
-    )
-}
-
-/// The model's supersede message: the records a node had taken, and what it had dropped.
-/// A supersede message, riding on a push to `new`.
-fn sup_json(node: usize, (applied, dropped): &Sup, new: Op) -> Value {
-    json!({"msg": "supersede", "node": node, "applied": records_json(applied),
-        "dropped": sorted(dropped.iter().copied()), "new": new})
-}
-
 /// Normalizes a state for comparison: sets become sorted arrays and `net` a sorted,
-/// deduplicated list. Pairs (`known`) and node order are kept.
+/// deduplicated list. Pairs (`known`) and node order are kept. Only the fields of
+/// `Exec.lean`'s state are compared: the oracle's state also carries `SupersedeExec.lean`'s
+/// dropped sets and records, which no core step changes.
 fn canonical_state(state: &Value) -> Value {
     fn set(value: &Value) -> Value {
         let mut numbers: Vec<u64> = value
@@ -1391,6 +1069,22 @@ fn canonical_state(state: &Value) -> Value {
         numbers.sort_unstable();
         numbers.dedup();
         json!(numbers)
+    }
+    /// `value` with only `kept` of its fields, those in `sets` normalized as sets.
+    fn project(value: &Value, kept: &[&str], sets: &[&str]) -> Value {
+        Value::Object(
+            kept.iter()
+                .filter_map(|&field| {
+                    let entry = value.get(field)?;
+                    let entry = if sets.contains(&field) {
+                        set(entry)
+                    } else {
+                        entry.clone()
+                    };
+                    Some((field.to_owned(), entry))
+                })
+                .collect(),
+        )
     }
     fn with_sets(value: &Value, fields: &[&str]) -> Value {
         let mut value = value.clone();
@@ -1413,13 +1107,17 @@ fn canonical_state(state: &Value) -> Value {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|node| with_sets(node, &["lops", "lobj", "heads", "sops", "sobj", "dropped"]))
+        .map(|node| {
+            let sets = ["lops", "lobj", "heads", "sops", "sobj"];
+            let kept = ["lops", "lobj", "heads", "known", "sops", "sobj"];
+            project(node, &kept, &sets)
+        })
         .collect();
     let mut net: Vec<Value> = state["net"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|msg| with_sets(msg, &["ops", "objs", "dropped"]))
+        .map(|msg| with_sets(msg, &["ops", "objs"]))
         .collect();
     net.sort_by_cached_key(Value::to_string);
     net.dedup();
@@ -1427,7 +1125,14 @@ fn canonical_state(state: &Value) -> Value {
         [
             ("next".to_owned(), state["next"].clone()),
             ("ops".to_owned(), Value::Array(ops)),
-            ("hub".to_owned(), with_sets(&state["hub"], &["ops", "objs"])),
+            (
+                "hub".to_owned(),
+                project(
+                    &state["hub"],
+                    &["ops", "objs", "head", "seq"],
+                    &["ops", "objs"],
+                ),
+            ),
             ("nodes".to_owned(), Value::Array(nodes)),
             ("net".to_owned(), Value::Array(net)),
         ]

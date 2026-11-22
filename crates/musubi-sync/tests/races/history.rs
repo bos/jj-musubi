@@ -299,8 +299,7 @@ fn interrupted_git_export_can_leave_aliased_operation_heads() {
             .update_op_heads(&[], &original.0),
     )
     .unwrap();
-    let known = member.core.known().head.clone();
-    let heads = member.adapter.heads_for(&known).unwrap();
+    let heads = member.adapter.heads().unwrap();
     assert_eq!(heads, vec![canonical.0.clone(), canonical.0.clone()]);
     let second = member.core.step(&mut member.adapter).unwrap();
     assert!(matches!(second, Step::Merged));
@@ -322,7 +321,6 @@ fn interrupted_git_export_can_leave_aliased_operation_heads() {
 fn independent_merges_can_reuse_a_canonical_operation() {
     use crate::oracle::Oracle;
     use jj_lib::config::{ConfigLayer, ConfigSource};
-    use musubi_core::hub::HubStorage as _;
     use musubi_core::node::{LocalRepo as _, Step};
     use musubi_jj::node::NodeRepo;
     use musubi_jj::objects::Backend;
@@ -337,7 +335,6 @@ fn independent_merges_can_reuse_a_canonical_operation() {
         .map(|name| env.init_simple_repo(name))
         .collect();
     let mut hive = Hive::new(&env.root().join("hub"), Backend::Simple).unwrap();
-    hive.pruning = false;
     for repo in &repos {
         let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
         node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
@@ -364,7 +361,6 @@ fn independent_merges_can_reuse_a_canonical_operation() {
     let p = hive.hub_head();
     for n in [0, 1, 3] {
         assert_eq!(hive.members[n].adapter.heads().unwrap(), vec![p.clone()]);
-        assert!(hive.members[n].adapter.pending().unwrap().is_empty());
     }
     assert_eq!(hive.members[2].adapter.heads().unwrap(), vec![s.clone()]);
 
@@ -391,7 +387,6 @@ fn independent_merges_can_reuse_a_canonical_operation() {
             .is_ancestor_of(&CanonicalOp(q.clone()), &CanonicalOp(p.clone()))
             .unwrap()
     );
-    assert_eq!(hive.hub.records().count, 0);
 
     fn closure(
         store: &musubi_jj::canonical::CanonicalStore,
@@ -486,7 +481,7 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
         for _ in 0..32 {
             let member = &mut hive.members[n];
             match member.core.step(&mut member.adapter).unwrap() {
-                Step::Realized(_) | Step::Adopted => {}
+                Step::Realized(_) => {}
                 Step::Advanced(_) => {
                     did_advance = true;
                     break;
@@ -574,7 +569,7 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
         .unwrap()
         .into_iter()
         .collect();
-    let mut heads_before = member.adapter.heads_for(&q).unwrap();
+    let mut heads_before = member.adapter.heads().unwrap();
     heads_before.sort();
     let mut expected = vec![p, merged[0].0.clone()];
     expected.sort();
@@ -612,7 +607,7 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
         member.core.step(&mut member.adapter).unwrap(),
         Step::Merged
     ));
-    let heads_after = member.adapter.heads_for(&q).unwrap();
+    let heads_after = member.adapter.heads().unwrap();
     assert_eq!(heads_after, vec![merged[0].0.clone()]);
     let after = snapshot(member, &heads_after);
     let bodies_after: BTreeSet<_> = member
@@ -726,7 +721,6 @@ fn an_unexplained_lost_base_pauses_without_dropping() {
     hive.hive.restart(1);
     let err = hive.hive.sync(1).unwrap_err();
     assert!(history_lost(&err), "{err:#}");
-    assert_eq!(hive.hive.hub.store().record_count(), 0);
 }
 
 /// `jj op abandon` of operations the hub accepted stops that copy syncing for good, publishing
@@ -754,7 +748,6 @@ fn op_abandon_of_published_history_stops_that_copy() {
             "the stop changed alpha's history"
         );
     }
-    assert_eq!(hive.hive.hub.store().record_count(), 0);
 
     hive.commit(1, "c", "beta's");
     hive.hive.sync(1).unwrap();
@@ -857,7 +850,6 @@ fn drops_recorded_before_upgrading_stop_that_copy() {
         assert!(history_lost(&err), "{case}: {err:#}");
         assert!(path.exists(), "{case}");
         assert_eq!(hive.hive.hub_head(), head, "{case}");
-        assert_eq!(hive.hive.hub.store().record_count(), 0, "{case}");
         hive.commit(1, "c", "beta's");
         hive.hive.sync(1).unwrap();
     }
@@ -885,62 +877,6 @@ fn files_an_earlier_release_kept_for_abandons_are_removed() {
     hive.commit(0, "b", "second");
     hive.sync();
     hive.assert_converged();
-}
-
-/// The hub of an earlier release keeps announcing the records it took, which dropped operations
-/// the hive's other history still names. A copy that joins it ignores them: it syncs without
-/// stopping, and goes on syncing, rather than asking the hub for them again.
-///
-/// Compatibility until 2027-02-21: remove with the records in the protocol.
-#[test]
-fn records_an_earlier_hub_announces_are_ignored() {
-    use jj_lib::object_id::ObjectId as _;
-    use musubi_hub::store::HubStore;
-    use musubi_jj::op_id::CanonicalOp;
-    use musubi_jj::records::HubOp;
-    use std::io::Write as _;
-
-    let env = TestEnv::new();
-    let alpha = env.init_repo("alpha");
-    let beta = env.init_repo("beta");
-    let mut hive = Fixture::join(env, vec![alpha]);
-    hive.commit(0, "a", "first");
-    hive.commit(0, "b", "second");
-    hive.sync();
-    // The hub takes a record that drops the head's parent, as a 0.47 hub did for an abandon.
-    let dir = hive.env.root().join("hub");
-    let store = HubStore::open(&dir).unwrap();
-    let head = store.head().1.clone();
-    let seq = store.head().0 + 1;
-    let dropped = store
-        .canonical()
-        .parents(&CanonicalOp(head.clone()))
-        .unwrap()[0]
-        .clone();
-    let contracted = store.contract(&[HubOp(dropped)]).unwrap();
-    let image = contracted.images[&head][0].clone();
-    let mut line = format!("{seq} {}", image.hex());
-    for op in &contracted.dropped {
-        line.push(' ');
-        line.push_str(&op.hex());
-    }
-    line.push('\n');
-    drop(store);
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join("heads"))
-        .unwrap()
-        .write_all(line.as_bytes())
-        .unwrap();
-    hive.hive.restart_hub().unwrap();
-    assert_eq!(hive.hive.hub.store().record_count(), 1);
-    hive.add(beta);
-    hive.hive.sync(1).unwrap();
-    assert_eq!(hive.hive.sync(1).unwrap(), 0, "beta syncs on");
-    assert!(hive.visible(1).iter().any(|c| c.ends_with(" second")));
-    hive.commit(1, "c", "beta's");
-    hive.hive.sync(1).unwrap();
-    assert_eq!(hive.hive.sync(1).unwrap(), 0, "beta syncs on");
 }
 
 /// Abandoning only history from before a machine joined rewrites the operations since

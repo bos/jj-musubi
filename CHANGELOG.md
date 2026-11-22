@@ -22,15 +22,20 @@
 
 - musubi removes the files that earlier releases kept in a copy's `musubi` directory to pass
   `jj op abandon` on (`records.json`, `superseded`, `hub-renamings` and `originals`) the
-  first time it opens the copy, and ignores the records an older hub still announces: nothing
-  needs doing on upgrading. A copy that held drops it hadn't sent, or was
-  taking records, keeps `records.json` and stops syncing, until a release after 2027-02-21, which no longer looks for the file.
+  first time it opens the copy: nothing needs doing on upgrading. A copy that held drops it
+  hadn't sent, or was taking records, keeps `records.json` and stops syncing, until a release
+  after 2027-02-21, which no longer looks for the file.
 
 - Upgrade the hub and every machine together: machines and hubs from before and after this
   release refuse each other ([Upgrade jj-musubi](docs/guides/upgrading.md)). Run `musubi sync`
   on every machine first, so that its work reaches the hub. A copy that ran `jj op abandon`
   and hadn't passed it on before upgrading stops with "this repository lost history the hive
-  has".
+  has". A hive where an earlier release passed `jj op abandon` on is made again, empty, the
+  first time the upgraded hub opens it, and its machines fill it at their next sync, as after
+  the hub loses its state. Nothing needs doing, but a machine that was offline when an earlier
+  release passed on a `jj op abandon`, and so never took it, brings the abandoned operations
+  back. A hub from a release after 2027-02-21 still makes such a hive again, but takes it for
+  one whose files are damaged.
 
 - A workspace whose name has a `/`, such as `feat/x`, is no longer shown on other machines,
   which use names like `laptop/default` for each other's workspaces. It keeps working on its

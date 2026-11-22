@@ -456,7 +456,6 @@ pub struct World {
     /// The change of every commit seen so far, for `fingerprint`.
     change_of: BTreeMap<String, String>,
     /// Whether the hub has restarted since it last pruned, for coverage.
-    restarted_since_prune: bool,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -579,7 +578,6 @@ impl World {
             recovery_actions: 0,
             recovery_ops: BTreeSet::new(),
             change_of: BTreeMap::new(),
-            restarted_since_prune: false,
             counter: 0,
             trace: vec![],
         };

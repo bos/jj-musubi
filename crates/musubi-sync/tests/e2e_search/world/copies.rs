@@ -261,9 +261,6 @@ impl World {
                 fired("join:with_history");
             }
         }
-        if self.fx.hive.hub.store().pruned() > 0 {
-            fired("join:after_prune");
-        }
         let command = if existing { "join" } else { "clone" };
         self.record(format!(
             "{}: musubi {command} at {}",

@@ -1,15 +1,11 @@
 //! A hub and nodes in one process, delivering every message directly: the real protocol
 //! core over real repositories and hub storage, without a transport. For tests.
 
-use musubi_core::hub::HubStorage as _;
-use musubi_core::message::RecordState;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use musubi_core::hub;
 use musubi_core::hub::Handled;
-use musubi_core::hub::Notice;
+use musubi_core::message::Head;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -35,32 +31,10 @@ pub struct Member {
     pub downloaded: u64,
 }
 
-/// Independent observations at the moment a real prune takes place, before a later
-/// request can make an offline copy present again.
-pub struct PruneObservation {
-    pub records: RecordState,
-    pub present: BTreeSet<String>,
-    pub known: BTreeSet<String>,
-    pub reported: BTreeMap<String, RecordState>,
-}
-
 pub struct Hive {
     pub hub: HubAdapter,
     pub members: Vec<Member>,
     hub_dir: std::path::PathBuf,
-    /// Whether the hub prunes its records after each request, once every member that is a
-    /// copy the hive hasn't forgotten has taken them, as a hub does. On unless a test turns
-    /// it off.
-    pub pruning: bool,
-    pub prunes: Vec<PruneObservation>,
-    /// The `heads` log as it was before the hub's latest prune wrote it again, until the hub
-    /// restarts or accepts another head: what a power cut just after that write leaves
-    /// (`Self::hub_loses_prune`).
-    before_prune: Option<Vec<u8>>,
-    /// The hub's sequence number when it last wrote its `heads` log whole, pruning: a power cut
-    /// loses lines appended since, or the whole write (`Self::hub_loses_prune`), never part of
-    /// it.
-    pruned_at: Option<u64>,
 }
 
 impl Hive {
@@ -69,10 +43,6 @@ impl Hive {
             hub: HubAdapter::init(hub_dir, backend)?,
             members: vec![],
             hub_dir: hub_dir.to_owned(),
-            pruning: true,
-            prunes: vec![],
-            before_prune: None,
-            pruned_at: None,
         })
     }
 
@@ -83,54 +53,23 @@ impl Hive {
             hub: HubAdapter::open(hub_dir)?,
             members: vec![],
             hub_dir: hub_dir.to_owned(),
-            pruning: true,
-            prunes: vec![],
-            before_prune: None,
-            pruned_at: None,
         })
-    }
-
-    /// The oldest head a power cut can send the hub back to: the one it wrote its log whole
-    /// at, as after its latest prune, or its first.
-    pub fn oldest_head(&self) -> u64 {
-        self.pruned_at.unwrap_or(0)
     }
 
     /// Restarts the hub from its directory, as after a crash.
     pub fn restart_hub(&mut self) -> anyhow::Result<()> {
-        self.before_prune = None;
         self.hub = HubAdapter::open(&self.hub_dir)?;
         Ok(())
     }
 
-    /// Whether the hub has pruned its records since it last restarted.
-    pub fn pruned_since_restart(&self) -> bool {
-        self.before_prune.is_some()
-    }
-
-    /// Restarts the hub with the `heads` log it had before its latest prune wrote it again,
-    /// as a power cut that loses that write, and everything written after it, leaves it.
-    /// Returns false, changing nothing, if the hub hasn't pruned since it last restarted.
-    pub fn hub_loses_prune(&mut self) -> anyhow::Result<bool> {
-        let Some(before) = self.before_prune.take() else {
-            return Ok(false);
-        };
-        std::fs::write(self.hub_dir.join("heads"), before)?;
-        self.pruned_at = None;
-        self.restart_hub()?;
-        Ok(true)
-    }
-
-    /// Restarts the hub having lost every head it accepted after the `seq`th, and the records
-    /// with them, as a power cut can make it. A hub that has pruned its records keeps the
-    /// line saying so, which comes first.
+    /// Restarts the hub having lost every head it accepted after the `seq`th, as a power cut
+    /// can make it.
     pub fn hub_goes_back(&mut self, seq: u64) -> anyhow::Result<()> {
         let path = self.hub_dir.join("heads");
         let text = std::fs::read_to_string(&path)?;
-        let pruned = usize::from(text.starts_with("pruned "));
         let kept: String = text
             .split_inclusive('\n')
-            .take(usize::try_from(seq)? + 1 + pruned)
+            .take(usize::try_from(seq)? + 1)
             .collect();
         std::fs::write(&path, kept)?;
         self.restart_hub()
@@ -138,8 +77,6 @@ impl Hive {
 
     /// Makes the hive again, empty, as a hub does whose store is corrupt.
     pub fn remake_hub(&mut self) -> anyhow::Result<()> {
-        self.before_prune = None;
-        self.pruned_at = None;
         let backend = self.hub.store().backend();
         std::fs::remove_dir_all(&self.hub_dir)?;
         self.hub = HubAdapter::init(&self.hub_dir, backend)?;
@@ -192,19 +129,18 @@ impl Hive {
             Reply::Objects { attachment, .. } => {
                 self.members[node].downloaded += attachment_size(attachment)?;
             }
-            Reply::Head { .. } | Reply::Refused { .. } => {}
+            Reply::Head { .. } => {}
         }
         let member = &mut self.members[node];
         member
             .core
             .handle_reply(&mut member.adapter, through(&request, handled.reply))?;
-        if let Some(Notice { seq, head, records }) = handled.publish {
+        if let Some(Head { seq, head }) = handled.publish {
             for member in &mut self.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,
                     seq,
                     head: head.clone(),
-                    records: records.clone(),
                 };
                 member.core.handle(&mut member.adapter, notify)?;
             }
@@ -212,49 +148,12 @@ impl Hive {
         Ok(())
     }
 
-    /// Has the hub handle `request`, then prune its records if it can, as it does after every
-    /// request, unless pruning is off.
+    /// Has the hub handle `request`.
     pub fn handle(
         &mut self,
         request: Request<OpId, Attachment>,
     ) -> anyhow::Result<Handled<OpId, Attachment>> {
-        let handled = hub::handle(&mut self.hub, request)?;
-        // The prune's write is on disk by the time the hub writes another head after it.
-        if handled.publish.is_some() {
-            self.before_prune = None;
-        }
-        if self.pruning {
-            let path = self.hub_dir.join("heads");
-            // Read only while there is something to prune.
-            let before = if self.hub.store().records().is_empty() {
-                None
-            } else {
-                Some(std::fs::read(&path)?)
-            };
-            let presence = before
-                .as_ref()
-                .map(|_| self.hub.store().presence())
-                .transpose()?;
-            if self.hub.prune()?.is_some() {
-                let presence = presence.expect("records existed before the prune");
-                self.prunes.push(PruneObservation {
-                    records: self.hub.pruned(),
-                    present: presence.copies().map(str::to_owned).collect(),
-                    known: presence.known().clone(),
-                    reported: self
-                        .members
-                        .iter()
-                        .filter_map(|member| {
-                            let key = member.adapter.repo().machine().key();
-                            Some((key.to_owned(), self.hub.reported(key)?))
-                        })
-                        .collect(),
-                });
-                self.before_prune = before;
-                self.pruned_at = Some(self.hub.store().head().0);
-            }
-        }
-        Ok(handled)
+        hub::handle(&mut self.hub, request)
     }
 
     /// Polls the hub, then runs the node's policy until it has nothing left to do. Returns
@@ -323,8 +222,7 @@ impl Hive {
                     self.request(node, request, through)?;
                 }
             }
-            Step::Superseded { push, .. } => self.request(node, push, through)?,
-            Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
+            Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
         }
         Ok(true)
     }

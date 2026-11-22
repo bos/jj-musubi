@@ -130,13 +130,7 @@ impl HistoryTest {
         index
     }
 
-    /// `override_parents` supplies the historical parents used while recognizing an abandon.
-    /// The oracle gets that logical DAG; the Rust walk gets the actual parent callback.
-    fn check(
-        &mut self,
-        head: usize,
-        override_parents: Option<(usize, Vec<usize>)>,
-    ) -> Option<RefTarget> {
+    fn check(&mut self, head: usize) -> Option<RefTarget> {
         let mut commits: Vec<_> = self
             .entries
             .iter()
@@ -164,16 +158,12 @@ impl HistoryTest {
         let nodes: Vec<_> = self
             .entries
             .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let parents = override_parents
-                    .as_ref()
-                    .filter(|(at, _)| *at == i)
-                    .map_or(&entry.parents, |(_, parents)| parents);
+            .map(|entry| {
                 json!({
                     "target": id(&entry.target), "known": checkpoint(&entry.known),
                     "recorded": checkpoint(&entry.recorded),
-                    "boundary": entry.join || parents.as_slice() == [0], "parents": parents,
+                    "boundary": entry.join || entry.parents.as_slice() == [0],
+                    "parents": entry.parents,
                 })
             })
             .collect();
@@ -223,17 +213,10 @@ impl HistoryTest {
                     .map(|e| ((LocalOp(entry.op.id().clone()), REF.into()), e.clone()))
             })
             .collect();
-        let parents = |op: &Operation| -> Result<Option<Vec<Operation>>, NodeError> {
-            Ok(override_parents
-                .as_ref()
-                .filter(|(at, _)| op.id() == self.entries[*at].op.id())
-                .map(|(_, ps)| ps.iter().map(|&p| self.entries[p].op.clone()).collect()))
-        };
         let history = History {
             known: &known,
             roots: std::slice::from_ref(self.repo.op_store().root_operation_id()),
             is_join: &|op| self.entries.iter().any(|e| e.join && e.op.id() == op.id()),
-            parents: &parents,
         };
         let actual = expected(
             self.repo.store(),
@@ -270,37 +253,37 @@ fn expected_history_conforms_to_model() {
     let rc = h.add(&at(&c), &[0], false, None, None);
     let merge = h.add(&conflict, &[ra, rb], false, None, None);
     let tied = at(std::cmp::max(&a, &b));
-    assert_eq!(h.check(merge, None), Some(tied.clone()));
+    assert_eq!(h.check(merge), Some(tied.clone()));
     let restore_a = h.add(&conflict, &[ra], false, None, None);
     let restore_b = h.add(&conflict, &[rb], false, None, None);
-    assert_eq!(h.check(restore_a, None), Some(at(&a)));
-    assert_eq!(h.check(restore_b, None), Some(at(&b)));
+    assert_eq!(h.check(restore_a), Some(at(&a)));
+    assert_eq!(h.check(restore_b), Some(at(&b)));
     for (parents, value) in [
         ([restore_a, restore_b], at(&a)),
         ([restore_b, restore_a], at(&b)),
     ] {
         let first = h.add(&conflict, &parents, false, None, None);
-        assert_eq!(h.check(first, None), Some(value));
+        assert_eq!(h.check(first), Some(value));
     }
     // Single-parent target changes continue through conflicts, not just unchanged targets.
     let changed = h.add(&three, &[restore_a], false, None, None);
-    assert_eq!(h.check(changed, None), Some(at(&a)));
+    assert_eq!(h.check(changed), Some(at(&a)));
     // Join points and realized joins (whose sole parent is the root) cut private history.
     let private_parent = if a < b { restore_a } else { restore_b };
     let join = h.add(&conflict, &[private_parent], true, None, None);
     let realized_join = h.add(&conflict, &[0], false, None, None);
-    assert_eq!(h.check(join, None), Some(tied.clone()));
+    assert_eq!(h.check(join), Some(tied.clone()));
     let inherited_join = h.add(&conflict, &[join], false, None, None);
-    assert_eq!(h.check(inherited_join, None), Some(tied.clone()));
-    assert_eq!(h.check(realized_join, None), Some(tied.clone()));
+    assert_eq!(h.check(inherited_join), Some(tied.clone()));
+    assert_eq!(h.check(realized_join), Some(tied.clone()));
     let absent = h.add(&RefTarget::absent(), &[0], false, None, None);
     let restored_absent = h.add(&conflict, &[absent], false, None, None);
-    assert_eq!(h.check(restored_absent, None), Some(RefTarget::absent()));
+    assert_eq!(h.check(restored_absent), Some(RefTarget::absent()));
     for value in [Some(at(&a)), Some(RefTarget::absent()), None] {
         let checkpoint = h.add(&conflict, &[0], false, None, Some(value.clone()));
-        assert_eq!(h.check(checkpoint, None), value);
+        assert_eq!(h.check(checkpoint), value);
         let child = h.add(&conflict, &[checkpoint], false, None, None);
-        assert_eq!(h.check(child, None), value);
+        assert_eq!(h.check(child), value);
     }
     for value in [Some(at(&a)), Some(RefTarget::absent()), None] {
         let cached = h.add(
@@ -310,43 +293,32 @@ fn expected_history_conforms_to_model() {
             Some(value.clone()),
             Some(Some(at(&b))),
         );
-        assert_eq!(h.check(cached, None), value);
+        assert_eq!(h.check(cached), value);
         let child = h.add(&conflict, &[cached], false, None, None);
-        assert_eq!(h.check(child, None), value);
+        assert_eq!(h.check(child), value);
     }
     // An unchanged third parent must be considered, too.
     let inherited_third = h.add(&conflict, &[ra, rb, restore_a], false, None, None);
-    assert_eq!(h.check(inherited_third, None), Some(at(&a)));
-    // Recognition walks logical pre-contraction parents rather than jj's rewritten root.
-    let contracted = h.add(&conflict, &[0], false, None, None);
-    assert_eq!(
-        h.check(contracted, Some((contracted, vec![restored_absent]))),
-        Some(RefTarget::absent())
-    );
-    let child = h.add(&conflict, &[contracted], false, None, None);
-    assert_eq!(
-        h.check(child, Some((contracted, vec![restored_absent]))),
-        Some(RefTarget::absent())
-    );
+    assert_eq!(h.check(inherited_third), Some(at(&a)));
     assert!(
         &c < std::cmp::max(&a, &b),
         "fixture must oppose timestamp and commit-id order"
     );
     let multihead = h.add(&three, &[ra, rb, rc], false, None, None);
-    assert_eq!(h.check(multihead, None), Some(at(&c)));
+    assert_eq!(h.check(multihead), Some(at(&c)));
     // Two merges of the same concurrent fetches, then a merge with two merge bases.
     let other_merge = h.add(&conflict, &[rb, ra], false, None, None);
     let criss_cross = h.add(&conflict, &[merge, other_merge], false, None, None);
-    assert_eq!(h.check(criss_cross, None), h.check(merge, None));
+    assert_eq!(h.check(criss_cross), h.check(merge));
     // A correct memoized result is transparent, including when reached through a child.
-    let cold = h.check(criss_cross, None);
-    h.entries[merge].known = Some(h.check(merge, None));
-    assert_eq!(h.check(criss_cross, None), cold);
+    let cold = h.check(criss_cross);
+    h.entries[merge].known = Some(h.check(merge));
+    assert_eq!(h.check(criss_cross), cold);
     h.entries[merge].known = None;
     let removed_newest = RefTarget::from_removes_adds([Some(removed)], [Some(a), Some(c.clone())]);
     let removal = h.add(&removed_newest, &[ra, rc], false, None, None);
-    assert_eq!(h.check(removal, None), Some(at(&c)));
+    assert_eq!(h.check(removal), Some(at(&c)));
     let no_sides = RefTarget::from_removes_adds([Some(b)], [None, None]);
     let no_side = h.add(&no_sides, &[ra, rb], false, None, None);
-    assert_eq!(h.check(no_side, None), None);
+    assert_eq!(h.check(no_side), None);
 }

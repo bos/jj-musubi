@@ -2219,27 +2219,12 @@ fn hex(bytes: &[u8]) -> String {
     }
 }
 
-/// `text` with each record digest, 32 or 64 numbers, elided, and then cut to a few hundred
-/// characters, for a note.
+/// `text` cut to a few hundred characters, for a note.
 pub(crate) fn brief(text: &str) -> String {
     const LIMIT: usize = 600;
-    const DIGEST: &str = "digest: [";
-    let mut compact = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(DIGEST) {
-        let (head, tail) = rest.split_at(start + DIGEST.len());
-        compact.push_str(head);
-        let Some(end) = tail.find(']') else {
-            rest = tail;
-            break;
-        };
-        compact.push_str("..");
-        rest = &tail[end..];
-    }
-    compact.push_str(rest);
-    match compact.char_indices().nth(LIMIT) {
-        Some((end, _)) => format!("{}...", &compact[..end]),
-        None => compact,
+    match text.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text.to_owned(),
     }
 }
 

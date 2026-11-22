@@ -969,8 +969,7 @@ lexicographically greatest commit id. A removal is never a candidate. No present
 no expectation, not an expectation that the ref is absent. Parent order is significant: two
 restores can have identical conflicted targets but different expectations.
 
-The walk reads direct parents, not merge bases. `History.parents` can supply the parents the
-walk takes where they aren't the operation store's; otherwise it reads the operation store.
+The walk reads direct parents, not merge bases, from the operation store.
 `musubi.expected` records a value on an operation; the checkpoint that cleanup after
 `musubi sync --prune` writes carries one, so a later walk can stop there. The computation
 preserves what those checkpoints say; proving that their producer captured the right value, and

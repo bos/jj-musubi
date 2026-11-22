@@ -238,7 +238,6 @@ impl Colocation {
             known: &known,
             roots: std::slice::from_ref(loader.op_store().root_operation_id()),
             is_join,
-            parents: &|_| Ok(None),
         };
         let (expected, unwritten) =
             export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history, beside)?;
@@ -512,21 +511,13 @@ fn recorded_in(text: &str, name: &GitRefNameBuf) -> Option<Option<RefTarget>> {
 /// What [`expected`] knows of history beyond the op store.
 pub(super) struct History<'a> {
     /// Expected values already worked out: as the last export remembers them, and as a
-    /// cleanup checkpoint not yet written will record them. By local operation: a walk that
-    /// `parents` takes into the canonical store has none.
+    /// cleanup checkpoint not yet written will record them. By local operation.
     pub known: &'a Expected,
-    /// The root operations: the op store's, and the canonical store's where the walk goes
-    /// there.
+    /// The root operations, where the walk ends: the op store's.
     pub roots: &'a [OperationId],
-    /// Whether an operation is a join point: a local one, as a canonical one the walk reaches
-    /// never is (its join operation is on a root).
+    /// Whether an operation is a join point: a local one.
     pub is_join: &'a dyn Fn(&Operation) -> bool,
-    /// An operation's parents as the walk takes them, where they aren't the op store's.
-    pub parents: &'a Parents<'a>,
 }
-
-/// An operation's parents as [`expected`]'s walk takes them, or none for the op store's.
-pub(super) type Parents<'a> = dyn Fn(&Operation) -> Result<Option<Vec<Operation>>, NodeError> + 'a;
 
 /// The value every machine's `.git` should hold for the conflicted remote bookmark `symbol`,
 /// whose git ref is `name` and whose target at `op` is `target`, so that every machine's import
@@ -552,18 +543,13 @@ fn expected(
     let mut op = op.clone();
     let mut target = target.clone();
     loop {
-        // Taken for a local operation, which every one here is unless `parents` led the walk
-        // into the canonical store, where `known` is empty.
         if let Some(known) = history.known.get(&(LocalOp(op.id().clone()), name.clone())) {
             return Ok(known.clone());
         }
         if let Some(recorded) = recorded(&op, name) {
             return Ok(recorded);
         }
-        let mut parents = match (history.parents)(&op)? {
-            Some(parents) => parents,
-            None => op.parents().block_on()?,
-        };
+        let mut parents = op.parents().block_on()?;
         let joined = (history.is_join)(&op)
             || matches!(parents.as_slice(), [parent] if history.roots.contains(parent.id()));
         if joined {

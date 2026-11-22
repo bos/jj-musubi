@@ -179,24 +179,6 @@ impl Hive {
         anyhow::bail!("node {node} did not settle")
     }
 
-    /// Polls the hub and runs at most `steps` of the node's policy steps, as a sync cut short
-    /// does, with each reply passed through `through`, as in [`Self::sync_through`]. Returns
-    /// how many it took.
-    pub fn sync_steps(
-        &mut self,
-        node: usize,
-        steps: usize,
-        through: &mut Through<'_>,
-    ) -> anyhow::Result<usize> {
-        self.begin_sync(node, through)?;
-        for taken in 0..steps {
-            if !self.step_through(node, through)? {
-                return Ok(taken);
-            }
-        }
-        Ok(steps)
-    }
-
     /// Polls the hub, as a sync starts by doing, and takes in what it sends, staging the
     /// operations and objects it fetches, without realizing them.
     pub fn fetch(&mut self, node: usize) -> anyhow::Result<()> {

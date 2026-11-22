@@ -67,8 +67,25 @@ fault-injection tests check the parts that make it hold, such as retries after a
 The models extend beyond the main sync loop. Separate models cover Git-ref import and export,
 which machines still belong to a shared repo, distinguishing a joined repo from a duplicate of
 its directory, workspace names, chunked transfers, how musubi moves jj's operation heads, and
-the limits, approval and cleanup of accidental snapshots. These models have different scopes;
-they are not all one combined proof.
+the limits, approval and cleanup of accidental snapshots.
+
+A further model covers how incoming work is written into your repo while your jj commands run
+and the daemon may crash at any step. It models jj's operation log and its merging, with tests
+checking the merge rules against real jj. It assumes the daemon adds a new operation head before
+it removes old ones, removes only those the new one descends from, under jj's lock and once it
+has checked they haven't changed, and writes nothing but incoming work and the merges jj would
+write itself. Within it, the proofs show that no operation your jj commands record leaves the
+operation log, unless you abandon it with `jj op abandon`, which the model leaves out; that once
+incoming work is in, you see what jj shows when it merges your work with the incoming work; that
+a crash leaves the repo as an uninterrupted sync would, apart from extra operation heads that jj
+drops the next time any jj command runs; and that once you stop running commands, nothing in the
+repo can stop syncing from finishing with the incoming work in. Tests with real jj check where
+the daemon's code ends up, not its individual steps. How each incoming change becomes an
+operation in your repo, including what it records of each workspace, is checked by tests, not
+proofs. Where your own commands moved a workspace two ways at once, jj can keep the other move
+once incoming work arrives.
+
+These models have different scopes; they are not all one combined proof.
 
 The proofs have no unfinished Lean placeholders and introduce no additional axioms. The
 [formal guide](../formal/README.md) lists the theorems and their assumptions. The remaining

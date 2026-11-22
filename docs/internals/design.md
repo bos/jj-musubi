@@ -931,6 +931,11 @@ These are not lost history:
   while its parents still reach every parent of its canonical operation, and `reparent_late`
   puts it back on them. `musubi sync --prune` removes unsent operations on purpose
   ([Snapshot publication budgets](#snapshot-publication-budgets)).
+- **A rewrite of an operation this machine wrote, by itself.** musubi marks its rewrite of such
+  an operation with its canonical form, as it marks a realization, but without the original
+  parents every canonical operation records. Abandoning work below one translates it afresh, as
+  an unmarked operation would be, and the fetch base and the accepted push say whether the hub
+  had what went (`abandoning_own_work_below_a_rewritten_merge_keeps_syncing`).
 - **`jj undo`, `jj redo` and `jj op restore`.** They add operations and lose none.
 
 `op_abandon_of_published_history_stops_that_copy` pins the stop: the copy publishes nothing,

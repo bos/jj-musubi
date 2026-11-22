@@ -19,7 +19,6 @@ use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
 use crate::canonical::Work;
-use crate::canonical::namespace::Namespace;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_ATTRIBUTE;
@@ -244,13 +243,10 @@ impl NodeRepo {
 
     /// This machine's of `workspaces`, a local view's, whose canonical form is `canonical`:
     /// every one but those the canonical view gives other machines, and other machines' under
-    /// names the hive no longer gives them, as `jj undo` or a trim brings back
-    /// (`names_other_machine`), judged with the machines the canonical operation's namespace
-    /// context knows too, unless this machine records the name as its own here
-    /// (`private_workspace_names`) or has a working copy for it (`has_working_copy_here`). Where a trim left its history the root alone, the
-    /// canonical view has no other machine's workspaces to go by, and the context stands for
-    /// the views the operation started from. Those with a `/` in their names are this
-    /// machine's to keep but not to publish (`view::is_publishable`).
+    /// names the hive no longer gives them, as `jj undo` brings back (`names_other_machine`),
+    /// unless this machine records the name as its own here (`private_workspace_names`) or has
+    /// a working copy for it (`has_working_copy_here`). Those with a `/` in their names are
+    /// this machine's to keep but not to publish (`view::is_publishable`).
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
@@ -269,25 +265,13 @@ impl NodeRepo {
         let canonical_view = self.canonical.read_view(&canonical_op.view_id)?;
         let prefixes =
             self.prefixes_with_own(&canonical_view, &*self.presence(canonical)?, &private)?;
-        let mut others: BTreeSet<_> = self
+        let others: BTreeSet<_> = self
             .names_of(&canonical_view, &prefixes)
             .into_iter()
             .filter(|(key, _)| !self.is_own_key(key))
             .map(|(_, name)| name)
             .collect();
-        let mut machines = self.known_machines(canonical)?;
-        if let Some(context) = Namespace::read(&canonical_op.metadata)?
-            .filter(|context| context.source == self.machine.key())
-        {
-            machines.extend(context.known);
-            others.extend(
-                context
-                    .names
-                    .into_iter()
-                    .filter(|(_, key)| !self.is_own_key(&WorkspaceNameBuf::from(key.clone())))
-                    .map(|(name, _)| WorkspaceNameBuf::from(name)),
-            );
-        }
+        let machines = self.known_machines(canonical)?;
         Ok(workspaces
             .into_iter()
             .filter(|(name, _)| {
@@ -339,7 +323,7 @@ impl NodeRepo {
         here
     }
 
-    /// This exact native head set's owned bindings, qualified before their aliases are read.
+    /// This machine's own workspaces in `heads`, merged as jj merges them.
     pub(super) fn own_at_heads(
         &mut self,
         heads: &[LocalOp],
@@ -358,18 +342,17 @@ impl NodeRepo {
         self.merged_local_workspaces(&native)
     }
 
-    /// Merges this copy's bindings over the actual native heads and native merge bases.
-    /// Canonical operations can omit them while the copy is forgotten.
-    pub(super) fn merged_local_workspaces(
+    /// This machine's own workspaces in `ops`, merged over them and their merge bases as jj
+    /// merges views.
+    fn merged_local_workspaces(
         &self,
         ops: &[jj_lib::operation::Operation],
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         let of = |op: &jj_lib::operation::Operation| {
-            let local = LocalOp(op.id().clone());
-            // A prejoin branch has no shared namespace: as at the join boundary,
-            // its native slots belong to this copy. It must not block taking a trim.
+            // One from before the join has no canonical form: all of its workspaces are this
+            // machine's, as at the root.
             let canonical = self
-                .canonical_of(&local)
+                .canonical_of(&LocalOp(op.id().clone()))
                 .unwrap_or_else(|| self.canonical.root_operation_id().clone());
             let view = op.view().block_on()?;
             self.own_of_view(

@@ -582,7 +582,7 @@ impl CanonicalStore {
         })?;
         origin::identity(&op)?;
         presence::check_stamp(&op).map_err(|_| CanonicalError::MalformedOperation(id.hex()))?;
-        namespace::Namespace::read(&op.metadata)?;
+        namespace::Namespace::check(&op.metadata)?;
         crate::node::retained_publication_intent(&op)
             .map_err(|_| CanonicalError::MalformedOperation(id.hex()))?;
         Ok(op.parents)

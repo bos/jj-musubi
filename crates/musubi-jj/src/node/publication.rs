@@ -70,34 +70,7 @@ struct Checkpoint {
 }
 
 impl NodeRepo {
-    /// Namespace and ownership declarations of publication checkpoints.
-    pub(in crate::node) fn publication_namespace_facts(
-        &self,
-        head: &CanonicalOp,
-    ) -> Result<BTreeMap<String, String>, NodeError> {
-        let view = self.canonical.read_operation_view(head)?;
-        let presence = self.presence(head)?;
-        let namespace = self.workspace_context_of_view(&view, &presence)?;
-        let own = crate::canonical::namespace::Namespace {
-            source: self.machine.key().to_owned(),
-            known: BTreeSet::from([self.machine.key().to_owned()]),
-            names: view
-                .wc_commit_ids
-                .keys()
-                .filter_map(|key| {
-                    let (owner, name) = crate::workspaces::split_key(key.as_str())?;
-                    (owner == self.machine.key())
-                        .then(|| (name.to_owned(), key.as_str().to_owned()))
-                })
-                .collect(),
-        };
-        Ok(BTreeMap::from([
-            (crate::canonical::namespace::ATTRIBUTE.to_owned(), namespace),
-            (super::view::LOCAL_WORKSPACES.to_owned(), own.encode()),
-        ]))
-    }
-
-    /// A cleanup is new local activity, retaining Git expectations, namespace and this
+    /// A cleanup is new local activity, retaining Git expectations and this
     /// copy's lease. Other copies' complete causal presence is checked before publication;
     /// recreating their work under new identities would change later concurrent merges.
     pub(in crate::node) fn publication_state_attributes(
@@ -118,7 +91,7 @@ impl NodeRepo {
             &history,
         )?);
         let presence = self.presence(head)?;
-        let mut attrs = self.publication_namespace_facts(head)?;
+        let mut attrs = BTreeMap::new();
         // Cleanup is genuine activity by this copy. It must not invent new activity by
         // other copies: their causal work/forget identities are checked before publishing.
         attrs.insert(WORK_ATTRIBUTE.to_owned(), self.machine.key().to_owned());

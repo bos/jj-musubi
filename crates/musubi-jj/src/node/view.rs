@@ -31,7 +31,9 @@ use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
 
-/// Names retained only in this copy after their shared history was trimmed away.
+/// The names a realization records as this machine's own where its canonical view doesn't
+/// give them to it, as those with a `/` (`record_private_workspaces`), for
+/// `private_workspace_names` to find. Local to this copy: canonicalizing drops it.
 pub(crate) const LOCAL_WORKSPACES: &str = "musubi.local-workspaces";
 
 /// The names a realization showed other machines' workspaces clear of beyond its canonical
@@ -223,26 +225,6 @@ impl<'a> ParentsBefore<'a> {
     }
 }
 
-/// Existing fix-up WORK transitions restore each copy's bindings too, where the entire
-/// accepted base left no view from which to inherit them: `copy`'s workspaces among `others`,
-/// at their commits in `local`, where `workspaces_by_key` has none.
-fn restore_fixup_bindings(
-    copy: &str,
-    others: &BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
-    local: &BTreeMap<WorkspaceNameBuf, CommitId>,
-    workspaces_by_key: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
-) {
-    for (name, key) in others {
-        if workspaces::split_key(key.as_str()).is_some_and(|(owner, _)| owner == copy)
-            && let Some(commit) = local.get(name)
-        {
-            workspaces_by_key
-                .entry(key.clone())
-                .or_insert_with(|| commit.clone());
-        }
-    }
-}
-
 /// The workspaces of `workspaces_by_key` that this operation didn't move, `moved_here`.
 /// Another machine's workspace forgotten here can't be moved by jj; follow the rewrites this
 /// operation records instead.
@@ -281,7 +263,6 @@ impl NodeRepo {
         canonical_parents: &[CanonicalOp],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
         kind: &Kind,
-        metadata: &jj_lib::op_store::OperationMetadata,
     ) -> Result<(View, Presence<Work>), NodeError> {
         let parent_presences = canonical_parents
             .iter()
@@ -319,25 +300,12 @@ impl NodeRepo {
         let names_here: Arc<BTreeSet<WorkspaceNameBuf>> =
             Arc::new(view.wc_commit_ids.keys().cloned().collect());
         let local_parents = self.read_local_parents(&raw, last)?;
-        let mut inherited =
+        let inherited =
             self.inherited_from_parents(&parent_presences, &private, &local_parents.reserved_at)?;
-        self.apply_namespace_context(
-            &mut inherited,
-            local_op,
-            canonical_parents,
-            metadata,
-            &private,
-        )?;
 
         let mut workspaces_by_key = self.present_workspaces(&parent_presences, &present)?;
         workspaces_by_key.retain(|key, _| !self.is_own_key(key));
         let mut local = std::mem::take(&mut view.wc_commit_ids);
-        if OpAttrs(&metadata.attributes).is_fixup()
-            && let Some(copy) = &kind.work
-            && present(copy)
-        {
-            restore_fixup_bindings(copy, &inherited.others, &local, &mut workspaces_by_key);
-        }
         let moved_here = self.move_others_here(
             &raw,
             &local_parents,
@@ -445,46 +413,6 @@ impl NodeRepo {
         Ok(inherited)
     }
 
-    /// Adds to `inherited` the names the namespace `metadata` records gives other machines'
-    /// workspaces, where this machine recorded it: which of their workspaces the operation's
-    /// names stand for, as the views it started from named them. On the root, as after a full
-    /// trim, or in a fix-up, whose accepted base can leave no view to go by, all of them
-    /// (`restore_fixup_bindings`); otherwise those its local parents' views have.
-    fn apply_namespace_context(
-        &self,
-        inherited: &mut Inherited,
-        local_op: &LocalOp,
-        canonical_parents: &[CanonicalOp],
-        metadata: &jj_lib::op_store::OperationMetadata,
-        private: &BTreeSet<WorkspaceNameBuf>,
-    ) -> Result<(), NodeError> {
-        let Some(context) =
-            Namespace::read(metadata)?.filter(|context| context.source == self.machine.key())
-        else {
-            return Ok(());
-        };
-        let parent_names = if canonical_parents == [self.canonical.root_operation_id().clone()]
-            || OpAttrs(&metadata.attributes).is_fixup()
-        {
-            None
-        } else {
-            Some(self.parents_names_and_heads(local_op)?.0)
-        };
-        for (name, key) in context.names {
-            let key = WorkspaceNameBuf::from(key);
-            let name = WorkspaceNameBuf::from(name);
-            if !self.is_own_key(&key)
-                && !private.contains(&name)
-                && parent_names
-                    .as_ref()
-                    .is_none_or(|names| names.contains(&name))
-            {
-                inherited.others.entry(name).or_insert(key);
-            }
-        }
-        Ok(())
-    }
-
     /// Moves other machines' workspaces that this operation moved from `local` to
     /// `workspaces_by_key`, returning their keys. A `jj` command here that adds a name none
     /// of the views it started from has, as after forgetting another machine's workspace here
@@ -587,34 +515,6 @@ impl NodeRepo {
             }
         }
         Ok(())
-    }
-
-    // Unused since musubi stopped passing on `jj op abandon`; goes with the rest of that code.
-    #[allow(dead_code)]
-    pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {
-        let view = self.canonical.read_operation_view(at)?;
-        let presence = self.presence(at)?;
-        self.workspace_context_of_view(&view, &presence)
-    }
-
-    pub(super) fn workspace_context_of_view(
-        &self,
-        view: &View,
-        presence: &Presence<Work>,
-    ) -> Result<String, NodeError> {
-        let prefixes = self.prefixes_with_own(view, presence, &BTreeSet::new())?;
-        let mut known = self.machines_of(view, presence.known());
-        known.insert(self.machine.key().to_owned());
-        Ok(Namespace {
-            source: self.machine.key().to_owned(),
-            names: self
-                .names_of(view, &prefixes)
-                .into_iter()
-                .map(|(key, name)| (name.as_str().to_owned(), key.as_str().to_owned()))
-                .collect(),
-            known,
-        }
-        .encode())
     }
 
     pub(super) fn private_workspace_names(
@@ -939,10 +839,10 @@ impl NodeRepo {
     /// Whether `name`, a workspace in this machine's view, is one this machine shows, or
     /// once showed, another machine's under: `<prefix>/<workspace>`, with a prefix one of
     /// `machines` other than this one can be shown under (`workspaces::could_be_shown_as`).
-    /// `jj undo`, `jj op restore` and trims bring back older views, with names the hive no
-    /// longer gives: a forgotten machine's, or one shown by another name since a machine of
-    /// the same name joined. Such a name is this machine's to keep only if it records it as
-    /// its own (`own_of_view`). Depends only on its arguments.
+    /// `jj undo` and `jj op restore` bring back older views, with names the hive no longer
+    /// gives: a forgotten machine's, or one shown by another name since a machine of the same
+    /// name joined. Such a name is this machine's to keep only if it records it as its own or
+    /// has a working copy for it (`own_of_view`). Depends only on its arguments.
     pub(super) fn names_other_machine(
         &self,
         name: &WorkspaceName,
@@ -1007,16 +907,7 @@ impl NodeRepo {
         &self,
         parents: &[CanonicalOp],
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        self.merge_workspace_values(parents, &|op| self.workspaces_of(op))
-    }
-
-    /// jj's workspace merge over supplied bindings, also used for the namespace evidence
-    /// a full trim detached from its accepted parents.
-    pub(super) fn merge_workspace_values(
-        &self,
-        parents: &[CanonicalOp],
-        of: &impl Fn(&CanonicalOp) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError>,
-    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+        let of = |op: &CanonicalOp| self.workspaces_of(op);
         let Some((first, rest)) = parents.split_first() else {
             return Ok(BTreeMap::new());
         };
@@ -1024,7 +915,7 @@ impl NodeRepo {
         let mut merged_parents = vec![first.clone()];
         for other in rest {
             let base = self.base_of(&merged_parents, other, of, |ops| {
-                self.merge_workspace_values(ops, of)
+                self.merged_workspaces(ops)
             })?;
             let theirs = of(other)?;
             let keys: BTreeSet<WorkspaceNameBuf> = merged

@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 
-use crate::canonical::namespace;
 use crate::canonical::origin;
 use crate::node::CANONICAL_ATTRIBUTE;
 use crate::node::CHECKPOINT_ATTRIBUTE;
@@ -47,11 +46,6 @@ impl<M: Borrow<BTreeMap<String, String>>> OpAttrs<M> {
     /// Whether this declares the commits it retains on purpose.
     pub fn has_intent(&self) -> bool {
         self.has(INTENT_ATTRIBUTE)
-    }
-
-    /// Whether this carries the workspace names it was made among.
-    pub fn has_namespace(&self) -> bool {
-        self.has(namespace::ATTRIBUTE)
     }
 }
 
@@ -122,14 +116,6 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
         let text = serde_json::to_string(&hex)?;
         self.set(INTENT_ATTRIBUTE, text);
         Ok(())
-    }
-
-    pub fn set_namespace(&mut self, encoded: String) {
-        self.set(namespace::ATTRIBUTE, encoded);
-    }
-
-    pub fn remove_namespace(&mut self) {
-        self.0.borrow_mut().remove(namespace::ATTRIBUTE);
     }
 
     /// Drops the workspace names only this copy knows, which no canonical operation carries.

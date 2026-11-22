@@ -1177,10 +1177,6 @@ fn removing_a_snapshots_parent_does_not_turn_unrelated_work_into_intent() {
         INTENT_ATTRIBUTE.to_owned(),
         serde_json::to_string(&frozen.iter().map(CommitId::hex).collect::<Vec<_>>()).unwrap(),
     );
-    prepared
-        .metadata
-        .attributes
-        .extend(node.publication_namespace_facts(&canonical).unwrap());
     for id in frozen {
         prepared
             .commit_predecessors

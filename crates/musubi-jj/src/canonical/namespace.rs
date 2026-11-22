@@ -1,5 +1,10 @@
-//! The observed namespace of unpublished operations whose parents jj trimmed away.
-//! This is translation evidence, not ancestry or presence.
+//! Names of workspaces as one machine gave them, by the machine-qualified keys they stand for:
+//! the form of `musubi.local-workspaces`, which a realization records of this machine's own
+//! (`node::view::record_private_workspaces`), and of `musubi.workspace-context`. An earlier
+//! release recorded the latter on canonical operations where `jj op abandon` had trimmed their
+//! history away. Nothing writes or reads it now, but it is part of the operations that carry
+//! it, and of their ids, for as long as their hives last, so imports still accept it, checking
+//! only that it is well formed, as they did.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -11,7 +16,7 @@ use serde::Serialize;
 use super::CanonicalError;
 use crate::workspaces;
 
-pub(crate) const ATTRIBUTE: &str = "musubi.workspace-context";
+const ATTRIBUTE: &str = "musubi.workspace-context";
 
 /// Literal names apply only on `source`. Canonical views, rather than these names, carry
 /// the resulting bindings to other machines.
@@ -23,8 +28,10 @@ pub(crate) struct Namespace {
 }
 
 impl Namespace {
-    pub fn read(metadata: &OperationMetadata) -> Result<Option<Self>, CanonicalError> {
-        Self::read_attribute(metadata, ATTRIBUTE)
+    /// Refuses an operation whose `musubi.workspace-context` isn't one an earlier release
+    /// could have written.
+    pub fn check(metadata: &OperationMetadata) -> Result<(), CanonicalError> {
+        Self::read_attribute(metadata, ATTRIBUTE).map(|_| ())
     }
 
     pub fn read_attribute(
@@ -55,23 +62,6 @@ impl Namespace {
         Ok(Some(namespace))
     }
 
-    /// Adds what `carried` says of other machines: the machines it knows, and the names it
-    /// gives them, unless this context already has the name, or gives another name the same
-    /// workspace. Whatever this context gives its own machine stays as it is.
-    pub fn keep_others_of(&mut self, carried: Self) {
-        self.known.extend(carried.known);
-        for (name, key) in carried.names {
-            let theirs =
-                workspaces::split_key(&key).is_some_and(|(machine, _)| machine != self.source);
-            if theirs
-                && !self.names.contains_key(&name)
-                && !self.names.values().any(|have| *have == key)
-            {
-                self.names.insert(name, key);
-            }
-        }
-    }
-
     pub fn encode(&self) -> String {
         // Every field has a string representation in JSON.
         serde_json::to_string(self).expect("workspace context contains strings only")
@@ -82,7 +72,7 @@ impl Namespace {
 mod tests {
     use super::*;
 
-    /// The serialized text is part of operation identities and the peer contract.
+    /// The serialized text is part of the identities of operations that carry it.
     #[test]
     fn workspace_context_encoding_is_pinned() {
         let namespace = Namespace {
@@ -99,48 +89,6 @@ mod tests {
                 r#"{"source":"alpha#aaaa","names":{"beta/default":"beta#bbbb/default","#,
                 r#""default":"alpha#aaaa/default"},"known":["alpha#aaaa","beta#bbbb"]}"#,
             )
-        );
-    }
-
-    #[test]
-    fn keeping_others_of_a_carried_context_adds_only_what_is_unclaimed() {
-        let namespace = |names: &[(&str, &str)], known: &[&str]| Namespace {
-            source: "alpha#a".to_owned(),
-            names: names
-                .iter()
-                .map(|(name, key)| ((*name).to_owned(), (*key).to_owned()))
-                .collect(),
-            known: known.iter().map(|machine| (*machine).to_owned()).collect(),
-        };
-        let mut recomputed = namespace(
-            &[("alpha", "alpha#a/alpha"), ("x/y", "gamma#g/y")],
-            &["alpha#a", "gamma#g"],
-        );
-        recomputed.keep_others_of(namespace(
-            &[
-                ("alpha", "alpha#a/alpha"),
-                // Another machine's, and unclaimed: kept.
-                ("beta/beta", "beta#b/beta"),
-                // The name is taken here, by another machine's workspace: this one wins.
-                ("x/y", "beta#b/y"),
-                // The workspace is already here under another name.
-                ("z/y", "gamma#g/y"),
-                // The context's own machine's names are not carried over.
-                ("extra", "alpha#a/extra"),
-            ],
-            &["alpha#a", "beta#b"],
-        ));
-        assert_eq!(
-            recomputed.encode(),
-            namespace(
-                &[
-                    ("alpha", "alpha#a/alpha"),
-                    ("beta/beta", "beta#b/beta"),
-                    ("x/y", "gamma#g/y"),
-                ],
-                &["alpha#a", "beta#b", "gamma#g"],
-            )
-            .encode()
         );
     }
 }

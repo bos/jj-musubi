@@ -4,18 +4,15 @@
 //! captured frontier under both locks; cached native ancestry is invalidated explicitly when
 //! translations or history change. Merge feasibility and diagnosis belong to `merge`.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use jj_lib::backend::CommitId;
 use jj_lib::lock::FileLock;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_heads_store::OpHeadsStore;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
-use jj_lib::ref_name::WorkspaceNameBuf;
 use pollster::FutureExt as _;
 
 use super::super::NodeError;
@@ -210,7 +207,6 @@ impl NodeRepo {
         &mut self,
         canonical: &CanonicalOp,
         published: &HashMap<CanonicalOp, LocalOp>,
-        root_own: &BTreeMap<WorkspaceNameBuf, CommitId>,
     ) -> Result<LocalOp, NodeError> {
         let order = self
             .canonical
@@ -243,7 +239,7 @@ impl NodeRepo {
             if let Some(local) = &old {
                 let raw = self.loader.op_store().read_operation(&local.0).block_on()?;
                 // An original native operation is its own authority; only realizations not
-                // yet published can depend on stale parent aliases or private root context.
+                // yet published can depend on stale parent aliases.
                 if OpAttrs(&raw.metadata.attributes).canonical().is_none() {
                     continue;
                 }
@@ -280,8 +276,7 @@ impl NodeRepo {
                 _ => self.inherited_per_machine(&parents)?,
             };
             let view = self.local_view(id, op, &fields, &reserved)?;
-            let view =
-                self.with_own_workspaces(id, op, &parents, view, &reserved, Some(root_own))?;
+            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
             let own = self.own_of(&view);
             let view = with_kept(view, &kept);
             let expected =
@@ -379,8 +374,7 @@ impl NodeRepo {
         self.realizing.clear_prepared();
         let heads = self.local_heads()?;
         let published = self.published_realizations(&heads)?;
-        let own = self.own_at_heads(&heads)?;
-        let mut realized = self.current_realization(canonical, &published, &own)?;
+        let mut realized = self.current_realization(canonical, &published)?;
         if self.realized_beside_other_heads(&realized)? {
             realized = self.realize_again(canonical, &realized)?;
         }

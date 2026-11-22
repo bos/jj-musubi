@@ -112,7 +112,6 @@ impl NodeRepo {
         parents: &[LocalOp],
         local: LocalView,
         reserved: &BTreeSet<WorkspaceNameBuf>,
-        root_own: Option<&BTreeMap<WorkspaceNameBuf, CommitId>>,
     ) -> Result<LocalView, NodeError> {
         let published = local.names.keys().any(|key| self.is_own_key(key));
         let canonical_parents = CanonicalOp::parents_of(op);
@@ -134,15 +133,6 @@ impl NodeRepo {
                 )?
             }
         };
-        if own.is_empty() && parents.get(source) == Some(self.root_op_id()) {
-            own = match root_own {
-                Some(own) => own.clone(),
-                None => {
-                    let heads = self.local_heads()?;
-                    self.own_at_heads(&heads)?
-                }
-            };
-        }
         if own.is_empty() {
             return Ok(local);
         }

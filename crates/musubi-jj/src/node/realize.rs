@@ -147,7 +147,7 @@ impl NodeRepo {
                     view
                 }
             };
-            let view = self.with_own_workspaces(id, op, &parents, view, &reserved, None)?;
+            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
             let own = self.own_of(&view);
             let view = with_kept(view, &kept);
             let realization =

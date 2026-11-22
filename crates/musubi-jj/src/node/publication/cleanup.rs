@@ -78,7 +78,6 @@ struct CleanupWorkspace {
 struct SourceFacts {
     view: ViewId,
     intentional: BTreeSet<CommitId>,
-    namespace: BTreeMap<String, String>,
 }
 
 /// The head cleanup rewrites, read under the op-head lock, and what the rewrite must leave
@@ -571,7 +570,6 @@ impl NodeRepo {
                     SourceFacts {
                         view: operation.view_id.clone(),
                         intentional: self.publication_intentional(id, &operation, &view)?,
-                        namespace: self.publication_namespace_facts(id)?,
                     },
                 );
             }
@@ -677,10 +675,6 @@ impl NodeRepo {
                 OpAttrs(&mut operation.metadata.attributes)
                     .set_intent(&facts.intentional)
                     .map_err(PublicationError::Json)?;
-                operation
-                    .metadata
-                    .attributes
-                    .extend(facts.namespace.clone());
                 for commit in &facts.intentional {
                     operation
                         .commit_predecessors

@@ -427,30 +427,6 @@ impl NodeRepo {
         Ok(true)
     }
 
-    /// The context this machine captured that `parents` carry: the first parent's, with what
-    /// each other parent's says of other machines folded in (`Namespace::keep_others_of`).
-    /// At a merge each parent can carry a context from a different trim, and the names the
-    /// others give other machines are the only evidence left of whose those names are.
-    fn carried_context(
-        &self,
-        parents: &[CanonicalOp],
-    ) -> Result<Option<crate::canonical::namespace::Namespace>, NodeError> {
-        let mut carried: Option<crate::canonical::namespace::Namespace> = None;
-        for parent in parents {
-            let parent_op = self.canonical.read_operation(parent)?;
-            if let Some(context) =
-                crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
-                && context.source == self.machine.key()
-            {
-                match &mut carried {
-                    Some(carried) => carried.keep_others_of(context),
-                    None => carried = Some(context),
-                }
-            }
-        }
-        Ok(carried)
-    }
-
     fn write_canonical(
         &mut self,
         id: &LocalOp,
@@ -507,35 +483,9 @@ impl NodeRepo {
         metadata.workspace_name = metadata
             .workspace_name
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
-        // Context is local to the machine that captured it. Carry it through native
-        // descendants until their canonical views and presence again describe all aliases.
-        if !OpAttrs(&metadata.attributes).has_namespace()
-            && let Some(context) = self.carried_context(&parents)?
-        {
-            OpAttrs(&mut metadata.attributes).set_namespace(context.encode());
-        }
-        if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
-            let mut known = std::collections::BTreeSet::new();
-            for parent in &parents {
-                known.extend(self.presence(parent)?.known().iter().cloned());
-            }
-            let mut attributes = OpAttrs(&mut metadata.attributes);
-            if context.known.is_subset(&known)
-                && !attributes.is_checkpoint()
-                && !attributes.has_intent()
-            {
-                attributes.remove_namespace();
-            }
-        }
         let kind = Kind::of(&metadata);
-        let (view, presence) = self.canonical_view(
-            id,
-            view,
-            &parents,
-            commit_predecessors.as_ref(),
-            &kind,
-            &metadata,
-        )?;
+        let (view, presence) =
+            self.canonical_view(id, view, &parents, commit_predecessors.as_ref(), &kind)?;
         let view_id = view_id(&view)?;
         let canonical_op = StoreOperation {
             view_id,

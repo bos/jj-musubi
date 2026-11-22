@@ -96,7 +96,8 @@ the copy you run them in, and the hub and the other machines keep everything the
 
 2. Remove what you don't want there with jj: `jj abandon <change>` to drop a commit, or `jj
    restore` and `jj squash` to take a file out of a commit you keep. Check with `jj log -r
-   'all()'` that no commit it lists still has it. Abandoned commits and old operations need
+   'all()'` that no commit it lists still has it, and `jj bookmark list --conflicted` that no
+   conflicted bookmark names one `all()` doesn't show. Abandoned commits and old operations need
    nothing more: the new hive gets only what this copy shows now.
 
 3. Make the hive again from this copy:
@@ -109,7 +110,8 @@ the copy you run them in, and the hub and the other machines keep everything the
    settings, and starts again from this copy's current state, with none of its operation
    history. The hub deletes the old history at once. This copy goes on syncing, and keeps its
    own operation history, and with it the data you removed: see [Remove data from a machine's
-   disk](#remove-data-from-a-machines-disk).
+   disk](#remove-data-from-a-machines-disk). Other hives on the hub that share the history
+   keep it; clean up and resume each of them the same way.
 
 `musubi resume` refuses if the hive has work this copy hasn't received, such as work another
 machine sent just before the pause, and names the machines it came from. To include it, run
@@ -173,15 +175,24 @@ the hub loses its state while a copy that hasn't heard of the reset is offline, 
 hears nothing of the reset, and `musubi join` there would make the old hive again. So replace
 or delete old copies as soon as their machines are back, and never run `musubi join` in one.
 
+Resetting doesn't stop someone who still has the old history from putting it back. The defence
+is to replace every copy made before the reset, including the one you resumed in, with a
+`musubi clone`, or delete it. A copy restored from a backup taken before the reset, or made
+from an old copy with `git clone` or `jj git clone`, is an old copy too. Copies that haven't
+heard of the reset look like any other until they contact the hub, so delete every copy made
+before it.
+
 ## Remove data from a machine's disk
 
 `musubi resume` removes the old history from the hub, but not from any machine's disk: the
 copy that resumed keeps its own operation history, and the other copies keep everything until
 you delete them. jj-musubi never deletes git objects ([Repo cleanup](#repo-cleanup)).
 
-The sure way is to make a new copy with `musubi clone`, check it with `jj log` and `musubi
-sync`, then run `musubi leave` in the old copy, if it's the one that resumed, and delete the
-old directory, with any other jj workspaces it has.
+The sure way is to make a new copy with `musubi clone` on each machine that has one, check it with `jj log` and
+`musubi sync`, then run `musubi leave` in the old copy, if it's the one that resumed, and
+delete the old directory, with any other jj workspaces it has. Until the old directory is
+deleted, `jj undo` or `jj op restore` past `musubi: reset the hive`, or a command naming an
+abandoned old commit's id, would send the old history up again.
 
 To clean up the copy that resumed in place instead, do this in it right after `musubi
 resume`, while no other jj command runs there:
@@ -371,6 +382,10 @@ In one surviving copy of each hive, run:
 ```sh
 musubi join
 ```
+
+If the hive was ever [reset](#clean-up-history-on-every-machine), run it only in a copy made
+after the reset, and delete every older copy first: any of them can make the old hive again,
+and the daemons of other copies that haven't heard of the reset would then sync to it.
 
 This recreates the hive with its old id and name. With ssh access working, other daemons find
 it within a minute, or at once with `musubi sync`, and send retained work. Check each copy's

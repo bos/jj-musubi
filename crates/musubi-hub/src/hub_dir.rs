@@ -206,6 +206,15 @@ pub enum ResetOutcome {
     Reset(Reset),
 }
 
+/// Why a join was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinRefused {
+    /// For the user, as a message.
+    Refused(Refusal),
+    /// A hive it would bring the old history of was reset: for the hub to answer as for a reset.
+    Reset(Reset),
+}
+
 /// The outcome of a join.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Joined {
@@ -710,15 +719,29 @@ impl HubDir {
     fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
         let probed = self.probe(request).run();
         self.join_probed(request, &probed)
+            .map_err(|refused| match refused {
+                JoinRefused::Refused(message) => message,
+                JoinRefused::Reset(reset) => format!("hive {} was reset", reset.name),
+            })
     }
 
     /// Decides which hive a repository joins, as the test-only `join` does, with what
-    /// [`Self::probe`] found in the hives' stores.
+    /// [`Self::probe`] found in the hives' stores. It looks for a reset again
+    /// ([`Self::reset_among`]), since one can land between the caller's look and the lock this
+    /// runs under, after the probe.
     pub fn join_probed(
         &mut self,
         request: &JoinRequest,
         probed: &Probed,
-    ) -> Result<Joined, Refusal> {
+    ) -> Result<Joined, JoinRefused> {
+        if let Some(reset) = self.reset_among(request) {
+            return Err(JoinRefused::Reset(reset));
+        }
+        self.join_decided(request, probed)
+            .map_err(JoinRefused::Refused)
+    }
+
+    fn join_decided(&mut self, request: &JoinRequest, probed: &Probed) -> Result<Joined, Refusal> {
         if let Some((name, _)) = request.remotes.iter().find(|(name, _)| {
             request
                 .remote_bindings
@@ -1339,6 +1362,12 @@ mod tests {
             ..request("beta", "https://example.com/a")
         };
         assert_eq!(hubs.reset_among(&carrying), Some(reset.clone()));
+        // join_probed looks again, for a reset that landed after the caller's look.
+        let probed = hubs.probe(&carrying).run();
+        assert_eq!(
+            hubs.join_probed(&carrying, &probed).unwrap_err(),
+            JoinRefused::Reset(reset.clone())
+        );
         assert_eq!(
             hubs.reset_among(&request("beta", "https://example.com/a")),
             None

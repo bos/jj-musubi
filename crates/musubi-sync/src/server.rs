@@ -30,6 +30,7 @@ use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
 use musubi_hub::hub_dir::JoinChoice;
+use musubi_hub::hub_dir::JoinRefused;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Opened;
 use musubi_hub::hub_dir::Refusal;
@@ -259,16 +260,21 @@ impl HubServer {
                 // Looking in the stores takes a while, and needn't hold up the hub.
                 let probe = self.lock().probe(&request);
                 let probed = probe.run();
-                self.lock().join_probed(&request, &probed).map(|joined| {
-                    let verb = if joined.created { "created" } else { "joined" };
-                    tracing::info!(
-                        "{} {verb} hive {} ({})",
-                        request.machine,
-                        joined.hive.name,
-                        joined.reason
-                    );
-                    HubWideReply::Joined(joined)
-                })
+                // A reset can land between the check above and this lock.
+                match self.lock().join_probed(&request, &probed) {
+                    Ok(joined) => {
+                        let verb = if joined.created { "created" } else { "joined" };
+                        tracing::info!(
+                            "{} {verb} hive {} ({})",
+                            request.machine,
+                            joined.hive.name,
+                            joined.reason
+                        );
+                        Ok(HubWideReply::Joined(joined))
+                    }
+                    Err(JoinRefused::Reset(reset)) => Ok(HubWideReply::Reset(reset)),
+                    Err(JoinRefused::Refused(message)) => Err(message),
+                }
             }
             HubWideRequest::PrepareClone {
                 hive,

@@ -1,7 +1,7 @@
 //! An operation's original parents distinguish originals even when all their other fields
-//! agree. Contraction preserves them; a fresh operation replaces any supplied attribute.
-//! Contraction may stamp an operation with its presence ([`PRESENCE`]), which is no part of
-//! its identity either.
+//! agree. A fresh operation replaces any supplied attribute. An earlier release's contraction
+//! may have stamped an operation with its presence ([`PRESENCE`]), which is no part of its
+//! identity either.
 
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
@@ -13,9 +13,9 @@ use super::log::ID_LEN;
 
 pub(crate) const ORIGINAL_PARENTS: &str = "musubi.original-parents";
 
-/// The presence a contraction keeps at an operation it rewrites, where the presence worked out
-/// from its new parents would differ (docs/internals/design.md, "Presence through an
-/// abandon"). Only a contraction writes it.
+/// The presence an earlier release's contraction kept at an operation it rewrote, where the
+/// presence worked out from its new parents would differ. Nothing writes it now, but hives keep
+/// their operations, so it is still read.
 pub(crate) const PRESENCE: &str = "musubi.presence";
 
 pub(super) fn fresh(op: &Operation) -> Operation {

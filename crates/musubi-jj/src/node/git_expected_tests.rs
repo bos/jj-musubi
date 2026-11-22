@@ -297,9 +297,9 @@ fn expected_history_conforms_to_model() {
     let restored_absent = h.add(&conflict, &[absent], false, None, None);
     assert_eq!(h.check(restored_absent, None), Some(RefTarget::absent()));
     for value in [Some(at(&a)), Some(RefTarget::absent()), None] {
-        let fixup = h.add(&conflict, &[0], false, None, Some(value.clone()));
-        assert_eq!(h.check(fixup, None), value);
-        let child = h.add(&conflict, &[fixup], false, None, None);
+        let checkpoint = h.add(&conflict, &[0], false, None, Some(value.clone()));
+        assert_eq!(h.check(checkpoint, None), value);
+        let child = h.add(&conflict, &[checkpoint], false, None, None);
         assert_eq!(h.check(child, None), value);
     }
     for value in [Some(at(&a)), Some(RefTarget::absent()), None] {

@@ -11,7 +11,6 @@
 //! bundles; `validate` normalizes their bytes and checks their meaning against jj's decoding.
 
 mod codec;
-mod contract;
 mod log;
 pub(crate) mod namespace;
 pub(crate) mod origin;
@@ -47,7 +46,6 @@ use pollster::FutureExt as _;
 use thiserror::Error;
 
 use self::codec::ViewCodec;
-pub use self::contract::Contraction;
 use self::log::Log;
 pub use self::presence::PresenceMemo;
 pub use self::presence::Work;

@@ -350,3 +350,39 @@ fn work_below(store: &CanonicalStore, a: &Work, b: &Work) -> Result<bool, Canoni
         (_, None) => Ok(false),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use jj_lib::op_store::ViewId;
+
+    use super::*;
+
+    /// Stamps that earlier releases' contractions wrote stay readable, and a peer's malformed
+    /// one is refused, though nothing writes them now.
+    #[test]
+    fn an_earlier_releases_presence_stamp_still_reads() {
+        let original = OperationId::from_bytes(&[3; 64]);
+        let id = CanonicalOp(OperationId::from_bytes(&[4; 64]));
+        let stamp = format!(
+            "known m\nlatest m {hex}\nworked m {hex}",
+            hex = original.hex()
+        );
+        let read = read_stamp(&id, &original, &stamp, &Presence::default()).unwrap();
+        assert_eq!(read.copies().collect::<Vec<_>>(), ["m"]);
+        let latest = read.latest("m").unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest.iter().next().unwrap().op.as_ref(), Some(&id));
+
+        let mut op = Operation::make_root(ViewId::from_bytes(&[1; 64]));
+        assert!(check_stamp(&op).is_ok());
+        op.metadata
+            .attributes
+            .insert(origin::PRESENCE.to_owned(), stamp);
+        assert!(check_stamp(&op).is_ok());
+        op.metadata
+            .attributes
+            .insert(origin::PRESENCE.to_owned(), "known  m".to_owned());
+        assert!(check_stamp(&op).is_err());
+        assert!(read_stamp(&id, &original, "latest m nothex", &Presence::default()).is_err());
+    }
+}

@@ -45,7 +45,7 @@ mod sync;
 use self::evidence::NativeEvidence;
 
 /// Machine directories. Their hostnames are the same, unless the setup shares one.
-pub const MACHINES: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+pub const MACHINES: [&str; 3] = ["alpha", "beta", "gamma"];
 /// How many machines a search's hive grows to.
 pub const SEARCH_MACHINES: usize = 3;
 /// Small pools, so that machines collide on names.

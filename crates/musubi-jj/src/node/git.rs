@@ -67,9 +67,10 @@ pub(super) struct Colocation {
 /// Expected values of conflicted remote bookmarks, by operation and git ref.
 pub(super) type Expected = HashMap<(LocalOp, GitRefNameBuf), Option<RefTarget>>;
 
-/// The attribute of a fix-up's first operation recording the expected value ([`expected`]) of
-/// each conflicted remote bookmark there as the history before the abandon had it, one line
-/// each: the git ref, then the value ([`expected_token`]).
+/// The attribute of a cleanup checkpoint's first operation, and of an earlier release's fix-up,
+/// recording the expected value ([`expected`]) of each conflicted remote bookmark there as the
+/// history before the cleanup had it, one line each: the git ref, then the value
+/// ([`expected_token`]).
 pub(super) const EXPECTED_ATTRIBUTE: &str = "musubi.expected";
 
 /// A conflicted remote bookmark's git ref, and its expected value.
@@ -511,8 +512,8 @@ fn recorded_in(text: &str, name: &GitRefNameBuf) -> Option<Option<RefTarget>> {
 /// What [`expected`] knows of history beyond the op store.
 pub(super) struct History<'a> {
     /// Expected values already worked out: as the last export remembers them, and as a
-    /// fix-up not yet written will record them. By local operation: a walk that `parents`
-    /// takes into the canonical store has none.
+    /// cleanup checkpoint not yet written will record them. By local operation: a walk that
+    /// `parents` takes into the canonical store has none.
     pub known: &'a Expected,
     /// The root operations: the op store's, and the canonical store's where the walk goes
     /// there.
@@ -538,8 +539,8 @@ pub(super) type Parents<'a> = dyn Fn(&Operation) -> Result<Option<Vec<Operation>
 /// one committed last (then the greatest commit id), or none if no side is present; and so it
 /// is at a join, whose history before it only the machine that joined has: a join operation,
 /// whose realization's only parent is the root, or the join point it is on that machine. Where
-/// `op` is a fix-up's first operation, it is what that records, as the history before the
-/// abandon had it (docs/internals/design.md, "The fix-up").
+/// `op` is a cleanup checkpoint's first operation, it is what that records, as the history
+/// before the cleanup had it.
 fn expected(
     store: &Arc<Store>,
     history: &History<'_>,
@@ -614,7 +615,7 @@ mod tests {
     use super::*;
     use crate::git_command::git;
 
-    /// What a fix-up records reads back as it was: a commit, a ref that should be absent, and
+    /// What a checkpoint records reads back as it was: a commit, a ref that should be absent, and
     /// none, which leaves the ref alone, each told apart.
     #[test]
     fn recorded_expected_values_read_back() {

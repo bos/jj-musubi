@@ -327,8 +327,8 @@ impl<Op: Clone + Ord> Presence<Op> {
         })
     }
 
-    /// This presence as a contraction stamps an operation with it (docs/internals/design.md,
-    /// "Presence through an abandon"), each operation as `name` writes it: a line for each
+    /// This presence as an earlier release's contraction stamped an operation with it, and as a
+    /// cleanup compares presences, each operation as `name` writes it: a line for each
     /// copy known, each copy's latest work that no forget saw, its latest work whether or not
     /// one did, and the `musubi.forget-after` it last recorded, in order.
     pub fn to_stamp(&self, name: impl Fn(&Op) -> String) -> String {

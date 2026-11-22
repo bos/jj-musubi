@@ -19,7 +19,6 @@ use pollster::FutureExt as _;
 use super::super::NodeError;
 use super::super::NodeRepo;
 use super::super::view::LocalView;
-use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::Kind;
@@ -137,10 +136,7 @@ impl NodeRepo {
             return Ok(local);
         }
         let own_work = Kind::of(&op.metadata).work.as_deref() == Some(self.machine.key());
-        let fixup = OpAttrs(&op.metadata.attributes).is_fixup();
-        if published
-            || !own_work && !fixup && self.presence(canonical_id)?.is_present(self.machine.key())
-        {
+        if published || !own_work && self.presence(canonical_id)?.is_present(self.machine.key()) {
             own.retain(|name, _| !super::super::view::is_publishable(name));
             if own.is_empty() {
                 return Ok(local);

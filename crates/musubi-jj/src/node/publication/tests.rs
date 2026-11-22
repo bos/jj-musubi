@@ -1221,20 +1221,6 @@ fn attempted_publications_remain_unprunable_after_a_lost_reply_and_restart() {
     assert!(err.to_string().contains("was offered"), "{err}");
     let latest = node.canonical_heads().unwrap()[0].clone();
     node.record_publication_offer(&latest).unwrap();
-    let mut contraction =
-        crate::canonical::Contraction::new(&node.canonical, [first.clone()]).unwrap();
-    let compacted = contraction.images(&node.canonical, &latest).unwrap();
-    assert_eq!(compacted.len(), 1);
-    assert_eq!(
-        node.canonical.original_id(&latest).unwrap(),
-        node.canonical.original_id(&compacted[0]).unwrap()
-    );
-    node.record_publication_offer(&compacted[0]).unwrap();
-    assert_eq!(
-        node.read_publication_offers().unwrap().len(),
-        2,
-        "a contracted offer cannot subsume an older offer with more ancestors"
-    );
     let origins = node.publication_offered_origins().unwrap();
     assert!(origins.contains(&node.canonical.original_id(&first).unwrap()));
     let path = repo.repo_path().join("musubi").join(OFFERS_FILE);

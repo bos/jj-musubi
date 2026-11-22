@@ -87,10 +87,6 @@ pub(crate) use view::RESERVED_WORKSPACES;
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 
-/// The attribute that marks a fix-up, which earlier releases wrote on an operation to restore
-/// what `jj op abandon` dropped. Hives keep their operations, so they still carry it.
-pub(crate) const FIXUP_ATTRIBUTE: &str = "musubi.fixup";
-
 /// Where the sync adapter keeps the head this machine pushed that the hub took, once it knows.
 pub const ACCEPTED_PUSH: &str = "accepted_push";
 

@@ -1,8 +1,7 @@
 //! The presence rule as musubi computes it (`musubi_jj::presence`) against the Lean model's
 //! executable form, through the oracle (docs/internals/conformance.md, "Presence"): for
 //! random histories, the copies present at every operation, with each one's latest work that
-//! no forget saw, are what the model says; and so they stay at every operation a contraction
-//! keeps, as a canonical store works them out.
+//! no forget saw, are what the model says.
 
 #![allow(clippy::unwrap_used)]
 
@@ -10,21 +9,10 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 
-use hegel::Generator as _;
 use hegel::TestCase;
 use hegel::generators as gs;
-use jj_lib::backend::CommitId;
-use jj_lib::op_store::Operation;
-use jj_lib::op_store::OperationId;
-use jj_lib::op_store::View;
-use musubi_jj::canonical::CanonicalStore;
-use musubi_jj::canonical::Contraction;
-use musubi_jj::canonical::PresenceMemo;
-use musubi_jj::op_id::CanonicalOp;
-use musubi_jj::presence::FORGET_ATTRIBUTE;
 use musubi_jj::presence::Kind;
 use musubi_jj::presence::Presence;
-use musubi_jj::presence::WORK_ATTRIBUTE;
 use serde_json::Value;
 use serde_json::json;
 
@@ -148,91 +136,5 @@ fn conformance(tc: TestCase) {
     let modelled = Oracle::with(|oracle| modelled(oracle, &ops));
     for (x, (computed, modelled)) in computed.iter().zip(&modelled).enumerate() {
         assert_eq!(computed, modelled, "at operation {x}");
-    }
-}
-
-/// Each operation's copies with their latest work, as a canonical store works them out at
-/// what each operation becomes once those `dropped` are contracted out, stamps and all: for
-/// those it keeps, what the model says.
-fn contracted(
-    ops: &[Op],
-    dropped: &BTreeSet<usize>,
-) -> Vec<Option<BTreeMap<u64, BTreeSet<usize>>>> {
-    let dir = musubi_testutil::tempdir();
-    let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-    let view = store
-        .write_view(&View::make_root(CommitId::from_bytes(&[0; 20])))
-        .unwrap();
-    let mut ids: Vec<CanonicalOp> = vec![];
-    let mut index: BTreeMap<OperationId, usize> = BTreeMap::new();
-    for (x, op) in ops.iter().enumerate() {
-        let mut operation = Operation::make_root(view.clone());
-        operation.parents = if op.parents.is_empty() {
-            vec![store.root_operation_id().0.clone()]
-        } else {
-            op.parents.iter().map(|&p| ids[p].0.clone()).collect()
-        };
-        operation.metadata.description = format!("op {x}");
-        let attributes = &mut operation.metadata.attributes;
-        if let Some(copy) = op.work {
-            attributes.insert(WORK_ATTRIBUTE.to_owned(), copy.to_string());
-        }
-        if !op.forgets.is_empty() {
-            let copies: Vec<String> = op.forgets.iter().map(u64::to_string).collect();
-            attributes.insert(FORGET_ATTRIBUTE.to_owned(), copies.join(" "));
-        }
-        let id = store.write_operation(&operation).unwrap();
-        index.insert(store.original_id(&id).unwrap(), x);
-        ids.push(id);
-    }
-    let mut contraction =
-        Contraction::new(&store, dropped.iter().map(|&x| ids[x].clone())).unwrap();
-    let memo = PresenceMemo::default();
-    (0..ops.len())
-        .map(|x| {
-            if dropped.contains(&x) {
-                return None;
-            }
-            let image = contraction.images(&store, &ids[x]).unwrap();
-            let presence = memo.presence(&store, &image[0]).unwrap();
-            Some(
-                presence
-                    .copies()
-                    .map(|k| {
-                        let latest = presence.latest(k).unwrap();
-                        let latest = latest.iter().map(|work| index[&work.original]);
-                        (k.parse().unwrap(), latest.collect())
-                    })
-                    .collect(),
-            )
-        })
-        .collect()
-}
-
-// As `conformance`, with some operations dropped.
-#[hegel::test(profile = "presence")]
-fn contraction_keeps_presence(tc: TestCase) {
-    let ops = tc.draw(history());
-    // Each operation dropped or not, independently and evenly, so that most cases drop some but
-    // not all of a history's operations, however long it is. Printed as the set dropped.
-    let dropped = tc.draw(
-        gs::vecs(gs::booleans())
-            .min_size(ops.len())
-            .max_size(ops.len())
-            .map(|drop| {
-                (0..drop.len())
-                    .filter(|&x| drop[x])
-                    .collect::<BTreeSet<usize>>()
-            }),
-    );
-    let contracted = contracted(&ops, &dropped);
-    let modelled = Oracle::with(|oracle| modelled(oracle, &ops));
-    for (x, (contracted, modelled)) in contracted.iter().zip(&modelled).enumerate() {
-        if let Some(contracted) = contracted {
-            assert_eq!(
-                contracted, modelled,
-                "at operation {x}, {dropped:?} dropped"
-            );
-        }
     }
 }

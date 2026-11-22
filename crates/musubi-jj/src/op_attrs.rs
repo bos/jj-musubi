@@ -13,7 +13,6 @@ use jj_lib::object_id::ObjectId as _;
 use crate::canonical::origin;
 use crate::node::CANONICAL_ATTRIBUTE;
 use crate::node::CHECKPOINT_ATTRIBUTE;
-use crate::node::FIXUP_ATTRIBUTE;
 use crate::node::INTENT_ATTRIBUTE;
 use crate::node::LOCAL_WORKSPACES;
 use crate::node::PublicationError;
@@ -31,11 +30,6 @@ pub(crate) struct OpAttrs<M>(pub M);
 impl<M: Borrow<BTreeMap<String, String>>> OpAttrs<M> {
     fn has(&self, key: &str) -> bool {
         self.0.borrow().contains_key(key)
-    }
-
-    /// Whether this is a fix-up, which changes no view.
-    pub fn is_fixup(&self) -> bool {
-        self.has(FIXUP_ATTRIBUTE)
     }
 
     /// Whether this is a step of a publication cleanup's checkpoint.
@@ -127,13 +121,5 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
 
     pub fn args_mut(&mut self) -> Option<&mut String> {
         self.0.borrow_mut().get_mut(ARGS)
-    }
-
-    pub fn set_presence(&mut self, stamp: String) {
-        self.set(origin::PRESENCE, stamp);
-    }
-
-    pub fn remove_presence(&mut self) {
-        self.0.borrow_mut().remove(origin::PRESENCE);
     }
 }

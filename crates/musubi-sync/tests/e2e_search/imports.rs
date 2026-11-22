@@ -1837,7 +1837,7 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     .validate_record(&inherited, setup, &record)
     .unwrap();
     // A later `jj op abandon` reidentifies the exact carrier on different native parents.
-    // The source frontier still proves its record, without another receipt or cache map.
+    // The source frontier still proves its record, without another witness or cache map.
     let mut alias = block_on(store.read_operation(&carrier)).unwrap();
     alias.parents = vec![store.root_operation_id().clone()];
     alias
@@ -1876,7 +1876,7 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
             log(valid.clone())
                 .validate_record(id, setup, &record)
                 .is_err(),
-            "an unchanged header or unmarked body cannot reuse a receipt witness"
+            "an unchanged header or unmarked body cannot reuse a witness"
         );
     }
 

@@ -22,19 +22,6 @@ use super::operation_header;
 use super::single;
 
 impl World {
-    /// The `merge_key` of every operation of the hub's history.
-    pub(super) fn hub_merge_keys(&self) -> BTreeSet<SourceKey> {
-        let store = self.fx.hive.hub.store();
-        let canonical = store.canonical();
-        let head = CanonicalOp(store.head().1.clone());
-        canonical
-            .ancestors_until(&[head], |_| false)
-            .unwrap()
-            .iter()
-            .map(|op| merge_key(&canonical.read_operation(op).unwrap()))
-            .collect()
-    }
-
     /// The `merge_key` of every operation in machine `m`'s history, read in process: a `jj`
     /// command could merge op heads.
     pub(super) fn merge_keys(&self, m: usize) -> BTreeSet<SourceKey> {

@@ -1025,10 +1025,10 @@ so the code's run is the model's with those writes moved earlier.
   workspaces take what a realization records as given, and the tests of
   [races.md](races.md#workspaces) check it. Promise 4 follows from what the model assumes
   musubi writes.
-- Promise 6 read strictly, that realization never moves a workspace of yours, is false where
-  two op heads of yours moved it apart:
-  `a_realization_leaves_a_workspace_this_machine_moved_two_ways_where_jj_had_it` is ignored, and
-  fails ([formal/README.md](../../formal/README.md#realization-realizelean) says why).
+- Promise 6, that realization never moves your workspace, has one exception: where two op heads
+  of yours moved it apart, jj's own tie-break decides, as it would without musubi:
+  `a_workspace_moved_two_ways_follows_jjs_tie_break_after_realization` pins it
+  ([formal/README.md](../../formal/README.md#realization-realizelean) says why).
 - `jj op abandon` and `jj op integrate`, which take no lock ([Moving op
   heads](#moving-op-heads)).
 - The tests above are colocated. Without `.git`, `advance` publishes the realization beside the

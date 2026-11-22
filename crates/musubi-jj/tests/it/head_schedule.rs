@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::sync::{Condvar, Mutex};
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{OpStore, OperationId};
-use musubi_jj::node::NodeRepo;
+use musubi_jj::node::{NodeError, NodeRepo};
 use musubi_testutil::{TestEnv, TestRepo};
 use pollster::FutureExt as _;
 use serde::{Deserialize, Serialize};
@@ -22,13 +22,13 @@ use serde::{Deserialize, Serialize};
 mod gate;
 use gate::{Gate, PausedCommand};
 
-use crate::translation::{single_canonical_head, sync};
+use crate::translation::{single_canonical_head, sync, try_sync};
 
 const MAX_STEPS: usize = 8;
 const CONCURRENT_STEPS: usize = 14;
 /// A native merge widens the search: it reaches every state by this many actions.
 const LOADER_STEPS: usize = 22;
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +62,23 @@ enum Action {
     /// The daemon receives the other machine's work while a native command holds the lock: its
     /// advance waits for the command to finish before it takes the lock.
     ReceiveWhileLocked,
+    /// A native `jj op abandon`, which takes no lock, of an operation of this machine's that the
+    /// hub doesn't have: the first command's, else the peer's, else the unpublished one, as
+    /// `World::abandonable` picks.
+    Abandon,
+    /// The daemon's check, with that abandon landing in the move of op heads it makes, if it
+    /// makes one, once it has read them and before it takes the lock.
+    CheckAbandoning,
+    /// The daemon receives, with that abandon landing in its advance's move.
+    ReceiveAbandoning,
+    /// A native `jj op abandon` of history the hub has: the realization of the other machine's
+    /// first operation, below the base. It takes no lock, so it lands even while a command holds
+    /// it.
+    AbandonHistory,
+    /// The daemon's check, with that abandon landing in its move.
+    CheckLosingHistory,
+    /// The daemon receives, with that abandon landing in its advance's move.
+    ReceiveLosingHistory,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -76,6 +93,10 @@ const WRITE_MARKER: &str = "musubi head-schedule write";
 const MARKERS: [&str; 2] = [FIRST_MARKER, WRITE_MARKER];
 /// The description the other machine gives its work before this one receives it.
 const RECEIVE_MARKER: &str = "musubi head-schedule received";
+/// What the commands that wrote this machine's operations the hub doesn't have were given, as
+/// their operations record it, in the order `Abandon` tries them: the first command, the peer,
+/// and the work the fixture leaves unpublished.
+const LOCAL_WORK: [&str; 3] = [FIRST_MARKER, WRITE_MARKER, "-m unpublished"];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +128,18 @@ struct State {
     online: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     lost_cache: bool,
+    /// How many of this machine's operations the hub doesn't have `jj op abandon` removed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    abandoned: usize,
+    /// Whether `jj op abandon` removed history the hub has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    history_lost: bool,
+    /// Whether the daemon stopped for good, as it does on finding that history lost.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stopped: bool,
+    /// Whether an abandon of this machine's own work has landed inside a move of the daemon's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    raced: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -128,6 +161,10 @@ struct Schedule {
     loader: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     receive: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    abandon: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    lost_history: bool,
     steps: Vec<Step>,
 }
 
@@ -142,6 +179,50 @@ fn exact(loader: bool, receive: bool) -> bool {
 impl Schedule {
     fn exact(&self) -> bool {
         exact(self.loader, self.receive)
+    }
+
+    fn modes(&self) -> Modes {
+        Modes {
+            unpublished: self.unpublished,
+            concurrent: self.concurrent,
+            loader: self.loader,
+            receive: self.receive,
+            abandon: self.abandon,
+            lost_history: self.lost_history,
+        }
+    }
+}
+
+/// What a search starts from, and what it may do besides the first command and the daemon's
+/// checks.
+#[derive(Clone, Copy, Debug)]
+struct Modes {
+    /// Start with work of this machine's above the synced operation.
+    unpublished: bool,
+    /// Follow the first command with a second.
+    concurrent: bool,
+    /// Load the repository at several heads with a native command, which merges them.
+    loader: bool,
+    /// Receive the other machine's work.
+    receive: bool,
+    /// Abandon operations of this machine's the hub doesn't have with native `jj op abandon`.
+    abandon: bool,
+    /// Abandon history the hub has with native `jj op abandon`.
+    lost_history: bool,
+}
+
+impl Modes {
+    /// The modes named by the environment, as `contrib/head_schedule.py` sets it.
+    fn from_env() -> Self {
+        let set = |name: &str| std::env::var_os(format!("MUSUBI_HEAD_SCHEDULE_{name}")).is_some();
+        Self {
+            unpublished: set("UNPUBLISHED"),
+            concurrent: set("CONCURRENT"),
+            loader: set("LOADER"),
+            receive: set("RECEIVE"),
+            abandon: set("ABANDON"),
+            lost_history: set("LOST_HISTORY"),
+        }
     }
 }
 
@@ -169,21 +250,12 @@ fn synced_copies(unpublished: bool) -> (TestEnv, NodeRepo) {
 struct Fixture<'a> {
     gate: &'a Gate,
     directory: PathBuf,
-    unpublished: bool,
-    concurrent: bool,
-    loader: bool,
-    receive: bool,
+    modes: Modes,
 }
 
 impl<'a> Fixture<'a> {
-    fn load(
-        gate: &'a Gate,
-        cache: &Path,
-        unpublished: bool,
-        concurrent: bool,
-        loader: bool,
-        receive: bool,
-    ) -> Self {
+    fn load(gate: &'a Gate, cache: &Path, modes: Modes) -> Self {
+        let unpublished = modes.unpublished;
         let case = if unpublished {
             "unpublished"
         } else {
@@ -197,10 +269,7 @@ impl<'a> Fixture<'a> {
         Self {
             gate,
             directory,
-            unpublished,
-            concurrent,
-            loader,
-            receive,
+            modes,
         }
     }
 
@@ -215,24 +284,48 @@ impl<'a> Fixture<'a> {
         // The history the fixture starts with is the same on every run: only operations a
         // schedule writes need keys other than their ids.
         let mut keys = HashMap::new();
-        let mut pending = vec![old_id];
+        let mut pending = vec![old_id.clone()];
         while let Some(id) = pending.pop() {
             if !keys.contains_key(&id) {
                 pending.extend(store.read_operation(&id).block_on().unwrap().parents);
                 keys.insert(id.clone(), id);
             }
         }
+        // The realization of the other machine's first operation: below the base, which the
+        // unpublished work, if any, is on.
+        let only_parent = |id: &OperationId| {
+            let [parent] = store
+                .read_operation(id)
+                .block_on()
+                .unwrap()
+                .parents
+                .try_into()
+                .unwrap();
+            parent
+        };
+        let base = if self.modes.unpublished {
+            only_parent(&old_id)
+        } else {
+            old_id
+        };
+        let modes = self.modes;
         World {
             gate: self.gate,
             node: Some(node),
             native: [Native::Ready; 2],
             children: [None, None],
-            loader: self.loader.then_some(Native::Ready),
+            loader: modes.loader.then_some(Native::Ready),
             loader_child: None,
             loader_unlinks: 0,
-            receive: self.receive,
+            receive: modes.receive,
             received: false,
-            concurrent: self.concurrent,
+            concurrent: modes.concurrent,
+            modes,
+            history: only_parent(&base),
+            abandoned: vec![],
+            history_lost: false,
+            stopped: false,
+            raced: false,
             checked_heads: None,
             lost_cache: false,
             keys: RefCell::new(keys),
@@ -244,22 +337,25 @@ impl<'a> Fixture<'a> {
     }
 
     fn empty_schedule(&self) -> Schedule {
+        let modes = self.modes;
         Schedule {
             version: VERSION,
-            unpublished: self.unpublished,
-            concurrent: self.concurrent,
-            loader: self.loader,
-            receive: self.receive,
+            unpublished: modes.unpublished,
+            concurrent: modes.concurrent,
+            loader: modes.loader,
+            receive: modes.receive,
+            abandon: modes.abandon,
+            lost_history: modes.lost_history,
             steps: vec![],
         }
     }
 
     fn horizon(&self) -> usize {
-        horizon(self.concurrent, self.loader)
+        horizon(self.modes.concurrent, self.modes.loader)
     }
 
     fn exact(&self) -> bool {
-        exact(self.loader, self.receive)
+        exact(self.modes.loader, self.modes.receive)
     }
 }
 
@@ -296,6 +392,15 @@ struct World<'a> {
     /// Whether each native command added its head: jj merges it later even if the command is
     /// killed before its unlink.
     published: [bool; 2],
+    modes: Modes,
+    /// The operation `AbandonHistory` removes, which the hub has.
+    history: OperationId,
+    /// The operations of this machine's the hub doesn't have that `jj op abandon` removed.
+    abandoned: Vec<OperationId>,
+    history_lost: bool,
+    /// Whether the daemon stopped for good.
+    stopped: bool,
+    raced: bool,
     store: Arc<dyn OpStore>,
     repo: TestRepo,
     env: TestEnv,
@@ -396,6 +501,10 @@ impl World<'_> {
             checked_heads: self.checked_heads.clone(),
             online: self.node.is_some(),
             lost_cache: self.lost_cache,
+            abandoned: self.abandoned.len(),
+            history_lost: self.history_lost,
+            stopped: self.stopped,
+            raced: self.raced,
         }
     }
 
@@ -447,7 +556,14 @@ impl World<'_> {
                 _ => {}
             }
         }
-        if !state.online {
+        // `jj op abandon` takes no lock, but one that lands while a command holds it may have
+        // that command put back what it removed, as jj would: so this machine's own work is
+        // abandoned, by itself or in a move of the daemon's, only while no command holds it.
+        let abandonable = self.abandonable().is_some();
+        let lose_history = self.modes.lost_history && !self.history_lost;
+        if self.stopped {
+            // The daemon has stopped for good.
+        } else if !state.online {
             choices.push(Action::Reopen);
             if self.concurrent {
                 choices.push(Action::ReopenWithoutCache);
@@ -458,6 +574,12 @@ impl World<'_> {
             choices.push(Action::CheckWhileLocked);
         } else if state.checked_heads.as_ref() != Some(&state.heads) {
             choices.push(Action::Check);
+            if abandonable {
+                choices.push(Action::CheckAbandoning);
+            }
+            if lose_history {
+                choices.push(Action::CheckLosingHistory);
+            }
         } else if self.concurrent && state.heads.len() > 1 && !self.locked() {
             choices.push(Action::MergeHeads);
         }
@@ -468,11 +590,25 @@ impl World<'_> {
         // command finishes first. The first native command starts first, and the daemon receives
         // during and after the commands.
         if self.receive && self.native[0] != Native::Ready && !self.received && state.online {
-            choices.push(if self.locked() {
-                Action::ReceiveWhileLocked
+            if self.locked() {
+                choices.push(Action::ReceiveWhileLocked);
             } else {
-                Action::Receive
-            });
+                choices.push(Action::Receive);
+                if abandonable {
+                    choices.push(Action::ReceiveAbandoning);
+                }
+                if lose_history {
+                    choices.push(Action::ReceiveLosingHistory);
+                }
+            }
+        }
+        if abandonable {
+            choices.push(Action::Abandon);
+        }
+        // Once the first command has started, history the hub has is abandoned at any time,
+        // since that takes no lock.
+        if lose_history && self.native[0] != Native::Ready {
+            choices.push(Action::AbandonHistory);
         }
         match self.loader {
             // Loading at one head takes no lock and changes nothing.
@@ -493,6 +629,186 @@ impl World<'_> {
         choices
     }
 
+    /// The operation of this machine's that the hub doesn't have that `Abandon` removes now: the
+    /// first command's, else the peer's, else the unpublished work's, by what the command that
+    /// wrote it was given. `jj op abandon` removes one the op heads reach that is neither one of
+    /// them nor a merge. None while a command holds the lock.
+    fn abandonable(&self) -> Option<OperationId> {
+        if !self.modes.abandon || self.locked() {
+            return None;
+        }
+        let heads: Vec<OperationId> = read_heads(&self.repo)
+            .iter()
+            .map(|head| OperationId::try_from_hex(head).unwrap())
+            .collect();
+        let mut candidates = vec![];
+        let mut seen = HashSet::new();
+        let mut pending = heads.clone();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let op = self.store.read_operation(&id).block_on().unwrap();
+            if !heads.contains(&id) && op.parents.len() == 1 {
+                let args = op
+                    .metadata
+                    .attributes
+                    .get("args")
+                    .map_or("", String::as_str);
+                if let Some(rank) = LOCAL_WORK.iter().position(|work| args.contains(work)) {
+                    // A rewrite keeps what its command was given: take the same one every run.
+                    candidates.push((rank, self.key(&id).hex(), id.clone()));
+                }
+            }
+            pending.extend(op.parents);
+        }
+        candidates.sort();
+        candidates.into_iter().map(|(_, _, id)| id).next()
+    }
+
+    /// The operations the op heads reach.
+    fn reachable(&self) -> HashSet<OperationId> {
+        let heads: Vec<OperationId> = read_heads(&self.repo)
+            .iter()
+            .map(|head| OperationId::try_from_hex(head).unwrap())
+            .collect();
+        self.reached_from(heads)
+    }
+
+    /// `from` and the operations below them.
+    fn reached_from(&self, from: Vec<OperationId>) -> HashSet<OperationId> {
+        let mut seen = HashSet::new();
+        let mut pending = from;
+        while let Some(id) = pending.pop() {
+            if seen.insert(id.clone()) {
+                pending.extend(self.store.read_operation(&id).block_on().unwrap().parents);
+            }
+        }
+        seen
+    }
+
+    /// The op heads that no other reaches. jj drops the others when it loads the repository:
+    /// `jj op abandon` leaves one, rewriting both heads of a command that has added its own and
+    /// not yet removed the old.
+    fn loaded_heads(&self) -> Vec<String> {
+        let heads = read_heads(&self.repo);
+        let parents = heads.iter().flat_map(|head| {
+            let id = OperationId::try_from_hex(head).unwrap();
+            self.store.read_operation(&id).block_on().unwrap().parents
+        });
+        let below = self.reached_from(parents.collect());
+        heads
+            .into_iter()
+            .filter(|head| !below.contains(&OperationId::try_from_hex(head).unwrap()))
+            .collect()
+    }
+
+    /// Runs `step`, one of the daemon's, with an abandon of `racing`, if given, landing in the
+    /// move of op heads it makes, if it makes one: of history the hub has if `history`.
+    ///
+    /// Once history the hub has is gone, the daemon's next step must fail, saying so, reach no
+    /// move of op heads and change none, and the daemon then stops for good. A step that the
+    /// abandon lands in had read the op heads already, so it may finish, and then the next one
+    /// fails. Returns whether the abandon landed.
+    fn daemon_step(
+        &mut self,
+        step: fn(&mut Self) -> Result<(), NodeError>,
+        racing: Option<(OperationId, bool)>,
+    ) -> bool {
+        let lost = self.history_lost;
+        let moved = Arc::new(AtomicBool::new(false));
+        let node = self.node.as_ref().unwrap();
+        if lost {
+            let moved = moved.clone();
+            node.race_head_move(move || moved.store(true, Ordering::Relaxed));
+        }
+        let command = Arc::new(Mutex::new(None));
+        let landed = Arc::new(Mutex::new(None));
+        if let Some((op, _)) = &racing {
+            // Each command takes the environment's next seed: only one that runs may, or a step
+            // whose move never came would leave the same state as one without the abandon but
+            // later seeds.
+            *command.lock().unwrap() = Some((self.env.repo_handle("beta"), op.clone()));
+            let (command, landed) = (command.clone(), landed.clone());
+            node.race_head_move(move || {
+                if let Some((repo, op)) = command.lock().unwrap().take() {
+                    abandon(&repo, &op);
+                    *landed.lock().unwrap() = Some(read_heads(&repo));
+                }
+            });
+        }
+        let before = read_heads(&self.repo);
+        let result = step(self);
+        // Where the step moved nothing, the abandon never ran.
+        command.lock().unwrap().take();
+        let landed = landed.lock().unwrap().take();
+        if let (Some(_), Some((op, history))) = (&landed, racing) {
+            if history {
+                self.history_lost = true;
+            } else {
+                self.abandoned.push(op);
+                self.raced = true;
+            }
+        }
+        if !self.history_lost {
+            result.unwrap();
+            return landed.is_some();
+        }
+        let gone = "removed history the hive has";
+        match result {
+            Err(NodeError::UnreachableHistory | NodeError::RewrittenRealization) => {}
+            Err(error) => {
+                panic!("the daemon failed otherwise once `jj op abandon` {gone}: {error}")
+            }
+            Ok(()) if lost => panic!("the daemon went on once `jj op abandon` {gone}"),
+            // The step had read the op heads before the abandon landed in its move: it may
+            // finish, but it moves no more of them.
+            Ok(()) => {
+                assert_eq!(
+                    Some(read_heads(&self.repo)),
+                    landed,
+                    "the daemon moved op heads after `jj op abandon` {gone} in its move"
+                );
+                return true;
+            }
+        }
+        assert!(
+            !moved.load(Ordering::Relaxed),
+            "the daemon went on to move op heads once `jj op abandon` {gone}"
+        );
+        assert_eq!(
+            read_heads(&self.repo),
+            landed.unwrap_or(before),
+            "the daemon changed the op heads once `jj op abandon` {gone}"
+        );
+        self.stopped = true;
+        self.node = None;
+        self.checked_heads = None;
+        true
+    }
+
+    /// The abandon that `action` has land in the daemon's move, if any: the operation, and
+    /// whether the hub has it.
+    fn racing(&self, action: Action) -> Option<(OperationId, bool)> {
+        match action {
+            Action::CheckAbandoning | Action::ReceiveAbandoning => {
+                Some((self.abandonable().unwrap(), false))
+            }
+            Action::CheckLosingHistory | Action::ReceiveLosingHistory => {
+                Some((self.history.clone(), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// What each of the daemon's steps does first (`Node::read_heads`): reads the op heads,
+    /// canonicalizing them. Where that moves any, it checks again.
+    fn check(&mut self) -> Result<(), NodeError> {
+        let node = self.node.as_mut().unwrap();
+        node.settle()?;
+        node.canonical_heads().map(drop)
+    }
+
     /// Whether a native command holds jj's op-heads lock, which loading at several heads waits
     /// for.
     fn locked(&self) -> bool {
@@ -510,14 +826,15 @@ impl World<'_> {
     }
 
     /// The daemon receives what the other machine wrote.
-    fn receive(&mut self) {
+    fn receive(&mut self) -> Result<(), NodeError> {
         let alpha = self.env.repo_handle("alpha");
         alpha.jj(&["describe", "-m", RECEIVE_MARKER]);
         let mut from = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
         let head = single_canonical_head(&mut from);
-        sync(&from, self.node.as_mut().unwrap(), &head);
+        try_sync(&from, self.node.as_mut().unwrap(), &head)?;
         self.received = true;
         self.checked_heads = None;
+        Ok(())
     }
 
     /// Starts native command `slot`, paused where it is about to add its head, on the one op
@@ -639,14 +956,27 @@ impl World<'_> {
                 self.children[slot].take().unwrap().kill();
                 self.native[slot] = Native::Killed;
             }
-            Action::Check => {
+            Action::Check | Action::CheckAbandoning | Action::CheckLosingHistory => {
                 let heads = read_heads(&self.repo);
-                // What each of the daemon's steps does first (`Node::read_heads`): reads the
-                // op heads, canonicalizing them. Where that moves any, it checks again.
-                let node = self.node.as_mut().unwrap();
-                node.settle().unwrap();
-                node.canonical_heads().unwrap();
-                self.checked_heads = Some(self.head_keys(&heads));
+                let racing = self.racing(action);
+                // An abandon that landed in the move changed the op heads again.
+                let landed = self.daemon_step(Self::check, racing);
+                if !self.stopped && !landed {
+                    self.checked_heads = Some(self.head_keys(&heads));
+                }
+            }
+            Action::Receive | Action::ReceiveAbandoning | Action::ReceiveLosingHistory => {
+                let racing = self.racing(action);
+                self.daemon_step(Self::receive, racing);
+            }
+            Action::Abandon => {
+                let op = self.abandonable().unwrap();
+                abandon(&self.repo, &op);
+                self.abandoned.push(op);
+            }
+            Action::AbandonHistory => {
+                abandon(&self.repo, &self.history);
+                self.history_lost = true;
             }
             Action::CheckWhileLocked | Action::ReceiveWhileLocked => {
                 // Whichever command holds the lock: a write, or a native merge.
@@ -686,13 +1016,14 @@ impl World<'_> {
                         }
                     });
                 }
-                if action == Action::CheckWhileLocked {
-                    let node = self.node.as_mut().unwrap();
-                    node.settle().unwrap();
-                    node.canonical_heads().unwrap();
-                } else {
-                    self.receive();
-                }
+                self.daemon_step(
+                    if action == Action::CheckWhileLocked {
+                        Self::check
+                    } else {
+                        Self::receive
+                    },
+                    None,
+                );
                 let back = holder.lock().unwrap().take();
                 if finished.load(Ordering::Relaxed) {
                     if loader {
@@ -710,7 +1041,7 @@ impl World<'_> {
                     } else {
                         self.children[writer.unwrap()] = back;
                     }
-                    if action == Action::CheckWhileLocked {
+                    if action == Action::CheckWhileLocked && !self.stopped {
                         self.checked_heads = Some(self.head_keys(&heads));
                     }
                 }
@@ -732,11 +1063,15 @@ impl World<'_> {
                 self.node =
                     Some(NodeRepo::open(&self.repo.repo_path(), &self.repo.settings()).unwrap());
             }
-            Action::Receive => self.receive(),
             Action::MergeHeads => {
-                let node = self.node.as_mut().unwrap();
-                node.settle().unwrap();
-                node.merge_heads().unwrap();
+                self.daemon_step(
+                    |world| {
+                        let node = world.node.as_mut().unwrap();
+                        node.settle()?;
+                        node.merge_heads().map(drop)
+                    },
+                    None,
+                );
                 self.checked_heads = None;
             }
         }
@@ -776,6 +1111,18 @@ impl World<'_> {
                 return Some(format!("unreadable operation head {head}: {error}"));
             }
         }
+        // An abandon lands only while no command holds the lock, so no command puts back what
+        // it removed: only a move of the daemon's that went ahead on the op heads it read
+        // before the abandon would.
+        if !self.abandoned.is_empty() {
+            let reachable = self.reachable();
+            if let Some(op) = self.abandoned.iter().find(|op| reachable.contains(op)) {
+                return Some(format!(
+                    "the op heads reach operation {}, which `jj op abandon` removed",
+                    op.hex()
+                ));
+            }
+        }
         if self.choices(state).is_empty() {
             for (slot, marker) in MARKERS.into_iter().enumerate() {
                 if self.published[slot]
@@ -793,19 +1140,30 @@ impl World<'_> {
         None
     }
 
+    /// Where to look at the repository once everything has settled: at each op head, or, where
+    /// several are left, as the daemon stopped for good leaves them, at the merge of them that
+    /// jj loads, which it makes and publishes.
+    fn settled(&self) -> Vec<Vec<String>> {
+        let heads = self.loaded_heads();
+        if self.stopped && heads.len() > 1 {
+            return vec![vec![]];
+        }
+        heads
+            .into_iter()
+            .map(|head| vec!["--at-op".to_owned(), head])
+            .collect()
+    }
+
     /// A commit described with `marker` is in the view of every op head, settled.
     fn check_kept(&self, marker: &str, what: &str) -> Result<(), String> {
-        for head in read_heads(&self.repo) {
+        for at in self.settled() {
+            let head = at.last().map_or("the merged op heads", String::as_str);
             let output = self
                 .repo
                 .program(Path::new("jj"))
-                .args([
-                    "--ignore-working-copy",
-                    "--at-op",
-                    &head,
-                    "log",
-                    "--no-graph",
-                ])
+                .arg("--ignore-working-copy")
+                .args(&at)
+                .args(["log", "--no-graph"])
                 .args(["-r", &format!("description(substring:{marker:?})")])
                 .args(["-T", "commit_id"])
                 .output()
@@ -858,6 +1216,22 @@ fn replay(
         }
     }
     Some((state, None))
+}
+
+/// Runs `jj op abandon` of `op` alone, which takes no lock, to the end.
+fn abandon(repo: &TestRepo, op: &OperationId) {
+    let output = repo
+        .program(Path::new("jj"))
+        .args(["--ignore-working-copy", "op", "abandon", &op.hex()])
+        .env("COLUMNS", "80")
+        .env("RAYON_NUM_THREADS", "1")
+        .output()
+        .expect("run jj op abandon");
+    assert!(
+        output.status.success(),
+        "jj op abandon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// What the workers of a search share.
@@ -969,7 +1343,24 @@ fn explore(
         different_from.is_none() || longest.steps.len() > prefix.steps.len(),
         "no alternative is enabled at that prefix"
     );
-    if fixture.concurrent && prefix.steps.is_empty() {
+    let reaches = |reached: fn(&State) -> bool| visited.keys().any(reached);
+    if prefix.steps.is_empty() {
+        let modes = fixture.modes;
+        assert!(
+            !modes.abandon || reaches(|state| state.abandoned > 0),
+            "the search must abandon an operation the hub doesn't have"
+        );
+        // Without a receipt, the daemon moves no op heads for an abandon to land in.
+        assert!(
+            !(modes.abandon && modes.receive) || reaches(|state| state.raced),
+            "the search must land an abandon in a move of the daemon's"
+        );
+        assert!(
+            !modes.lost_history || reaches(|state| state.stopped),
+            "the search must stop the daemon once history the hub has is gone"
+        );
+    }
+    if fixture.modes.concurrent && prefix.steps.is_empty() {
         // Each command ends, finished or killed, before the next starts, around a daemon that
         // restarted and lost its cache. Two commands take three actions each, and the restart
         // one more; a shorter search is for a quick look.
@@ -984,14 +1375,14 @@ fn explore(
             "the search must finish both commands after a restart that lost the cache"
         );
         assert!(
-            !fixture.loader
+            !fixture.modes.loader
                 || visited
                     .keys()
                     .any(|state| state.loader == Some(Native::Paused)),
             "the search must pause a native merge between adding and removing heads"
         );
         assert!(
-            !fixture.receive
+            !fixture.modes.receive
                 || visited.keys().any(|state| {
                     state.received && matches!(state.native, Native::Finished | Native::Killed)
                 }),
@@ -1003,7 +1394,7 @@ fn explore(
         ] {
             assert!(
                 horizon < 8
-                    || !fixture.loader
+                    || !fixture.modes.loader
                     || visited.keys().any(|state| state.loader == Some(loader)),
                 "the search must {what}"
             );
@@ -1171,24 +1562,16 @@ fn run() {
     let gate = Gate::load(&library);
     let mode = std::env::var("MUSUBI_HEAD_SCHEDULE_MODE").unwrap_or_else(|_| "search".into());
     let trace = std::env::var_os("MUSUBI_HEAD_SCHEDULE_INPUT").map(|input| load(Path::new(&input)));
-    let unpublished = trace.as_ref().map_or_else(
-        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_UNPUBLISHED").is_some(),
-        |trace| trace.unpublished,
+    let modes = trace.as_ref().map_or_else(Modes::from_env, Schedule::modes);
+    assert!(
+        modes.concurrent || !modes.loader,
+        "a loader needs a concurrent search"
     );
-    let concurrent = trace.as_ref().map_or_else(
-        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_CONCURRENT").is_some(),
-        |trace| trace.concurrent,
+    assert!(
+        modes.unpublished || modes.concurrent || !modes.abandon,
+        "abandoning needs work below a head: unpublished, or a second command"
     );
-    let loader = trace.as_ref().map_or_else(
-        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_LOADER").is_some(),
-        |trace| trace.loader,
-    );
-    assert!(concurrent || !loader, "a loader needs a concurrent search");
-    let receive = trace.as_ref().map_or_else(
-        || std::env::var_os("MUSUBI_HEAD_SCHEDULE_RECEIVE").is_some(),
-        |trace| trace.receive,
-    );
-    let fixture = Fixture::load(&gate, &cache, unpublished, concurrent, loader, receive);
+    let fixture = Fixture::load(&gate, &cache, modes);
     let (trace, violation) = match mode.as_str() {
         "search" => explore(&fixture, fixture.empty_schedule(), None),
         "replay" => {

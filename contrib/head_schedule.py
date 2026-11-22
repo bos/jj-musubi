@@ -57,6 +57,15 @@ def main():
         "--loader", action="store_true",
         help="with --concurrent, also load the repository once at several heads, merging them",
     )
+    search.add_argument(
+        "--abandon", action="store_true",
+        help="with --unpublished or --concurrent, also run jj op abandon of this machine's work "
+        "that the hub doesn't have, alone or inside the daemon's next move of op heads",
+    )
+    search.add_argument(
+        "--lost-history", action="store_true",
+        help="also run jj op abandon of history the hub has, once; the daemon must then stop",
+    )
     search.add_argument("--out", type=Path, default=ROOT / "target/head-schedule.json")
     replay = modes.add_parser("replay", help="replay a saved schedule and verify its states")
     replay.add_argument("input", type=Path)
@@ -93,6 +102,11 @@ def main():
         parser.error("--at must be nonnegative")
     if getattr(args, "loader", False) and not args.concurrent:
         parser.error("--loader requires --concurrent")
+    if getattr(args, "abandon", False) and not (args.unpublished or args.concurrent):
+        parser.error(
+            "--abandon requires --unpublished or --concurrent: otherwise there is no unsent work "
+            "below a head to abandon"
+        )
     if getattr(args, "jobs", None) is not None and args.jobs < 1:
         parser.error("--jobs must be positive")
     if args.steps is not None and args.steps < 1:
@@ -119,8 +133,9 @@ def main():
         settings["MUSUBI_HEAD_SCHEDULE_AT"] = str(args.at)
     if getattr(args, "unpublished", False):
         settings["MUSUBI_HEAD_SCHEDULE_UNPUBLISHED"] = "1"
-    if getattr(args, "receive", False):
-        settings["MUSUBI_HEAD_SCHEDULE_RECEIVE"] = "1"
+    for flag in ("receive", "abandon", "lost_history"):
+        if getattr(args, flag, False):
+            settings[f"MUSUBI_HEAD_SCHEDULE_{flag.upper()}"] = "1"
     if getattr(args, "concurrent", False):
         settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
         if args.loader:

@@ -129,7 +129,9 @@ impl World {
     /// the operations of the hive on another branch of the history, as one `--at-op` command or
     /// a second workspace leaves, are put on other parents. musubi can't tell its own such
     /// operation from one that is new, so a copy where that happens stops syncing as it does
-    /// for one that abandoned operations the hive has.
+    /// for one that abandoned operations the hive has. A realization the abandon only puts on
+    /// more history is put back instead (`op_abandon_of_pre_join_history_is_harmless`), but
+    /// the import check doesn't follow that move, so the search takes neither.
     fn abandon_rewrites_the_hives(&mut self, m: usize, op: &str) -> bool {
         use jj_lib::object_id::ObjectId as _;
         let store = self.fx.hive.members[m]

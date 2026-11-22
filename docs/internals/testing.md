@@ -1020,13 +1020,6 @@ copy left unchanged or rewritten, where taking a commit always checks out a new 
 predecessor. A working copy jj replaces because it is immutable isn't recognised.
 `imports::jj_resets_an_unborn_head_it_imports` pins jj's behaviour in a plain repository.
 
-A machine's own `jj op abandon` can reparent a realization too: one on the root, as of a copy
-that joined since, lands on the abandoned operation's parent, keeping its view and so none of
-this machine's records. The search records each realization the command rewrote, the same but
-for its parents, and the record checker judges jj's rewrite on the realization's own parents.
-`imports::a_realization_jj_reparents_keeps_its_records` checks HEAD and ref records through
-such a move, and that without it the move is blamed for dropping HEAD's record.
-
 Concurrent HEAD records can contain conflicts and even resolve by cancellation to a value
 no command wrote. The import checker traces possible physical values to native imports or
 commands that actually changed a scalar record, through original source parents. Merges and

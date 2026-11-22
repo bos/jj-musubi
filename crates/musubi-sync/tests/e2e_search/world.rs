@@ -280,14 +280,6 @@ pub struct CommandSnapshot {
     pub made: jj_lib::op_store::View,
 }
 
-/// Native source capture includes failed invocations; only successful ones qualify for
-/// race coverage. This never controls the reference oracle's evidence capture.
-#[derive(Clone, Copy)]
-pub(super) enum CommandOutcome {
-    Succeeded,
-    Failed,
-}
-
 /// How many recovery commands a sequence may make before a repeated refusal is a finding.
 const MAX_RECOVERIES: usize = 10;
 

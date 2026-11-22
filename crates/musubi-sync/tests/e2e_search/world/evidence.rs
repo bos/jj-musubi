@@ -15,7 +15,6 @@ use musubi_sync::OpId;
 
 use crate::identity::{HistoryKey, NativeOperation, SourceHeader, SourceKey};
 
-use super::CommandOutcome;
 use super::CommandSnapshot;
 use super::GitRecordAuthorization;
 use super::GitRecordInput;
@@ -85,14 +84,8 @@ impl World {
         keys
     }
 
-    /// Preserve every new native effect, including one written before a refusal. Outcome
-    /// gates only race coverage; the reference always retains the same source evidence.
-    pub(super) fn record_commands(
-        &mut self,
-        m: usize,
-        history_before: &BTreeSet<SourceKey>,
-        outcome: CommandOutcome,
-    ) {
+    /// Preserve every new native effect, including one written before a refusal.
+    pub(super) fn record_commands(&mut self, m: usize, history_before: &BTreeSet<SourceKey>) {
         let store = self.fx.hive.members[m]
             .adapter
             .repo()
@@ -162,9 +155,6 @@ impl World {
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 self.evidence.commands.entry(merge_key(&op))
             {
-                if matches!(outcome, CommandOutcome::Succeeded) {
-                    crate::coverage::record_native(&op, &snapshot, history_before);
-                }
                 entry.insert(snapshot);
             }
         }

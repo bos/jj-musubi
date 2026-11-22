@@ -46,11 +46,9 @@ impl World {
 
     /// Syncs node `m` until idle and returns how many steps it took.
     pub fn sync_counted(&mut self, m: usize) -> usize {
-        crate::coverage::interrupt_races();
         self.observe_operation_sources(m);
         self.touched.insert(m);
         self.merge_local_heads(m);
-        let forgotten = self.forgotten_working_copies(m);
         let steps = loop {
             let input = self.git_record_input(m);
             let result = self.fx.hive.sync(m);
@@ -60,7 +58,6 @@ impl World {
                 Err(err) => self.recover(m, "sync", &err),
             }
         };
-        self.note_forgotten_rebase(m, forgotten);
         self.record_merges(m);
         steps
     }
@@ -121,7 +118,6 @@ impl World {
         lose: Option<usize>,
         realizing: Option<usize>,
     ) -> anyhow::Result<()> {
-        crate::coverage::interrupt_races();
         let mut sent = 0;
         let mut deliver = |world: &mut Self, request| {
             let lost = lose == Some(sent);

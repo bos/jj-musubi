@@ -1,14 +1,9 @@
 //! Copy membership: forgetting, expiry and replacement. Records the copy's independent
-//! join inputs and name births before the fixture enrolls it, and tracks forgotten working
-//! copies across syncs.
+//! join inputs and name births before the fixture enrolls it.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 
-use jj_lib::backend::CommitId;
-use jj_lib::object_id::ObjectId as _;
-use jj_lib::repo::Repo as _;
 use musubi_jj::op_id::LocalOp;
 
 use crate::coverage::fired;
@@ -90,66 +85,6 @@ impl World {
         self.ledger.record(m, &what, &before, &after, false);
     }
 
-    /// Machine `m`'s own working-copy commits, by workspace, each with its change id and
-    /// whether it is visible, read in process, where the hive has forgotten the machine:
-    /// `None` where it shows it.
-    pub(super) fn forgotten_working_copies(
-        &self,
-        m: usize,
-    ) -> Option<BTreeMap<String, (String, String, bool)>> {
-        if self.fx.shown_machines().contains(&self.fx.machine_key(m)) {
-            return None;
-        }
-        let repo = self.fx.load(m);
-        let index = repo.index();
-        let heads = repo.view().heads();
-        let visible = |id: &CommitId| {
-            futures::executor::block_on(index.has_id(id)).unwrap()
-                && heads
-                    .iter()
-                    .any(|head| futures::executor::block_on(index.is_ancestor(id, head)).unwrap())
-        };
-        Some(
-            repo.view()
-                .wc_commit_ids()
-                .iter()
-                // The search names workspaces without a `/`: those with one are others'.
-                .filter(|(name, _)| !name.as_str().contains('/'))
-                .map(|(name, id)| {
-                    let commit =
-                        futures::executor::block_on(repo.store().get_commit_async(id)).unwrap();
-                    let change = commit.change_id().hex();
-                    (name.as_str().to_owned(), (id.hex(), change, visible(id)))
-                })
-                .collect(),
-        )
-    }
-
-    /// Notes, for coverage, a sync of machine `m`, forgotten before it and after, that moved
-    /// a working copy of its own from one hidden commit to another of the same change: as a
-    /// forgotten copy rebases one whose parents other machines rewrote or abandoned
-    /// (`replace_abandoned_working_copies`).
-    pub(super) fn note_forgotten_rebase(
-        &self,
-        m: usize,
-        before: Option<BTreeMap<String, (String, String, bool)>>,
-    ) {
-        let (Some(before), Some(after)) = (before, self.forgotten_working_copies(m)) else {
-            return;
-        };
-        let rebased = after.iter().any(|(name, (commit, change, visible))| {
-            !visible
-                && before
-                    .get(name)
-                    .is_some_and(|(old, old_change, was_visible)| {
-                        !was_visible && old != commit && old_change == change
-                    })
-        });
-        if rebased {
-            fired("forgotten:working_copy_rebased");
-        }
-    }
-
     /// A new copy of the hive on machine `m`, as `musubi clone` makes: an empty colocated
     /// repository at a path of its own, with the machine's jj config, joined to the hive on
     /// the root and synced, then on its local `trunk()`. A new machine's, if `m` is `nodes()`, or
@@ -165,7 +100,6 @@ impl World {
     }
 
     fn new_copy(&mut self, m: usize, existing: bool, like: Option<usize>) {
-        crate::coverage::interrupt_races();
         let n = self.next();
         let repo = if m == self.nodes() {
             let machine = MACHINES[m];

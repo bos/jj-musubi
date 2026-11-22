@@ -17,7 +17,6 @@ use crate::view::Commit;
 use crate::view::TEMPLATE;
 use crate::view::View;
 
-use super::CommandOutcome;
 use super::FILES;
 use super::OperationHistory;
 use super::PastOp;
@@ -282,12 +281,6 @@ impl World {
         m: usize,
         command: Command<'_>,
     ) -> Result<CommandResult, String> {
-        match &command {
-            Command::Observe => {}
-            Command::InWorkspace { args, .. }
-                if matches!(args.first(), Some(&"describe" | &"squash")) => {}
-            _ => crate::coverage::interrupt_races(),
-        }
         let CommandExecution {
             history_before,
             before,
@@ -386,19 +379,7 @@ impl World {
         };
 
         // Include snapshots and imports even when the requested work then failed.
-        let succeeded = match &completion {
-            Completion::Observed(_) => true,
-            Completion::InWorkspace { output, .. } | Completion::AtOperation { output, .. } => {
-                output.status.success()
-            }
-        };
-        let outcome = if succeeded {
-            CommandOutcome::Succeeded
-        } else {
-            crate::coverage::interrupt_races();
-            CommandOutcome::Failed
-        };
-        self.record_commands(m, &history_before, outcome);
+        self.record_commands(m, &history_before);
         match completion {
             Completion::Observed(view) => {
                 self.forgive_jj_returns(m, present);
@@ -549,7 +530,6 @@ impl World {
     }
 
     fn git(&mut self, m: usize, args: &[&str]) -> String {
-        crate::coverage::interrupt_races();
         self.record(format!("{}: git {}", self.machine(m), args.join(" ")));
         self.fx.repo(m).git(args)
     }

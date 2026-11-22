@@ -75,26 +75,9 @@ that source before replay, and names which independent native witness explains a
 merge. The tests beside its public checks deliberately remove or forge evidence: they protect
 the oracle itself from accepting an unsupported explanation.
 
-[Coverage](../../crates/musubi-sync/tests/e2e_search/coverage.rs) separates rule activity from
-race witnesses. Catalogue rule combinations are approximate exploration guidance: they do not
-establish that the participants changed the same object concurrently. Currently, native
-detectors cover descriptions of the same commit on two copies and independent squashes into
-the same destination. Each requires distinct copy identities, exact common input ids and
-captured native predecessor records showing actual rewrites. Only adjacent qualifying rules
-can pair; synchronization, unrelated commands and history-rewrite rules break the interval.
-Local preparation observations remain allowed: they may snapshot or reconcile, but cannot
-receive the peer's newly written operation. A squash pair also needs disjoint, nonempty source
-sets.
-
-Witnesses count only after the complete case, including final convergence checks, succeeds.
-Reports distinguish witnessed, not witnessed, not instrumented and excluded rows. A missing
-detector is not a zero count. Each report belongs to one test execution and includes the
-concrete native operations behind its first witness; old report files never contribute.
-Under `target/tmp/e2e_search/`, `coverage-v2-<test>.txt` is the readable report and
-`counts-v2-<test>.json` records the same evidence and statuses. Use the files emitted by the
-current test command. The coverage negative controls check single actions, same-copy and
-different-object pairs, causal barriers, absent native effects, failed cases, report isolation and
-stale files; the native bridge test also exercises both detectors through real jj commands.
+[Coverage](../../crates/musubi-sync/tests/e2e_search/coverage.rs) lists, as each test ends, the
+rules and setup or outcome events that never fired in it (shown with `--no-capture`). It
+claims no race: a rule firing says only that its precondition held.
 
 Private workspace replay pairs each canonical parent with its certificate in `CertifiedParent`.
 It qualifies a candidate's source mappings and certificates, then projects every base and both

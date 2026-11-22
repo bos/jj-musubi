@@ -455,14 +455,11 @@ listing snapshot, it waits for both the saved membership and the daemon's report
 count: the daemon saves membership before it finishes cleanup, so the membership file alone cannot
 tell when its thread has stopped.
 
-`recreating_hives_keeps_work_without_inheriting_remote_workspaces` recreates a hive with two
-copies and a real linked workspace whose name contains `/`, including the first copy leaving
-before the other. It removes old remote workspace names, archives both
-copies' musubi state and the hub, then creates and
-joins a fresh hive. It checks that both copies retain their commits and show exactly the
-local and remote workspaces expected. Omitting the workspace cleanup republishes old remote
-names as new local workspaces. This exercises recreation with the current release, not
-compatibility with an earlier release's files.
+`recreating_hives_keeps_work_without_inheriting_remote_workspaces` has two copies leave a
+hive, the first before the other, and start another together. It checks that both keep their
+commits, a linked workspace whose name has a `/` included, and show exactly the local and
+remote workspaces expected: the other machine's working copy, which the first copy still shows
+from the old hive, is not published as its own.
 
 `the_quick_start_works_as_written` follows the quick start in `docs/get-started.md` as a new
 user would:

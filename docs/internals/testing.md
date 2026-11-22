@@ -1143,7 +1143,9 @@ and the test checks that:
   jj's merge of either merge's parents did the same, the repeat is jj's, and the trace says
   so instead of the case failing.
   `regressions::a_native_serial_merge_can_repeat_a_rebase_after_abandon` pins that jj still
-  repeats the rebase.
+  repeats the rebase, and
+  `reference::rewrites::a_repeated_rebase_is_jjs_only_where_jjs_own_merge_made_it` that only
+  such a repeat is exempt: a duplicate jj's merge didn't make fails.
 
 A machine can list a workspace it has no directory for, but only under a name it created: the
 world records each name a copy creates, and `check_workspaces` holds every listed name without a

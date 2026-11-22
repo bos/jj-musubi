@@ -55,6 +55,13 @@ pub(super) fn repeated_rebases(
 }
 
 impl Reference {
+    /// A commit's change id as the view's `change_id` template prints it, which names a change
+    /// in `alike_changes` and in the `change` that `same_rebase_twice` is asked about: the two
+    /// must agree for jj's alike pair to be found.
+    fn change_name(&mut self, id: &CommitId) -> String {
+        self.facts(id).change.reverse_hex()
+    }
+
     /// The changes with two visible commits alike in `view` (by structural key), as jj's own
     /// merge made them: recorded for each merge the reference replays, so that a repeated
     /// rebase jj makes too isn't taken for the hive's.
@@ -63,7 +70,7 @@ impl Reference {
         let keys = self.keys(&visible, &|_| true);
         let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
         for id in &visible {
-            let change = self.facts(id).change.reverse_hex();
+            let change = self.change_name(id);
             *seen.entry((change, keys[id])).or_default() += 1;
         }
         seen.into_iter()
@@ -87,22 +94,98 @@ impl Reference {
             .rewrites
             .clone()
             .into_iter()
-            .filter(|rewrite| self.facts(&rewrite.new).change.reverse_hex() == change)
+            .filter(|rewrite| self.change_name(&rewrite.new) == change)
             .collect();
         let ids: Vec<CommitId> = ours.iter().map(|rewrite| rewrite.new.clone()).collect();
         let keys = self.keys(&ids, &|_| true);
         let pairs = repeated_rebases(&ours, &keys);
-        let by_jj = |op: &OperationId| {
-            self.jj_alike
-                .get(op)
-                .is_some_and(|changes| changes.contains(change))
-        };
-        if pairs.is_empty() {
-            RebaseTwice::No
-        } else if pairs.iter().all(|(a, b)| by_jj(a) || by_jj(b)) {
-            RebaseTwice::ByJj
-        } else {
-            RebaseTwice::ByMerges
-        }
+        rebase_twice(&pairs, &self.jj_alike, change)
     }
+}
+
+/// Who did the repeated rebases `pairs` of `change`: jj, if for each pair jj's own merge of
+/// either merge's parents made the same alike pair of commits of `change` (`jj_alike`), and
+/// else the hive's merges.
+fn rebase_twice(
+    pairs: &[(OperationId, OperationId)],
+    jj_alike: &HashMap<OperationId, BTreeSet<String>>,
+    change: &str,
+) -> RebaseTwice {
+    let by_jj = |op: &OperationId| {
+        jj_alike
+            .get(op)
+            .is_some_and(|changes| changes.contains(change))
+    };
+    if pairs.is_empty() {
+        RebaseTwice::No
+    } else if pairs.iter().all(|(a, b)| by_jj(a) || by_jj(b)) {
+        RebaseTwice::ByJj
+    } else {
+        RebaseTwice::ByMerges
+    }
+}
+
+/// A repeated rebase is jj's own, so recorded and not failed, exactly where jj's own merge of
+/// either merge's parents made the same alike pair of the change; a duplicate that jj's merge
+/// didn't make is the hive's. Merges 1 and 2 rewrite the commit 10 into alike commits, as do 3
+/// and 4 the commit 11, and 5 rewrites it into a different one.
+#[test]
+fn a_repeated_rebase_is_jjs_only_where_jjs_own_merge_made_it() {
+    let op = |n: u8| OperationId::new(vec![n]);
+    let commit = |n: u8| CommitId::new(vec![n]);
+    let rewrite = |operation: u8, new: u8, old: u8| MergeRewrite {
+        operation: op(operation),
+        new: commit(new),
+        predecessors: vec![commit(old)],
+    };
+    // The structural key of each new commit: 21 and 22 are alike, and 23 is not.
+    let keys: HashMap<CommitId, u64> =
+        HashMap::from([(commit(21), 7), (commit(22), 7), (commit(23), 8)]);
+    let repeated = |rewrites: &[MergeRewrite]| repeated_rebases(rewrites, &keys);
+    let jj_alike = |ops: &[u8], change: &str| -> HashMap<OperationId, BTreeSet<String>> {
+        ops.iter()
+            .map(|n| (op(*n), BTreeSet::from([change.to_owned()])))
+            .collect()
+    };
+
+    let twice = repeated(&[rewrite(1, 21, 10), rewrite(2, 22, 10)]);
+    assert_eq!(twice, [(op(1), op(2))]);
+    let different = repeated(&[rewrite(1, 21, 10), rewrite(5, 23, 10)]);
+    assert_eq!(
+        rebase_twice(&different, &jj_alike(&[], "c"), "c"),
+        RebaseTwice::No
+    );
+
+    // jj's own merge of either merge's parents made the pair: jj's repeat.
+    for ops in [&[1][..], &[2], &[1, 2]] {
+        assert_eq!(
+            rebase_twice(&twice, &jj_alike(ops, "c"), "c"),
+            RebaseTwice::ByJj
+        );
+    }
+    // A duplicate jj's merges didn't make is the hive's: jj made no pair, a pair of another
+    // change, or a pair at merges outside this one.
+    for alike in [
+        jj_alike(&[], "c"),
+        jj_alike(&[1, 2], "other"),
+        jj_alike(&[3, 4], "c"),
+    ] {
+        assert_eq!(rebase_twice(&twice, &alike, "c"), RebaseTwice::ByMerges);
+    }
+    // Every repeat must be jj's: one it didn't make fails the change.
+    let both = repeated(&[
+        rewrite(1, 21, 10),
+        rewrite(2, 22, 10),
+        rewrite(3, 21, 11),
+        rewrite(4, 22, 11),
+    ]);
+    assert_eq!(both, [(op(1), op(2)), (op(3), op(4))]);
+    assert_eq!(
+        rebase_twice(&both, &jj_alike(&[1, 4], "c"), "c"),
+        RebaseTwice::ByJj
+    );
+    assert_eq!(
+        rebase_twice(&both, &jj_alike(&[1], "c"), "c"),
+        RebaseTwice::ByMerges
+    );
 }

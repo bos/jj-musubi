@@ -320,6 +320,9 @@ impl NodeRepo {
 #[cfg(all(test, unix))]
 mod advance_tests;
 
+#[cfg(all(test, unix))]
+mod concurrent_tests;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]

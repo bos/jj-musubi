@@ -130,12 +130,12 @@ impl OpStore for LateMergeError {
     }
 }
 
-fn open(repo: &TestRepo) -> NodeRepo {
+pub(super) fn open(repo: &TestRepo) -> NodeRepo {
     NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap()
 }
 
 /// No helper here loads at the op heads: reachability must be observed before jj repairs it.
-fn reachable(node: &NodeRepo) -> BTreeSet<LocalOp> {
+pub(super) fn reachable(node: &NodeRepo) -> BTreeSet<LocalOp> {
     let mut seen = BTreeSet::new();
     let mut todo = node.local_heads().unwrap();
     while let Some(op) = todo.pop() {
@@ -157,7 +157,7 @@ fn reachable(node: &NodeRepo) -> BTreeSet<LocalOp> {
     seen
 }
 
-fn git_bookmark(repo: &TestRepo, name: &str) -> String {
+pub(super) fn git_bookmark(repo: &TestRepo, name: &str) -> String {
     let git = gix::open(repo.path()).unwrap();
     git.find_reference(&format!("refs/heads/{name}"))
         .unwrap()
@@ -167,7 +167,7 @@ fn git_bookmark(repo: &TestRepo, name: &str) -> String {
         .to_string()
 }
 
-fn assert_exported(node: &NodeRepo, repo: &TestRepo, head: &LocalOp, old_left: &str) {
+pub(super) fn assert_exported(node: &NodeRepo, repo: &TestRepo, head: &LocalOp, old_left: &str) {
     let merged = node.repo_at(head).unwrap();
     assert_ne!(git_bookmark(repo, "left"), old_left);
     for name in ["left", "right", "incoming", "main"] {
@@ -178,7 +178,7 @@ fn assert_exported(node: &NodeRepo, repo: &TestRepo, head: &LocalOp, old_left: &
     }
 }
 
-fn transfer(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
+pub(super) fn transfer(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
     let dir = musubi_testutil::tempdir();
     let ops = from
         .canonical
@@ -200,7 +200,7 @@ fn transfer(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
     to.reload().unwrap();
 }
 
-fn fixture(colocated: bool) -> (TestEnv, CanonicalOp) {
+pub(super) fn fixture(colocated: bool) -> (TestEnv, CanonicalOp) {
     let env = TestEnv::new();
     let a = env.init_repo("alpha");
     let b = if colocated {

@@ -323,10 +323,21 @@ realization still reachable. Reopening and retrying must converge. A rebased boo
 also be exported, so a later jj git import neither creates an operation nor reverts it.
 
 This Unix regression skips with a reason when mode bits cannot deny a write. It does not
-inject view-write or read failures, partial head writes, crashes, concurrent commands, or
-record-taking changes to merge bases. The oracle's two-step proof does not cover these
-intermediate store effects. A working-copy repair that creates an operation is another
-operation-creating action.
+inject view-write or read failures, or record-taking changes to merge bases. The oracle's
+two-step proof does not cover these intermediate store effects. A working-copy repair that
+creates an operation is another operation-creating action.
+
+`node::realize::concurrent_tests` runs real `jj` commands inside `advance` and `merge_heads`,
+interposing only at the op stores' edge to run a command at a chosen point, and checks what a
+user would see afterwards; none of them counts how often the code reads the op heads.
+
+| Test | What it checks |
+| --- | --- |
+| `a_command_finishing_before_publication_is_merged_and_exported` | A command that finishes after the realization was prepared, or while it is, is merged with it at publication, not left as a second op head: the first op head `advance` publishes already has the command's operation behind it, and afterwards its bookmark move and the received work are in the one head, `.git` agrees, a later `jj status` or `jj git import` moves nothing back, and the workspaces `a` and `b` keep their commits. Fails if `advance` publishes without comparing the op heads under the locks with those it prepared for, or without merging with the heads concurrent with it. |
+| `a_workspace_named_like_another_machines_stays_this_machines` | A workspace the user named `alpha/c` stays theirs when alpha's workspace `c` arrives, whether the user added it before the realization was prepared or after: alpha's is shown under another name, and the user's `a` and `b` keep their commits. Fails if the realization doesn't name other machines' workspaces clear of this machine's (`reserved_names`). `realized_beside_other_heads` has no test that fails without it: with it disabled the `musubi-jj` library tests, these included, pass, as re-rendering the realization (`current_realization`) covers the same cases here. |
+| `merge_heads_exports_when_a_second_head_arrives` | A head that arrives while `merge_heads` looks at the op heads is merged under the Git export lock, and the bookmark the merge rebases is moved in `.git` as in jj's import record, as when the head was there at the start. |
+| `advance_exports_the_merge_before_publishing_it` | Every bookmark of the op head `advance` publishes is in `.git` when the head goes in. |
+| `publication_interrupted_before_the_old_heads_go_loses_nothing` | In a colocated repository, with taking out an old op head refused, as a crash before it would, the new head is beside the old and no operation is lost; realization resumed after a restart leaves one head with everything and exports the merge. This relies on jj's op-heads store putting a head in before taking any out. |
 
 Mutation checks distinguish these obligations: returning the unpublished merge error,
 replacing concurrent heads without a merge, suppressing cleanup errors, skipping cleanup's
@@ -1233,6 +1244,13 @@ The native lifecycle model (`formal/Musubi/NativeLifecycle.lean` and the modules
 operation into a native jj operation and publish it. It computes its answers from raw
 observations, so that Rust fixtures can be compared with them through the oracle's
 `nativeLifecycle` request.
+
+The fixtures this section names (`native_contract_tests.rs` and its siblings) went with
+replicated `jj op abandon`, whose records and contraction they were built on, and the model
+goes with them. What they guarded of realization, real `jj` commands racing it and an
+interruption on its way to the op heads, is now guarded by
+`node::realize::concurrent_tests`, which needs no records (described above, after the late
+store failures).
 
 **What the model covers.**
 

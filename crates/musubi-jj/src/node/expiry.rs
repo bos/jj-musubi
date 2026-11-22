@@ -30,6 +30,11 @@ pub const FORGET_AFTER_KEY: &str = "musubi.forget-after";
 
 /// The attribute of an earlier release's fix-up saying when the work it stands for was done,
 /// in milliseconds since the epoch: the copy's latest work, which an abandon dropped.
+///
+/// Compatibility until 2027-02-21: remove this, its read in `NodeRepo::work_time`, the mention
+/// of it in `NodeRepo::last_work`, and the test
+/// `an_earlier_releases_worked_at_attribute_still_reads`; `work_time` then returns the end of
+/// the operation.
 const WORKED_AT_ATTRIBUTE: &str = "musubi.worked-at";
 
 /// A copy present in the hive, as `musubi list` shows it.
@@ -295,6 +300,27 @@ fn staggered(own: &str, copy: &str, stagger: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compatibility until 2027-02-21: remove with `WORKED_AT_ATTRIBUTE`.
+    #[test]
+    fn an_earlier_releases_worked_at_attribute_still_reads() {
+        let env = musubi_testutil::TestEnv::new();
+        let repo = env.init_repo("alpha");
+        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        node.create_join_operation("musubi: alpha joins").unwrap();
+        let head = node.canonical_heads().unwrap().remove(0);
+        let mut operation = node.canonical.read_operation(&head).unwrap();
+        let ended = operation.metadata.time.end.timestamp.0;
+        assert_eq!(node.work_time(&head).unwrap(), ended);
+        for (text, expected) in [("1234", 1234), ("not a time", ended)] {
+            operation
+                .metadata
+                .attributes
+                .insert(WORKED_AT_ATTRIBUTE.to_owned(), text.to_owned());
+            let written = node.canonical.write_operation(&operation).unwrap();
+            assert_eq!(node.work_time(&written).unwrap(), expected, "{text}");
+        }
+    }
 
     #[test]
     fn staggering_stays_within_its_bound() {

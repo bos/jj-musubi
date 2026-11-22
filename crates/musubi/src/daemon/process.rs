@@ -154,6 +154,18 @@ impl Running {
 
     /// Whether it is of a build from before pid files named their build, which spoke another
     /// protocol, and can't be asked to stop.
+    ///
+    /// Compatibility until 2027-02-17: remove this, its uses in `remedy` and `stop`, the
+    /// `OtherBuild(None)` arm of `OtherBuild`'s message that says "an earlier build" (a listener
+    /// that doesn't greet as this transport does also gives `OtherBuild(None)`, and then says
+    /// "another build"), `control::EARLIER_BUILD` and its uses in `control.rs`'s tests, the
+    /// sentences about a daemon from before the protocol in `control.rs`'s module doc and in
+    /// `docs/internals/design.md` ("Commands reach the daemon"), and the tests
+    /// `a_daemon_from_before_this_protocol_is_left_to_be_ended_by_hand`,
+    /// `a_command_says_what_to_do_by_what_it_knows` (its `info(42, None)` case), the `earlier`
+    /// assertions of `a_pid_file_names_the_build_of_its_daemon` (the `said_of(earlier)` check
+    /// and the `predates` asserts at its end), and the "earlier build" snapshots in
+    /// `crates/musubi/tests/cli.rs`.
     fn predates(&self) -> bool {
         self.pid.is_some() && self.version.is_none()
     }

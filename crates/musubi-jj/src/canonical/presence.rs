@@ -26,8 +26,13 @@ use crate::presence::Presence;
 use crate::translation_map::whole_id;
 
 /// Work as presence names it: by its original identity (`CanonicalStore::original_id`), with
-/// the operation that stands for it in the history at hand, none if an abandon dropped it.
+/// the operation that stands for it in the history at hand, none for work that no operation
+/// stands for: as a stamp an earlier release wrote can name (compatibility), or the unnamed
+/// work of an operation that isn't work ([`Work::unnamed`]).
 /// Equal, and ordered, by the original alone.
+///
+/// Compatibility until 2027-02-21: see `origin::PRESENCE`, which lists what goes, including
+/// `op`'s `Option`, which becomes a `CanonicalOp`.
 #[derive(Clone, Debug)]
 pub struct Work {
     pub original: OperationId,
@@ -269,6 +274,8 @@ fn at(
     Ok(Arc::new(merged.apply(&work, kind)))
 }
 
+/// Compatibility until 2027-02-21: see `origin::PRESENCE`.
+///
 /// The presence `id`, with original `original`, is stamped with: each work it names as the
 /// operation that stands for it here, if any. That is `id` itself, or one its parents' merged
 /// presence, `merged`, names: work at an operation that survives a contraction is maximal
@@ -301,6 +308,8 @@ fn read_stamp(
         .ok_or_else(|| CanonicalError::MalformedOperation(id.0.hex()))
 }
 
+/// Compatibility until 2027-02-21: see `origin::PRESENCE`.
+///
 /// Refuses `op`, received from a peer, if it has a stamp that isn't one: presence at it and
 /// everything after would be unreadable.
 pub(super) fn check_stamp(op: &Operation) -> Result<(), ()> {

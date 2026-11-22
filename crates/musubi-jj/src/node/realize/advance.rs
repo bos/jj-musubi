@@ -11,7 +11,6 @@ use std::sync::Arc;
 use jj_lib::lock::FileLock;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_heads_store::OpHeadsStore;
-use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use pollster::FutureExt as _;
 
@@ -95,45 +94,6 @@ impl NodeRepo {
 }
 
 impl NodeRepo {
-    /// Whether `local` is a realization not yet published that was named clear of fewer of
-    /// this machine's own names (`reserved_names`) than its op heads have now, as one made
-    /// before a crash, or before a `jj` command published: merged with them, it may show
-    /// another machine's workspace by a name that is a workspace of this machine's own there.
-    fn realized_beside_other_heads(&mut self, local: &LocalOp) -> Result<bool, NodeError> {
-        let op = self.loader.op_store().read_operation(&local.0).block_on()?;
-        if OpAttrs(&op.metadata.attributes).canonical().is_none()
-            || self
-                .reserved_names()?
-                .is_subset(&super::super::view::reserved_of(&op.metadata)?)
-        {
-            return Ok(false);
-        }
-        // Published already, it is merged with nothing new.
-        let load = |op: &LocalOp| self.loader.load_operation(&op.0).block_on();
-        let heads = self
-            .local_heads()?
-            .iter()
-            .map(load)
-            .collect::<Result<Vec<_>, _>>()?;
-        let bases = op_walk::closest_common_ancestors([load(local)?], heads).block_on()?;
-        Ok(!bases.iter().any(|base| base.id() == &local.0))
-    }
-
-    /// Realizes `canonical` again in place of `local`, its realization, not yet published,
-    /// beside the op heads as they are now.
-    fn realize_again(
-        &mut self,
-        canonical: &CanonicalOp,
-        local: &LocalOp,
-    ) -> Result<LocalOp, NodeError> {
-        self.settle()?;
-        // The old one stays unreachable, as after a crash: the map's file names the new one
-        // after it, and the one named last counts.
-        self.map.forget(local, canonical);
-        self.realizing.clear_prepared();
-        self.realize(canonical)
-    }
-
     /// Actual native ancestry, not the cache's preferred unpublished aliases. Append-only
     /// moves extend only the new suffix; a trim or restore rebuilds the index.
     pub(in crate::node) fn published_realizations(
@@ -203,6 +163,9 @@ impl NodeRepo {
 
     /// Re-render only unpublished suffixes against actual published parent aliases.
     /// Every operation validates its full inputs, so partial writes recover after restart.
+    /// Each shows other machines' workspaces clear of this machine's own names in the op heads
+    /// as they are now (`reserved_for`), so one made before a crash, or before a `jj` command
+    /// added such a name, is made again rather than published as it was.
     pub(super) fn current_realization(
         &mut self,
         canonical: &CanonicalOp,
@@ -374,10 +337,7 @@ impl NodeRepo {
         self.realizing.clear_prepared();
         let heads = self.local_heads()?;
         let published = self.published_realizations(&heads)?;
-        let mut realized = self.current_realization(canonical, &published)?;
-        if self.realized_beside_other_heads(&realized)? {
-            realized = self.realize_again(canonical, &realized)?;
-        }
+        let realized = self.current_realization(canonical, &published)?;
         let (superseded, concurrent) = self.check_mergeable(canonical, &realized, &heads)?;
         Ok(Prepared {
             heads,

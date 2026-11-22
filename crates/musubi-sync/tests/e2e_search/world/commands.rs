@@ -578,8 +578,10 @@ impl World {
             .workspace_births
             .insert(format!("{}/{name}", self.fx.machine_key(m)));
         self.logical_extras[m].remove(&self.workspaces[m][ws].name);
+        let old = self.workspaces[m][ws].name.clone();
         self.jj_in(m, ws, &["workspace", "rename", name]);
         self.workspaces[m][ws].name = name.to_owned();
+        self.check_own_workspaces_listed(m, &format!("`jj workspace rename {name}`"), &old);
     }
 
     pub fn forget_workspace(&mut self, m: usize, ws: usize) {
@@ -587,6 +589,45 @@ impl World {
         self.jj(m, &["workspace", "forget", &name]);
         self.logical_extras[m].remove(&name);
         self.workspaces[m].remove(ws);
+        self.check_own_workspaces_listed(m, &format!("`jj workspace forget {name}`"), &name);
+    }
+
+    /// After `command` renamed or forgot machine `m`'s workspace `gone`, before any sync:
+    /// its latest operation lists its workspaces, and not `gone`. A later merge may bring a
+    /// name back, which `check_workspaces` allows for names the copy created; this catches
+    /// a rename or forget that never took effect. Read in process, so it changes nothing.
+    fn check_own_workspaces_listed(&self, m: usize, command: &str, gone: &str) {
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let head = jj_lib::op_store::OperationId::try_from_hex(self.latest_op_head(m)).unwrap();
+        let view = futures::executor::block_on(async {
+            let op = store.read_operation(&head).await.unwrap();
+            store.read_view(&op.view_id).await.unwrap()
+        });
+        let listed: BTreeSet<&str> = view
+            .wc_commit_ids
+            .keys()
+            .map(|name| name.as_str())
+            .filter(|name| !name.contains('/'))
+            .collect();
+        let missing: Vec<&str> = self.workspaces[m]
+            .iter()
+            .map(|ws| ws.name.as_str())
+            .filter(|name| !listed.contains(name))
+            .collect();
+        let mut wrong = vec![];
+        if listed.contains(gone) {
+            wrong.push(format!("still {gone:?}"));
+        }
+        if !missing.is_empty() {
+            wrong.push(format!("not {missing:?}"));
+        }
+        if !wrong.is_empty() {
+            self.fail(&format!(
+                "after {command}, {} lists workspaces {listed:?}: {}",
+                self.machine(m),
+                wrong.join(", ")
+            ));
+        }
     }
 }
 
@@ -687,4 +728,35 @@ fn only_the_duplicate_commit_bug_is_excused() {
             "{other}"
         );
     }
+}
+
+/// A forget or rename that left the old name listed, or a workspace the machine has a
+/// directory for no longer listed, fails at once; one that took effect passes.
+#[test]
+fn a_forget_or_rename_that_did_not_take_effect_fails() {
+    use super::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 1,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: true,
+    });
+    let failure = |world: &World, gone: &str| {
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.check_own_workspaces_listed(0, "the command", gone);
+        }))
+        .expect_err("the check fails");
+        failed.downcast_ref::<String>().unwrap().clone()
+    };
+    // As if `jj workspace forget second` had done nothing.
+    let message = failure(&world, "second");
+    assert!(message.contains("still \"second\""), "{message}");
+    // As if a rename had dropped a workspace without giving it its new name.
+    world.workspaces[0][1].name = "renamed".to_owned();
+    let message = failure(&world, "second");
+    assert!(message.contains("not [\"renamed\"]"), "{message}");
+    world.workspaces[0][1].name = "second".to_owned();
+    world.rename_workspace(0, 1, "renamed");
+    world.forget_workspace(0, 1);
 }

@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
@@ -271,11 +270,10 @@ impl std::fmt::Debug for PastOp {
 pub struct CommandSnapshot {
     /// The native operation, before a per-machine export or `jj op abandon` changes it.
     pub id: jj_lib::op_store::OperationId,
+    /// The copy that ran it.
     pub copy: String,
-    pub copies: BTreeSet<String>,
-    pub parent: jj_lib::op_store::OperationId,
+    /// The canonical operation it ran at, where its parent has one.
     pub input: Option<CanonicalOp>,
-    pub predecessors: Option<BTreeMap<CommitId, Vec<CommitId>>>,
     pub base: jj_lib::op_store::View,
     pub made: jj_lib::op_store::View,
 }
@@ -369,7 +367,8 @@ pub struct World {
     dirty: Vec<bool>,
     /// Each machine's workspaces; the first is the primary.
     pub workspaces: Vec<Vec<Workspace>>,
-    /// Logical names with a live independent merge witness, without physical directories.
+    /// Workspaces each machine lists without a directory, all of names it created
+    /// (`check_workspaces`).
     pub logical_extras: Vec<BTreeSet<String>>,
     /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
     /// its `merge_key`: none comes back, unless jj brings it back there.
@@ -476,7 +475,6 @@ impl World {
         let mut world = Self {
             logical_extras: vec![BTreeSet::new(); setup.nodes],
             evidence: NativeEvidence {
-                initial_workspace_keys: workspace_births.clone(),
                 workspace_births,
                 baseline_ids: vec![],
                 baseline_keys: vec![],
@@ -491,7 +489,6 @@ impl World {
                 published_seen: BTreeSet::new(),
                 published_headers: BTreeSet::new(),
                 commands: BTreeMap::new(),
-                workspace_joins: BTreeMap::new(),
                 command_sources: BTreeMap::new(),
             },
             fx,

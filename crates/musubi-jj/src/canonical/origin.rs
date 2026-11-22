@@ -51,7 +51,7 @@ pub(super) fn fresh(op: &Operation) -> Operation {
 }
 
 /// The original operation's hash, recomputed from immutable material rather than trusting
-/// a peer's claimed hash. Original parents need not remain in the contracted history.
+/// a peer's claimed hash. Original parents need not be in the history at hand.
 pub(super) fn identity(op: &Operation) -> Result<OperationId, CanonicalError> {
     let malformed = || CanonicalError::MalformedOperation("original parents".to_owned());
     let mut original = op.clone();

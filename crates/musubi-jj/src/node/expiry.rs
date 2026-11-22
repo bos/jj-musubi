@@ -218,8 +218,9 @@ impl NodeRepo {
     }
 
     /// When a present copy last worked: the latest end of its latest work's operations, or
-    /// when a fix-up an earlier release wrote says that work was done. Work an abandon dropped,
-    /// which the fix-up replaces, counts as just done: it is never a reason to forget a copy.
+    /// when a fix-up an earlier release wrote says that work was done. Work that no operation
+    /// stands for, as a stamp an earlier release wrote can name, counts as just done: it is
+    /// never a reason to forget a copy.
     fn last_work(&self, presence: &Presence<Work>, copy: &str) -> Result<SystemTime, NodeError> {
         let mut last = SystemTime::UNIX_EPOCH;
         for work in presence.latest(copy).into_iter().flatten() {

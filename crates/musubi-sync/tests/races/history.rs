@@ -853,12 +853,10 @@ fn concurrent_operation_on_one_machine() {
 
 /// A node that restarts loses its protocol state and its translation cache. It recovers both,
 /// and converges without duplicating or dropping anything. With the cache lost, nothing maps
-/// its own operations above its join, so it looks for a `jj op abandon` there, matching each
-/// of them to an operation the hive has by its fingerprint. An operation and jj's rewrite of
-/// it, both in the history once a command run at an operation from before the abandon writes
-/// on the operation, have the same fingerprint: which survived is ambiguous, and the node
-/// stopped for good. It must find, as canonicalizing would, that each stands for an
-/// operation the hive has. The undo is matched either way.
+/// its own operations above its join, so it works out the canonical form of each again, as
+/// canonicalizing would. Here an operation and jj's rewrite of it are both in the history,
+/// once a command run at an operation from before a `jj op abandon` writes on the operation:
+/// each must stand for an operation the hive has, and the heads come out as they were.
 #[test]
 fn restart_with_lost_cache() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

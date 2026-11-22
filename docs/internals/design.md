@@ -859,12 +859,12 @@ The approval token hashes this copy's identity, accepted basis, applicable limit
 outgoing operation ids, charged file-version set and byte count. Approval is exact; any change is
 rechecked. The sender records a compact frontier of every attempted publication *before*
 uploading, retaining incomparable histories. Only exact ancestry subsumes an older frontier
-entry: equal original ids after contraction
-cannot establish that an older uploaded ancestor was never shared. On activation in an existing
-copy, pre-activation heads and saved offers are conservatively frozen. Malformed or missing
-source bodies fail closed. Exclusive creation prevents a late initializer from replacing a
-sender's record, and a checksum detects mixed old/new records after an interrupted in-place
-write. This is provenance, not a durable network acknowledgement.
+entry: equal original ids after an earlier release's contraction, or cleanup's, cannot establish
+that an older uploaded ancestor was never shared. On activation in an existing copy,
+pre-activation heads and saved offers are conservatively frozen. Malformed or missing source
+bodies fail closed. Exclusive creation prevents a late initializer from replacing a sender's
+record, and a checksum detects mixed old/new records after an interrupted in-place write. This is
+provenance, not a durable network acknowledgement.
 
 Cleanup selects whole operations known never to have been offered. It never enlarges a user's
 selection. Before contracting native parents, freeze each survivor's source intent in

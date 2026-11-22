@@ -1,7 +1,8 @@
 //! Provenance of histories offered to the hub, including offers with a lost reply.
 //!
-//! Persist exact ancestry frontiers, not original identities: contraction can preserve an
-//! original identity while removing ancestors an older offer already shared.
+//! Persist exact ancestry frontiers, not original identities: an earlier release's contraction,
+//! and cleanup's of native parents, can keep an original identity while removing ancestors an
+//! older offer already shared.
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -137,8 +138,8 @@ impl NodeRepo {
     }
 
     /// A compact frontier of every attempted upload. Only exact ancestry can subsume an
-    /// older offer: a contraction may preserve its head's original identity while dropping
-    /// ancestors that were part of the original upload.
+    /// older offer: a contraction, an earlier release's or cleanup's, may keep its head's
+    /// original identity while dropping ancestors that were part of the original upload.
     pub fn record_publication_offer(&mut self, head: &CanonicalOp) -> Result<(), NodeError> {
         self.initialize_publication_offers()?;
         let previous = self.read_publication_offers()?;

@@ -1,7 +1,7 @@
 //! Which copies are present at canonical operations (see `crate::presence`), worked out from
 //! a canonical store, for a node and for a hub alike. Presence names work by its original
-//! identity, which a contraction keeps, and at an operation a contraction stamped it is the
-//! stamp (docs/internals/design.md, "Presence").
+//! identity, and at an operation an earlier release's contraction stamped it is the stamp
+//! (docs/internals/design.md, "Presence").
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ impl Ord for Work {
 
 impl Work {
     /// Whether this work is in the history below `other`, as presence asks it ([`merge`]): work
-    /// an abandon dropped counts as below every operation.
+    /// no operation stands for counts as below every operation.
     pub fn below(&self, store: &CanonicalStore, other: &Self) -> Result<bool, CanonicalError> {
         work_below(store, self, other)
     }
@@ -278,8 +278,8 @@ fn at(
 ///
 /// The presence `id`, with original `original`, is stamped with: each work it names as the
 /// operation that stands for it here, if any. That is `id` itself, or one its parents' merged
-/// presence, `merged`, names: work at an operation that survives a contraction is maximal
-/// below it, and so below a parent that has it.
+/// presence, `merged`, names: work at an operation that survived an earlier release's
+/// contraction is maximal below it, and so below a parent that has it.
 fn read_stamp(
     id: &CanonicalOp,
     original: &OperationId,
@@ -349,7 +349,7 @@ pub fn merge(
 }
 
 /// Whether work `a` is in the history below `b`, an operation of `store`, as presence asks
-/// it: work an abandon dropped counts as below every operation, so a merge keeps it only
+/// it: work no operation stands for counts as below every operation, so a merge keeps it only
 /// where every parent does.
 fn work_below(store: &CanonicalStore, a: &Work, b: &Work) -> Result<bool, CanonicalError> {
     match (&a.op, &b.op) {

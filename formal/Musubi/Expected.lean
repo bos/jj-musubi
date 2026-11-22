@@ -206,7 +206,7 @@ def withoutKnown (h : I → Observation I T) (i : I) : Observation I T :=
   { h i with known := none }
 
 /-- A machine may have different memoization from another. Correct cached answers can be
-removed without changing a successful computation. Pending pre-contraction values must
+removed without changing a successful computation. Pending pre-cleanup values must
 instead correspond to authoritative history checkpoints; this lemma does not justify them. -/
 theorem Computes.without_known {resolved : T → Bool} {side : T → Option T}
     {h : I → Observation I T} {i : I} {e : Option T}
@@ -241,7 +241,7 @@ theorem eval_without_known_agrees (resolved : T → Bool) (side : T → Option T
   ((eval_computes resolved side h n i e warm).without_known sound).unique
     (eval_computes resolved side (withoutKnown h) m i e' cold)
 
-/-- A recorded fix-up value preserves a pre-contraction expectation without retaining the
+/-- A recorded fix-up value preserves a pre-cleanup expectation without retaining the
 old parents. The hypothesis `hc` is `known.or recorded = some e`: the known value if there is
 one, otherwise the recorded value, is `e`. It is assumed here, not proved. -/
 theorem checkpoint (resolved : T → Bool) (side : T → Option T)

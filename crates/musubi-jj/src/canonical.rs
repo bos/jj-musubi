@@ -231,7 +231,7 @@ impl Shared {
         self.write_original(&origin::fresh(op))
     }
 
-    /// Writes immutable content already prepared by fresh creation or contraction.
+    /// Writes immutable content already prepared by fresh creation.
     fn write_original(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
         let id = OperationId::new(blake2b_hash(op).to_vec());
         self.log
@@ -348,7 +348,7 @@ impl CanonicalStore {
         self.shared.read_operation(&id.0)
     }
 
-    /// The immutable identity before contraction, recomputed from original parent material.
+    /// The immutable identity, recomputed from original parent material.
     pub fn original_id(&self, id: &CanonicalOp) -> Result<OperationId, CanonicalError> {
         Ok(self.read_operation_and_original(id)?.1)
     }

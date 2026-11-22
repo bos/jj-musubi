@@ -1127,35 +1127,20 @@ and the test checks that:
 - no change has two commits with the same parents and contents that independent merges rewrote
   from one commit: the same rebase done twice, which the hub's sequencing exists to prevent. A
   ledger (`e2e_search/ledger.rs`) of which machine's commands rewrote what tells this apart
-  from rewrites that commands make alike. After an operation abandon, jj can rebase the original
-  again in a later merge whose inputs already contain the first result. The reference accepts
-  this serial case only when an independent jj replay agrees on the complete shared result and
-  the exact predecessor relation. Parent ancestry or a preserved merge view alone is insufficient.
-  `reference::a_native_serial_merge_can_repeat_a_rebase_after_abandon` demonstrates it in a
-  non-colocated native repository and still rejects an independent repeat of the first merge,
-  including alongside a certified serial pair. The same fixture checks the production
-  certificate guard against different or missing native predecessors and changed shared commits
-  or references, even with the earlier result visible in the merge's inputs.
+  from rewrites that commands make alike, and the reference confirms that two of the hive's
+  merges rewrote the commit alike. After `jj op abandon`, jj itself can rebase the original again
+  in a later merge whose inputs already hold the first result ([races.md, "Known jj
+  limitations"](races.md#known-jj-limitations)). So for each merge it replays, the reference
+  records which changes jj's own merge of the same parents left with two alike commits; where
+  jj's merge of either merge's parents did the same, the repeat is jj's, and the trace says
+  so instead of the case failing.
+  `regressions::a_native_serial_merge_can_repeat_a_rebase_after_abandon` pins that jj still
+  repeats the rebase.
 
-Workspace names have a separate logical ledger from the directories used for edits. Native
-merges can restore a name whose directory was renamed or forgotten. The checker certifies a
-name only from independently recorded workspace births, the actual native command's before
-and after views, or jj's replay of authenticated source parents. A forgotten copy's private
-bindings require matching source views and an independent native merge witness; shared
-metadata naming a workspace is never its own certificate. Rewriting a dormant binding's
-commit revokes opaque inheritance unless independent replay certifies its result.
-An internal repair or merge can also inherit a binding certified by every source: each live
-source must already contain that exact target, or its hidden old target must have exactly
-one visible rewrite there, equal to the result. Only source parents where the owner is present
-contribute its bindings; a forgotten branch's stale target cannot veto newer live work.
-A dormant source among the present parents must certify the unchanged target while omitting
-its slot. At least one source must have a live binding and a present owner; dormant omissions
-cannot certify a comeback by themselves. Visibility in the result
-is never evidence for a new target.
-`reference::workspace_certificates_require_each_sources_existing_binding` checks these rules
-with real jj rewrites, including two divergent versions, missing or conflicting source
-bindings, owner deletion, all-dormant inputs, a target visible only in the result, and newer
-live work with a different change from the forgotten branch's stale binding.
+A machine can list a workspace it has no directory for, but only under a name it created: the
+world records each name a copy creates, and `check_workspaces` holds every listed name without a
+directory to those.
+
 The private-workspace parent selector's
 `node::realize::tests::concrete_work_keeps_the_namespace_after_a_deletion`
 uses an actual native workspace add and forget, then an erased original marker, to check
@@ -1170,19 +1155,6 @@ translation-cache loss.
 parent version through a real jj command, then verifies that the different abandoned version
 still fails if the adapter republishes it. Neither matching metadata nor prior publication
 widens that exact return witness.
-
-A previously witnessed merge birth keeps its name through a single-parent repair while the
-name is still present or private, even if its working-copy commit changes. This carries no
-certificate for the replacement payload; the binding controls above still reject it.
-Certificate dependencies and the source copies used for native replay are walked iteratively;
-the source history's depth does not consume the test thread's stack.
-`reference::workspace_witnesses_walk_deep_histories_without_recursing` checks 512 unchanged
-source operations, including binding, name, merged and dormant state, and exact copied ids.
-A replacement clone's synthetic join has its own independently captured native input, keyed
-by the join's metadata identity. Only its exact owned workspace keys and commit targets can
-be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`
-rejects both a foreign key and a changed target on an otherwise valid synthetic join, and
-checks that removing the captured input revokes the certificate.
 
 The reference (`e2e_search/reference.rs`) is a jj repository of the test's own that replays
 the hub's history, operation by operation, with the same parents:
@@ -1200,97 +1172,51 @@ the hub's history, operation by operation, with the same parents:
    unexplained divergence and conflicts against its input, bounded by the native result. Genuine
    reconciliations still take the merge path.
 2. Where jj's merge gives what the hive's did, comparing commits by contents, change ids and
-   parents, the reference goes on from the hive's operation. Where it doesn't, it goes on from
-   its own, applying later operations three-way as jj applies a concurrent one, until the two
-   agree again past every point where they parted.
+   parents, the reference goes on from the hive's operation. So it does after a merge of
+   parents the two agree on that differs from jj's (step 3 judges it), where no other line has
+   parted, so that later merges are judged each against jj's too. Otherwise it goes on from its
+   own, applying later operations three-way as jj applies a concurrent one, until the two agree
+   again past every point where they parted.
 3. A merge that makes a change diverge into more commits than jj's merge of the same parents
    does, or a name conflict with terms jj's lacks, is musubi's doing, and so is any such excess
    at the hive's head over the reference's. The failure lists where the merges parted.
 
 Merges staged through the hub are judged as staged: a node that merges part of another machine's
-work and later the rest makes what jj makes of the same two merges. A merge made on a machine,
-rather than realized there, is judged against the parents as that machine had them too, where they
-lack only the working-copy commit of another machine's workspace it forgot, which the hive keeps:
-jj there merges as if the forget abandoned it ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)). Where `jj op abandon` later moved such a merge onto
-other parents, keeping its view, and the merge no longer qualifies, each native version of it, the
-same but for its parents, can witness it: its parents must stand for the canonical parents, in
-order, mapped or as earlier versions of the merge's own, its base must be mapped and below both
-canonical parents, and each must qualify as the merge's own inputs do.
-`reference::a_native_merge_qualifies_over_a_command_jj_op_abandon_reparented` checks that such a
-version witnesses a merge that can't, and that a version on parents in another order, on a parent
-that stands for none, or over a base not below both, witnesses nothing.
+work and later the rest makes what jj makes of the same two merges. jj's merge of the hive's
+parents can still differ from the merge a machine made, for known reasons that are no fault of
+musubi's: the machine had its parents without the working-copy commit of another machine's
+workspace it forgot, which the hive keeps, so jj there merged as if the forget abandoned it
+([races.md, "Known jj limitations"](races.md#known-jj-limitations)); the machine was a forgotten
+copy, which merged with its own workspaces where the hive's views leave them out; or `jj op
+abandon` later moved the merge onto other parents, keeping its view. The reference doesn't try to
+prove such a merge jj's own. It records it as a deviation, and fails the case only if the hive's
+merge has divergence or conflicts beyond jj's. Every failure of these checks lists the deviations
+under "where jj's merges differ from the hive's", each naming the operation and what is visible
+only in the hive's view or only in jj's, and the names whose targets differ.
+
+When a nightly failure comes down to such a deviation adding divergence or conflicts, report the
+deviation, as the failure names it, and stop there: don't make the reference prove the merge jj's
+own to excuse it. It once did, replaying each such merge from its maker's own inputs, and across
+1,015 generated cases that changed no verdict.
 
 The test also checks that the hive's history can stand for one repository's: every machine's
 realization of each operation has the hive's view of it, and no operation but a merge makes
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
 import of git refs or of git's HEAD. A recorded native command can itself introduce divergence;
 translation may retain those exact versions and conflict terms, but add none beyond them. A native
-command or retained native operation can also leave an older foreign working copy protected in the
-canonical view. This allowance requires an exact live input certificate, an unchanged output slot,
-and visibility in that same source; only that commit and its ancestors extend the captured native
-payload bound. Owned, dormant, hidden, altered and output-only targets cannot extend it. The
-snapshot-capture example checks both an accepted native divergence and a rejected extra canonical
-version using its captured commit versions.
-
-Workspace certificates distinguish an authenticated historical name from an exact canonical
-binding. A captured command can rebase another copy's working copy without moving that owner's
-canonical slot. Its unambiguous raw alias can carry an input name. If that alias was locally
-forgotten, an already-certified live foreign binding can instead remain unchanged or follow
-its unique visible successor from the command's captured predecessor map. An owned or dormant
-binding, a hidden successor, or several visible successors supplies no such witness. A global
-birth or a matching outgoing name alone supplies no certificate. A command that `jj op abandon`
-moved onto other parents, keeping its view, ran on its recorded input
-rather than its new parent: where the retained source records that input as the command's base,
-the command's own output certifies its maker's slots, though the new parent's bindings differ
-from that base. The test above checks that a native merge over such a command qualifies, and
-that without that retained input the maker's binding is not certified. Native merge replay uses
-the same copy's actual owned bindings in its base and ordered parents, for authenticated names
-only, and checks the output structurally. Multiple closest bases retain their separate projections
-and source-parent graphs, then jj recursively merges them in the order it found them. A base
-whose required source or command-input dependency closure reaches an active proof
-cannot provide a new replay candidate. This preflight changes no certificates and rejects
-circular evidence before replay; completed certificates stop the walk.
-Existing marked source identities remain usable after their disposable cache mappings disappear;
-only already stored source bodies qualify them. An image where the maker is absent can retain
-actual owned literals whose names are authenticated by another input of this same merge.
-Present images retain their per-source name restriction, and bases supply no names to that
-frontier. The new target still requires native replay and structural equality.
-`reference::private_workspace_replay_merges_all_native_bases` checks a real native criss-cross
-frontier after cache loss. The pure private-projection control rejects missing frontier proof,
-present-source borrowing and missing raw slots, and keeps foreign aliases separate from owned
-slash names.
-
-Names and exact bindings remain separate: a command cannot delete another owner's authenticated
-namespace by forgetting its local alias. Later commands carry that name and its prior merge-birth
-provenance even with the alias absent from both native inputs. An independent native merge can
-carry such a name without certifying its unknown replacement target. The binding controls cover
-forgotten and already absent aliases, a missing name certificate, and a command by the owner that
-actually deletes the name. With identical visible heads, replay can also omit an already-certified
-foreign slot absent from an exact captured native input. Only ownership certified at that source
-can exclude an apparent alias; a later workspace birth cannot.
-
-When rebuilding the same views changes jj's result, the reference can replay the actual
-native operation DAG and index in an isolated full repository copy. Its producer must be
-unmarked, its ordered parents must map to the canonical parents, and every native parent and
-closest base must structurally match an already checked shared input. This fallback requires
-one closest base; recursive base merges stay with the other replay paths. Native workspace
-slots must bijectively match exact certified canonical bindings through unambiguous aliases;
-matching visible commits and namespace names alone are insufficient. The complete replay,
-including signed conflict multiplicity, must match the output; no merge payload is a replay
-input. Reference settings keep checker operations and randomness out of the tested copy.
-`reference::native_merge_replay_requires_its_source_and_complete_shared_inputs` checks a real
-native merge, rejects changed output and input refs, a workspace-only input change, reversed
-parents and marked-only sources, and verifies that source heads and operation/view files do
-not change.
+command or retained native operation can also leave another machine's working copy visible in the
+canonical view where it hid it natively, as musubi keeps another machine's working copy; only a
+commit bound to the same foreign workspace in one of the operation's inputs, visible there, and
+still bound to it in the output, extends the captured native payload bound. The snapshot-capture
+example (`regressions::e2e_records_snapshots_from_commands_and_looking`) checks both an accepted
+native divergence and a rejected extra canonical version using its captured commit versions.
 
 Native origins are captured from unmarked local operations and qualified only by an existing
-original identity. A later canonical marker does not make the author's own operation a foreign
-realization. The captured header and entire shared view must still match; only private workspace
-and Git fields can differ. Qualified origins survive cache loss, but never pass to a replacement
-copy. Observing an unknown source must not canonicalize it. The pure namespace controls cover a
-missing input certificate, an owner rename, and an owned literal that collides with a foreign
-alias.
+original identity, so that the realization check can tell a machine's own operation from its
+realization of another's. A later canonical marker does not make the author's own operation a
+foreign realization. The captured header and entire shared view must still match; only private
+workspace and Git fields can differ. Qualified origins survive cache loss, but never pass to a
+replacement copy. Observing an unknown source must not canonicalize it.
 
 To keep the search effective:
 

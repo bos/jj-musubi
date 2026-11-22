@@ -110,8 +110,9 @@ website displays it and uses the opening paragraph for search and index descript
   stale files, undo, conflicts, and fetching and pushing.
 - [guides/snapshots.md](guides/snapshots.md): the complete workflow for inspecting, excluding,
   saving, pruning or approving snapshot content. Keep cleanup hazards beside cleanup commands.
-- [guides/manage.md](guides/manage.md): checking sync reports, membership, leases, pausing a
-  hive, stopping a daemon, leaving, uninstalling, moving copies and replacing hubs.
+- [guides/manage.md](guides/manage.md): checking sync reports, membership, leases, pausing and
+  resetting a hive, removing data from disk, stopping a daemon, leaving, uninstalling, moving
+  copies and replacing hubs.
 - [guides/upgrading.md](guides/upgrading.md): release upgrades by hand or with automatic
   installers, including building releases from source. Keep intermediate builds out of the
   user guide.

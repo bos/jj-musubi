@@ -22,6 +22,7 @@ use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::HivePaused;
+use musubi_sync::remote::HiveReset;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
@@ -601,6 +602,23 @@ impl<'a> Session<'a> {
             held_before,
             paused_before,
         } = attempt;
+        let result = result.map_err(|err| crate::reset::mark_own(&self.located, err));
+        // The hive was reset from another copy: leave it for good, then say so, as for a
+        // hive removed. A reset of this copy's own that stopped partway is a failure, which
+        // `musubi resume` finishes.
+        if let Err(err) = &result
+            && let Some(reset) = HiveReset::of(err)
+            && reset.key != self.machine
+        {
+            let message = format!("{:#}", crate::reset::error(&reset));
+            anyhow::ensure!(
+                crate::daemon::leave_reset_hive(&self.located, &self.hive, &reset)?,
+                "this repository's hive or hub changed while it synced"
+            );
+            tracing::warn!("{message}");
+            answer_all(self.waiting, &Err(message));
+            return Ok(Flow::Done);
+        }
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
             && HiveGone::of(err) == Some(HiveGone::Removed)

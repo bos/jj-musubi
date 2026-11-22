@@ -29,6 +29,7 @@ use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_hub::hub_dir::Pause;
+use musubi_hub::hub_dir::Reset;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -36,7 +37,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -152,6 +153,9 @@ pub enum HubReply {
     /// The hive asked about is paused (`musubi pause`): the hub answers nothing else for it
     /// until the pause is lifted.
     Paused(Pause),
+    /// The hive asked about was reset from one of its copies (`musubi resume`), as a new
+    /// hive: its other copies have the history the reset removed, and never sync again.
+    Reset(Reset),
 }
 
 /// The first token of every subject the hub serves (docs/internals/design.md, "Transport").
@@ -242,6 +246,8 @@ pub enum HubWideReply {
         hive: HiveInfo,
         before: Option<Pause>,
     },
+    /// The hive asked about was reset already, as [`HubReply::Reset`] says.
+    Reset(Reset),
     Error(String),
 }
 

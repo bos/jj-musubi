@@ -40,6 +40,10 @@ pub struct HiveConfig {
     /// Whether the copy is still part of the hive. A record outlives its membership, so
     /// that a copy whose hive was removed knows which hive that was.
     pub state: Membership,
+    /// How the hive was reset from another copy (`musubi resume`), once the hub has said so:
+    /// this copy has the history the reset removed, so it never joins a hive again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<musubi_hub::hub_dir::Reset>,
 }
 
 /// Whether a copy is part of the hive its record names.
@@ -51,6 +55,8 @@ pub enum Membership {
     Left,
     /// The hub said the hive was removed.
     Removed,
+    /// The hub said the hive was reset from another copy (`HiveConfig::reset`).
+    Reset,
 }
 
 impl HiveConfig {
@@ -473,6 +479,7 @@ mod tests {
             node: "alpha".to_owned(),
             config_id: "id".to_owned(),
             state: Membership::Joined,
+            reset: None,
         };
         record.save(&repo_path(&old)).unwrap();
         fs::rename(&old, &new).unwrap();

@@ -91,6 +91,8 @@ change, or ask before rewriting them. Description-only changes are safe.
 - Revsets such as `empty()` and `mine()` can match other machines' commits. Use change ids.
 - `jj op restore` moves every machine's working copy, and `jj op abandon` of operations the
   hive has stops this copy syncing for good. Run either only when asked.
+- `musubi pause` stops every machine syncing, and `musubi resume` makes every other copy
+  stop for good. Run them only when asked.
 - Forgetting a `<machine>/...` workspace removes it locally; it returns on a later sync.
 
 Every working-copy snapshot replicates, even if you immediately abandon the change. Keep

@@ -1,7 +1,7 @@
 //! A hub's directory: one subdirectory per hive, named by the hive's id, each holding a hub
 //! store (see [`crate::store`]), the hive's `hive.toml` (its name and backend), and its
-//! index (see [`crate::index`]), and while it is paused, its `paused` file. Removed hives move
-//! to `removed/`.
+//! index (see [`crate::index`]), and while it is paused, its `paused` file. Removed and reset
+//! hives move to `removed/`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -33,9 +33,11 @@ use crate::store::HubStore;
 mod bindings;
 mod lifecycle;
 
+pub use lifecycle::LACKS_WORK;
 pub use lifecycle::Opened;
 use lifecycle::SetAside;
 use lifecycle::SetAsides;
+use lifecycle::Tombstone;
 use lifecycle::finish_remakes;
 pub use lifecycle::open_whole;
 use lifecycle::set_aside;
@@ -111,6 +113,16 @@ pub enum JoinChoice {
     /// make it; otherwise as `Create` without one would, refused if the repository belongs in
     /// another hive here. A hive with this id that the hub has is joined.
     Remake { id: HiveId, name: Option<String> },
+    /// The hive with this id made again from the joining repository alone, under a new id,
+    /// with its name and settings (`musubi resume`): it must be paused, and unless `force`,
+    /// its head must be `base`, the hex id of the operation the repository last fetched, so
+    /// that the repository has all its work. The old hive's store goes at once, and its id
+    /// answers [`Reset`] from then on.
+    Reset {
+        id: HiveId,
+        base: String,
+        force: bool,
+    },
 }
 
 /// What a joining repository tells the hub.
@@ -134,6 +146,10 @@ pub struct JoinRequest {
     pub remote_targets: Vec<String>,
     /// The joining machine's key.
     pub machine: String,
+    /// The ids of the hives whose history the repository carries, as its join operations
+    /// name them: a join is refused if any was reset since ([`HubDir::reset_among`]), since
+    /// it would bring back the history the reset removed.
+    pub carried: Vec<String>,
 }
 
 /// A hive, as `musubi list` shows it.
@@ -161,6 +177,33 @@ pub struct Pause {
     pub by: String,
     /// When, by the hub's clock, in seconds since the epoch.
     pub at: u64,
+}
+
+/// A hive made again from one of its copies (`musubi resume`), as the hub answers for its old
+/// id from then on: so that the other copies, which have the history the reset removed, stop
+/// syncing, and never bring that history back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reset {
+    /// The id of the hive that was reset, which the hub answers this for.
+    pub hive: HiveId,
+    /// The new hive's name, as the hub has it now.
+    pub name: String,
+    /// The name of the machine whose copy the hive was made again from.
+    pub by: String,
+    /// That copy's machine key, which tells it that the reset is its own.
+    pub key: String,
+    /// When, by the hub's clock, in seconds since the epoch.
+    pub at: u64,
+}
+
+/// What a [`JoinChoice::Reset`] comes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResetOutcome {
+    /// The hive made again, for the copy that asked to join, or for the copy that made it
+    /// asking again, after it missed the answer.
+    Joined(Joined),
+    /// Another copy reset the hive already.
+    Reset(Reset),
 }
 
 /// The outcome of a join.
@@ -214,6 +257,9 @@ pub struct HubDir {
     removed: BTreeSet<HiveId>,
     /// The removed hives' stores not emptied yet.
     unemptied: Vec<SetAside>,
+    /// The ids of hives `musubi resume` made again under new ids: each has a directory under
+    /// `removed/`, kept for good, holding only what [`Tombstone`] needs.
+    reset: BTreeMap<HiveId, Tombstone>,
 }
 
 /// Errors that are the requester's to fix, worded for them.
@@ -270,6 +316,7 @@ impl HubDir {
             corrupt,
             removed,
             unemptied,
+            reset,
         } = set_aside(dir);
         let mut hubs = Self {
             dir: dir.to_owned(),
@@ -278,6 +325,7 @@ impl HubDir {
             corrupt,
             removed,
             unemptied,
+            reset,
         };
         for id in unindexed {
             let index = HiveIndex::rebuild(&hubs.open_store(&id)?)?;
@@ -339,17 +387,22 @@ impl HubDir {
     /// Creates an empty hive with id `id`, a UUID in its usual form, and `name`, which must be
     /// valid.
     fn create_as(&mut self, id: &HiveId, name: &str, backend: Backend) -> anyhow::Result<()> {
-        names::check_name(name).map_err(anyhow::Error::msg)?;
-        let dir = self.dir.join(id.as_str());
-        HubStore::init(&dir, backend)?;
         let meta = HiveMeta {
             name: name.to_owned(),
             backend,
             remote_bindings: BTreeMap::new(),
             clone_config: BTreeMap::new(),
         };
+        self.create_with(id, meta, HiveIndex::default())
+    }
+
+    /// Creates an empty hive with id `id`, a UUID in its usual form, and `meta`, whose name
+    /// must be valid, and with `index` for joins to match it by.
+    fn create_with(&mut self, id: &HiveId, meta: HiveMeta, index: HiveIndex) -> anyhow::Result<()> {
+        names::check_name(&meta.name).map_err(anyhow::Error::msg)?;
+        let dir = self.dir.join(id.as_str());
+        HubStore::init(&dir, meta.backend)?;
         write_meta(&dir, &meta)?;
-        let index = HiveIndex::default();
         index.save(&dir)?;
         self.hives.insert(
             id.clone(),
@@ -620,6 +673,37 @@ impl HubDir {
         Ok(candidates)
     }
 
+    /// A hive reset since (`musubi resume`) that `request` would bring the old history of
+    /// into whichever hive it joins: one its history carries, or the one it asks to make
+    /// again, unless [`Self::finishing_reset`]. A reset is for [`Self::reset`] to answer.
+    pub fn reset_among(&self, request: &JoinRequest) -> Option<Reset> {
+        let remake = match &request.choice {
+            JoinChoice::Reset { .. } => return None,
+            JoinChoice::Remake { .. } if self.finishing_reset(request) => None,
+            JoinChoice::Remake { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        request
+            .carried
+            .iter()
+            .map(|id| HiveId::from(id.clone()))
+            .chain(remake)
+            .find_map(|id| self.reset_of(&id))
+    }
+
+    /// Whether `request` asks to make again a hive the joining copy reset itself, from a
+    /// repository whose history no longer carries it: a copy that a crash stopped partway
+    /// through `musubi resume`, after it had forgotten the old hive, which a remake (`musubi
+    /// join --original`) joins to the new hive, as [`Self::reset`] would.
+    pub fn finishing_reset(&self, request: &JoinRequest) -> bool {
+        let JoinChoice::Remake { id, .. } = &request.choice else {
+            return false;
+        };
+        self.reset_of(id)
+            .is_some_and(|reset| reset.key == request.machine)
+            && !request.carried.iter().any(|hive| hive == id.as_str())
+    }
+
     /// Decides which hive a repository joins, or creates one if asked to, or makes one
     /// again ([`JoinChoice::Remake`]). See [`crate::matching`].
     #[cfg(test)]
@@ -711,9 +795,18 @@ impl HubDir {
                 }
                 Intent::Create(name.as_ref())
             }
+            // `HubDir::reset`'s, not a join's.
+            JoinChoice::Reset { .. } => return Err("a reset isn't a join".to_owned()),
             JoinChoice::Remake { id, name } => {
                 if self.hives.contains_key(id) {
                     return Ok(Intent::Rejoin(id));
+                }
+                if let Some(reset) = self.reset_of(id) {
+                    return Err(format!(
+                        "this repository's hive was reset to remove history this repository \
+                         has; `musubi clone {} <dir>` makes a new copy",
+                        reset.name
+                    ));
                 }
                 if self.is_removed(id) {
                     return Err(
@@ -859,8 +952,8 @@ impl HubDir {
                 paused: Some(pause),
                 ..
             } => Err(format!(
-                "hive {} is paused (by {}); it can be joined once `musubi pause --cancel` is run \
-                 in one of its copies",
+                "hive {} is paused (by {}); it can be joined once `musubi pause --cancel` or \
+                 `musubi resume` is run in one of its copies",
                 meta.name, pause.by
             )),
             _ => Ok(()),
@@ -1064,6 +1157,7 @@ mod tests {
             machine: format!("{machine}#00000000"),
             choice: JoinChoice::Match,
             remote_targets: vec![],
+            carried: vec![],
         }
     }
 
@@ -1143,6 +1237,143 @@ mod tests {
             hubs.pause(&missing, "alpha")
                 .unwrap_err()
                 .contains("no record")
+        );
+    }
+
+    /// `musubi resume` makes a paused hive again under a new id, with its name and settings,
+    /// unpaused, for the copy that asked to join, unless the head isn't the one it last
+    /// fetched; the old id answers the reset from then on, to other copies, and stays refused
+    /// to a remake, or a join that carries its history, across restarts. The copy that reset
+    /// it, asking again after missing the answer, joins the new hive, made again if a crash
+    /// lost it. The old store is emptied at once, but for its tombstone, which a power cut that
+    /// tore it leaves still a reset.
+    #[test]
+    fn a_reset_hive_starts_again_under_a_new_id() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let named = JoinRequest {
+            choice: JoinChoice::Create(Some("project".to_owned())),
+            clone_config: [("user.name".to_owned(), "\"A\"".to_owned())].into(),
+            ..request("alpha", "https://example.com/a")
+        };
+        let id = hubs.join(&named).unwrap().hive.id;
+        let root = jj_lib::object_id::ObjectId::hex(hubs.open_store(&id).unwrap().head().1);
+        let resetting = |base: &str, force: bool| JoinRequest {
+            choice: JoinChoice::Reset {
+                id: id.clone(),
+                base: base.to_owned(),
+                force,
+            },
+            ..request("alpha", "https://example.com/a")
+        };
+        let err = hubs.reset(&resetting(&root, false)).unwrap_err();
+        assert!(err.contains("isn't paused"), "{err}");
+        hubs.pause(&id, "alpha").unwrap();
+        let err = hubs.reset(&resetting(&"ab".repeat(32), false)).unwrap_err();
+        assert!(
+            err.contains("has work that this copy hasn't received"),
+            "{err}"
+        );
+        let ResetOutcome::Joined(joined) = hubs.reset(&resetting(&"ab".repeat(32), true)).unwrap()
+        else {
+            panic!("not reset");
+        };
+        let new = joined.hive.id.clone();
+        assert_ne!(new, id);
+        assert!(joined.created);
+        assert_eq!(joined.hive.name, "project");
+        assert_eq!(joined.hive.paused, None);
+        assert_eq!(joined.hive.clone_config, named.clone_config);
+        assert!(!dir.path().join(id.as_str()).exists());
+        let reset = hubs.reset_of(&id).unwrap();
+        assert_eq!(
+            (reset.name.as_str(), reset.by.as_str(), reset.key.as_str()),
+            ("project", "alpha", "alpha#00000000")
+        );
+        // Emptied in the background, but for the tombstone.
+        let tombstone = fs::read_dir(dir.path().join("removed"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let left = || {
+            let mut names: Vec<String> = fs::read_dir(&tombstone)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        while left().len() > 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(left(), ["hive.toml", "reset"]);
+
+        let beta = JoinRequest {
+            choice: JoinChoice::Reset {
+                id: id.clone(),
+                base: root.clone(),
+                force: false,
+            },
+            ..request("beta", "https://example.com/a")
+        };
+        assert_eq!(
+            hubs.reset(&beta).unwrap(),
+            ResetOutcome::Reset(reset.clone())
+        );
+        let remake = JoinRequest {
+            choice: JoinChoice::Remake {
+                id: id.clone(),
+                name: Some("project".to_owned()),
+            },
+            ..request("beta", "https://example.com/a")
+        };
+        let err = hubs.join(&remake).unwrap_err();
+        assert!(err.contains("was reset"), "{err}");
+        // Nor does a join that carries its history, into any hive.
+        assert_eq!(hubs.reset_among(&remake), Some(reset.clone()));
+        let carrying = JoinRequest {
+            carried: vec![id.as_str().to_owned()],
+            ..request("beta", "https://example.com/a")
+        };
+        assert_eq!(hubs.reset_among(&carrying), Some(reset.clone()));
+        assert_eq!(
+            hubs.reset_among(&request("beta", "https://example.com/a")),
+            None
+        );
+        // Unless it is the copy that reset it, which no longer carries it.
+        let own = JoinRequest {
+            choice: remake.choice.clone(),
+            ..request("alpha", "https://example.com/a")
+        };
+        assert!(hubs.finishing_reset(&own) && hubs.reset_among(&own).is_none());
+        let still = JoinRequest {
+            carried: vec![id.as_str().to_owned()],
+            ..own.clone()
+        };
+        assert!(!hubs.finishing_reset(&still) && hubs.reset_among(&still).is_some());
+        let again = |hubs: &mut HubDir| match hubs.reset(&resetting(&root, false)).unwrap() {
+            ResetOutcome::Joined(joined) => joined.hive.id,
+            ResetOutcome::Reset(_) => panic!("its own reset refused"),
+        };
+        assert_eq!(again(&mut hubs), new);
+
+        // A crash before the new hive was made, then the hub restarting.
+        fs::remove_dir_all(dir.path().join(new.as_str())).unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        assert_eq!(hubs.reset_of(&id), Some(reset.clone()));
+        assert_eq!(again(&mut hubs), new);
+        assert_eq!(hubs.info(&new).unwrap().name, "project");
+        assert!(hubs.join(&remake).is_err());
+
+        fs::write(tombstone.join("reset"), "").unwrap();
+        let hubs = HubDir::open(dir.path()).unwrap();
+        let torn = hubs.reset_of(&id).unwrap();
+        assert_eq!(
+            (torn.name.as_str(), torn.by.as_str()),
+            ("project", "another machine")
         );
     }
 

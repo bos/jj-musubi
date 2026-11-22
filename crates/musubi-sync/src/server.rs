@@ -5,9 +5,9 @@
 //! time, as [`HubService`] does; different hives never wait for each other. A request whose
 //! sender has stopped waiting for it by the time the thread comes to it goes unanswered, as if
 //! lost, unless it uploads a chunk. Requests to `musubi.hub.rpc` ([`HUB_TOKEN`]) are about the
-//! hub as a whole: joining, listing, renaming, pausing and removing hives. A request for a hive
-//! the hub doesn't have gets an error: only a join creates a hive. One for a paused hive gets
-//! [`HubReply::Paused`].
+//! hub as a whole: joining, listing, renaming, pausing, resetting and removing hives. A request
+//! for a hive the hub doesn't have gets an error: only a join creates a hive. One for a paused
+//! hive gets [`HubReply::Paused`], and one for a hive reset since gets [`HubReply::Reset`].
 //!
 //! The hub keeps account of what it serves, and of what machines report of their syncing,
 //! in memory, for `musubi top` (see `musubi_hub::activity`).
@@ -29,8 +29,11 @@ use musubi_hub::activity::summarize;
 use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
+use musubi_hub::hub_dir::JoinChoice;
+use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Opened;
 use musubi_hub::hub_dir::Refusal;
+use musubi_hub::hub_dir::ResetOutcome;
 use musubi_hub::hub_dir::open_whole;
 use musubi_hub::index::HiveIndex;
 use musubi_hub::store::HubStore;
@@ -66,8 +69,8 @@ pub struct HubServer {
 #[derive(Default)]
 struct Workers {
     serving: HashMap<HiveId, Worker>,
-    /// The hives being removed: their threads are finishing what they have queued, and
-    /// requests for them are refused until they are gone.
+    /// The hives being removed or reset: their threads are finishing what they have queued,
+    /// and requests for them are refused until they are gone.
     removing: HashSet<HiveId>,
 }
 
@@ -178,15 +181,18 @@ impl HubServer {
         let id = HiveId::from(token.to_owned());
         let mut workers = self.workers();
         if workers.removing.contains(&id) {
-            // Not `Removed` yet, which tells its machines to leave: the removal may fail.
+            // Not `Removed` or `Reset` yet, which tell its machines to leave: it may fail.
             return Some(HubReply::Error(
-                "this hive is being removed from the hub".to_owned(),
+                "this hive is being removed or reset".to_owned(),
             ));
         }
         let dir = {
             let hubs = self.lock();
             match hubs.hive_dir(&id) {
                 Some(dir) => dir.to_owned(),
+                None if let Some(reset) = hubs.reset_of(&id) => {
+                    return Some(HubReply::Reset(reset));
+                }
                 None if hubs.is_removed(&id) => return Some(HubReply::Removed),
                 None => return Some(HubReply::NoHive),
             }
@@ -226,6 +232,29 @@ impl HubServer {
             Err(err) => return HubWideReply::Error(fit_error(format!("{err:#}"), max_payload)),
         };
         let result = match request {
+            HubWideRequest::Join(request) if matches!(request.choice, JoinChoice::Reset { .. }) => {
+                self.reset(&request)
+            }
+            HubWideRequest::Join(request)
+                if let Some(reset) = self.lock().reset_among(&request) =>
+            {
+                Ok(HubWideReply::Reset(reset))
+            }
+            // The copy that reset the hive, finishing what a crash stopped, as a reset does.
+            HubWideRequest::Join(request) if self.lock().finishing_reset(&request) => {
+                let finish = match request.choice.clone() {
+                    JoinChoice::Remake { id, .. } => JoinRequest {
+                        choice: JoinChoice::Reset {
+                            id,
+                            base: String::new(),
+                            force: true,
+                        },
+                        ..request
+                    },
+                    _ => request,
+                };
+                self.reset(&finish)
+            }
             HubWideRequest::Join(request) => {
                 // Looking in the stores takes a while, and needn't hold up the hub.
                 let probe = self.lock().probe(&request);
@@ -264,6 +293,11 @@ impl HubServer {
                 })
             }
             HubWideRequest::Remove { name } => self.remove(&name).map(HubWideReply::Hive),
+            HubWideRequest::Pause { hive, .. } | HubWideRequest::Unpause { hive }
+                if let Some(reset) = self.lock().reset_of(&hive) =>
+            {
+                Ok(HubWideReply::Reset(reset))
+            }
             HubWideRequest::Pause { hive, machine } => {
                 self.lock().pause(&hive, &machine).map(|(hive, before)| {
                     if before.is_none() {
@@ -341,6 +375,49 @@ impl HubServer {
             tracing::info!("removed hive {}", info.name);
         }
         removed
+    }
+}
+
+impl HubServer {
+    /// Resets the hive `request` asks to (`HubDir::reset`), once its thread has finished what
+    /// it has queued, as a push the hub took before the hive was paused, and closed its store.
+    fn reset(&self, request: &JoinRequest) -> Result<HubWideReply, Refusal> {
+        let JoinChoice::Reset { id, .. } = &request.choice else {
+            return Err("not a reset".to_owned());
+        };
+        let worker = {
+            let mut workers = self.workers();
+            // A hive reset already answers at once.
+            if self.lock().hive_dir(id).is_some() {
+                if !workers.removing.insert(id.clone()) {
+                    return Err("this hive is being removed or reset".to_owned());
+                }
+                Some(workers.serving.remove(id))
+            } else {
+                None
+            }
+        };
+        let removing = worker.is_some().then_some(Removing { server: self, id });
+        if let Some(Some(worker)) = worker {
+            drop(worker.requests);
+            worker.thread.join().ok();
+        }
+        let outcome = self.lock().reset(request)?;
+        Ok(match outcome {
+            ResetOutcome::Joined(joined) => {
+                if removing.is_some() {
+                    self.activity().forget(id);
+                }
+                tracing::info!(
+                    "{} reset hive {} as {}",
+                    request.machine,
+                    joined.hive.name,
+                    joined.hive.id
+                );
+                HubWideReply::Joined(joined)
+            }
+            ResetOutcome::Reset(reset) => HubWideReply::Reset(reset),
+        })
     }
 }
 

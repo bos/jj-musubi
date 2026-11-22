@@ -2853,14 +2853,15 @@ fn a_paused_hive_holds_every_machine_until_cancelled() {
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["pause", "--help"]), @"
-    Stop every machine syncing the hive of the repository in the current directory, until `musubi pause
-    --cancel`.
+    Stop every machine syncing the hive of the repository in the current directory, until `musubi
+    resume` or `musubi pause --cancel`.
 
     The hub refuses the hive's syncs as soon as it's paused. Each machine's daemon finds out at its next
     attempt to sync, within half a minute, or once the machine is back online, and waits; from then on,
     `musubi status` there says who paused the hive and when, as `musubi sync` does. jj works as usual
-    meanwhile: work done on a machine stays on it until the pause is lifted, and then syncs. `musubi
-    join` and `musubi clone` refuse a paused hive.
+    meanwhile, and work done on a machine stays on it: it syncs once `musubi pause --cancel` lifts the
+    pause, and after `musubi resume` it stays there, to bring across to a new copy. `musubi join` and
+    `musubi clone` refuse a paused hive.
 
     It doesn't sync first, so it works in a copy whose syncing fails. Pausing a hive that is paused
     already says who paused it, and when.
@@ -2891,13 +2892,13 @@ fn a_paused_hive_holds_every_machine_until_cancelled() {
     // Beta is offline as the hive pauses.
     musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
     let out = musubi_in(&env, &logs, &alpha, &["pause"]);
-    insta::assert_snapshot!(out, @"Paused hive alpha: nothing syncs with it until `musubi pause --cancel`.");
+    insta::assert_snapshot!(out, @"Paused hive alpha: nothing syncs with it until `musubi resume` or `musubi pause --cancel`.");
     let out = musubi_in(&env, &logs, &alpha, &["pause"]);
     insta::assert_snapshot!(out, @"Hive alpha was paused already (by alpha, N ago).");
     let (_, hints) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(hints, @"
     Warning: Hive alpha is paused (by alpha, N ago), so nothing syncs.
-    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    Hint: `musubi resume` in a copy you've cleaned up resets the hive from it; `musubi pause --cancel` in any copy lets it sync again unchanged.
     ");
 
     // jj works on both machines meanwhile, and nothing syncs.
@@ -2908,19 +2909,19 @@ fn a_paused_hive_holds_every_machine_until_cancelled() {
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
     insta::assert_snapshot!(err, @"
     Error: hive alpha is paused (by alpha, N ago)
-    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    Hint: `musubi resume` in a copy you've cleaned up resets the hive from it; `musubi pause --cancel` in any copy lets it sync again unchanged.
     ");
     // Beta's daemon, back, hears at its first sync, and waits.
     musubi_in(&env, &logs, &beta, &["daemon", "start"]);
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
     insta::assert_snapshot!(err, @"
     Error: hive alpha is paused (by alpha, N ago)
-    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    Hint: `musubi resume` in a copy you've cleaned up resets the hive from it; `musubi pause --cancel` in any copy lets it sync again unchanged.
     ");
     let (_, hints) = status_in(&env, &logs, &beta);
     insta::assert_snapshot!(hints, @"
     Warning: Hive alpha is paused (by alpha, N ago), so nothing syncs.
-    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    Hint: `musubi resume` in a copy you've cleaned up resets the hive from it; `musubi pause --cancel` in any copy lets it sync again unchanged.
     ");
     let clone = env.root().join("clone");
     let err = musubi_fails(
@@ -2929,7 +2930,7 @@ fn a_paused_hive_holds_every_machine_until_cancelled() {
         &alpha,
         &["clone", "alpha", clone.to_str().unwrap(), "--hub", &hub.url],
     );
-    insta::assert_snapshot!(err, @"Error: hive alpha is paused (by alpha); it can be joined once `musubi pause --cancel` is run in one of its copies");
+    insta::assert_snapshot!(err, @"Error: hive alpha is paused (by alpha); it can be joined once `musubi pause --cancel` or `musubi resume` is run in one of its copies");
     assert!(!log(&alpha).contains("beta while paused"));
     assert!(!log(&beta).contains("alpha while paused"));
 
@@ -2963,8 +2964,302 @@ fn a_paused_hive_holds_every_machine_until_cancelled() {
     }
 }
 
-/// Whether the repository is part of the hive its record names: `joined`, `left`, or
-/// `removed`.
+/// `musubi resume`, in a copy cleaned up with jj while its hive is paused, `jj op abandon`
+/// included, makes the hive again from that copy alone: a secret it no longer shows is in none
+/// of the new hive's objects, though the old hive had it, and the copy goes on syncing, a jj
+/// command at an operation from before a reset included. The guide's way of removing the old
+/// history from that copy's disk works. Every other copy, one online and one offline
+/// throughout, hears at its next contact, stops syncing for good with its unsent work kept,
+/// never joins a hive again, even after leaving without hearing of the reset, and gets its work
+/// across to a new copy, which syncs. Resume refuses a hive that isn't paused, or whose head is
+/// past what the copy has, unless forced. Taking out the hub's check of the head fails the
+/// snapshot of the refusal; carrying the old history into the new hive fails the search of its
+/// objects; a daemon that didn't stop on the reset fails the snapshots of beta's `musubi sync`
+/// and status; reading a pre-reset realization's dangling attribute as the hive's fails alpha's
+/// sync after the late command; taking out the hub's refusal of a join that carries a reset
+/// hive's history lets gamma join. It can't reach a crash partway through a reset, which
+/// `a_reset_hive_starts_again_under_a_new_id` covers on the hub.
+#[test]
+fn a_resumed_hive_leaves_its_old_history_behind() {
+    const SECRET: &str = "hunter2-correct-horse-battery";
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let mut hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let gamma = env.init_repo("gamma");
+    logs.daemon_of(&env, &gamma);
+    daemons.of(&gamma);
+    fetch_history(&alpha, &gamma);
+    musubi_in(&env, &logs, &gamma, &["join", "--hub", &hub.url]);
+    let hive_id = |repo: &TestRepo| musubi_in(&env, &logs, repo, &["status", "-T", "id"]);
+    let old = hive_id(&alpha);
+    // Everything a hive's store holds, as git has it: every object, packed or loose.
+    let hub_dir = hub.dir.clone();
+    let objects = |id: &str| {
+        let mut git = Command::new("git");
+        git.args(["cat-file", "--batch-all-objects", "--batch"])
+            .current_dir(hub_dir.join(id).join("git"));
+        String::from_utf8_lossy(&git.output().unwrap().stdout).into_owned()
+    };
+
+    // A secret, committed and synced everywhere.
+    alpha.write_file("secret.txt", SECRET);
+    alpha.jj(&["commit", "-m", "add the secret"]);
+    let secret = alpha.jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "description(substring:\"add the secret\")",
+        "-T",
+        "commit_id",
+    ]);
+    for repo in [&beta, &gamma] {
+        wait_for(&logs, "the secret on every machine", || {
+            log(repo).contains("add the secret")
+        });
+    }
+    assert!(objects(&old).contains(SECRET));
+    // Gamma goes offline for good, with work it never sends.
+    musubi_in(&env, &logs, &gamma, &["daemon", "stop"]);
+    gamma.write_file("from-gamma", "gamma");
+    gamma.jj(&["commit", "-m", "gamma offline"]);
+
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["resume", "--help"]), @r#"
+    Make the paused hive of the repository in the current directory again from this copy's current state
+    alone, deleting its old history from the hub.
+
+    For removing something from every machine, such as a secret committed by mistake: pause the hive
+    with `musubi pause`, remove it from this copy with jj (`jj abandon`, say), then run this. The hive
+    starts again as this copy's current state, with none of its operation history, so only the commits
+    this copy shows go to the hub. This copy goes on syncing, and keeps its own operation history.
+
+    Every other copy stops syncing for good once it hears, and keeps everything it has: replace it with
+    `musubi clone`, bringing across any work the new copy lacks. "Clean up history on every machine" in
+    the user guide says how.
+
+    It refuses if the hive has work this copy hasn't received, unless `--force`.
+
+    Usage: musubi resume [OPTIONS]
+
+    Options:
+      -y, --yes
+              Reset the hive without asking first
+
+          --force
+              Reset it though it has work, from other machines, that this copy hasn't received, which
+              then reaches the new hive only if they bring it across
+
+      -h, --help
+              Print help (see a summary with '-h')
+
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    "#);
+    let err = musubi_fails(&env, &logs, &alpha, &["resume", "--yes"]);
+    insta::assert_snapshot!(err, @"
+    Error: hive alpha isn't paused
+    Hint: Run `musubi pause`, clean up this copy with jj, then run `musubi resume` again.
+    ");
+    // Alpha misses beta's latest work, which reaches the hub before the pause.
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    beta.write_file("from-beta", "beta");
+    beta.jj(&["commit", "-m", "beta sent"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["pause"]);
+    let err = musubi_fails(&env, &logs, &alpha, &["resume", "--yes"]);
+    insta::assert_snapshot!(err, @"
+    Error: hive alpha has work from beta that this copy hasn't received
+    Hint: Run `musubi pause --cancel` and `musubi sync` here, then `musubi pause` and clean up again; or run `musubi resume --force` to leave that work out.
+    ");
+    // Lifting the pause brings it, and alpha pauses again.
+    musubi_in(&env, &logs, &alpha, &["pause", "--cancel"]);
+    assert!(log(&alpha).contains("beta sent"));
+    musubi_in(&env, &logs, &alpha, &["pause"]);
+    beta.write_file("beta-paused", "beta");
+    beta.jj(&["commit", "-m", "beta while paused"]);
+    // Alpha cleans up, abandoning the operations too, which would stop it syncing, and resets
+    // the hive from what it has now.
+    alpha.jj(&["abandon", "-r", secret.trim()]);
+    alpha.jj(&["op", "abandon", "..@-"]);
+    assert!(!alpha.path().join("secret.txt").exists());
+    let err = musubi_fails(&env, &logs, &alpha, &["resume"]);
+    insta::assert_snapshot!(err, @"
+    Error: `musubi resume` asks before it resets the hive
+    Hint: Run it in a terminal, or with `--yes` to reset it without asking.
+    ");
+    let mut resume = alpha.program(musubi());
+    resume.args(["resume", "--yes"]);
+    let (ok, out, err) = try_run(&logs, &env, resume);
+    assert!(ok, "{out}{err}\n{}", logs.dump());
+    insta::assert_snapshot!(format!("{out}{err}"), @r#"
+    Reset hive alpha from this copy; the hub has none of its old history.
+    Hint: This machine still has the old history; "Remove data from a machine's disk" in the user guide says how to remove it.
+    "#);
+    let new = hive_id(&alpha);
+    assert_ne!(new, old);
+    let stored = objects(&new);
+    assert!(!stored.contains(SECRET) && !stored.contains("add the secret"));
+    assert!(stored.contains("beta sent"), "{stored}");
+    let removed = hub_dir.join("removed");
+    wait_for(&logs, "the old store deleted", || {
+        let tombstone = fs::read_dir(&removed)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::read_dir(tombstone).unwrap().count() == 2
+    });
+
+    // Alpha removes the old history from its own disk, as the guide says, and syncs on.
+    let reset_op = alpha.jj(&[
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        "if(description.starts_with(\"musubi: reset the hive\"), id)",
+    ]);
+    alpha.jj(&["op", "abandon", &format!("..{}-", reset_op.trim())]);
+    let mut git = Command::new("git");
+    git.args(["reflog", "expire", "--expire=now", "--all"])
+        .current_dir(alpha.path());
+    assert!(git.status().unwrap().success());
+    alpha.jj(&["util", "gc", "--expire=now"]);
+    let mut git = Command::new("git");
+    git.args(["cat-file", "--batch-all-objects", "--batch"])
+        .current_dir(alpha.path());
+    assert!(!String::from_utf8_lossy(&git.output().unwrap().stdout).contains(SECRET));
+    alpha.write_file("after", "after");
+    alpha.jj(&["commit", "-m", "alpha after the reset"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let (_, hints) = status_in(&env, &logs, &alpha);
+    assert_eq!(hints, "");
+
+    // Beta hears at its next sync, and keeps what it did meanwhile.
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    insta::assert_snapshot!(err, @r#"
+    Error: hive alpha was reset (by alpha, N ago) to remove history this copy still has, so it no longer syncs
+    Hint: Make a new copy with `musubi clone alpha <dir>`, bring across any work it lacks, then delete this copy; "Clean up history on every machine" in the user guide says how.
+    "#);
+    assert_eq!(membership(&beta), "reset");
+    let (status, hints) = status_in(&env, &logs, &beta);
+    insta::assert_snapshot!(format!("{status}{hints}"), @r#"
+    Hive alpha was reset (by alpha, N ago) to remove history this copy still has, so it no longer syncs.
+    Default hub: $ROOT/hub
+    Daemon: running (pid N), serving 0 repositories; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-beta/daemon.log
+    Hint: Make a new copy with `musubi clone alpha <dir>`, bring across any work it lacks, then delete this copy; "Clean up history on every machine" in the user guide says how.
+    "#);
+    assert!(log(&beta).contains("beta while paused"));
+    let err = musubi_fails(&env, &logs, &beta, &["join"]);
+    insta::assert_snapshot!(err, @"
+    Error: this copy has history hive alpha was reset to remove, so it can't join a hive again
+    Hint: Make a new copy with `musubi clone alpha <dir>` instead.
+    ");
+    insta::assert_snapshot!(musubi_in(&env, &logs, &beta, &["leave"]), @"This repository has left hive alpha.");
+    let err = musubi_fails(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    insta::assert_snapshot!(err, @"
+    Error: this copy has history hive alpha was reset to remove, so it can't join a hive again
+    Hint: Make a new copy with `musubi clone alpha <dir>` instead.
+    ");
+    // Its work goes to a new copy as files.
+    let rescued = env.root().join("beta-new");
+    musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["clone", "alpha", rescued.to_str().unwrap()],
+    );
+    fs::copy(beta.path().join("beta-paused"), rescued.join("beta-paused")).unwrap();
+    jj_at(
+        &env,
+        &logs,
+        &beta,
+        &rescued,
+        &["commit", "-m", "beta rescued"],
+    );
+    musubi_at(&env, &logs, &beta, &rescued, &["sync"]);
+
+    // Gamma, offline throughout, leaves while the hub is out of reach, without hearing of the
+    // reset. Joining once the hub is back would bring the old history into the new hive.
+    hub.kill();
+    musubi_in(&env, &logs, &gamma, &["leave", "--force"]);
+    assert_eq!(membership(&gamma), "left");
+    hub = Hub::start(&env, &mut logs);
+    let err = musubi_fails(&env, &logs, &gamma, &["join", "--hub", &hub.url]);
+    insta::assert_snapshot!(err, @r#"
+    Error: hive alpha was reset (by alpha, N ago) to remove history this copy still has, so it no longer syncs
+    Hint: Make a new copy with `musubi clone alpha <dir>`, bring across any work it lacks, then delete this copy; "Clean up history on every machine" in the user guide says how.
+    "#);
+    assert_eq!(membership(&gamma), "reset");
+    let err = musubi_fails(&env, &logs, &gamma, &["resume", "--yes"]);
+    assert!(err.contains("was reset"), "{err}");
+    assert!(log(&gamma).contains("gamma offline"));
+    // Its work goes to a new copy through a bookmark.
+    gamma.jj(&["bookmark", "create", "rescue-1", "-r", "@-"]);
+    let rescued = env.root().join("gamma-new");
+    musubi_in(
+        &env,
+        &logs,
+        &gamma,
+        &["clone", "alpha", rescued.to_str().unwrap()],
+    );
+    let root = gamma.jj(&["git", "root"]);
+    for args in [
+        &["git", "remote", "add", "rescue", root.trim()][..],
+        &["git", "fetch", "--remote", "rescue", "-b", "rescue-*"],
+        &["bookmark", "track", "rescue-*", "--remote", "rescue"],
+        &["git", "remote", "remove", "rescue"],
+    ] {
+        jj_at(&env, &logs, &gamma, &rescued, args);
+    }
+    musubi_at(&env, &logs, &gamma, &rescued, &["sync"]);
+    wait_for(&logs, "the rescued work on alpha", || {
+        let log = log(&alpha);
+        log.contains("beta rescued") && log.contains("gamma offline")
+    });
+    assert!(!log(&alpha).contains("add the secret"));
+    assert!(!objects(&new).contains(SECRET));
+
+    // Reset again, forced, a jj command at an operation from before it, which has the new
+    // copies' work, carries on from it.
+    musubi_in(&env, &logs, &alpha, &["pause"]);
+    let before = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    musubi_in(&env, &logs, &alpha, &["resume", "--yes", "--force"]);
+    alpha.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        before.trim(),
+        "bookmark",
+        "create",
+        "late",
+        "-r",
+        "main",
+    ]);
+    alpha.write_file("later", "later");
+    alpha.jj(&["commit", "-m", "alpha after the second reset"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let (_, hints) = status_in(&env, &logs, &alpha);
+    assert_eq!(hints, "");
+}
+
+/// Whether the repository is part of the hive its record names: `joined`, `left`, `removed`
+/// or `reset`.
 fn membership(repo: &TestRepo) -> String {
     let record = fs::read_to_string(repo.repo_path().join("musubi/hive.toml")).unwrap();
     let line = record
@@ -4601,10 +4896,10 @@ fn status_says_when_retrying_cannot_help() {
     "#);
     // It can still pause the hive, since pausing doesn't sync first, and lifting the pause
     // says again what it lost.
-    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["pause"]), @"Paused hive alpha: nothing syncs with it until `musubi pause --cancel`.");
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["pause"]), @"Paused hive alpha: nothing syncs with it until `musubi resume` or `musubi pause --cancel`.");
     insta::assert_snapshot!(musubi_fails(&env, &logs, &beta, &["sync"]), @"
     Error: hive alpha is paused (by alpha, N ago)
-    Hint: Run `musubi pause --cancel` in any copy of the hive to let it sync again.
+    Hint: `musubi resume` in a copy you've cleaned up resets the hive from it; `musubi pause --cancel` in any copy lets it sync again unchanged.
     ");
     let mut cancel = alpha.program(musubi());
     cancel.args(["pause", "--cancel"]);

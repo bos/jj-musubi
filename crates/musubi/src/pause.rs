@@ -20,7 +20,7 @@ use crate::ui::Ui;
 /// without syncing first, which a copy that lost history couldn't, then syncs this copy, so
 /// that `musubi status` here says at once how the hive is.
 pub fn pause(ui: &Ui, start: &Path, socket: &Socket, cancel: bool) -> anyhow::Result<()> {
-    let (_, hive, _) = the_copy(ui, start, socket)?;
+    let (located, hive, _) = the_copy(ui, start, socket)?;
     let id = HiveId::from(hive.hive);
     let request = if cancel {
         HubWideRequest::Unpause { hive: id }
@@ -30,14 +30,15 @@ pub fn pause(ui: &Ui, start: &Path, socket: &Socket, cancel: bool) -> anyhow::Re
             machine: hive.node.clone(),
         }
     };
-    let reply = block_on(hub::ask(&hive.hub, request))?;
+    let reply = block_on(hub::ask(&hive.hub, request))
+        .map_err(|err| crate::reset::explain(&located, err))?;
     let HubWideReply::PauseChanged { hive: info, before } = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
     let (lead, tail) = match (cancel, &before) {
         (false, None) => (
             "Paused hive ",
-            ": nothing syncs with it until `musubi pause --cancel`.".to_owned(),
+            ": nothing syncs with it until `musubi resume` or `musubi pause --cancel`.".to_owned(),
         ),
         (false, Some(pause)) => (
             "Hive ",

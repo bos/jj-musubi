@@ -320,13 +320,14 @@ pub enum Command {
         dry_run: bool,
     },
     /// Stop every machine syncing the hive of the repository in the current directory, until
-    /// `musubi pause --cancel`.
+    /// `musubi resume` or `musubi pause --cancel`.
     ///
     /// The hub refuses the hive's syncs as soon as it's paused. Each machine's daemon finds out
     /// at its next attempt to sync, within half a minute, or once the machine is back online,
     /// and waits; from then on, `musubi status` there says who paused the hive and when, as
-    /// `musubi sync` does. jj works as usual meanwhile: work done on a machine stays on it
-    /// until the pause is lifted, and then syncs. `musubi join` and `musubi clone` refuse a
+    /// `musubi sync` does. jj works as usual meanwhile, and work done on a machine stays on it:
+    /// it syncs once `musubi pause --cancel` lifts the pause, and after `musubi resume` it
+    /// stays there, to bring across to a new copy. `musubi join` and `musubi clone` refuse a
     /// paused hive.
     ///
     /// It doesn't sync first, so it works in a copy whose syncing fails. Pausing a hive that
@@ -335,6 +336,29 @@ pub enum Command {
         /// Lift the pause instead, from any copy: every machine syncs again, as before.
         #[arg(long)]
         cancel: bool,
+    },
+    /// Make the paused hive of the repository in the current directory again from this copy's
+    /// current state alone, deleting its old history from the hub.
+    ///
+    /// For removing something from every machine, such as a secret committed by mistake:
+    /// pause the hive with `musubi pause`, remove it from this copy with jj (`jj abandon`,
+    /// say), then run this. The hive starts again as this copy's current state, with none of
+    /// its operation history, so only the commits this copy shows go to the hub. This copy
+    /// goes on syncing, and keeps its own operation history.
+    ///
+    /// Every other copy stops syncing for good once it hears, and keeps everything it has:
+    /// replace it with `musubi clone`, bringing across any work the new copy lacks. "Clean up
+    /// history on every machine" in the user guide says how.
+    ///
+    /// It refuses if the hive has work this copy hasn't received, unless `--force`.
+    Resume {
+        /// Reset the hive without asking first.
+        #[arg(long, short)]
+        yes: bool,
+        /// Reset it though it has work, from other machines, that this copy hasn't received,
+        /// which then reaches the new hive only if they bring it across.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///

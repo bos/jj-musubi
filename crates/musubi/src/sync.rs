@@ -10,6 +10,7 @@ use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::HivePaused;
+use musubi_sync::remote::HiveReset;
 
 use crate::block_on;
 use crate::config::HiveConfig;
@@ -241,12 +242,23 @@ pub fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(S
         Some(Ok(synced)) => synced,
         // The daemon recorded why before it answered.
         Some(Err(message)) => {
+            // The daemon recorded a reset before it answered, as for a removal.
+            if let Some(reset) = HiveConfig::load(&located.repo_path)?
+                .filter(|record| record.hive == hive.hive)
+                .and_then(|record| record.reset)
+            {
+                return Err(crate::reset::error(&reset));
+            }
             let status = daemon::Status::load(&located.repo_path)
                 .filter(|status| status.error.as_ref() == Some(&message));
             return Err(way_on(&hive, anyhow::anyhow!("{message}"), status));
         }
         None => match sync_directly(ui, &located) {
             Ok(synced) => synced,
+            // As the daemon would: the hive was reset from another copy.
+            Err(err) if let Some(reset) = HiveReset::of(&err) => {
+                return Err(crate::reset::heard(&located, &reset)?);
+            }
             // As the daemon would: the hive is over.
             Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => {
                 daemon::leave_hive(&located, &hive, Membership::Removed)?;
@@ -277,6 +289,9 @@ pub fn way_on(
             status::paused_by(&pause)
         );
         return ui::with_hint(err, status::PAUSED_HINT);
+    }
+    if crate::reset::unfinished(&err) || status.as_ref().is_some_and(|s| s.reset_unfinished) {
+        return ui::with_hint(err, crate::reset::UNFINISHED_HINT);
     }
     if history_lost(&err) || status.is_some_and(|status| status.history_lost) {
         return ui::with_hint(err, status::HISTORY_LOST_HINT);

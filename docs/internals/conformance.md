@@ -1284,7 +1284,8 @@ A case is a repository, with its key, config-id (`cid`) and record, each `null` 
 none; this machine's entry for its key, or `null`; and `refine`'s two questions, whether the
 entry's path holds the copy the entry names (`elsewhereHolds`) and whether it is the
 repository's directory (`sameDirectory`), each false if not given. A record's `state` is
-`joined`, `left` or `removed`. The reply has, for each case, the repository's standing
+`joined`, `left` or `removed`; the test sends a record whose hive was reset as `removed`,
+checking that the code treats the two alike. The reply has, for each case, the repository's standing
 (`outside`, `removed`, `copy`, `broken`, `duplicate` or `unknown`), that standing refined,
 and, if the case has an entry, whether the repository passes its check. A copies request
 leaves the oracle's session as it was.

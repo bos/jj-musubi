@@ -12,8 +12,6 @@ use futures::FutureExt as _;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
-use musubi_hub::hub_dir::JoinChoice;
-use musubi_hub::hub_dir::JoinRequest;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
@@ -165,6 +163,7 @@ async fn create_hive(server: &HubServer, repo: &TestRepo) -> String {
         remote_targets: vec![],
         machine: node.machine().key().to_owned(),
         choice: JoinChoice::Create(Some(repo.machine().to_owned())),
+        carried: vec![],
     });
     match server.handle_hub_wide(&Envelope::encode(request).unwrap(), 1024 * 1024) {
         HubWideReply::Joined(joined) => joined.hive.id.into_string(),

@@ -243,4 +243,6 @@ every operation. Two kinds of abandon are fine:
   any operation this copy has tried to send, and keeps your current work. Add `--dry-run` to
   check without changing anything.
 
-Abandoning an operation doesn't remove its data from disk, on this machine or any other.
+Abandoning an operation doesn't remove its data from disk, on this machine or any other. To
+remove something from every machine, such as a secret committed by mistake, see [Clean up
+history on every machine](manage.md#clean-up-history-on-every-machine).

@@ -689,6 +689,7 @@ pub async fn ask_within(
     };
     match Envelope::decode(&reply)? {
         HubWideReply::Error(message) => anyhow::bail!("{message}"),
+        HubWideReply::Reset(reset) => Err(musubi_sync::remote::HiveReset(reset).into()),
         reply => Ok(reply),
     }
 }

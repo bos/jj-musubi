@@ -76,6 +76,24 @@ pub fn join(
     let state = UserState::load()?;
     let entry = found.key.as_deref().and_then(|key| state.entry(key));
     let standing = copy::standing_of(&located, &found, entry);
+    // Joining any hive would bring back the history the reset removed: copies that shared
+    // history carry it when they join.
+    if let Some(reset) = found
+        .record
+        .as_ref()
+        .and_then(|record| record.reset.as_ref())
+    {
+        return Err(crate::ui::with_hint(
+            anyhow::anyhow!(
+                "this copy has history hive {} was reset to remove, so it can't join a hive again",
+                reset.name
+            ),
+            format!(
+                "Make a new copy with `musubi clone {} <dir>` instead.",
+                crate::ui::shell_word(&reset.name)
+            ),
+        ));
+    }
     // `musubi join` in a repository that is part of a hive joins that hive again, made again
     // if its hub has lost it.
     let rejoin = |record: &HiveConfig| -> anyhow::Result<(JoinChoice, String)> {
@@ -135,35 +153,18 @@ pub fn join(
     // `--machine` free to name it next time.
     let machine = joining_machine(&located, machine, &settings)?;
     let node = located.open_as(&settings, machine.clone())?;
-    let summary = node.join_summary()?;
-    let mut remotes = summary.remote_snapshot();
-    if let JoinChoice::Remake { id, .. } = &choice {
-        node.check_recorded_remote_bindings(id.as_str(), &mut remotes)?;
-    }
-    let request = JoinRequest {
-        choice,
-        backend: summary.backend,
-        clone_config: clone_config::capture(node.loader().settings().config())?,
-        remote_bindings: remotes.bindings.clone(),
-        remotes: summary
-            .remotes
-            .into_iter()
-            .flat_map(|(name, remote)| {
-                let urls: Vec<String> = remote.urls().map(str::to_owned).collect();
-                urls.into_iter().map(move |url| (name.clone(), url))
-            })
-            .collect(),
-        dir_name: located
-            .repository_root()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        roots: summary.roots.iter().map(|id| id.hex()).collect(),
-        remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
-        machine: machine.key().to_owned(),
-    };
+    let (request, remotes) = request(&located, &node, choice, &machine)?;
     drop(node);
-    let joined = match block_on(ask_preparing(ui, &hub, HubWideRequest::Join(request)))? {
+    let asked = block_on(ask_preparing(ui, &hub, HubWideRequest::Join(request)));
+    // The repository has history of a hive reset since, which joining would bring back.
+    let asked = match asked {
+        Err(err) if let Some(reset) = musubi_sync::remote::HiveReset::of(&err) => {
+            drop(joining);
+            return Err(crate::reset::heard(&located, &reset)?);
+        }
+        asked => asked?,
+    };
+    let joined = match asked {
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
@@ -208,6 +209,45 @@ pub fn join(
     drop(out);
     start_serving(ui, &located, socket)?;
     fetch_join_conflicts(ui, &located, socket)
+}
+
+/// What the repository at `located`, opened as `node`, tells the hub, joining as `machine`
+/// and asking for `choice`, and the remotes it records as it joins.
+pub(crate) fn request(
+    located: &Located,
+    node: &NodeRepo,
+    choice: JoinChoice,
+    machine: &Machine,
+) -> anyhow::Result<(JoinRequest, musubi_jj::remote_url::JoinRemotes)> {
+    let summary = node.join_summary()?;
+    let mut remotes = summary.remote_snapshot();
+    if let JoinChoice::Remake { id, .. } = &choice {
+        node.check_recorded_remote_bindings(id.as_str(), &mut remotes)?;
+    }
+    let request = JoinRequest {
+        choice,
+        backend: summary.backend,
+        clone_config: clone_config::capture(node.loader().settings().config())?,
+        remote_bindings: remotes.bindings.clone(),
+        remotes: summary
+            .remotes
+            .into_iter()
+            .flat_map(|(name, remote)| {
+                let urls: Vec<String> = remote.urls().map(str::to_owned).collect();
+                urls.into_iter().map(move |url| (name.clone(), url))
+            })
+            .collect(),
+        dir_name: located
+            .repository_root()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        roots: summary.roots.iter().map(|id| id.hex()).collect(),
+        remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
+        machine: machine.key().to_owned(),
+        carried: node.carried_hives()?.into_iter().collect(),
+    };
+    Ok((request, remotes))
 }
 
 /// Independent snapshots may describe different observations of rewritten Git history.
@@ -275,7 +315,7 @@ fn exact_pattern(name: &str) -> String {
     format!("exact:{}", RefName::new(name).as_symbol())
 }
 /// Asks `hub`, over ssh first making sure this machine's key works there.
-async fn ask_preparing(
+pub(crate) async fn ask_preparing(
     ui: &Ui,
     hub: &str,
     request: HubWideRequest,
@@ -312,7 +352,7 @@ fn joining_machine(
 /// join operation (unless replicating full history), its record, and its entry, for the
 /// daemon to serve it. A copy whose record named another hive, `before`, forgets the copies its
 /// history brings that the hive doesn't have. The first hub joined becomes the user's default.
-fn become_node(
+pub(crate) fn become_node(
     located: &Located,
     joined: &Joined,
     hub: &str,
@@ -366,6 +406,7 @@ fn become_node(
         node: machine,
         config_id,
         state: Membership::Joined,
+        reset: None,
     };
     {
         let _lock = HiveConfig::lock(&located.repo_path)?;
@@ -460,7 +501,7 @@ fn configured_forget_after(
 }
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
 /// Without a daemon, syncs once.
-fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
+pub(crate) fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
     /// How asking the daemon to serve the repository went.
     enum Served {
         /// There was no daemon to ask, nor could one be started.

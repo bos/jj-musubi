@@ -266,7 +266,9 @@ impl NodeRepo {
                 continue;
             }
             let late = parents.iter().any(|parent| self.late.contains(parent));
-            let canonical_id = if let Some(canonical) = OpAttrs(&op.metadata.attributes).canonical()
+            let realized = OpAttrs(&op.metadata.attributes).canonical();
+            let canonical_id = if let Some(canonical) = realized
+                && !(self.names_unknown(canonical) && self.is_before_join(&id, &op)?)
             {
                 self.realized_canonical(&id, &op, canonical)?
             } else if self.is_before_join(&id, &op)? {
@@ -285,6 +287,14 @@ impl NodeRepo {
             Some(canonical) => Ok(canonical),
             None => Err(NodeError::BeforeJoin(local.0.hex())),
         }
+    }
+
+    /// Whether `canonical`, a realization's `musubi.canonical` attribute, names an operation
+    /// the canonical store lacks: as a realization from before `musubi resume` started this
+    /// copy's hive afresh does, which is history from before its join now.
+    fn names_unknown(&self, canonical: &str) -> bool {
+        !OperationId::try_from_hex(canonical)
+            .is_some_and(|id| self.canonical.has_operation(&CanonicalOp(id)))
     }
 
     /// Whether a local operation that isn't a join point or a realization, whose parents are

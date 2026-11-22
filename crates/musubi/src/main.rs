@@ -19,6 +19,7 @@ mod login;
 mod open_files;
 mod pause;
 mod repo;
+mod reset;
 mod settings;
 mod snapshot;
 mod socket;
@@ -378,6 +379,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             }
         }
         Command::Pause { cancel } => pause::pause(ui, &cwd()?, &socket()?, cancel),
+        Command::Resume { yes, force } => reset::resume(ui, &cwd()?, &socket()?, yes, force),
         Command::Completion { shell } => completion::print_script(ui, shell),
         Command::Debug(Debug::OpId { id }) => debug::op_id(ui, &cwd()?, &id),
     }

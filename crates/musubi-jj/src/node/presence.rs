@@ -25,6 +25,9 @@ use crate::presence::FORGET_ATTRIBUTE;
 use crate::presence::Presence;
 use crate::workspaces;
 
+/// The description of the operation `NodeRepo::forget_other_machines` writes.
+const RESET_DESCRIPTION: &str = "musubi: reset the hive";
+
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
 pub(super) type WorkedNames = Option<(Vec<Option<CanonicalOp>>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
@@ -173,6 +176,36 @@ impl NodeRepo {
             "musubi: forget copies of another hive",
         )?;
         Ok(forgotten)
+    }
+
+    /// Removes every other machine's workspace from the view, as `musubi resume` does before
+    /// this copy starts its hive afresh, with no other machines in it: those whose names have
+    /// a `/` that have no working copy here, which this machine's own with a `/` have
+    /// (`unpublished_of`). Each one's working-copy commit is abandoned if empty, as `jj
+    /// workspace forget` abandons it. It writes its operation, `musubi: reset the hive`, even
+    /// if there are none, to mark where this copy's history in the new hive starts, which the
+    /// user guide's way of removing the old history from this machine's disk looks for. It
+    /// reads nothing of the hive's history, which this copy may have lost. Returns the names it
+    /// removed.
+    pub fn forget_other_machines(&mut self) -> Result<Vec<WorkspaceNameBuf>, NodeError> {
+        let repo = self.merged_repo()?;
+        let names: Vec<WorkspaceNameBuf> = repo
+            .view()
+            .wc_commit_ids()
+            .keys()
+            .filter(|name| !super::view::is_publishable(name) && !self.has_working_copy_here(name))
+            .cloned()
+            .collect();
+        let mut tx = repo.start_transaction();
+        for name in &names {
+            tx.repo_mut()
+                .remove_workspace(name)
+                .block_on()
+                .map_err(index_err)?;
+        }
+        tx.repo_mut().rebase_descendants().block_on()?;
+        tx.commit(RESET_DESCRIPTION).block_on()?;
+        Ok(names)
     }
 
     /// Forgets this machine's copy, as `musubi leave` does before it stops syncing: an

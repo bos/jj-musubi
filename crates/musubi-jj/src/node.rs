@@ -283,6 +283,13 @@ impl NodeRepo {
         jj_lib::op_store::OperationId::try_from_hex(hex.trim()).map(CanonicalOp)
     }
 
+    /// The operation the hub accepted that this machine last fetched from, or the root
+    /// operation, if it has fetched none: the hive's head as this copy last knew it.
+    pub fn accepted_base(&self) -> CanonicalOp {
+        self.stored_base()
+            .unwrap_or_else(|| self.canonical.root_operation_id().clone())
+    }
+
     /// The machine whose key the repository whose `.jj/repo` directory is `repo_path` has, if
     /// it has one.
     pub fn machine_of(repo_path: &Path) -> Result<Option<Machine>, NodeError> {

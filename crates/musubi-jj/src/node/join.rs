@@ -267,6 +267,20 @@ impl NodeRepo {
         self.canonicalize(&LocalOp(joined.op_id().clone()))
     }
 
+    /// The hives whose history this repository's canonical store carries: those its join
+    /// operations, its own and other machines', name. A join would carry that history into
+    /// the hive it joins, which a hub refuses for a hive reset since (`musubi resume`).
+    pub fn carried_hives(&self) -> Result<BTreeSet<String>, NodeError> {
+        let mut hives = BTreeSet::new();
+        for id in self.canonical.operation_ids()? {
+            let op = self.canonical.read_operation(&id)?;
+            if let Some(hive) = op.metadata.attributes.get(JOIN_HIVE) {
+                hives.insert(hive.clone());
+            }
+        }
+        Ok(hives)
+    }
+
     /// Restores known name constraints before remaking a lost hub. This runs only for an
     /// explicit rejoin, never on ordinary syncs; no mutable config or journal is written.
     pub fn check_recorded_remote_bindings(

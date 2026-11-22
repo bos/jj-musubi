@@ -27,6 +27,8 @@ pub use process::unreachable;
 pub use status::Status;
 pub use status::now;
 pub use sync::leave_hive;
+pub use sync::leave_reset_hive;
+pub use sync::record_reset;
 pub use sync::sync_once;
 
 /// Why the daemon syncs nothing for an entry: its path doesn't hold the copy it names, and

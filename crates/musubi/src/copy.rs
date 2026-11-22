@@ -67,7 +67,7 @@ fn read_trimmed(path: &Path) -> anyhow::Result<Option<String>> {
 pub enum Standing {
     /// Part of no hive: it has no record, or it left.
     Outside,
-    /// Its hive was removed from the hub.
+    /// Its hive was removed from the hub, or reset from another copy (`HiveConfig::reset`).
     Removed,
     /// The copy of its key: musubi syncs it.
     Copy,
@@ -92,9 +92,11 @@ pub fn standing(found: &Found, entry: Option<&Entry>) -> Standing {
         .as_ref()
         .is_some_and(|config_id| *config_id != record.config_id);
     match record.state {
-        Membership::Left | Membership::Removed if elsewhere => return Standing::Duplicate,
+        Membership::Left | Membership::Removed | Membership::Reset if elsewhere => {
+            return Standing::Duplicate;
+        }
         Membership::Left => return Standing::Outside,
-        Membership::Removed => return Standing::Removed,
+        Membership::Removed | Membership::Reset => return Standing::Removed,
         Membership::Joined => {}
     }
     let (Some(key), Some(config_id)) = (&found.key, &found.config_id) else {
@@ -234,6 +236,10 @@ pub fn not_the_copy(
     let name = record.map_or_else(|| "its hive".to_owned(), HiveConfig::display_name);
     let (why, what_to_do) = match standing {
         Standing::Outside => ("this repository is not part of a hive".to_owned(), None),
+        Standing::Removed if let Some(reset) = record.and_then(|record| record.reset.as_ref()) => (
+            crate::reset::reset_why(reset),
+            Some(crate::reset::rescue(reset)),
+        ),
         Standing::Removed => (
             format!("this repository's hive, {name}, was removed from its hub"),
             Some(
@@ -311,6 +317,7 @@ mod tests {
             node: "laptop".to_owned(),
             config_id: config_id.to_owned(),
             state,
+            reset: None,
         }
     }
 

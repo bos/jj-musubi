@@ -28,7 +28,8 @@ duplicate that must not sync under the same key. The implementation is
   jj, or musubi, opens it while its original still exists. A duplicate on another machine, or
   opened with another jj config directory, keeps it: jj has no record of where it was.
 - A copy's **record** is `.jj/repo/musubi/hive.toml`. It names the hive, the hub and the
-  machine, the copy's config-id, and its state: joined, left, or hive removed.
+  machine, the copy's config-id, and its state: joined, left, hive removed, or hive reset,
+  which is to these rules as hive removed.
 - The daemon's **entries**, in `state.toml`, are the copies it syncs: one per key, each with
   its key, hive id, config-id, and the path of the workspace the repository was made in,
   which holds its `.jj/repo`, from whichever workspace it joined (R5).
@@ -107,7 +108,10 @@ machine, and the entries across machines.
   the hive was removed, which a hub that lost its state never says, the daemon marks the record
   removed and drops the entry. A plain `musubi join` in a repository whose hive was removed
   says so, rather than matching another hive by history; `musubi join --hive` and `musubi
-  create` work as in a repository that left.
+  create` work as in a repository that left. When it replies that the hive was reset from
+  another copy, the daemon marks the record reset, with the reply, and drops the entry; no
+  join of any kind works in that repository again, and `musubi leave` leaves the record as it
+  is.
 
 - **R8. A new hive doesn't inherit members.** When a copy joins or creates a hive whose id
   isn't the one its record holds, its join forgets every key that is present
@@ -203,6 +207,8 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | `sudo musubi join` | Refused (R9). | — (needs root) |
 | `musubi hub remove`, then a plain `musubi join` | Says the hive was removed (R7). | `copies_leave_a_removed_hive` |
 | …or `musubi leave` | Records that the copy left, as any other that left. | `copies_leave_a_removed_hive` |
+| The hive reset from another copy (`musubi resume`), then any `musubi join`, before or after `musubi leave` | Refused, naming the hive to clone (R7). | `a_resumed_hive_leaves_its_old_history_behind` |
+| …`musubi leave --force` while the hub is out of reach, so that the record doesn't say the hive was reset, then `musubi join` | The hub refuses the join, since the copy's history carries the reset hive, and the record says reset from then on. | `a_resumed_hive_leaves_its_old_history_behind` |
 | A copy that left one hive creates or joins another | Its join forgets the old hive's copies (R8). | `a_new_hive_doesnt_inherit_members` |
 | `musubi join` killed partway, when joining a hive again | The daemon keeps syncing the copy: its `add` request restarts the copy's sync in one step, so nothing stops it between. | — |
 

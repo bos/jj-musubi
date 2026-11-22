@@ -21,6 +21,7 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::hub_dir::Pause;
+use musubi_hub::hub_dir::Reset;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
 
@@ -146,6 +147,29 @@ impl HivePaused {
     }
 }
 
+/// That the hive asked about was reset from one of its copies (`musubi resume`), by whom and
+/// when: the error a sync of any other copy fails with from then on, which stops it syncing
+/// for good.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiveReset(pub Reset);
+
+impl std::fmt::Display for HiveReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the hive was reset, by {}", self.0.by)
+    }
+}
+
+impl std::error::Error for HiveReset {}
+
+impl HiveReset {
+    /// Who reset the hive, and when, if `err` comes of its having been reset.
+    pub fn of(err: &anyhow::Error) -> Option<Reset> {
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<Self>())
+            .map(|reset| reset.0.clone())
+    }
+}
+
 /// The error a reply stands for when it isn't one the request expects.
 fn unexpected(reply: HubReply) -> anyhow::Error {
     match reply {
@@ -153,6 +177,7 @@ fn unexpected(reply: HubReply) -> anyhow::Error {
         HubReply::NoHive => HiveGone::Missing.into(),
         HubReply::Removed => HiveGone::Removed.into(),
         HubReply::Paused(pause) => HivePaused(pause).into(),
+        HubReply::Reset(reset) => HiveReset(reset).into(),
         other => anyhow::anyhow!("unexpected reply {other:?}"),
     }
 }

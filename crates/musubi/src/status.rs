@@ -519,6 +519,8 @@ impl Hive {
                 // still runs. It is not a connection failure to retry.
             } else if self.sync.as_ref().is_some_and(|sync| sync.history_lost) {
                 writeln!(ui.hint(), "{HISTORY_LOST_HINT}")?;
+            } else if self.sync.as_ref().is_some_and(|sync| sync.reset_unfinished) {
+                writeln!(ui.hint(), "{}", crate::reset::UNFINISHED_HINT)?;
             } else if daemon.serving == Some(true) {
                 writeln!(
                     ui.hint(),
@@ -802,8 +804,8 @@ pub const HISTORY_LOST_HINT: &str = "Make a new copy with `musubi clone`, bring 
      troubleshooting guide says how.";
 
 /// The way on while a hive is paused, which commands print as a hint.
-pub const PAUSED_HINT: &str =
-    "Run `musubi pause --cancel` in any copy of the hive to let it sync again.";
+pub const PAUSED_HINT: &str = "`musubi resume` in a copy you've cleaned up resets the hive \
+     from it; `musubi pause --cancel` in any copy lets it sync again unchanged.";
 
 /// Who paused a hive, and how long ago: `(by laptop, 12m ago)`.
 pub fn paused_by(pause: &musubi_hub::hub_dir::Pause) -> String {

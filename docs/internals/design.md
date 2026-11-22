@@ -548,7 +548,7 @@ when nodes that synced through different hubs can each merge the same work once 
 and a hub going back to a head it accepted earlier, having lost later ones to a power cut
 ([protocol.md, "Network and failures"](protocol.md#network-and-failures)).
 
-## Pausing a hive
+## Pausing and resetting a hive
 
 `musubi pause` asks the hub, in a request about the hub as a whole that names the hive by id, to
 pause the hive. The hub writes who paused it and when to the hive's `paused` file, without
@@ -564,6 +564,52 @@ changes anything. A daemon whose sync gets it records it in the copy's status, f
 status`, and syncs again only at its next poll, request, local operation or reconnection,
 rather than retrying with backoff. `musubi pause` itself sends no operations, so it works in a
 copy that lost history the hive has.
+
+`musubi resume` ends a pause by making the hive again from one copy, which the user has
+cleaned up with jj, so that what they removed never reaches the new hive: the way to remove a
+committed secret from every machine, which no replication of `jj op abandon` could
+([Lost history](#lost-history)). It sends a join whose choice is `JoinChoice::Reset`, with the
+hive's id, the copy's fetch base and whether `--force` was given. The hub takes the hive out of
+service, as `musubi hub remove` does, so that a push it took before the pause finishes first,
+then refuses unless the hive is paused and, without `--force`, its head is the copy's base:
+otherwise the copy lacks work the hive has, and the refusal names the machines whose work it
+is, from the operations between the two. It writes a `reset` file into the hive's directory,
+saying the new id, who reset it and when, and renames the directory to
+`removed/<id>-<time>.reset`, which is the moment the hive is reset; then it makes a new hive,
+with the old one's name and settings and an empty index, which the copy's first push fills,
+and records the join. A thread empties the old directory at once but for `hive.toml` and
+`reset`, which stay as its tombstone, and deletes a corrupt store of the hive set aside under
+`removed/`; a hub starting finds a tombstone a crash left whole and empties it.
+
+From then on the hub answers every request for the old id with `Reset`, naming the new hive,
+whoever reset it and when: a hive's requests, as the hub dispatches them, and a pause, a
+resume or a remake. A join of any other kind gets it too if the joining repository's history
+carries the old hive: its join request lists the hives its canonical store's join operations
+name (`musubi.join-hive`), so that a copy that left without hearing of the reset, or a
+duplicate of one, can't bring the old history into the new hive, which it would otherwise
+match by its commits. The copy that reset it is told apart by its machine key: a resume from it
+again, as after a crash or a lost reply, joins the new hive, making it again under its id if a
+crash came before it was made; any other gets `Reset`. A `reset` file a power cut tore still
+leaves a reset, of unknown origin.
+
+The copy that resumes then makes its history a new hive's. It removes every other machine's
+workspace from its view, in an operation of its own, `musubi: reset the hive`, deletes what
+musubi kept of the old hive (everything in `.jj/repo/musubi` but its machine key, its record
+and lock files), and joins the new hive as a repository that never shared its history does
+([Joining](#joining)): a join operation on the root with its current view. Only what that view
+reaches goes to the hub. Its operations from before stay local, as history from before a join
+does; one a late command writes on them is from before the join, though a realization among
+them names a canonical operation of the old hive, which the store no longer has. A copy that
+lost history the hive has can resume, since nothing of the old history is read.
+
+Every other copy, at its next sync, gets `Reset`: the daemon marks the copy's record `reset`,
+with the reply, and stops serving it, as for a hive removed, keeping everything it has. A
+command that hears it, `musubi leave` and `musubi join` included, records it the same way,
+whatever the record said. A copy
+whose record says it was reset never joins a hive again, since joining would carry the old
+history back into the new hive ([Joining](#joining)); `musubi status` and every command there
+say how to replace it with a new copy. To the model of copies (`Copies.lean`) the state is the
+same as a removed hive's.
 
 ## Objects
 
@@ -931,7 +977,8 @@ changes nothing. The check reads the heads, not a record of what was done, so ev
 finds the same loss, and retrying or rejoining doesn't help. `musubi status` shows the message. If
 the user brings the operations back, as `jj op integrate` can, the heads reach them again and the
 copy syncs on. Otherwise they make a new copy and bring their work across ([troubleshooting.md,
-"Rescue work in a new copy"](../troubleshooting.md#rescue-work-in-a-new-copy)).
+"Rescue work in a new copy"](../troubleshooting.md#rescue-work-in-a-new-copy)), or make the hive
+again from this copy ([Pausing and resetting a hive](#pausing-and-resetting-a-hive)).
 
 These are not lost history:
 

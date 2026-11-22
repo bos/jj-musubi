@@ -41,6 +41,9 @@ pub struct Status {
     /// Outgoing snapshot content needs a decision; receiving continues normally.
     #[serde(default)]
     pub publication_held: bool,
+    /// Whether the error is that a `musubi resume` here stopped partway.
+    #[serde(default)]
+    pub reset_unfinished: bool,
 }
 
 impl Status {
@@ -75,6 +78,7 @@ impl Status {
         self.history_lost = error.is_some_and(history_lost);
         self.hive_paused = error.and_then(HivePaused::of);
         self.publication_held = error.is_some_and(publication_held);
+        self.reset_unfinished = error.is_some_and(crate::reset::unfinished);
     }
 
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out

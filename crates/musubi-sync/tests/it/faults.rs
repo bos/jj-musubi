@@ -1694,7 +1694,7 @@ enum BadReply {
     Another,
     ChunkAck,
     Indirect,
-    /// A reply of another kind: an error, no hive, a removed one, or a paused one.
+    /// A reply of another kind: an error, no hive, a removed one, a paused one, or a reset one.
     Other,
     /// From a hub of another version.
     OtherVersion,
@@ -1707,6 +1707,7 @@ enum OtherReply {
     NoHive,
     Removed,
     Paused,
+    Reset,
 }
 
 /// A reply no honest hub sends to request `n` of the session, built from what the session
@@ -1780,6 +1781,7 @@ fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
                 OtherReply::NoHive,
                 OtherReply::Removed,
                 OtherReply::Paused,
+                OtherReply::Reset,
             ]));
             encode(match other_reply {
                 OtherReply::Error => {
@@ -1793,6 +1795,13 @@ fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
                     let at = tc.draw(gs::integers::<u64>());
                     HubReply::Paused(musubi_hub::hub_dir::Pause { by, at })
                 }
+                OtherReply::Reset => HubReply::Reset(musubi_hub::hub_dir::Reset {
+                    hive: musubi_hub::hub_dir::HiveId::from(tc.draw(gs::text().max_size(36))),
+                    name: tc.draw(gs::text().max_size(16)),
+                    by: tc.draw(gs::text().max_size(16)),
+                    key: tc.draw(gs::text().max_size(16)),
+                    at: tc.draw(gs::integers::<u64>()),
+                }),
             })
         }
         BadReply::OtherVersion => {
@@ -2171,7 +2180,8 @@ fn describe_reply(bytes: &[u8]) -> String {
             other @ (HubReply::Error(_)
             | HubReply::NoHive
             | HubReply::Removed
-            | HubReply::Paused(_)),
+            | HubReply::Paused(_)
+            | HubReply::Reset(_)),
         ) => brief(&format!("{other:?}")),
         Err(err) => undecodable(bytes, &err),
     }

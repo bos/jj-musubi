@@ -65,6 +65,7 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
         remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
         machine: node.machine().key().to_owned(),
         choice: JoinChoice::Match,
+        carried: vec![],
     }
 }
 

@@ -29,10 +29,12 @@ use oracle::Oracle;
 /// Each id, hive, key and config-id alike, is 0 or 1.
 const IDS: [u64; 2] = [0, 1];
 
-const STATES: [(Membership, &str); 3] = [
+/// A copy whose hive was reset is to the model as one whose hive was removed.
+const STATES: [(Membership, &str); 4] = [
     (Membership::Joined, "joined"),
     (Membership::Left, "left"),
     (Membership::Removed, "removed"),
+    (Membership::Reset, "removed"),
 ];
 
 /// A record as the model has it: hive, config-id and state.
@@ -116,6 +118,7 @@ fn found(case: &Case) -> Found {
             node: "laptop".to_owned(),
             config_id: config_id(config),
             state: STATES[state].0,
+            reset: None,
         }),
         key: case.key.map(key),
         config_id: case.config_id.map(config_id),

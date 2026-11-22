@@ -148,6 +148,13 @@ pub fn the_copy(
     let state = UserState::load()?;
     let entry = found.key.as_deref().and_then(|key| state.entry(key));
     let standing = copy::standing_of(&located, &found, entry);
+    if let Some(reset) = found
+        .record
+        .as_ref()
+        .and_then(|record| record.reset.as_ref())
+    {
+        return Err(crate::reset::error(reset));
+    }
     let (copy::Standing::Copy, Some(record), Some(entry)) = (standing, &found.record, entry) else {
         anyhow::bail!(
             "{}",

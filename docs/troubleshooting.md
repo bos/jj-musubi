@@ -24,6 +24,9 @@ Follow the symptom:
   [rescue work in a new copy](#rescue-work-in-a-new-copy).
 - **Hive … is paused:** `musubi pause` stopped every machine syncing it; see [Pause a whole
   hive](guides/manage.md#pause-a-whole-hive).
+- **Hive … was reset:** `musubi resume` in another copy made the hive again without its old
+  history; replace this copy with a new one, as [On the other
+  machines](guides/manage.md#on-the-other-machines) says.
 - **Another sync error:** follow the command's hint, fix the cause, then run `musubi sync`.
   If it persists, [collect the logs](#report-a-problem).
 
@@ -192,8 +195,14 @@ If the error says this repo lost history the hive has, retrying or rejoining won
 operations](guides/working-across-machines.md#abandoning-operations)). `musubi status` shows
 the same message. Keep the original repo: its work is still there.
 
-Make a new copy with `musubi clone <hive> <new-directory>`, which refuses a paused hive until
-`musubi pause --cancel`. Bring across work since the last
+To make this copy's history the hive's instead, run `musubi pause` and `musubi resume` here:
+see [Clean up history on every
+machine](guides/manage.md#clean-up-history-on-every-machine). That replaces every other copy
+with this copy's state, which may be behind theirs: `musubi resume` then needs `--force`, and
+work this copy hadn't received must be brought across by hand from each other machine.
+
+Otherwise, make a new copy with `musubi clone <hive> <new-directory>`, which refuses a paused
+hive until `musubi pause --cancel` or `musubi resume`. Bring across work since the last
 successful sync, or all wanted work if the first sync never finished. You can copy files as
 above, or transfer commits:
 

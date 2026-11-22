@@ -59,7 +59,7 @@ pub fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
 }
 
 /// Stops the daemon, if it runs, serving `key`'s copy. Returns whether one runs.
-fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
+pub(crate) fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
     block_on(async {
         let Some(client) = daemon::running(socket).await? else {
             return Ok(false);
@@ -94,6 +94,12 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
             )
         }),
     };
+    // The hive was reset from another copy: that's recorded, and this copy has left.
+    if let Err((_, _, err)) = &told
+        && let Some(reset) = musubi_sync::remote::HiveReset::of(err)
+    {
+        return Err(crate::reset::heard(&located, &reset)?);
+    }
     if let Err((doing, hint, err)) = told {
         if !force {
             if served {
@@ -133,9 +139,10 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
     Ok(())
 }
 
-/// Leaves, if the repository at `start` is a copy whose hive was removed, which syncs no more
-/// already and has nothing to tell its hive: records that it left, as any other that left, so
-/// that a plain `musubi join` may match it with a hive again. Returns whether it was one.
+/// Leaves, if the repository at `start` is a copy whose hive was removed, or reset, which
+/// syncs no more already and has nothing to tell its hive: records that it left, as any other
+/// that left, so that a plain `musubi join` may match it with a hive again, unless its hive
+/// was reset. Returns whether it was one.
 fn leave_removed(ui: &Ui, start: &Path) -> anyhow::Result<bool> {
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
@@ -144,17 +151,20 @@ fn leave_removed(ui: &Ui, start: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
     let _lock = HiveConfig::lock(&located.repo_path)?;
-    let Some(record) =
-        HiveConfig::load(&located.repo_path)?.filter(|record| record.state == Membership::Removed)
+    let Some(record) = HiveConfig::load(&located.repo_path)?
+        .filter(|record| matches!(record.state, Membership::Removed | Membership::Reset))
     else {
         return Ok(false);
     };
     let name = record.display_name();
-    HiveConfig {
-        state: Membership::Left,
-        ..record
+    // A copy of a hive reset keeps saying so, and never joins again.
+    if record.state == Membership::Removed {
+        HiveConfig {
+            state: Membership::Left,
+            ..record
+        }
+        .save(&located.repo_path)?;
     }
-    .save(&located.repo_path)?;
     // As leaving does, should the daemon have stopped before it was done hearing of the
     // removal.
     if let Some(key) = &found.key {

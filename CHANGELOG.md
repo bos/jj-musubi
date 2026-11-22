@@ -7,12 +7,23 @@
   `jj op abandon` run?)", and the other machines keep the operations; [Rescue work in a new
   copy](docs/troubleshooting.md#rescue-work-in-a-new-copy) says how to carry on there. Passing
   an abandon on never removed the abandoned data from the hub, or from other machines' disks.
-  `musubi pause` now stops every machine syncing a hive, until `musubi pause --cancel` ([Pause
-  a whole hive](docs/guides/manage.md#pause-a-whole-hive)); `musubi resume`, coming in this
-  release, will then remove data such as a committed secret from every machine. Abandoning
-  operations from before a copy joined, or ones it hasn't sent yet, works as before. The
-  lost-history error is now followed by a hint naming the commands to carry on with, which
-  `musubi status` gives too.
+  To remove data such as a committed secret from every machine, use the new `musubi pause`
+  and `musubi resume` ([Clean up history on every
+  machine](docs/guides/manage.md#clean-up-history-on-every-machine)). Abandoning operations
+  from before a copy joined, or ones it hasn't sent yet, works as before. The lost-history
+  error is now followed by a hint naming the commands to carry on with, which `musubi status`
+  gives too.
+
+- `musubi pause` stops every machine syncing a hive, at once, including machines that are
+  offline, which find out when they come back: `musubi status` and `musubi sync` there say who
+  paused it and when, and `musubi join` and `musubi clone` refuse it. `musubi pause --cancel`,
+  in any copy, lets it carry on unchanged. `musubi resume`, in a copy you've cleaned up with
+  jj, makes the hive again from that copy's current state, without its operation history, and
+  the hub deletes the old history at once. Every other copy then stops syncing for good,
+  keeping everything it has, and can't join a hive again: replace it with `musubi clone`,
+  bringing across work the new copy lacks. Removing the data from each machine's own disk is
+  up to you ([Remove data from a machine's
+  disk](docs/guides/manage.md#remove-data-from-a-machines-disk)).
 
 - A copy that was away before its first sync finished, or that the hive forgot, no longer
   stops syncing because other machines abandoned operations meanwhile.

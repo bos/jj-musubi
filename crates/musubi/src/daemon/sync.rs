@@ -32,6 +32,61 @@ pub fn leave_hive(
     hive: &HiveConfig,
     membership: Membership,
 ) -> anyhow::Result<bool> {
+    leave_as(located, hive, |now| HiveConfig {
+        state: membership,
+        ..now
+    })
+}
+
+/// [`leave_hive`], recording that the hive was reset from another copy, as `reset` says, so
+/// that this copy never joins a hive again.
+pub fn leave_reset_hive(
+    located: &Located,
+    hive: &HiveConfig,
+    reset: &musubi_hub::hub_dir::Reset,
+) -> anyhow::Result<bool> {
+    leave_as(located, hive, |now| HiveConfig {
+        state: Membership::Reset,
+        reset: Some(reset.clone()),
+        ..now
+    })
+}
+
+/// Records, in the copy at `located`, that its hive was reset, as `reset` says, whatever its
+/// record said, as after a `musubi leave --force` that couldn't tell the hive, so that it never
+/// joins a hive again, and stops this machine's daemon serving it. Does nothing, returning
+/// false, if its record names another hive, or none.
+pub fn record_reset(located: &Located, reset: &musubi_hub::hub_dir::Reset) -> anyhow::Result<bool> {
+    let _lock = HiveConfig::lock(&located.repo_path)?;
+    let Some(now) = HiveConfig::load(&located.repo_path)?
+        .filter(|now| now.hive.to_string() == reset.hive.as_str())
+    else {
+        return Ok(false);
+    };
+    let key = copy::Found::read(&located.repo_path)?.key;
+    HiveConfig {
+        state: Membership::Reset,
+        reset: Some(reset.clone()),
+        ..now
+    }
+    .save(&located.repo_path)?;
+    if let Some(key) = key
+        && UserState::load()?
+            .entry(&key)
+            .is_some_and(|entry| entry.hive.to_string() == reset.hive.as_str())
+    {
+        UserState::remove_entry(&key)?;
+    }
+    fs::remove_file(Status::path(&located.repo_path)).ok();
+    Ok(true)
+}
+
+/// [`leave_hive`], recording the copy's record as `record` makes it of the record now.
+fn leave_as(
+    located: &Located,
+    hive: &HiveConfig,
+    record: impl FnOnce(HiveConfig) -> HiveConfig,
+) -> anyhow::Result<bool> {
     let _lock = HiveConfig::lock(&located.repo_path)?;
     let Some(now) = HiveConfig::load(&located.repo_path)?
         .filter(|now| now.joined() && now.hive == hive.hive && now.hub == hive.hub)
@@ -41,11 +96,7 @@ pub fn leave_hive(
     let key = copy::Found::read(&located.repo_path)?.key;
     // The record first: an entry for a record that says it left is suspended, where a record
     // that says joined with no entry here would look like a duplicate, if this failed between.
-    HiveConfig {
-        state: membership,
-        ..now
-    }
-    .save(&located.repo_path)?;
+    record(now).save(&located.repo_path)?;
     if let Some(key) = key {
         UserState::remove_entry(&key)?;
     }
@@ -111,7 +162,10 @@ pub async fn sync_once(
     };
     let result = match driver.sync().await {
         Ok(synced) => Ok(synced),
-        Err(err) => Err(connection.explain(err).await),
+        Err(err) => Err(crate::reset::mark_own(
+            located,
+            connection.explain(err).await,
+        )),
     };
     let synced = known(&driver);
     status.synced(result.as_ref().err(), &synced);

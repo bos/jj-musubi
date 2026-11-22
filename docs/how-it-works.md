@@ -76,7 +76,9 @@ Shared history lets `jj op log` show what's happening on every machine, and `jj 
 rewrites made anywhere. You can [undo or restore shared
 work](guides/working-across-machines.md#undo-across-machines) from another machine. `jj op
 abandon` of operations other machines already have stops that copy syncing: read [Abandoning
-operations](guides/working-across-machines.md#abandoning-operations) before using it.
+operations](guides/working-across-machines.md#abandoning-operations) before using it. To remove
+something from every machine, [clean up history on every
+machine](guides/manage.md#clean-up-history-on-every-machine).
 
 ## Working copies stay put
 

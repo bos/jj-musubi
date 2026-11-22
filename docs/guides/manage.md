@@ -1,6 +1,6 @@
 # Manage hives, machines, and hubs
 
-Check syncing, rename, remove or pause hives, take machines out, and replace a hub.
+Check syncing, rename, remove, pause or reset hives, take machines out, and replace a hub.
 
 A hub passes shared history between copies; each machine's daemon keeps them in sync.
 See [How jj-musubi works](../how-it-works.md).
@@ -67,16 +67,150 @@ musubi pause
 No copy can sync once `musubi pause` returns. Each machine's daemon finds out at its next
 attempt to sync, within half a minute, or when the machine comes back online, and waits; from
 then on, `musubi status` there says who paused the hive and when, as `musubi sync` does. jj
-works as usual meanwhile, but work done on a machine exists only there until the pause is
-lifted. `musubi join` and `musubi clone` refuse a paused hive.
+works as usual meanwhile, but work done on a machine exists only there until the pause ends.
+`musubi join` and `musubi clone` refuse a paused hive.
 
 `musubi pause` doesn't sync first, so it works in a copy whose syncing fails.
 
-To lift the pause, run `musubi pause --cancel` in any copy. Machines sync again within half a
-minute, or at once with `musubi sync`, sending what each did meanwhile. Pausing removes
-nothing from the hub or from other machines, and the work done meanwhile syncs as any work
-does: `jj op abandon` of operations the hive has still stops that copy syncing ([Abandoning
-operations](working-across-machines.md#abandoning-operations)).
+A pause ends one of two ways:
+
+- `musubi pause --cancel`, in any copy, lets the hive carry on unchanged. Machines sync again
+  within half a minute, or at once with `musubi sync`, sending what each did meanwhile. The
+  work done meanwhile syncs as any work does: `jj op abandon` of operations the hive has still
+  stops that copy syncing ([Abandoning
+  operations](working-across-machines.md#abandoning-operations)).
+- `musubi resume`, in a copy you've cleaned up, makes the hive again from that copy, without
+  its old history, as the next section says.
+
+## Clean up history on every machine
+
+To remove something from every machine, such as a secret or a pile of files committed by
+mistake, make the hive again from one copy that no longer has it. jj's own commands change only
+the copy you run them in, and the hub and the other machines keep everything they've received.
+
+1. In the copy you'll clean up, pause the hive, so that nothing syncs while you work:
+
+   ```sh
+   musubi pause
+   ```
+
+2. Remove what you don't want there with jj: `jj abandon <change>` to drop a commit, or `jj
+   restore` and `jj squash` to take a file out of a commit you keep. Check with `jj log -r
+   'all()'` that no commit it lists still has it. Abandoned commits and old operations need
+   nothing more: the new hive gets only what this copy shows now.
+
+3. Make the hive again from this copy:
+
+   ```sh
+   musubi resume
+   ```
+
+   It names the other machines and asks before going on. The hive keeps its name and
+   settings, and starts again from this copy's current state, with none of its operation
+   history. The hub deletes the old history at once. This copy goes on syncing, and keeps its
+   own operation history, and with it the data you removed: see [Remove data from a machine's
+   disk](#remove-data-from-a-machines-disk).
+
+`musubi resume` refuses if the hive has work this copy hasn't received, such as work another
+machine sent just before the pause, and names the machines it came from. To include it, run
+`musubi pause --cancel` and `musubi sync` here, then `musubi pause` again, and repeat step 2,
+since that work can bring back what you removed. (If you ran `jj op abandon` here, the sync
+fails: this copy [lost history the hive has](../troubleshooting.md#rescue-work-in-a-new-copy).)
+To leave the work out instead, run `musubi resume --force`; those machines keep it, and can
+bring it across as below.
+
+Any copy can resume a paused hive, even one that [lost history the
+hive has](../troubleshooting.md#rescue-work-in-a-new-copy). The first to resume wins; a
+later one is told the hive was reset, as below. If `musubi resume` stops partway, as when the
+connection to the hub drops, run it again in the same copy to finish; if it then says this
+repo duplicates a copy, run `musubi join --original` there instead.
+
+### On the other machines
+
+Every other copy stops syncing for good the next time it contacts the hub, or when its machine
+comes back online. It keeps everything it has, including work it hadn't sent. `musubi status`
+and `musubi sync` there say so:
+
+```text
+Error: hive app was reset (by laptop, 5m ago) to remove history this copy still has, so it no longer syncs
+Hint: Make a new copy with `musubi clone app <dir>`, bring across any work it lacks, then delete this copy; "Clean up history on every machine" in the user guide says how.
+```
+
+Such a copy can't join a hive again, since joining would bring the old history back. Replace
+it with a new copy, on each of those machines, as soon as it's back online:
+
+1. Make the new copy, in a new directory:
+
+   ```sh
+   musubi clone app ~/src/app-new
+   ```
+
+2. Bring across any work the new copy lacks: what the old copy hadn't sent before the pause,
+   what was done there while the hive was paused, and, after `musubi resume --force`, work the
+   copy that resumed hadn't received. To find it, compare `jj log -r 'mutable()'` in the two:
+   a commit with the same commit id in both is in the new copy already.
+
+   Copy files across, which is the safe way if the work sits on top of what was removed. For
+   each change to bring, list its files in the old copy with `jj diff -r <change> --name-only`,
+   copy them into the new copy, and record them there with `jj commit -m '<description>'`.
+   Don't copy `.jj` or `.git`. You can also transfer whole commits, as [Rescue work in a new
+   copy](../troubleshooting.md#rescue-work-in-a-new-copy) says, but only where none of their
+   ancestors has what was removed: fetching a commit brings its ancestors too.
+
+3. Check the work in the new copy with `jj log`, and that `musubi sync` there succeeds. Then
+   delete the old directory, and any other jj workspaces it has. It needs no `musubi leave`:
+   it has stopped syncing already.
+
+### What resetting can't do
+
+Resetting reaches only the hub and jj-musubi's copies. It can't remove anything that was
+pushed to a git remote, or that reached a fork, CI, a backup, an editor's history or a
+file-syncing tool: treat a secret that went anywhere like that as leaked, and change it.
+
+Don't delete `.jj/repo/musubi` from an old copy to make it join again: it would join the new
+hive as a repo that never shared its history, bringing back every commit it shows. And if
+the hub loses its state while a copy that hasn't heard of the reset is offline, that copy
+hears nothing of the reset, and `musubi join` there would make the old hive again. So replace
+or delete old copies as soon as their machines are back, and never run `musubi join` in one.
+
+## Remove data from a machine's disk
+
+`musubi resume` removes the old history from the hub, but not from any machine's disk: the
+copy that resumed keeps its own operation history, and the other copies keep everything until
+you delete them. jj-musubi never deletes git objects ([Repo cleanup](#repo-cleanup)).
+
+The sure way is to make a new copy with `musubi clone`, check it with `jj log` and `musubi
+sync`, then run `musubi leave` in the old copy, if it's the one that resumed, and delete the
+old directory, with any other jj workspaces it has.
+
+To clean up the copy that resumed in place instead, do this in it right after `musubi
+resume`, while no other jj command runs there:
+
+1. Abandon every operation from before the reset, which the new hive never had. In `jj op
+   log`, find the operation `musubi: reset the hive`, and run, with its id:
+
+   ```sh
+   jj op abandon '..<id>-'
+   ```
+
+2. In a colocated repo, expire git's reflogs, which still name the old commits:
+
+   ```sh
+   git reflog expire --expire=now --all
+   ```
+
+3. Have jj delete what nothing refers to now:
+
+   ```sh
+   jj util gc --expire=now
+   ```
+
+To check, search what git has for a line of what you removed; this prints nothing once it's
+gone:
+
+```sh
+git --git-dir "$(jj git root)" cat-file --batch-all-objects --batch | grep '<a line of it>'
+```
 
 ## Stop syncing on this machine or leave
 

@@ -15,7 +15,7 @@ changes and how it is tested.
 | Sync work, run agents, or resolve concurrent changes | [Work across machines](guides/working-across-machines.md) |
 | Recover after snapshots pick up accidental files | [Snapshot limits and cleanup](guides/snapshots.md) |
 | Check background services and watch stuff happen | [Monitor syncing](guides/manage.md#check-syncing) |
-| Pause a hive, stop syncing, leave, remove copies, or replace a hub | [Manage hives, machines, and hubs](guides/manage.md) |
+| Pause or reset a hive, remove data from every machine, stop syncing, leave, remove copies, or replace a hub | [Manage hives, machines, and hubs](guides/manage.md) |
 | Upgrade to a new release | [Upgrade jj-musubi](guides/upgrading.md) |
 | Find why work hasn't arrived | [Start with this copy](troubleshooting.md#start-with-this-copy) |
 

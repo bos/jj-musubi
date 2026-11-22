@@ -87,7 +87,8 @@ You can add `--dry-run` to preview cleanup of the last recorded state without sn
 removing anything. Pending edits and deletions are included when you run the command without
 `--dry-run`, so they can change the result. Pruning removes whole operations, so it can't remove
 individual files from a snapshot. It doesn't immediately free disk space or erase secrets;
-jj's garbage collection reclaims unused objects later.
+jj's garbage collection reclaims unused objects later. To remove what other machines already
+have, see [Clean up history on every machine](manage.md#clean-up-history-on-every-machine).
 
 Pruning is limited to operations this copy has never tried to send to the hub. If `musubi`
 refuses a selection, it discards no operations; follow the

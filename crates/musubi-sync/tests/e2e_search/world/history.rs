@@ -200,17 +200,6 @@ impl World {
             let mut new_body = futures::executor::block_on(store.read_operation(&new_id)).unwrap();
             new_body.parents = op.parents.clone();
             if new_body == op {
-                // A realization jj reparented keeps its records, as the import check reads
-                // them (`Imports::native_rewrites`): through an earlier rewrite, to the first.
-                if op
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-                    && let Some(rewrites) = self.imports.native_rewrites.get_mut(m)
-                {
-                    let original = rewrites.get(&id).cloned().unwrap_or_else(|| op.clone());
-                    rewrites.insert(new_id.clone(), original);
-                }
                 survivor_links.insert(new_id.clone(), (id.clone(), prior_originals[&id].clone()));
                 let copy = self.fx.machine_key(m);
                 for dropped in &mut self.abandoned {

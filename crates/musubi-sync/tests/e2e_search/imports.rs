@@ -118,12 +118,6 @@ pub struct Imports {
     head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
     /// Exact published carriers of independently captured native Git frontiers.
     pub(crate) preserved_heads: Vec<BTreeMap<OperationId, PreservedHeadInput>>,
-    /// Each machine's realizations that its own `jj op abandon` rewrote, by the id of jj's
-    /// rewrite, with the realization it rewrote: the same but for its parents, as observed
-    /// around the command. jj keeps the view, records of `.git` included, so the rewrite's
-    /// records are judged on the original's parents. A realization whose parents jj changed
-    /// can otherwise seem to change a record, as a realization never does.
-    pub(crate) native_rewrites: Vec<BTreeMap<OperationId, op_store::Operation>>,
 }
 
 /// A ref an import compares with `.git`.
@@ -321,7 +315,6 @@ struct Log {
     repos: HashMap<OperationId, Arc<ReadonlyRepo>>,
     captured_sources: BTreeMap<SourceKey, op_store::Operation>,
     preserved_heads: BTreeMap<OperationId, PreservedHeadInput>,
-    native_rewrites: BTreeMap<OperationId, op_store::Operation>,
     validated: HashSet<(OperationId, RecordKind)>,
     head_writers: HashMap<(OperationId, String), Arc<HashSet<Option<CommitId>>>>,
 }
@@ -507,12 +500,8 @@ impl Log {
     }
 
     fn captured_operation(&mut self, id: &OperationId) -> op_store::Operation {
-        // jj's rewrite of a realization stands for the realization it rewrote, which may in
-        // turn stand for a source body `jj op abandon` reparented.
-        let op = match self.native_rewrites.get(id) {
-            Some(original) => original.clone(),
-            None => self.op(id).clone(),
-        };
+        // An operation `jj op abandon` reparented stands for the source body captured before.
+        let op = self.op(id).clone();
         self.captured_sources
             .get(&crate::world::merge_key(&op))
             .filter(|source| !source.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE))
@@ -1217,7 +1206,6 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
             repos: HashMap::new(),
             captured_sources: BTreeMap::new(),
             preserved_heads: BTreeMap::new(),
-            native_rewrites: BTreeMap::new(),
             validated: HashSet::new(),
             head_writers: HashMap::new(),
         };
@@ -1423,7 +1411,6 @@ fn a_forgotten_nonroot_publication_keeps_its_observed_git_frontier() {
         repos: HashMap::new(),
         captured_sources: world.captured_record_sources(1),
         preserved_heads,
-        native_rewrites: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -1558,7 +1545,6 @@ fn an_absent_head_is_written_only_where_the_workspace_remains() {
         repos: HashMap::new(),
         captured_sources: BTreeMap::new(),
         preserved_heads: BTreeMap::new(),
-        native_rewrites: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -1664,7 +1650,6 @@ fn preserved_ref_records_require_the_captured_frontier() {
             })
             .into_iter()
             .collect(),
-        native_rewrites: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -1817,7 +1802,6 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
                 (id, PreservedHeadInput { carrier, heads })
             })
             .collect(),
-        native_rewrites: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -1913,86 +1897,6 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     assert_eq!(&*physical, &HashSet::from([a.as_normal().cloned()]));
 }
 
-/// `jj op abandon` moves a realization on the root, as of a copy that joined since, onto
-/// the abandoned operation's parent, keeping its view, whose records of `.git` are the root's: none.
-/// Judged as a realization of its new parent, it would drop this machine's records, as no
-/// realization does; judged as jj's rewrite, on the parent it was realized on, it keeps them.
-/// Without `Imports::native_rewrites`, a stale workspace's command that then brought back
-/// what was abandoned, and the import of HEAD after jj's merge, were blamed on it, as the
-/// last assertion shows.
-#[test]
-fn a_realization_jj_reparents_keeps_its_records() {
-    use crate::world::{Naming, Setup};
-
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Own,
-        prejoin: false,
-        secondary: false,
-    });
-    world.commit(0, 0, 0);
-    world.jj(0, &["bookmark", "create", "kept", "-r", "@-"]);
-    world.jj(0, &["bookmark", "create", "x", "-r", "@-"]);
-    let abandoned = world.latest_op_head(0);
-    world.clone_copy(2);
-    world.sync(0);
-    world.op_abandon(0, &abandoned);
-    let rewrites = world.imports.native_rewrites[0].clone();
-    let join = format!("musubi: {} joins", world.machine(2));
-    let (moved, original) = rewrites
-        .iter()
-        .find(|(_, op)| op.metadata.description == join)
-        .expect("jj moved the join's realization");
-    let store = world.fx.hive.members[0]
-        .adapter
-        .repo()
-        .loader()
-        .op_store()
-        .clone();
-    let root = store.root_operation_id().clone();
-    assert_eq!(original.parents, vec![root.clone()]);
-    let parent = block_on(store.read_operation(moved)).unwrap().parents;
-    assert_ne!(parent, vec![root], "on what the abandon left");
-    // Each machine's workspace is named after it.
-    let alpha = world.machine(0);
-    let records = [
-        RecordKind::Head(alpha.to_owned()),
-        RecordKind::Ref(Ref {
-            kind: Kind::Bookmark,
-            name: "kept".to_owned(),
-        }),
-    ];
-    let log = |native_rewrites| Log {
-        owner: world.owner(0),
-        source_root: world.fx.repo(0).path().to_path_buf(),
-        native_replay: None,
-        native_merge_views: HashMap::new(),
-        store: store.clone(),
-        ops: HashMap::new(),
-        views: HashMap::new(),
-        repos: HashMap::new(),
-        captured_sources: world.captured_record_sources(0),
-        preserved_heads: BTreeMap::new(),
-        native_rewrites,
-        validated: HashSet::new(),
-        head_writers: HashMap::new(),
-    };
-    let setup = &world.imports.setup[0];
-    for record in &records {
-        log(rewrites.clone())
-            .validate_record(moved, setup, record)
-            .unwrap();
-    }
-    // The joining copy's view has no `kept` to record, so only HEAD's record shows the move.
-    let dropped = log(BTreeMap::new())
-        .validate_record(moved, setup, &records[0])
-        .unwrap_err();
-    assert!(
-        dropped.contains(&format!("made jj's record of {alpha}'s HEAD absent")),
-        "{dropped}"
-    );
-}
-
 impl World {
     /// Starts the check: the operations so far are the setup's.
     pub fn start_imports(&mut self) {
@@ -2002,7 +1906,6 @@ impl World {
             self.imports.moved.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
             self.imports.preserved_heads.push(BTreeMap::new());
-            self.imports.native_rewrites.push(BTreeMap::new());
             self.check_imports(m);
             self.imports.setup.push(self.imports.seen[m].clone());
         }
@@ -2018,7 +1921,6 @@ impl World {
             self.imports.moved.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
             self.imports.preserved_heads.push(BTreeMap::new());
-            self.imports.native_rewrites.push(BTreeMap::new());
             self.imports.setup.push(HashSet::new());
         }
         self.imports.seen[m].clear();
@@ -2026,7 +1928,6 @@ impl World {
         self.imports.moved[m].clear();
         self.imports.head_moved[m].clear();
         self.imports.preserved_heads[m].clear();
-        self.imports.native_rewrites[m].clear();
         self.imports.started = false;
         self.check_imports(m);
         self.imports.started = true;
@@ -2098,7 +1999,6 @@ impl World {
             repos: HashMap::new(),
             captured_sources: BTreeMap::new(),
             preserved_heads: self.imports.preserved_heads[m].clone(),
-            native_rewrites: self.imports.native_rewrites[m].clone(),
             validated: HashSet::new(),
             head_writers: HashMap::new(),
         };

@@ -28,7 +28,7 @@ use crate::translation_map::whole_id;
 /// Work as presence names it: by its original identity (`CanonicalStore::original_id`), with
 /// the operation that stands for it in the history at hand, none for work that no operation
 /// stands for: as a stamp an earlier release wrote can name (compatibility), or the unnamed
-/// work of an operation that isn't work ([`Work::unnamed`]).
+/// work of an operation that isn't work (`Work::unnamed`).
 /// Equal, and ordered, by the original alone.
 ///
 /// Compatibility until 2027-02-21: see `origin::PRESENCE`, which lists what goes, including

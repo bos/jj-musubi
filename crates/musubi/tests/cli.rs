@@ -4442,9 +4442,9 @@ fn a_new_hive_doesnt_inherit_members() {
     assert!(!workspaces.contains("alpha/"), "{workspaces}");
 }
 
-/// The upgrade guide recreates identity state from preserved views, after removing the old
-/// remote workspace names while their ownership is still known. The first copy to leave
-/// must not publish those names as its own in the new hive; its commits stay available.
+/// Copies that left a hive can start another together, each keeping its work, a linked
+/// workspace's included. What the first copy to leave still shows of the old hive, another
+/// machine's working copy, doesn't become its own in the new hive.
 #[test]
 fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     let env = TestEnv::new();
@@ -4473,59 +4473,28 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &beta, &["sync"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
+    let head = [
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id",
+    ];
     let mut linked_head = alpha.program(Path::new("jj"));
-    linked_head
-        .args([
-            "--ignore-working-copy",
-            "log",
-            "-r",
-            "@",
-            "--no-graph",
-            "-T",
-            "commit_id",
-        ])
-        .current_dir(&linked);
+    linked_head.args(head).current_dir(&linked);
     let mut commits = vec![run(&env, &logs, linked_head)];
     musubi_in(&env, &logs, &alpha, &["leave"]);
-    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
-    // Alpha no longer hears beta's subsequent leave.
-    assert!(
-        alpha
-            .jj(&["workspace", "list", "-T", NAMES])
-            .lines()
-            .any(|name| name == "beta/beta")
-    );
     musubi_in(&env, &logs, &beta, &["leave"]);
-    musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
     for repo in [&alpha, &beta] {
-        commits.push(repo.jj(&[
-            "--ignore-working-copy",
-            "log",
-            "-r",
-            "@",
-            "--no-graph",
-            "-T",
-            "commit_id",
-        ]));
-        let names = repo.jj(&["workspace", "list", "-T", NAMES]);
-        for name in names
-            .lines()
-            .filter(|name| *name != repo.machine() && *name != "local/linked")
-        {
-            repo.jj(&["workspace", "forget", name]);
-        }
-        fs::rename(
-            repo.repo_path().join("musubi"),
-            env.root()
-                .join(format!("{}-musubi-archive", repo.machine())),
-        )
-        .unwrap();
+        commits.push(repo.jj(&head));
     }
-    drop(hub);
-    fs::rename(env.root().join("hub"), env.root().join("hub-archive")).unwrap();
-    let hub = Hub::start(&env, &mut logs);
-    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
-    musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    // Having left first, alpha didn't hear beta leave.
+    let names = alpha.jj(&["workspace", "list", "-T", NAMES]);
+    assert!(names.lines().any(|name| name == "beta/beta"), "{names}");
+    musubi_in(&env, &logs, &alpha, &["create", "again"]);
+    musubi_in(&env, &logs, &beta, &["join", "--hive", "again"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     for (repo, expected) in [
         (&alpha, vec!["alpha", "local/linked", "beta/beta"]),
@@ -4535,18 +4504,17 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
         let actual: std::collections::BTreeSet<_> = names.lines().collect();
         assert_eq!(actual, expected.into_iter().collect());
         for commit in &commits {
-            assert_eq!(
-                repo.jj(&[
-                    "--ignore-working-copy",
-                    "log",
-                    "-r",
-                    &format!("all() & {}", commit.trim()),
-                    "--no-graph",
-                    "-T",
-                    "commit_id"
-                ]),
-                *commit
-            );
+            let revset = format!("all() & {}", commit.trim());
+            let found = repo.jj(&[
+                "--ignore-working-copy",
+                "log",
+                "-r",
+                &revset,
+                "--no-graph",
+                "-T",
+                "commit_id",
+            ]);
+            assert_eq!(found, *commit);
         }
     }
     // alpha keeps its own `local/linked`, which no other machine shows, and says why.

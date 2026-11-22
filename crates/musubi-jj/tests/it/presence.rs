@@ -153,7 +153,7 @@ fn conformance(tc: TestCase) {
 
 /// Each operation's copies with their latest work, as a canonical store works them out at
 /// what each operation becomes once those `dropped` are contracted out, stamps and all: for
-/// those it keeps, what the model says (`PresenceContract.pres_eq`).
+/// those it keeps, what the model says.
 fn contracted(
     ops: &[Op],
     dropped: &BTreeSet<usize>,

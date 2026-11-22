@@ -10,21 +10,12 @@ import Init.Data.List.Sort.Lemmas
 import Musubi.Publication
 import Musubi.ParentsBefore
 import Musubi.Exec
-import Musubi.SupersedeExec
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Chunks
 import Musubi.Names
 import Musubi.RefsExec
-import Musubi.RetryControl
-import Musubi.ContractOrder
-import Musubi.SerialReply
-import Musubi.RecordEpoch
-import Musubi.EarlyEntry
 import Musubi.ExpectedExec
-import Musubi.PacketAcceptance
-import Musubi.SysAcceptance
-import Musubi.NodeSysExec
 import Musubi.OpHeadsJson
 
 namespace Musubi.Exec.Json
@@ -101,33 +92,6 @@ def decodeAction (j : Json) : Except String Action := do
   | "hubForget" => return .hubForget (← getNats j "ops") (← getNats j "objs")
   | "hubRegress" => return .hubRegress (← getNat j "seq")
   | k => throw s!"unknown action kind {k}"
-
-def getRecs (j : Json) (k : String) : Except String (List Rec) := do
-  let a ← j.getObjValAs? (Array (Array Nat)) k
-  pure (a.toList.map Array.toList)
-
-/-- An action of `SupersedeExec.lean`: one of `Exec.lean`'s, or one with supersedes. -/
-def decodeSAction (j : Json) : Except String SAction := do
-  let kind ← j.getObjValAs? String "kind"
-  let node := getNat j "node"
-  let push (f : Nat → List Nat → List Nat → Nat → Nat → List Rec → List Nat → SAction) :=
-    do
-    let (n, S, O, e, d) ← getPush j
-    let (A, Δ) := (← getRecs j "applied", ← getNats j "dropped")
-    return f n S O e d A Δ
-  match kind with
-  | "abandon" => return .abandon (← node) (← getNats j "ops")
-  | "sendSup" => return .sendSup (← node) (← getNat j "new")
-  | "sendD" => return .sendD (← node)
-  | "adopt" => return .adopt (← node) (← getRecs j "records")
-  | "hubSupAccept" => push .hubSupAccept
-  | "hubPushRefuse" => push .hubPushRefuse
-  | "hubPushReject" =>
-    if (j.getObjVal? "applied").isOk then push .hubSupReject
-    else return .base (← decodeAction j)
-  | "advancePrepared" => return .advancePrepared (← node) (← getRecs j "records")
-  | "prune" => return .prune (← getNat j "count")
-  | _ => return .base (← decodeAction j)
 
 /-! ## Encoding -/
 
@@ -263,37 +227,25 @@ theorem encodeNet_compress_eq_reference (N : Nat) (net : List EMsg) (extra : Lis
     (encodeNet N net extra).compress = (encodeNetReference N net extra).compress :=
   congrArg Json.compress (encodeNet_eq_reference N net extra)
 
-/-- Records, each sorted. -/
-def recsJson (R : List Rec) : Json := Json.arr (R.map nats).toArray
-
-def encodeNode (nd : ENode) (dropped : List Nat) (applied : List Rec) : Json :=
+def encodeNode (nd : ENode) : Json :=
   Json.mkObj [("lops", nats nd.lops), ("lobj", nats nd.lobj), ("heads", nats nd.heads),
     ("known", toJson #[nd.known.seq, nd.known.head]), ("sops", nats nd.sops),
-    ("sobj", nats nd.sobj), ("dropped", nats dropped), ("applied", recsJson applied)]
-
-/-- The supersedes and announcements in flight, as wire messages. -/
-def encodeSMsgs (ses : SEState) : List Json :=
-  ses.sups.map (fun e => msgObj "supersede" e.node [("applied", recsJson e.applied),
-      ("dropped", nats e.dropped), ("new", toJson e.head)]) ++
-    ses.dmsgs.map (fun e => msgObj "dropped" e.node [("records", recsJson e.log.recs)])
+    ("sobj", nats nd.sobj)]
 
 def encodeOp (o : EOp) : Json :=
   Json.mkObj [("id", toJson o.id), ("parents", nats o.parents), ("objs", nats o.objs)]
 
-def encodeState (N : Nat) (ses : SEState) : Json :=
-  let es := ses.es
+def encodeState (N : Nat) (es : EState) : Json :=
   Json.mkObj [
     ("next", toJson es.next),
     ("ops", Json.arr ((es.ops.mergeSort (fun a b => a.id ≤ b.id)).map encodeOp).toArray),
     ("hub", Json.mkObj [("ops", nats es.hub.ops), ("objs", nats es.hub.objs),
-      ("head", toJson es.hub.head), ("seq", toJson es.hub.seq),
-      ("records", recsJson ses.recs), ("pruned", toJson ses.pruned)]),
-    ("nodes", Json.arr ((List.range N).map (fun i =>
-      encodeNode (es.nodeOf i) (ses.nodeDF i) (ses.appliedF i))).toArray),
-    ("net", encodeNet N es.net (encodeSMsgs ses))]
+      ("head", toJson es.hub.head), ("seq", toJson es.hub.seq)]),
+    ("nodes", Json.arr ((List.range N).map (fun i => encodeNode (es.nodeOf i))).toArray),
+    ("net", encodeNet N es.net [])]
 
-def okReply (N : Nat) (ses : SEState) : Json :=
-  Json.mkObj [("ok", Json.bool true), ("state", encodeState N ses)]
+def okReply (N : Nat) (es : EState) : Json :=
+  Json.mkObj [("ok", Json.bool true), ("state", encodeState N es)]
 
 def errReply (e : String) : Json :=
   Json.mkObj [("ok", Json.bool false), ("error", Json.str e)]
@@ -574,12 +526,6 @@ def decodeCall (j : Json) : Except String Refs.Exec.Call := do
     return .cinv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved") (← getNat j "e")
   | "restorable" => return .restorable (← slot "o") (← slot "s")
   | "restorableRemote" => return .restorableRemote (← slot "o") (← slot "s")
-  | "abandonBeside" =>
-    let refs ← (← j.getObjValAs? (List Json) "refs").mapM fun r => do
-      pure (← getNat r "op", ← r.getObjVal? "slot" >>= decodeSlot, ← getNat r "expected")
-    return .abandonBeside (← j.getObjValAs? (List (List Nat)) "par")
-      (← getNats j "drops") (← getNats j "heads") (← getNat j "incoming")
-      (← j.getObjValAs? Bool "first") refs (← getNat j "g") (← getNat j "eAfter")
   | f => throw s!"unknown fn {f}"
 
 def encodeSlot (s : Refs.TSlot Nat) : Json :=
@@ -592,10 +538,6 @@ def encodeRefs : Refs.Exec.Answer → Json
   | .imported s sets =>
     Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("sets", Json.bool sets)]
   | .holds b => Json.mkObj [("ok", Json.bool true), ("holds", Json.bool b)]
-  | .abandoned s g parents contracted bases valid =>
-    Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("g", toJson g),
-      ("parents", toJson parents), ("contracted", toJson contracted), ("bases", toJson bases),
-      ("valid", Json.bool valid)]
 
 /-- Decode a `refs` request, run it against its table and answer with `encodeRefs`. -/
 def refsReply (j : Json) : Except String Json := do
@@ -631,330 +573,19 @@ def expectedReply (j : Json) : Except String Json := do
   | none => throw "invalid or unfinished expected-value history"
   | some value => pure (Json.mkObj [("ok", Json.bool true), ("value", toJson value)])
 
-/-! ## Replies for contraction, retry control and the liveness measure
-
-Ancestry through dropped operations (`Contract`), survivor advance, the retry-control state
-machines (`Retry`), and the session's liveness measures (`Exec.lean`, "The liveness measure"). -/
-
-/-- Decode a `contractedAncestry` request and reply with whether `head` descends from
-`expected` once the dropped operations are contracted, its original ancestry, and the images. -/
-def contractedAncestryReply (j : Json) : Except String Json := do
-  let parents ← j.getObjValAs? (Array (List Nat)) "parents"
-  let dropped ← getNats j "dropped"
-  let expected ← getNat j "expected"
-  let head ← getNat j "head"
-  unless parentsBefore parents.toList do
-    throw "an operation's parents must come before it"
-  unless expected < parents.size && head < parents.size do
-    throw "head outside the history"
-  let par := fun x => parents[x]?.getD []
-  let D := fun x => dropped.contains x
-  pure (Json.mkObj [("ok", toJson true),
-    ("descends", toJson (Contract.belowB par D expected head)),
-    ("original", toJson (ancB par expected head)),
-    ("images", toJson (Contract.exp par D expected))])
-
-/-- Decode a `survivorAdvance` request and reply with the images of the heads, the heads
-after the advance, and whether they merge. -/
-def survivorAdvanceReply (j : Json) : Except String Json := do
-  let parents ← j.getObjValAs? (Array (List Nat)) "parents"
-  let dropped ← getNats j "dropped"
-  let heads ← getNats j "heads"
-  let known ← getNat j "known"
-  unless parentsBefore parents.toList do
-    throw "an operation's parents must come before it"
-  unless known < parents.size && heads.all (· < parents.size) do
-    throw "head outside the history"
-  unless !heads.isEmpty && heads.all (fun x => !dropped.contains x) do
-    throw "current heads must be nonempty and survive"
-  let par := fun x => parents[x]?.getD []
-  let D := fun x => dropped.contains x
-  let images := Contract.exp par D known
-  unless !images.isEmpty do throw "known head has no surviving image"
-  let next := Contract.frontier par D (heads ++ [known])
-  pure (Json.mkObj [("ok", toJson true), ("images", toJson images),
-    ("heads", toJson next), ("merge", toJson (decide (next.length > 1)))])
-
-/-- Decode a `retryFixup` request and reply with the fix-up machine after its `write` or
-`adopt`, and whether it emitted a write. -/
-def retryFixupReply (j : Json) : Except String Json := do
-  let s : Retry.Fixup := {
-    pending := ← getNats j "pending",
-    written := ← j.getObjValAs? Bool "written",
-    aligned := ← j.getObjValAs? Bool "aligned" }
-  let (t, emitted) ← match ← j.getObjValAs? String "action" with
-    | "write" => pure s.write
-    | "adopt" =>
-      match s.adopt (← getNats j "nextPending") with
-      | none => throw "pending grew after current-epoch alignment"
-      | some t => pure (t, false)
-    | _ => throw "unknown fix-up action"
-  pure (Json.mkObj [("ok", toJson true), ("pending", toJson t.pending),
-    ("written", toJson t.written), ("aligned", toJson t.aligned),
-    ("emitted", toJson emitted), ("credit", toJson t.credit)])
-
-/-- Decode a `retryInbox` request and reply with the inbox after its `start`, `finish` or
-`disconnect`, and whether a finish matched. -/
-def retryInboxReply (j : Json) : Except String Json := do
-  let s : Retry.Inbox := { next := ← getNat j "next", pending := ← getNats j "pending" }
-  let cut ← getNat j "cut"
-  let (t, matched) ← match ← j.getObjValAs? String "action" with
-    | "start" => pure (s.start.1, false)
-    | "finish" => pure (s.finish (← getNat j "id"))
-    | "disconnect" => pure (s.disconnect, false)
-    | _ => throw "unknown inbox action"
-  pure (Json.mkObj [("ok", toJson true), ("next", toJson t.next),
-    ("pending", toJson t.pending), ("matched", toJson matched), ("old", toJson (t.old cut))])
-
-/-- Decision/cache projection. The returned `headKnown` is the abstract fresh-result reading,
-not native post-write equality when a restoring body reuses the known canonical id. -/
-def retryPublicationReply (j : Json) : Except String Json := do
-  let cache : Retry.Fixup := {
-    pending := ← getNats j "pending"
-    written := ← j.getObjValAs? Bool "written"
-    aligned := ← j.getObjValAs? Bool "aligned" }
-  let s : Retry.Publication := {
-    cache := cache
-    headKnown := ← j.getObjValAs? Bool "headKnown" }
-  let (t, restoring, tip) := s.write
-  pure (Json.mkObj [("ok", toJson true), ("pending", toJson t.cache.pending),
-    ("written", toJson t.cache.written), ("aligned", toJson t.cache.aligned),
-    ("headKnown", toJson t.headKnown), ("restoring", toJson restoring), ("tip", toJson tip)])
-
-/-- Decode a `recordEpoch` request and reply with the record-control state after one
-action, and whether it adopted or failed. -/
-def recordEpochReply (j : Json) : Except String Json := do
-  let R ← getNat j "current"
-  let s : Retry.Records.State := {
-    applied := ← getNat j "applied"
-    announced := ← j.getObjValAs? (Option Nat) "announced"
-    stalePlan := ← j.getObjValAs? Bool "stalePlan"
-    receipts := ← j.getObjValAs? Bool "receipts" }
-  let a : Retry.Records.Action ← match ← j.getObjValAs? String "action" with
-    | "fetched" => pure Retry.Records.Action.fetched
-    | "keepReceipt" => pure (.keepReceipt (← getNat j "records"))
-    | "adopt" => pure (.adopt (← getNat j "records"))
-    | "staleFailure" => pure .staleFailure
-    | "reopen" => pure .reopen
-    | "clearPlan" => pure .clearPlan
-    | "wait" => pure .wait
-    | _ => throw "unknown record control action"
-  let some (t, adopts, fails) := Retry.Records.exec R s a
-    | throw "record control action is not enabled"
-  pure (Json.mkObj [("ok", toJson true), ("applied", toJson t.applied),
-    ("announced", toJson t.announced), ("receipts", toJson t.receipts),
-    ("stalePlan", toJson t.stalePlan), ("adopts", toJson adopts), ("fails", toJson fails),
-    ("beforeNeedsRecords", toJson (Retry.Records.needsRecords s.applied s.announced s.receipts)),
-    ("needsRecords", toJson (Retry.Records.needsRecords t.applied t.announced t.receipts)),
-    ("beforeCredit", toJson (s.credit R)), ("credit", toJson (t.credit R))])
+/-! ## The liveness measure (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
-def measureReply (N : Nat) (ses : SEState) : Json :=
-  let es := ses.es
+def measureReply (N : Nat) (es : EState) : Json :=
   let (a, b, c, d, e) := es.measureE N
   let (a', b', c', d', e', f') := es.rmeasureE N
-  let (ac, bc, cc, dc, ec, fc) := ses.rmeasureCE N
-  let (p, l, _) := ses.smeasureE N
   Json.mkObj [("ok", Json.bool true), ("measure", toJson #[a, b, c, d, e]),
-    ("rmeasure", toJson #[a', b', c', d', e', f']),
-    ("smeasure", toJson #[p, l, ac, bc, cc, dc, ec, fc]),
-    ("recordLag", toJson (ses.recordLagE N)),
-    ("converged", Json.bool (ses.recordConvergedE N))]
+    ("rmeasure", toJson #[a', b', c', d', e', f']), ("converged", Json.bool (es.convergedE N))]
 
 /-- What node `n` uploads with a policy `Push` of `new`: `upOps` and `upObjs`. -/
 def uploadReply (es : EState) (n new : Nat) : Json :=
   Json.mkObj [("ok", Json.bool true), ("ops", nats (es.upOpsL n new)),
     ("objs", nats (es.upObjsL n new))]
-
-/-! ## Replies for push, read and early-entry requests
-
-Raw pushes, hub reads, node growth, head control and local bursts. -/
-
-/-- Decode a `pushSnapshot` request and reply with whether the push packet matches the
-session's state, and the operations it drops. -/
-def pushSnapshotReply (N : Nat) (s : SEState) (j : Json) : Except String Json := do
-  let p : PushPacket := {
-    node := ← getNat j "node"
-    ops := ← getNats j "ops"
-    objs := ← getNats j "objs"
-    expected := ← getNat j "expected"
-    knownSeq := ← getNat j "knownSeq"
-    new := ← getNat j "new"
-    applied := ← getRecs j "applied"
-    pending := ← getNats j "pending" }
-  pure (Json.mkObj [("ok", toJson true), ("matches", toJson (p.sourceMatchesB N s)),
-    ("allDropped", nats p.allDrops)])
-
-def decodeGrowObs (j : Json) : Except String NodeSys.Exec.GrowObs := do
-  let raw ← j.getObjValAs? (Array (List Nat)) "rawParents"
-  let labels ← j.getObjValAs? (Array (List Nat)) "parents"
-  let emb ← j.getObjValAs? (Array Nat) "embedding"
-  unless emb.size = labels.size do throw "each label needs an embedding"
-  unless parentsBefore raw.toList && parentsBefore labels.toList do
-    throw "an operation's parents must come before it"
-  pure ⟨raw.size, labels.size, fun x => raw[x]?.getD [], fun x => labels[x]?.getD [],
-    fun x => emb[x]?.getD 0⟩
-
-/-- Decode a `nodeGrow` request and reply with whether the observations `after` are scoped
-and grow those `before`. -/
-def nodeGrowReply (j : Json) : Except String Json := do
-  let before ← decodeGrowObs (← j.getObjVal? "before")
-  let after ← decodeGrowObs (← j.getObjVal? "after")
-  let scopedBefore := NodeSys.Exec.scopeB before
-  let scopedAfter := NodeSys.Exec.scopeB after
-  let grows := NodeSys.Exec.growB before after
-  pure (Json.mkObj [("ok", toJson true), ("beforeScoped", toJson scopedBefore),
-    ("afterScoped", toJson scopedAfter), ("grows", toJson grows),
-    ("matches", toJson (scopedBefore && grows && scopedAfter))])
-
-def decodeAnswerSnap (j : Json) : Except String NodeSys.Snap := do
-  pure ⟨← getNat j "seq", ← getNat j "head", ← getNat j "recs"⟩
-
-/-- The actual hub snapshots and reply of one read call, checked by the executable event
-projection. Record ids stand for full ordered-record identities, including their digests. -/
-def hubReadReply (j : Json) : Except String Json := do
-  let body : NodeSys.Body ← match ← j.getObjValAs? String "call" with
-    | "fetch" => pure .fetch
-    | "objects" => pure .objs
-    | _ => throw "unknown hub read call"
-  let kind : SysAcceptance.AnswerKind ← match ← j.getObjValAs? String "kind" with
-    | "fetched" => pure .fetched
-    | "objects" => pure .objects
-    | "head" => pure .head
-    | "refused" => pure .refused
-    | _ => throw "unknown hub answer kind"
-  let replySnap ← match ← j.getObjVal? "replySnap" with
-    | .null => pure none
-    | snap => some <$> decodeAnswerSnap snap
-  let observed : SysAcceptance.AnswerObs := {
-    before := ← decodeAnswerSnap (← j.getObjVal? "before")
-    after := ← decodeAnswerSnap (← j.getObjVal? "after")
-    kind := kind
-    replySnap := replySnap
-    replyRecs := ← j.getObjValAs? (Option Nat) "replyRecs" }
-  pure (Json.mkObj [("ok", toJson true),
-    ("matches", toJson (SysAcceptance.checkAnswer body observed))])
-
-instance : Lean.ToJson Known := ⟨fun k => toJson #[k.seq, k.head]⟩
-
-instance : Lean.FromJson Known :=
-  ⟨fun j => do
-    let (seq, head) ← Lean.fromJson? (α := Nat × Nat) j
-    pure ⟨seq, head⟩⟩
-
-/-- Decode a `headControl` request and reply with whether the node restarts and the head it
-knows afterwards. -/
-def headControlReply (j : Json) : Except String Json := do
-  let known ← j.getObjValAs? Known "known"
-  let incoming ← j.getObjValAs? Known "incoming"
-  let root ← getNat j "root"
-  let own ← j.getObjValAs? Bool "own"
-  let notify ← j.getObjValAs? Bool "notify"
-  pure (Json.mkObj [("ok", toJson true),
-    ("restart", toJson (own && !notify && Retry.Serial.wentBack known incoming)),
-    ("known", toJson (Retry.Serial.handleHead root own notify known incoming))])
-
-def burstState (j : Json) : Except String EarlyEntry.Burst.State := do
-  let ops ← getNats j "local"
-  pure ⟨ops.contains, ← getNats j "heads", ← getNats j "plan"⟩
-
-def burstWith (raw images : List Nat) (anc : Nat → Nat → Bool) (j : Json) :
-    Except String Json := do
-  let before ← j.getObjVal? "before" >>= burstState
-  let after ← j.getObjVal? "after" >>= burstState
-  let kind ← match ← j.getObjValAs? String "kind" with
-    | "realize" => pure (EarlyEntry.Burst.Kind.realize (← getNat j "opId"))
-    | "merge" => pure EarlyEntry.Burst.Kind.merge
-    | "advance" => pure EarlyEntry.Burst.Kind.advance
-    | other => throw s!"unknown local burst kind {other}"
-  pure (Json.mkObj [("ok", toJson true),
-    ("matches", toJson (EarlyEntry.Burst.stepB raw images anc kind before after)),
-    ("before", toJson (EarlyEntry.Burst.rank raw images anc before)),
-    ("after", toJson (EarlyEntry.Burst.rank raw images anc after))])
-
-/-- Decode a `localBurst` request against the session's state and reply with whether the
-burst step takes `before` to `after`, and the rank of each. -/
-def burstReply (s : SEState) (j : Json) : Except String Json := do
-  let n ← getNat j "node"
-  let known ← getNat j "known"
-  burstWith (ancL s.es.parF known) (Contract.exp s.es.parF (s.nodeDF n).contains known)
-    (ancB s.es.parF) j
-
-/-- Decode a `rawBurst` request, which gives its parents directly, and reply as
-`burstReply` does. -/
-def rawBurstReply (j : Json) : Except String Json := do
-  let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
-  let parents := rows.toList.map Array.toList
-  if !parentsBefore parents then
-    throw "raw burst parents must be older than their operation"
-  let raw ← getNats j "rawClosure"
-  let images ← getNats j "images"
-  burstWith raw images (ancB (fun x => (parents[x]?).getD [])) j
-
-def controlState (j : Json) : Except String EarlyEntry.Control.State := do
-  let burst ← burstState j
-  let staged ← getNats j "staged"
-  let objects ← getNats j "objects"
-  pure ⟨burst, staged.contains, objects.contains⟩
-
-def controlChoiceName : EarlyEntry.Control.Choice → String
-  | .adopt => "adopt"
-  | .merge => "merge"
-  | .realize => "realize"
-  | .fetch => "fetch"
-  | .objects => "objects"
-  | .idle => "idle"
-  | .advance => "advance"
-  | .poll => "poll"
-  | .push => "push"
-
-/-- Compute the core's choice from its before-state, including the raw survey. If a completed
-call is supplied, also check its field effects. `objects` lists operations with all objects
-available, not object ids. The six primitive bits are read independently of the result. -/
-def rawControlReply (j : Json) : Except String Json := do
-  let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
-  let parents := rows.toList.map Array.toList
-  if !parentsBefore parents then
-    throw "raw control parents must be older than their operation"
-  let par := fun x => (parents[x]?).getD []
-  let raw ← getNats j "rawClosure"
-  let images ← getNats j "images"
-  let H ← getNat j "known"
-  let before ← j.getObjVal? "before" >>= controlState
-  let prims ← j.getObjVal? "primitives"
-  let q : EarlyEntry.Control.Prims := ⟨← prims.getObjValAs? Bool "announced",
-    ← prims.getObjValAs? Bool "dropHead", ← prims.getObjValAs? Bool "differ",
-    ← prims.getObjValAs? Bool "pending", ← prims.getObjValAs? Bool "headIsKnown",
-    ← prims.getObjValAs? Bool "newIsKnown"⟩
-  let choice := EarlyEntry.Control.rawControl raw images par (ancB par) H before q
-  let fields := [("ok", toJson true), ("choice", toJson (controlChoiceName choice))]
-  match j.getObjValAs? String "kind" with
-  | .error _ => pure (Json.mkObj fields)
-  | .ok kind =>
-    let k ← match kind with
-      | "realize" => pure (.burst (.realize (← getNat j "opId")))
-      | "merge" => pure (.burst .merge)
-      | "advance" => pure (.burst .advance)
-      | "fetch" => pure EarlyEntry.Control.CallKind.fetch
-      | "objects" => pure EarlyEntry.Control.CallKind.objects
-      | other => throw s!"unknown raw control call kind {other}"
-    let after ← j.getObjVal? "after" >>= controlState
-    pure (Json.mkObj (fields ++ [("matches", toJson
-      (EarlyEntry.Control.callB raw images (ancB par) k before after))]))
-
-/-- `Push::answer` on raw ids, for the hub at `(seq, head)`, given its checks of the push
-(`RawPublish.rawPush`): `recordsMatch`, the caller's own comparison of the push's records with
-the hub's, count and digest, and its storage's answers. The outcome, by `CasOutcome`'s name,
-and the hub's `(seq, head)` after. -/
-def rawPushReply (j : Json) : Except String Json := do
-  let h : RawPublish.Hub := ⟨← getNat j "seq", ← getNat j "head"⟩
-  let p : RawPublish.Push := ⟨← getNat j "expected", ← getNat j "new", ← getNats j "dropped"⟩
-  let c : RawPublish.Checks := ⟨← j.getObjValAs? Bool "recordsMatch",
-    ← j.getObjValAs? Bool "isDropped", ← j.getObjValAs? Bool "isClosed",
-    ← j.getObjValAs? Bool "descends"⟩
-  let (outcome, after) := RawPublish.rawPush h p c
-  pure (Json.mkObj [("ok", toJson true), ("outcome", toJson outcome.name),
-    ("seq", toJson after.seq), ("head", toJson after.head)])
 
 /-! ## Publication reply and request dispatch -/
 
@@ -1035,22 +666,14 @@ def publicationReply (j : Json) : Except String Json := do
     ("afterIntentional", nats (Publication.protectedRoots afterState.operations))]
 
 /-- The oracle's session: the node count and current state, once `reset`. -/
-abbrev Session := Option (Nat × SEState)
+abbrev Session := Option (Nat × EState)
 
 /-- Requests that need no session, by `op`, whose errors are bad requests: the decoding failing,
 or the model refusing what was decoded. -/
 def badRequestOps : List (String × (Json → Except String Json)) :=
-  [("publication", publicationReply), ("headControl", headControlReply),
-    ("hubRead", hubReadReply), ("nodeGrow", nodeGrowReply),
-    ("rawBurst", rawBurstReply), ("rawPush", rawPushReply),
-    ("rawControl", rawControlReply), ("chunks", chunksReply), ("refresh", refreshReply),
-    ("attempts", attemptsReply), ("names", namesReply),
-    ("copies", copiesReply),
-    ("expected", expectedReply), ("retryFixup", retryFixupReply),
-    ("contractedAncestry", contractedAncestryReply), ("retryInbox", retryInboxReply),
-    ("retryPublication", retryPublicationReply), ("recordEpoch", recordEpochReply),
-    ("survivorAdvance", survivorAdvanceReply), ("refs", refsReply),
-    ("opHeads", OpHeads.Json.reply)]
+  [("publication", publicationReply), ("chunks", chunksReply), ("refresh", refreshReply),
+    ("attempts", attemptsReply), ("names", namesReply), ("copies", copiesReply),
+    ("expected", expectedReply), ("refs", refsReply), ("opHeads", OpHeads.Json.reply)]
 
 /-- Requests that need no session, by `op`, whose errors are whole messages, not bad requests. -/
 def wholeMessageOps : List (String × (Json → Except String Json)) :=
@@ -1062,18 +685,16 @@ def statelessOps : List (String × (Json → Except String Json)) :=
 
 /-- A request that reads the session and leaves it as it is, by its `op`, given the node count
 and state. Before `reset`, it fails as `bad request: OP before reset`. -/
-def sessionOps : List (String × (Nat × SEState → Json → Except String Json)) :=
+def sessionOps : List (String × (Nat × EState → Json → Except String Json)) :=
   [("measure", fun (N, es) _ => pure (measureReply N es)),
-    ("upload", fun (_, ses) j => return uploadReply ses.es (← getNat j "node") (← getNat j "new")),
-    ("pushSnapshot", fun (N, s) j => pushSnapshotReply N s j),
-    ("localBurst", fun (_, s) j => burstReply s j)]
+    ("upload", fun (_, es) j => return uploadReply es (← getNat j "node") (← getNat j "new"))]
 
 /-- A `step`: the action's refusal by the model is reported as it is, not as a bad request. -/
-def handleStep (N : Nat) (es : SEState) (j : Json) : Json × Session :=
-  match j.getObjVal? "action" >>= decodeSAction with
+def handleStep (N : Nat) (es : EState) (j : Json) : Json × Session :=
+  match j.getObjVal? "action" >>= decodeAction with
   | .error e => (errReply (badRequest e), some (N, es))
   | .ok a =>
-    match sexecStep N es a with
+    match execStep N es a with
     | .error e => (errReply e, some (N, es))
     | .ok es' => (okReply N es', some (N, es'))
 
@@ -1088,7 +709,7 @@ def handleOp (sess : Session) (j : Json) (op : String) : Json × Session :=
   if op == "reset" then
     match getNat j "nodes" with
     | .error e => (errReply (badRequest e), sess)
-    | .ok N => (okReply N initSE, some (N, initSE))
+    | .ok N => (okReply N initE, some (N, initE))
   else if op == "step" then
     match sess with
     | none => (errReply (badRequest "step before reset"), sess)

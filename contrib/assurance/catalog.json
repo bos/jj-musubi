@@ -165,21 +165,6 @@
       ]
     },
     {
-      "id": "drops",
-      "area": "protocol",
-      "title": "Dropped operations stay dropped",
-      "detail": "Replicated abandonment and reconciliation must not revive a dropped head.",
-      "code": [
-        "crates/musubi-core/src/hub.rs",
-        "crates/musubi-core/src/node.rs"
-      ],
-      "evidence": [
-        "e10",
-        "e11",
-        "e12"
-      ]
-    },
-    {
       "id": "remake",
       "area": "protocol",
       "title": "A remade hub can rejoin agreement",
@@ -647,36 +632,6 @@
       "provenance": "documented"
     },
     {
-      "id": "e10",
-      "claim": "drops",
-      "mechanism": "conformance",
-      "source": "formal/Musubi/Supersede.lean",
-      "detail": "Invariant and convergence proofs include dropped sets and supersedes.",
-      "needs": [],
-      "provenance": "documented",
-      "kind": "proof"
-    },
-    {
-      "id": "e11",
-      "claim": "drops",
-      "mechanism": "conformance",
-      "source": "crates/musubi-core/tests/protocol.rs",
-      "detail": "The executable supersede model checks adoption, publication and dropped heads.",
-      "needs": [
-        "lean"
-      ],
-      "provenance": "documented"
-    },
-    {
-      "id": "e12",
-      "claim": "drops",
-      "mechanism": "mutation",
-      "source": "docs/internals/conformance.md",
-      "detail": "A node advancing to a dropped head is documented as detected through HeadsOK.",
-      "needs": [],
-      "provenance": "documented"
-    },
-    {
       "id": "e13",
       "claim": "remake",
       "mechanism": "conformance",
@@ -1024,7 +979,7 @@
       "claim": "ownership",
       "mechanism": "races",
       "source": "crates/musubi-sync/tests/races/workspaces.rs",
-      "detail": "Late commands after one and two trims, their merges, and abandoned restores keep other machines’ workspaces theirs.",
+      "detail": "Other machines’ workspaces stay theirs through renames, forgets, merges and restores.",
       "needs": [],
       "provenance": "documented"
     },
@@ -1570,10 +1525,6 @@
       "path": "formal/Musubi/Safety.lean",
       "symbol": "noFeedback"
     },
-    "formal/Musubi/Supersede.lean": {
-      "path": "formal/Musubi/Supersede.lean",
-      "symbol": null
-    },
     "crates/musubi-core/tests/protocol.rs": {
       "path": "crates/musubi-core/tests/protocol.rs",
       "symbol": null
@@ -1597,10 +1548,6 @@
     "crates/musubi-jj/tests/it/translation.rs#advance_with_concurrent_heads_refines_advance_then_merge": {
       "path": "crates/musubi-jj/tests/it/translation.rs",
       "symbol": "advance_with_concurrent_heads_refines_advance_then_merge"
-    },
-    "formal/Musubi/AbandonRefs.lean": {
-      "path": "formal/Musubi/AbandonRefs.lean",
-      "symbol": null
     },
     "formal/Musubi/Refs.lean#noSpuriousRevert": {
       "path": "formal/Musubi/Refs.lean",
@@ -1957,29 +1904,24 @@
     "step": [
       "Safety",
       "Liveness",
-      "Supersede",
       "Regress"
     ],
     "reset": [
       "Safety",
       "Liveness",
-      "Supersede",
       "Regress"
     ],
     "measure": [
-      "Liveness",
-      "Supersede"
+      "Liveness"
     ],
     "upload": [
       "Liveness"
     ],
     "presence": [
-      "Presence",
-      "PresenceContract"
+      "Presence"
     ],
     "refs": [
-      "Refs",
-      "AbandonRefs"
+      "Refs"
     ],
     "names": [
       "Names"
@@ -2001,48 +1943,6 @@
     ],
     "refresh": [
       "Chunks"
-    ],
-    "retryFixup": [
-      "RetryControl"
-    ],
-    "retryInbox": [
-      "RetryControl"
-    ],
-    "retryPublication": [
-      "RetryControl"
-    ],
-    "contractedAncestry": [
-      "ContractOrder"
-    ],
-    "recordEpoch": [
-      "RecordEpoch"
-    ],
-    "survivorAdvance": [
-      "ContractOrder"
-    ],
-    "pushSnapshot": [
-      "PacketAcceptance"
-    ],
-    "headControl": [
-      "SerialReply"
-    ],
-    "hubRead": [
-      "SysAcceptance/Events"
-    ],
-    "nodeGrow": [
-      "NodeSysExec"
-    ],
-    "localBurst": [
-      "EarlyEntry/Burst"
-    ],
-    "rawBurst": [
-      "EarlyEntry/Burst"
-    ],
-    "rawControl": [
-      "EarlyEntry/Control"
-    ],
-    "rawPush": [
-      "PacketAcceptance"
     ]
   }
 }

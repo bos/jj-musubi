@@ -636,8 +636,6 @@ mod tests {
     /// Deliver frames here, in a fixed order, to pin the client's own correlation rule.
     #[test]
     fn replies_only_complete_the_matching_pending_call_once() {
-        use serde_json::json;
-
         let shared = empty_shared(4);
         let (abandoned, canceled) = oneshot::channel();
         shared.lock().pending.insert(1, ("rpc".into(), abandoned));
@@ -646,21 +644,17 @@ mod tests {
         shared.lock().pending.insert(2, ("rpc".into(), fresh));
         let (current, mut waiting) = oneshot::channel();
         shared.lock().pending.insert(3, ("rpc".into(), current));
-        let mut oracle = crate::oracle::Oracle::spawn();
-        let mut model = json!({"op": "retryInbox", "action": "finish",
-            "next": 4, "pending": [1, 2, 3], "cut": 3});
-        let mut finish = |id, payload| {
-            model["id"] = json!(id);
-            let expected = oracle.call(&model);
-            assert_eq!(expected["ok"], true, "{expected}");
-            let matched = shared.lock().pending.contains_key(&id);
+        // A reply matches a call exactly while the call is pending, and takes it out.
+        let mut pending = vec![1u64, 2, 3];
+        let mut finish = |id: u64, payload| {
+            let matched = pending.contains(&id);
+            assert_eq!(shared.lock().pending.contains_key(&id), matched);
             shared.receive(Frame::Reply { id, payload }).unwrap();
-            assert_eq!(expected["matched"], matched);
+            pending.retain(|&live| live != id);
             let mut live: Vec<_> = shared.lock().pending.keys().copied().collect();
             live.sort_unstable();
-            assert_eq!(expected["pending"], json!(live));
-            assert_eq!(expected["next"], shared.lock().next_id);
-            model["pending"] = expected["pending"].clone();
+            assert_eq!(live, pending);
+            assert_eq!(shared.lock().next_id, 4);
         };
         finish(2, Bytes::from_static(b"fresh"));
         assert_eq!(completed.try_recv().unwrap().unwrap(), "fresh");

@@ -55,16 +55,20 @@ the hub's accepted history intact, they also rule out machines independently cre
 merge. A separate model covers the hub (which stores shared history) going back to an earlier
 state or being rebuilt; such a rollback could permit duplicate merges.
 
-The progress proofs establish convergence: after work and failures stop, successful syncing
-brings the machines to the same shared history. They check that progress cannot continue forever
-without finishing, rather than relying on a timeout in a test.
+The progress proofs establish that the sync policy converges: when work stops and each exchange
+with the hub succeeds, every sequence of syncing steps ends with the machines on the same shared
+history, also after the hub goes back to an earlier state. They check that progress cannot
+continue forever without finishing, rather than relying on a timeout in a test. They are about
+the policy's atomic exchanges, not the running system, whose requests can be lost, repeated and
+answered late. That convergence is tested, not proved: the generated end-to-end tests check
+that every machine ends on the hub's history at the end of every case, and the race and
+fault-injection tests check the parts that make it hold, such as retries after a lost reply.
 
 The models extend beyond the main sync loop. Separate models cover Git-ref import and export,
-operation abandonment, which machines still belong to a shared repo, distinguishing a joined
-repo from a duplicate of its directory, workspace names, chunked transfers, and the limits,
-approval and cleanup of accidental snapshots. There is also a model of preparing and
-publishing rewritten history. These models have different scopes; they are not all one
-combined proof.
+which machines still belong to a shared repo, distinguishing a joined repo from a duplicate of
+its directory, workspace names, chunked transfers, how musubi moves jj's operation heads, and
+the limits, approval and cleanup of accidental snapshots. These models have different scopes;
+they are not all one combined proof.
 
 The proofs have no unfinished Lean placeholders and introduce no additional axioms. The
 [formal guide](../formal/README.md) lists the theorems and their assumptions. The remaining
@@ -84,8 +88,8 @@ directly on Rust state, independently of the oracle comparison. During recovery,
 that the progress measures used by the convergence proofs decrease.
 
 These core tests use abstract operations and controlled storage instead of jj repositories.
-Further conformance tests compare real ref handling, operation abandonment, copy selection,
-workspace naming, snapshot cleanup and transfer code with their own Lean models. Tests with
+Further conformance tests compare real ref handling, copy selection, workspace naming,
+snapshot cleanup and transfer code with their own Lean models. Tests with
 real repos cover effects the core abstraction cannot express, such as merging received work
 with concurrent local work and retrying writes after hub rollback.
 
@@ -225,9 +229,8 @@ The proofs establish properties of their models; they do not prove every line of
 Convergence assumes that edits and failures eventually stop, machines resume successful
 syncing with correct replies, and snapshot holds are resolved, disabled or approved. It also
 assumes maintenance eventually stops adding repo operations; that termination is not proved.
-
-Individual operation-abandonment steps have proofs, but a combined safety result covering every
-sequence of abandonment and syncing is still missing. The [conformance
-guide](internals/conformance.md) describes the boundaries between the models and real repository
-behavior, and the [race condition catalogue](internals/races.md) records known limitations
-alongside tested outcomes.
+No proof covers convergence of the running system, with its retries and late replies, or the
+translation between jj's operations and the shared history; the tests above are the evidence for
+both. The [conformance guide](internals/conformance.md) describes the boundaries between the
+models and real repository behavior, and the [race condition
+catalogue](internals/races.md) records known limitations alongside tested outcomes.

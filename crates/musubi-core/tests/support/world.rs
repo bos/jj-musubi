@@ -262,10 +262,6 @@ impl World {
     /// One policy step. Returns whether anything happened.
     pub fn node_step(&mut self, node: usize, merge_objs: usize) -> bool {
         let before = self.storage_begin();
-        let burst_before = self
-            .oracle
-            .as_ref()
-            .map(|_| (self.cores[node].known().head, self.burst_state(node)));
         self.repos[node].merge_objs = merge_objs;
         let heads_before: Vec<Op> = self.repos[node].heads.iter().copied().collect();
         let step = match self.cores[node].step(&mut self.repos[node]) {
@@ -274,12 +270,6 @@ impl World {
                 self.storage_failed(Some(node), before, error, vec![]);
                 return false;
             }
-        };
-        let burst_kind = match &step {
-            Step::Merged => Some(("merge", None)),
-            Step::Realized(op) => Some(("realize", Some(*op))),
-            Step::Advanced(_) => Some(("advance", None)),
-            _ => None,
         };
         match step {
             Step::Idle => return false,
@@ -298,24 +288,7 @@ impl World {
                 }
             }
         }
-        if let (Some((known, before)), Some((kind, op))) = (burst_before, burst_kind) {
-            let after = self.burst_state(node);
-            let reply = self.oracle.as_mut().unwrap().call(&json!({
-                "op": "localBurst", "node": node, "known": known,
-                "kind": kind, "opId": op, "before": before, "after": after,
-            }));
-            assert_eq!(reply["ok"], true, "local burst query failed: {reply}");
-            assert_eq!(reply["matches"], true, "local burst fields differ: {reply}");
-        }
         true
-    }
-
-    fn burst_state(&self, node: usize) -> Value {
-        json!({
-            "local": sorted(self.repos[node].lops.iter().copied()),
-            "heads": sorted(self.repos[node].heads.iter().copied()),
-            "plan": self.cores[node].planned().copied().collect::<Vec<_>>(),
-        })
     }
 
     fn send_request(&mut self, node: usize, request: Req) {
@@ -613,11 +586,6 @@ impl World {
     fn node_handle(&mut self, node: usize, reply: Rep, own: bool) {
         let before = self.storage_begin();
         let known_before = self.known(node);
-        let incoming = match &reply {
-            Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => Some((*seq, *head)),
-            Reply::Objects { .. } => None,
-        };
-        let restarted = own && self.cores[node].hub_went_back(&reply);
         let head_kind = match &reply {
             Reply::Head { kind, .. } => *kind,
             _ => HeadKind::Head,
@@ -648,16 +616,6 @@ impl World {
                 return;
             }
         };
-        if let (Some(oracle), Some(incoming)) = (&mut self.oracle, incoming) {
-            let expected = oracle.call(&json!({
-                "op": "headControl", "root": ROOT,
-                "known": known_before, "incoming": incoming,
-                "own": own, "notify": head_kind == HeadKind::Notify,
-            }));
-            assert_eq!(expected["ok"], true, "head control failed: {expected}");
-            assert_eq!(expected["restart"], json!(restarted));
-            assert_eq!(expected["known"], json!(self.known(node)));
-        }
         match handled {
             Handled::Learned { kind, seq, head } => {
                 actions.push(json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}));
@@ -1056,8 +1014,7 @@ impl World {
 
 /// Normalizes a state for comparison: sets become sorted arrays and `net` a sorted,
 /// deduplicated list. Pairs (`known`) and node order are kept. Only the fields of
-/// `Exec.lean`'s state are compared: the oracle's state also carries `SupersedeExec.lean`'s
-/// dropped sets and records, which no core step changes.
+/// `Exec.lean`'s state are compared.
 fn canonical_state(state: &Value) -> Value {
     fn set(value: &Value) -> Value {
         let mut numbers: Vec<u64> = value

@@ -177,59 +177,7 @@ theorem work_present (hlt : ParLt h.par) (hwf : h.WellFormed) {x k : Nat} (hW : 
 theorem forget_absent {f k : Nat} (hF : h.forget f k) : ¬ h.Present f k :=
   fun ⟨_, hw, _, hn⟩ => hn ⟨f, Anc.refl, hF, hw⟩
 
-/-! ## The fix-up after a replicated abandon
-
-A contraction keeps presence at every operation it keeps (`PresenceContract.lean`), but the
-work it names may be work the abandon dropped. So the machine that abandons writes, on the
-rewritten head, a fix-up: work again by each copy whose latest work was dropped, then a forget
-of it if the op head it is written on has it forgotten, one operation each, so that every one
-is well formed (docs/internals/design.md, "The fix-up"). These two lemmas say what such a chain
-does: an operation on one parent that is work by `k`, or a forget of `k`, gives `k` the presence
-meant (`T`), and one that is neither leaves `k` as its parent has it. -/
-
-/-- An operation on one parent, made to restore `T` for copy `k` (work by `k` where `k` is
-absent and `T` holds, a forget of `k` where it is present and `T` doesn't, neither otherwise),
-has `k` present exactly when `T` holds. -/
-theorem fixup_present (hlt : ParLt h.par) {z x k : Nat} {T : Prop} (hpar : h.par z = [x])
-    (hW : h.work z k ↔ T ∧ ¬ h.Present x k) (hF : h.forget z k ↔ ¬ T ∧ h.Present x k) :
-    h.Present z k ↔ T := by
-  have hbelow : h.PresentIn (h.Below z) k ↔ h.Present x k := by
-    unfold Present
-    have : ∀ a, h.Below z a ↔ Anc h.par a x := by
-      intro a; simp [Below, hpar]
-    constructor
-    · rintro ⟨w, hw, hWk, hn⟩
-      exact ⟨w, (this w).1 hw, hWk, fun ⟨f, hf, hFk, hA⟩ => hn ⟨f, (this f).2 hf, hFk, hA⟩⟩
-    · rintro ⟨w, hw, hWk, hn⟩
-      exact ⟨w, (this w).2 hw, hWk, fun ⟨f, hf, hFk, hA⟩ => hn ⟨f, (this f).1 hf, hFk, hA⟩⟩
-  by_cases hT : T <;> by_cases hP : h.Present x k
-  · have hw : ¬ h.work z k := fun h' => (hW.1 h').2 hP
-    have hf : ¬ h.forget z k := fun h' => (hF.1 h').1 hT
-    exact ⟨fun _ => hT, fun _ => (h.present_iff_below hw hf).2 (hbelow.2 hP)⟩
-  · have hw : h.work z k := hW.2 ⟨hT, hP⟩
-    have hf : ¬ h.forget z k := fun h' => (hF.1 h').1 hT
-    refine ⟨fun _ => hT, fun _ => ⟨z, Anc.refl, hw, fun ⟨f, hf', hFk, hA⟩ => hf ?_⟩⟩
-    rw [← Anc.antisymm hlt hf' hA]; exact hFk
-  · have hf : h.forget z k := hF.2 ⟨hT, hP⟩
-    exact ⟨fun hz => absurd hz (h.forget_absent hf), fun h' => absurd h' hT⟩
-  · have hw : ¬ h.work z k := fun h' => (hW.1 h').1 |> hT
-    have hf : ¬ h.forget z k := fun h' => hP (hF.1 h').2
-    exact ⟨fun hz => absurd (hbelow.1 ((h.present_iff_below hw hf).1 hz)) hP,
-      fun h' => absurd h' hT⟩
-
-/-- An operation on one parent that is neither work by `k` nor a forget of it has `k` present
-exactly as its parent does: the rest of the fix-up chain leaves `k` alone. -/
-theorem pass_present {z x k : Nat} (hpar : h.par z = [x]) (hW : ¬ h.work z k)
-    (hF : ¬ h.forget z k) : h.Present z k ↔ h.Present x k := by
-  rw [h.present_iff_below hW hF]
-  unfold Present
-  have : ∀ a, h.Below z a ↔ Anc h.par a x := by
-    intro a; simp [Below, hpar]
-  constructor
-  · rintro ⟨w, hw, hWk, hn⟩
-    exact ⟨w, (this w).1 hw, hWk, fun ⟨f, hf, hFk, hA⟩ => hn ⟨f, (this f).2 hf, hFk, hA⟩⟩
-  · rintro ⟨w, hw, hWk, hn⟩
-    exact ⟨w, (this w).2 hw, hWk, fun ⟨f, hf, hFk, hA⟩ => hn ⟨f, (this f).1 hf, hFk, hA⟩⟩
+/-! ## Only work returns -/
 
 /-- Only work brings a copy back: an operation that isn't `k`'s work, made where every parent
 has `k` absent, has `k` absent. Merges and the operations musubi writes are such operations. -/

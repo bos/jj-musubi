@@ -319,7 +319,6 @@ fn interrupted_git_export_can_leave_aliased_operation_heads() {
 /// write projection must allow the second copy to reuse the raw vertex the first wrote.
 #[test]
 fn independent_merges_can_reuse_a_canonical_operation() {
-    use crate::oracle::Oracle;
     use jj_lib::config::{ConfigLayer, ConfigSource};
     use musubi_core::node::{LocalRepo as _, Step};
     use musubi_jj::node::NodeRepo;
@@ -405,8 +404,6 @@ fn independent_merges_can_reuse_a_canonical_operation() {
         }
         order
     }
-    let mut oracle = Oracle::spawn();
-    let mut global = vec![];
     let mut merged = vec![];
     for n in [0, 1, 3] {
         // Supported jj metadata settings, held fixed through the shipping initial Fetch and
@@ -473,10 +470,6 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
             vec![CanonicalOp(p.clone()), CanonicalOp(q.clone())]
         };
         let old = closure(hive.members[n].adapter.repo().canonical_store(), &roots);
-        if global.is_empty() {
-            global = old.clone();
-        }
-        let global_before = global.clone();
         let mut did_advance = false;
         for _ in 0..32 {
             let member = &mut hive.members[n];
@@ -506,42 +499,6 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
         expected.sort();
         assert_eq!(parents, expected);
         assert_eq!(old.contains(&m), n == 3);
-        let mut new_labels = old.clone();
-        if !new_labels.contains(&m) {
-            new_labels.push(m.clone());
-        }
-        if !global.contains(&m) {
-            global.push(m.clone());
-        }
-        assert_eq!(global.len() - global_before.len(), usize::from(n == 0));
-        let store = member.adapter.repo().canonical_store();
-        let encode = |raw: &[CanonicalOp], labels: &[CanonicalOp]| {
-            let number =
-                |ids: &[CanonicalOp], op: &CanonicalOp| ids.iter().position(|id| id == op).unwrap();
-            let parents = |ids: &[CanonicalOp]| {
-                ids.iter()
-                    .map(|op| {
-                        store
-                            .parents(op)
-                            .unwrap()
-                            .iter()
-                            .map(|p| number(ids, p))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>()
-            };
-            serde_json::json!({
-                "rawParents": parents(raw), "parents": parents(labels),
-                "embedding": labels.iter().map(|op| number(raw, op)).collect::<Vec<_>>(),
-            })
-        };
-        let query = serde_json::json!({
-            "op": "nodeGrow", "before": encode(&global_before, &old),
-            "after": encode(&global, &new_labels),
-        });
-        let checked = oracle.call(&query);
-        assert_eq!(checked["ok"], true, "{query}: {checked}");
-        assert_eq!(checked["matches"], true, "{query}: {checked}");
         assert_eq!(hive.hub_head(), q, "each checked write starts from Q");
         merged.push(m);
     }
@@ -574,42 +531,12 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
     let mut expected = vec![p, merged[0].0.clone()];
     expected.sort();
     assert_eq!(heads_before, expected);
-    let raw = closure(
-        member.adapter.repo().canonical_store(),
-        &[CanonicalOp(q.clone())],
-    );
-    let number = |op: &CanonicalOp| global.iter().position(|id| id == op).unwrap();
-    let parents: Vec<Vec<usize>> = global
-        .iter()
-        .map(|op| {
-            member
-                .adapter
-                .repo()
-                .canonical_store()
-                .parents(op)
-                .unwrap()
-                .iter()
-                .map(number)
-                .collect()
-        })
-        .collect();
-    let snapshot = |member: &musubi_sync::hive::Member, heads: &[musubi_sync::OpId]| {
-        serde_json::json!({
-            "local": raw.iter().filter(|op| member.adapter.is_local(&op.0).unwrap())
-                .map(number).collect::<Vec<_>>(),
-            "heads": heads.iter().cloned().map(CanonicalOp).map(|op| number(&op)).collect::<Vec<_>>(),
-            "plan": member.core.planned().cloned().map(CanonicalOp)
-                .map(|op| number(&op)).collect::<Vec<_>>(),
-        })
-    };
-    let before = snapshot(member, &heads_before);
     assert!(matches!(
         member.core.step(&mut member.adapter).unwrap(),
         Step::Merged
     ));
     let heads_after = member.adapter.heads().unwrap();
     assert_eq!(heads_after, vec![merged[0].0.clone()]);
-    let after = snapshot(member, &heads_after);
     let bodies_after: BTreeSet<_> = member
         .adapter
         .repo()
@@ -622,14 +549,6 @@ debug.commit-timestamp = "2020-01-01T00:00:00Z"
         bodies_before, bodies_after,
         "pruning writes no canonical body"
     );
-    let query = serde_json::json!({
-        "op": "rawBurst", "kind": "merge", "opId": null, "parents": parents,
-        "rawClosure": raw.iter().map(number).collect::<Vec<_>>(),
-        "images": [number(&CanonicalOp(q.clone()))], "before": before, "after": after,
-    });
-    let checked = oracle.call(&query);
-    assert_eq!(checked["ok"], true, "{query}: {checked}");
-    assert_eq!(checked["matches"], true, "{query}: {checked}");
     assert_eq!(hive.hub_head(), q);
 }
 

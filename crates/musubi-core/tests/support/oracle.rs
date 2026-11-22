@@ -154,8 +154,7 @@ pub struct Measure {
     pub measure: Vec<u64>,
     /// `rmeasure` of `Regress.lean`, which falls whether or not it has.
     pub rmeasure: Vec<u64>,
-    /// `convergedE`. The oracle's state carries no dropped sets or records here, so its
-    /// `recordConvergedE` is that.
+    /// `convergedE`.
     pub converged: bool,
 }
 

@@ -73,8 +73,7 @@ def MsgR (s : State) : Msg → Prop
   | .head _ _ _ h => h < s.U.next
   | _ => True
 
-/-- What every state satisfies once the hub can go back, a push can contract its expected
-head, and records a node takes can drop its own work (`Supersede.lean`): `Base`, with the
+/-- What every state satisfies once the hub can go back: `Base`, with the
 stored, known, staged and in-flight operations bounded by the universe. -/
 structure InvC (N : Nat) (s : State) : Prop extends Base N s where
   objsRoot : s.U.objs root = []

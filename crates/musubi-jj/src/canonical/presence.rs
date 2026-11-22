@@ -341,7 +341,7 @@ pub fn merge(
 
 /// Whether work `a` is in the history below `b`, an operation of `store`, as presence asks
 /// it: work an abandon dropped counts as below every operation, so a merge keeps it only
-/// where every parent does (`formal/Musubi/PresenceContract.lean`, `seen`).
+/// where every parent does.
 fn work_below(store: &CanonicalStore, a: &Work, b: &Work) -> Result<bool, CanonicalError> {
     match (&a.op, &b.op) {
         (Some(a), Some(b)) => store.is_ancestor_of(a, b),

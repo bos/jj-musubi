@@ -12,41 +12,15 @@ import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
 import Musubi.ExecJson
-import Musubi.SupersedeExecSound
-import Musubi.RecordLiveness
-import Musubi.AsyncLiveness
-import Musubi.RetryControl
-import Musubi.RecordStability
-import Musubi.ContractOrder
-import Musubi.BaseImages
-import Musubi.RecordEpoch
-import Musubi.NotificationControl
-import Musubi.SerialReply
-import Musubi.HubSuffix
-import Musubi.NodeSettle
-import Musubi.EarlyEntry
-import Musubi.HistoryWindow
-import Musubi.EntryAssembly
-import Musubi.CallBatch
-import Musubi.HubHistory
-import Musubi.SysFreshCuts
-import Musubi.SysAcceptance
-import Musubi.RequestBounds
 import Musubi.RegressScenario
 import Musubi.Refs
-import Musubi.AbandonRefs
 import Musubi.Expected
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Names
 import Musubi.Contract
-import Musubi.PresenceContract
 import Musubi.OpHeadsRace
-import Musubi.Supersede
-import Musubi.NodeSysExec
-import Musubi.NativeEvents
-import Musubi.FineAssembly
 import Musubi.Publication
 
 open Lean Elab Command in
@@ -89,196 +63,9 @@ open Musubi
 #assert_axioms Musubi.eventually_done_of_progress
 #assert_axioms Musubi.done_of_maximal_run
 
-#assert_axioms NativeEvents.nodeOK_of_filt
-#assert_axioms NativeEvents.Event.step
-#assert_axioms NativeEvents.Event.removed_eligible_push
-#assert_axioms NativeEvents.observed_invariants
-#assert_axioms NativeEvents.observed_hs
-#assert_axioms NativeEvents.observed_decisions
-#assert_axioms NativeEvents.RecordView.mono
-#assert_axioms NativeEvents.RecordView.applied_current
-#assert_axioms NativeEvents.RecordView.pending_empty
-#assert_axioms NativeEvents.RecordView.applied_stays
-#assert_axioms FineAssembly.InFlightHonest.honest
-#assert_axioms FineAssembly.Honest.extend
-#assert_axioms FineAssembly.honest_step
-#assert_axioms FineAssembly.honest_run
-#assert_axioms FineAssembly.notice_mem
-#assert_axioms FineAssembly.FineSource.steps
--- `FineAssembly.fineAt_of` builds data, not a proof; the theorems that use it are audited.
-#assert_axioms Schedule.index_le
-#assert_axioms Schedule.monotone
-#assert_axioms Schedule.before_of_done_before
-#assert_axioms FineAssembly.hive_converges_observed
-
-#assert_axioms Exec.sexec_record_and_drop_sets_stabilize
-#assert_axioms Exec.sexec_node_drop_mono
-#assert_axioms Exec.packet_source_drops
-#assert_axioms Exec.packet_accept_fields
-#assert_axioms Exec.packet_accept_fixed_drops
-#assert_axioms Exec.packet_sender_aligned
-#assert_axioms Exec.packet_sender_after_cut_aligned
-#assert_axioms Exec.packet_source_known
-#assert_axioms Exec.packet_source_heads
-#assert_axioms Exec.packet_upload_closes
-#assert_axioms Exec.packet_upload_closes_from_bases
-#assert_axioms Exec.packet_upload_closes_split
-#assert_axioms Exec.packet_checks_of_emit
-#assert_axioms Exec.packet_checks_force_accept
-#assert_axioms PendingEpoch.pending_names_settle
-#assert_axioms PendingEpoch.pending_names_fixed
-#assert_axioms PendingEpoch.pending_names_settle_with_old_known
-#assert_axioms PendingEpoch.pending_names_settle_from_sources
-#assert_axioms PendingEpoch.finite_metadata_stabilizes
-#assert_axioms PendingEpoch.finite_metadata_output_stabilizes
-#assert_axioms EarlyEntry.Burst.stepB_sound
-#assert_axioms EarlyEntry.Burst.local_grows_after_inputs
-#assert_axioms EarlyEntry.Burst.step_rank
-#assert_axioms EarlyEntry.Burst.no_infinite_burst
-#assert_axioms EarlyEntry.Control.call_rank
-#assert_axioms EarlyEntry.Control.no_infinite_calls
-#assert_axioms EarlyEntry.Control.frame_rank
-#assert_axioms EarlyEntry.Control.no_infinite_framed
-#assert_axioms EarlyEntry.Control.pending_push_reached
-#assert_axioms EarlyEntry.Control.walkB_iff
-#assert_axioms EarlyEntry.Control.rawControl_guarded
-#assert_axioms EarlyEntry.Control.callB_sound
-#assert_axioms EarlyEntry.Control.raw_round_yields
-#assert_axioms EarlyEntry.Control.Naming.settles
-#assert_axioms EarlyEntry.Control.fresh_head_reached
-#assert_axioms EarlyEntry.Control.fresh_fetch_takes
-#assert_axioms EarlyEntry.Control.fresh_fetch_current
-#assert_axioms EarlyEntry.Control.raw_entry_reached
-#assert_axioms EarlyEntry.Control.raw_entry_persists
-#assert_axioms RawPublish.pendingPush_accepted
-#assert_axioms RawPublish.stable_no_pendingPush
-#assert_axioms Recovery.HubSys.request_bounds_run
-#assert_axioms SysAcceptance.no_accepting_emit
-#assert_axioms SysAcceptance.node_settles_accepted
-#assert_axioms Recovery.HubSys.sys_step_expansion
-#assert_axioms Recovery.HubSys.path_bk_quiet
-#assert_axioms Recovery.HubSys.settled_raw_head
-#assert_axioms Recovery.HubSys.hub_stabilizes_sys
-#assert_axioms SysAcceptance.eligible_system_converges
-#assert_axioms SysAcceptance.not_dropped_of
-#assert_axioms SysAcceptance.PendingLaws.hsurviveOf
-#assert_axioms SysAcceptance.PendingLaws.hnoCacheOf
-#assert_axioms SysAcceptance.no_forever_pending
-#assert_axioms SysAcceptance.PendingLaws.absurd
-#assert_axioms SysAcceptance.old_effects_stop
-#assert_axioms SysAcceptance.known_after
-#assert_axioms SysAcceptance.known_truthful
-#assert_axioms SysAcceptance.knows_stable_head
-#assert_axioms SysAcceptance.hive_converges
-#assert_axioms SysAcceptance.HubAnswer.fetch_step
-#assert_axioms SysAcceptance.HubAnswer.objects_step
-#assert_axioms SysAcceptance.HubAnswer.hive_step
-#assert_axioms SysAcceptance.answer_refused_iff
-#assert_axioms SysAcceptance.answer_ne_incomplete
-#assert_axioms SysAcceptance.HubAnswer.push_step
-#assert_axioms SysAcceptance.HubAnswer.store_step
-#assert_axioms SysAcceptance.HubAnswer.push_handled
-#assert_axioms SysAcceptance.HubAnswer.observed_step
-#assert_axioms SysAcceptance.checkAnswer_expect
-#assert_axioms Recovery.raw_pending_empty_of_fixed_records
-#assert_axioms Recovery.raw_noneligible_answer_frame
-#assert_axioms Exec.record_and_drop_sets_stabilize
-#assert_axioms NodeSys.SysStep.nonanswer_effect
-#assert_axioms NodeSys.SysStep.answer_effect
-#assert_axioms NodeSysEntry.filt_step
-#assert_axioms NodeSysEntry.filt_run_from
-#assert_axioms NodeSysEntry.runOK_filt_init
-#assert_axioms Recovery.HubSys.hive_filtered
-#assert_axioms Recovery.HubSys.hub_stabilizes_hive
-#assert_axioms Recovery.HubSys.history_window_of_climbs
-#assert_axioms SysAcceptance.history_window_from_record_cut
-#assert_axioms Retry.project_own_start
-#assert_axioms Retry.project_reserve
-#assert_axioms Retry.project_other_start
-#assert_axioms Retry.project_finish
-#assert_axioms Retry.Serial.inv_step
-#assert_axioms Retry.Serial.step_inbox
-#assert_axioms Retry.Serial.old_call_effects_stop
-#assert_axioms Retry.Serial.fresh_reply_no_restart
-#assert_axioms Retry.Serial.own_reply_learns
-#assert_axioms Retry.Serial.round_step_serial
-#assert_axioms Retry.Serial.round_old_effects_stop
-#assert_axioms Retry.Serial.object_recoveries_stop
-#assert_axioms Retry.Records.record_disturbances_stop
-#assert_axioms Retry.Records.no_receipts_when_quiet
-#assert_axioms Retry.Records.State.guard_fetched
-#assert_axioms Retry.Records.step_guard
-#assert_axioms Retry.Records.exec_sound
-#assert_axioms Retry.Records.step_credit
-#assert_axioms Retry.Notifications.old_notifications_stop
-#assert_axioms Retry.publication_empty_pending
-#assert_axioms HubSuffix.hub_suffix_stabilizes
-#assert_axioms NodeSettle.write_known
-#assert_axioms NodeSettle.emit_packet
-#assert_axioms NodeSettle.node_settles
-#assert_axioms Recovery.history_window_enters_suffix
-#assert_axioms Recovery.eligible_pending_empty
-#assert_axioms Expansion.Path.invariant
-#assert_axioms Expansion.stabilizes_of_expansion
-#assert_axioms Retry.Batch.finish_relabel
-#assert_axioms Retry.Batch.match_relabel
-#assert_axioms Retry.Batch.finite_batch_completes
-#assert_axioms NodeSys.node_settles_sys
-#assert_axioms NodeSys.scoped_growR
-#assert_axioms NodeSys.GrowR.same_next
-#assert_axioms NodeSys.GrowR.one
-#assert_axioms NodeSys.Exec.scopeB_sound
-#assert_axioms NodeSys.Exec.growB_sound
-#assert_axioms SysFreshCuts.old_replies_stop
-#assert_axioms SysFreshCuts.old_notes_stop
-#assert_axioms Recovery.raw_growth_expansion
-#assert_axioms Recovery.raw_maintenance_expansion
-#assert_axioms Recovery.HubSys.ledger_covers
-#assert_axioms Recovery.HubSys.foreign_step_expansion
-#assert_axioms Recovery.HubNodeSteps.own_step_expansion
-#assert_axioms Recovery.HubNodeSteps.mid_mergeExisting
-#assert_axioms Recovery.HubNodeSteps.issue_post_heads
-#assert_axioms Recovery.HubNodeSteps.heads_nodup_step
-#assert_axioms NodeSettle.inv_busy
-#assert_axioms NodeSettle.rank_busy
-#assert_axioms NodeSys.loc_busy
-#assert_axioms Recovery.HubSys.suffixStepLaws_filt
-#assert_axioms SysAcceptance.FineAt.converges
-#assert_axioms SysAcceptance.NodeIssue.step
-#assert_axioms SysAcceptance.NodeIssue.hive_step
-#assert_axioms SysAcceptance.NodeIssue.raw_step
-#assert_axioms SysAcceptance.namedHead_of_le
-#assert_axioms SysAcceptance.learn_of_growB
-#assert_axioms SysAcceptance.learn_new_bare
-#assert_axioms SysAcceptance.NodeHandle.step
-#assert_axioms SysAcceptance.NodeHandle.hive_step
-#assert_axioms SysAcceptance.NodeCore.busy_step
-#assert_axioms SysAcceptance.NodeCore.idle_step
-#assert_axioms SysAcceptance.NodeCore.maint_step
-#assert_axioms SysAcceptance.NodeNotice.step
-#assert_axioms SysAcceptance.NodeNotice.ignore_step
-#assert_axioms Recovery.HubSys.answer_step_expansion
-#assert_axioms Exec.uncoveredImages_after_advance
-#assert_axioms Exec.uncoveredImages_singleton_zero
-#assert_axioms Exec.rmeasureCE_without_drops
-
-#assert_axioms Contract.frontierSet_covers
-#assert_axioms Contract.setP_frontier
-#assert_axioms Contract.frontier_nodup
-#assert_axioms Contract.frontier_covers
-#assert_axioms Contract.frontier_singleton_below
-#assert_axioms Contract.frontier_merge_below
-#assert_axioms Contract.frontier_merge_keeps
-#assert_axioms Contract.covered_drops
-#assert_axioms Contract.covered_image
-#assert_axioms Contract.covered_upd
-#assert_axioms Contract.covered_contracted
-
-#assert_axioms AbandonRefs.abstraction_unique
-#assert_axioms AbandonRefs.adoption_composes
-#assert_axioms AbandonRefs.publish_current
-#assert_axioms AbandonRefs.publish_refines
-#assert_axioms AbandonRefs.fixup_retains
+-- Contraction (`musubi sync --prune`)
+#assert_axioms Contract.anc_cpar_survives
+#assert_axioms Contract.anc_cpar_iff
 
 -- Safety
 #assert_axioms inv_reachable
@@ -377,57 +164,6 @@ open Musubi
 #assert_axioms Exec.convergedE_iff
 #assert_axioms Exec.mem_upOpsL
 #assert_axioms Exec.mem_upObjsL
-#assert_axioms Exec.sexec_sound
-#assert_axioms Exec.sabs_initSE
-#assert_axioms Exec.sexec_ok
-#assert_axioms Exec.sexec_allPruned
-#assert_axioms Exec.sexec_announced_held
-#assert_axioms Exec.sexec_reachable
-#assert_axioms Exec.sexec_inv
-#assert_axioms Exec.smeasureE_eq
-#assert_axioms Exec.sconvergedE_iff
--- Ordered-record reconciliation
-#assert_axioms Exec.recordMeasureE_eq
-#assert_axioms Exec.recordConvergedE_iff
-#assert_axioms Exec.recordMeasure_decreases
-#assert_axioms Exec.recordPolicy_wf
-#assert_axioms Exec.reconcile_executable
-#assert_axioms Exec.record_progress_at_convergence
-#assert_axioms Exec.record_finish
--- Split asynchronous exchanges
-#assert_axioms measureR_delayed_learn
-#assert_axioms bad_accept_before_reply
-#assert_axioms measureR_accept_before_reply
-#assert_axioms settling_decreases
-#assert_axioms settling_hub_stabilizes
--- Retry-control bounds under their explicit epoch constraints
-#assert_axioms Retry.finish_missing
-#assert_axioms Retry.start_fresh
-#assert_axioms Retry.inbox_old_credit
-#assert_axioms Retry.old_slots_eventually_stop
-#assert_axioms Retry.fixup_step_credit
-#assert_axioms Retry.fixup_writes_le_one
-#assert_axioms Retry.fixups_eventually_stop
-#assert_axioms Retry.publication_progress
-#assert_axioms Retry.publication_retry
-#assert_axioms Retry.publication_tip_cached
--- Stabilization of records
-#assert_axioms Exec.sexec_record_control
-#assert_axioms Exec.takeRecs_eq_iff
-#assert_axioms Exec.eventual_original_chain
-#assert_axioms Exec.record_prefix_eventually_stabilizes
-#assert_axioms Exec.sexec_record_prefix_stabilizes
-#assert_axioms Exec.adopt_pending_subset
-#assert_axioms Exec.retry_adopt_of_extension
-#assert_axioms Exec.node_drop_sets_eventually_stabilize
--- Contracted expected heads
-#assert_axioms Contract.below_survivor_iff
-#assert_axioms Contract.below_contracted_iff
-#assert_axioms Contract.below_two_step
-#assert_axioms Contract.below_mono
-#assert_axioms Contract.below_trans
-#assert_axioms Contract.belowB_iff
-#assert_axioms Contract.stable_suffix_chain
 -- Per-machine and shared view state
 #assert_axioms Refs.noSpuriousRevert
 #assert_axioms Refs.import_moves_only_after_git
@@ -494,8 +230,6 @@ open Musubi
 #assert_axioms Presence.Hist.umax_work
 #assert_axioms Presence.Hist.umax_forget
 #assert_axioms Presence.Hist.umax_merge
-#assert_axioms Presence.Hist.fixup_present
-#assert_axioms Presence.Hist.pass_present
 #assert_axioms Presence.EHist.presentB_iff
 #assert_axioms Presence.EHist.mem_latestB
 -- Copies, duplicates and moves
@@ -514,58 +248,6 @@ open Musubi
 #assert_axioms Names.choose_free
 #assert_axioms Names.localName_injective
 
--- Which workspaces in a local operation are this machine's own
-
--- Contracting abandoned operations out of a history
-#assert_axioms Contract.cpar_union
-#assert_axioms Contract.cid_union
-#assert_axioms Contract.union_absorbs_subset
-#assert_axioms Contract.cpar_absorbs_subset
-#assert_axioms Contract.cid_absorbs_subset
-#assert_axioms Contract.anc_cpar_survives
-#assert_axioms Contract.image_absorbs_subset
-#assert_axioms Contract.image_original_survives
-#assert_axioms Contract.image_ne_dropped_original
-#assert_axioms Contract.cid_comm
-#assert_axioms Contract.idTerm_cpar_eq
-#assert_axioms Contract.idTerm_superseded_ne
-#assert_axioms Contract.cid_eq
-#assert_axioms Contract.superseded_ne
-#assert_axioms Contract.anc_cpar_iff
-
--- Presence through a contraction
-#assert_axioms PresenceContract.pres_eq
-#assert_axioms PresenceContract.stamp_union
-#assert_axioms PresenceContract.sid_union
-#assert_axioms PresenceContract.sid_absorbs_subset
-#assert_axioms PresenceContract.sid_comm
-#assert_axioms PresenceContract.stamp_none
-#assert_axioms PresenceContract.sid_eq
-#assert_axioms PresenceContract.sid_superseded_ne
-
--- Replicated op abandon
-#assert_axioms sinv_reachable
-#assert_axioms hub_moves_original
-#assert_axioms schain_rstep
-#assert_axioms schain_of_run
-#assert_axioms nodeD_grows
-#assert_axioms hubD_grows
-#assert_axioms superseded_never_returns
-#assert_axioms superseded_never_returns_hub
-#assert_axioms dropped_never_head
-#assert_axioms behind_not_carried
-#assert_axioms allPruned_step
-#assert_axioms spstepR_reachable
-#assert_axioms smeasure_decreases
-#assert_axioms no_infinite_policy_runS
-#assert_axioms progressS
-#assert_axioms converged_quiescentS
-#assert_axioms terminal_iff_convergedS
-#assert_axioms eventually_convergesS
-#assert_axioms maximal_run_convergesS
-#assert_axioms converged_all_droppedS
-#assert_axioms converged_all_acceptedS
-
 -- Expected values derived from history
 #assert_axioms Refs.Expected.eval_congr_on
 #assert_axioms Refs.Expected.eval_congr
@@ -578,23 +260,6 @@ open Musubi
 
 #assert_axioms Musubi.Exec.Json.encodeNet_eq_reference
 #assert_axioms Musubi.Exec.Json.encodeNet_compress_eq_reference
-
--- Integration phase boundaries and request guards are derived without additional axioms.
-#assert_axioms Musubi.SysAcceptance.CutAt.mono
-#assert_axioms Musubi.SysAcceptance.record_control_stabilizes
-#assert_axioms Musubi.SysAcceptance.object_failures_stop
-#assert_axioms Musubi.SysAcceptance.recovering_reopens_stop
-#assert_axioms Musubi.SysAcceptance.entry_phase
-#assert_axioms Musubi.SysAcceptance.entered_phase
-#assert_axioms Musubi.SysAcceptance.fine_cut
-#assert_axioms Musubi.SysAcceptance.honest_latched_known
-#assert_axioms Musubi.SysAcceptance.all_eligible
-
-#assert_axioms Musubi.NodeSys.nodeOK_issue
-
-#assert_axioms Musubi.NodeSys.Issue.start_iff_inactive
-#assert_axioms Musubi.NodeSys.Fair.reaches_start
-#assert_axioms Musubi.NodeSys.Fair.reaches_core
 
 -- Moving op heads that musubi read earlier (`OpHeads.lean`, `OpHeadsRace.lean`).
 #assert_axioms OpHeads.Race.Inv.step

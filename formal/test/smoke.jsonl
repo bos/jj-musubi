@@ -1,9 +1,4 @@
 {"op": "reset", "nodes": 2}
-{"op":"pushSnapshot","node":0,"ops":[],"objs":[],"expected":0,"knownSeq":0,"new":0,"applied":[],"pending":[]}
-{"op":"pushSnapshot","node":0,"ops":[],"objs":[],"expected":1,"knownSeq":0,"new":0,"applied":[],"pending":[]}
-{"op":"pushSnapshot","node":0,"ops":[],"objs":[],"expected":0,"knownSeq":0,"new":0,"applied":[],"pending":[1]}
-{"op":"pushSnapshot","node":0,"ops":[],"objs":[],"expected":0,"knownSeq":0,"new":1,"applied":[],"pending":[]}
-{"op":"pushSnapshot","node":0,"ops":[],"objs":[],"expected":0,"knownSeq":1,"new":0,"applied":[],"pending":[]}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": [10]}}
 {"op": "measure"}
 {"op": "upload", "node": 0, "new": 1}
@@ -47,92 +42,9 @@
 {"op": "reset", "nodes": 2}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": []}}
 {"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 1}}
-{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1, "applied": [], "dropped": []}}
-{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 1, "objs": []}}
-{"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 2}}
-{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2, "applied": [], "dropped": []}}
-{"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [2]}}
-{"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [1]}}
-{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 2, "objs": []}}
-{"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 3}}
-{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3, "applied": [], "dropped": [1]}}
-{"op": "step", "action": {"kind": "fetchAll", "node": 1, "base": 0, "haves": []}}
-{"op": "step", "action": {"kind": "hubFetch", "node": 1, "base": 0, "haves": []}}
-{"op": "step", "action": {"kind": "sendD", "node": 1}}
-{"op": "step", "action": {"kind": "learn", "node": 1, "headKind": "head", "seq": 3, "head": 3}}
-{"op": "step", "action": {"kind": "recvOps", "node": 1, "ops": [1, 2, 3]}}
-{"op": "step", "action": {"kind": "recvObjs", "node": 1, "objs": []}}
-{"op": "step", "action": {"kind": "adopt", "node": 1, "records": [[1]]}}
-{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 1}}
-{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 2}}
-{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 3}}
-{"op": "step", "action": {"kind": "advance", "node": 1}}
-{"op": "measure"}
-{"op": "step", "action": {"kind": "adopt", "node": 1, "records": [[1]]}}
-{"op": "step", "action": {"kind": "learn", "node": 0, "headKind": "accepted", "seq": 3, "head": 3}}
-{"op": "measure"}
-{"op": "refs", "fn": "abandonBeside", "table": {"resolved": [0, 1, 2, 3], "writable": [0, 1, 2, 3], "terms": [{"conflict": 4, "terms": [1, 2, 3]}], "merges": [[3, 1, 4, 3]]}, "par": [[], [0], [1], [0]], "drops": [1], "heads": [2], "incoming": 3, "first": false, "g": 3, "eAfter": 3, "refs": [{"op": 0, "slot": {"L": 1, "R": 1, "K": 1, "tr": true}, "expected": 2}, {"op": 2, "slot": {"L": 3, "R": 3, "K": 3, "tr": true}, "expected": 3}, {"op": 3, "slot": {"L": 4, "R": 4, "K": 0, "tr": true}, "expected": 2}]}
-{"op": "refs", "fn": "abandonBeside", "table": {"resolved": [0, 1, 2, 3], "writable": [0, 1, 2, 3], "terms": [{"conflict": 4, "terms": [1, 2, 3]}], "merges": [[3, 1, 2, 4]]}, "par": [[], [0], [1], [0]], "drops": [1], "heads": [2], "incoming": 3, "first": false, "g": 3, "eAfter": 2, "refs": [{"op": 0, "slot": {"L": 1, "R": 1, "K": 1, "tr": true}, "expected": 2}, {"op": 2, "slot": {"L": 3, "R": 3, "K": 3, "tr": true}, "expected": 3}, {"op": 3, "slot": {"L": 2, "R": 2, "K": 0, "tr": true}, "expected": 2}]}
 {"op": "expected", "nodes": [{"target": 4, "parents": [], "known": [], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
 {"op": "expected", "nodes": [{"target": 4, "parents": [], "known": [null], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
 {"op": "expected", "nodes": [{"target": 4, "parents": [0], "known": [null], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
-{"op": "step", "action": {"kind": "prune", "count": 1}}
-{"op": "step", "action": {"kind": "sendD", "node": 0}}
-{"op": "step", "action": {"kind": "adopt", "node": 0, "records": [[1]]}}
-{"op": "step", "action": {"kind": "prune", "count": 1}}
-{"op": "measure"}
-{"action":"start","cut":3,"next":4,"op":"retryInbox","pending":[1,2]}
-{"action":"finish","cut":3,"id":2,"next":5,"op":"retryInbox","pending":[4,1,2]}
-{"action":"finish","cut":3,"id":2,"next":5,"op":"retryInbox","pending":[4,1]}
-{"action":"disconnect","cut":3,"next":5,"op":"retryInbox","pending":[4,1]}
-{"action":"write","aligned":false,"op":"retryFixup","pending":[1],"written":false}
-{"action":"write","aligned":false,"op":"retryFixup","pending":[1],"written":true}
-{"action":"adopt","aligned":false,"nextPending":[2],"op":"retryFixup","pending":[],"written":false}
-{"action":"adopt","aligned":true,"nextPending":[2],"op":"retryFixup","pending":[1,2],"written":true}
-{"action":"adopt","aligned":true,"nextPending":[],"op":"retryFixup","pending":[2],"written":true}
-{"action":"adopt","aligned":true,"nextPending":[2],"op":"retryFixup","pending":[],"written":false}
-{"op":"contractedAncestry","parents":[[],[0],[0]],"dropped":[1],"expected":1,"head":2}
-{"op":"contractedAncestry","parents":[[],[0],[0]],"dropped":[],"expected":1,"head":2}
-{"op":"contractedAncestry","parents":[[],[0],[0],[1,2],[1]],"dropped":[3],"expected":3,"head":4}
-{"op":"contractedAncestry","parents":[[]],"dropped":[0],"expected":0,"head":0}
-{"op":"retryPublication","pending":[1],"written":false,"aligned":false,"headKnown":true}
-{"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":true}
-{"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":false}
-{"op":"retryPublication","pending":[],"written":false,"aligned":true,"headKnown":true}
-{"op":"survivorAdvance","parents":[[],[0],[1],[0]],"dropped":[2],"heads":[3],"known":2}
-{"op":"survivorAdvance","parents":[[],[0],[0],[1,2],[0]],"dropped":[3],"heads":[4],"known":3}
-{"op":"survivorAdvance","parents":[[],[0],[1],[1]],"dropped":[2],"heads":[3],"known":2}
-{"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[2],"known":2}
-{"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[1],"known":2}
-{"op":"survivorAdvance","parents":[[],[0],[0],[1,2],[1]],"dropped":[1,2,3],"heads":[4],"known":3}
-{"op":"headControl","root":0,"known":[4,40],"incoming":[3,30],"own":true,"notify":false}
-{"op":"headControl","root":0,"known":[4,40],"incoming":[3,30],"own":false,"notify":false}
-{"op":"headControl","root":0,"known":[4,40],"incoming":[4,41],"own":true,"notify":false}
-{"op":"headControl","root":0,"known":[4,40],"incoming":[5,50],"own":false,"notify":true}
-{"op":"headControl","root":0,"known":[4,40],"incoming":[0,0],"own":true,"notify":false}
-{"action":"fetched","announced":null,"applied":0,"current":0,"op":"recordEpoch","receipts":true,"stalePlan":false}
-{"action":"adopt","announced":0,"applied":0,"current":0,"op":"recordEpoch","receipts":true,"records":0,"stalePlan":false}
-{"op":"localBurst","node":0,"known":0,"kind":"realize","opId":0,"before":{"local":[0],"heads":[0],"plan":[0]},"after":{"local":[0],"heads":[0],"plan":[]}}
-{"op":"localBurst","node":0,"known":0,"kind":"realize","opId":0,"before":{"local":[0],"heads":[0],"plan":[0]},"after":{"local":[0],"heads":[0],"plan":[0]}}
-{"action":"reopen","announced":0,"applied":1,"current":0,"op":"recordEpoch","receipts":false,"stalePlan":false}
-{"action":"reopen","announced":2,"applied":1,"current":0,"op":"recordEpoch","receipts":true,"stalePlan":true}
-{"action":"reopen","announced":null,"applied":0,"current":0,"op":"recordEpoch","receipts":false,"stalePlan":false}
-{"after":{"head":3,"recs":2,"seq":7},"before":{"head":3,"recs":2,"seq":7},"call":"fetch","kind":"fetched","op":"hubRead","replyRecs":null,"replySnap":{"head":3,"recs":2,"seq":7}}
-{"after":{"head":3,"recs":2,"seq":7},"before":{"head":3,"recs":2,"seq":7},"call":"objects","kind":"objects","op":"hubRead","replyRecs":null,"replySnap":null}
-{"after":{"head":3,"recs":2,"seq":8},"before":{"head":3,"recs":2,"seq":7},"call":"fetch","kind":"fetched","op":"hubRead","replyRecs":null,"replySnap":{"head":3,"recs":2,"seq":7}}
-{"after":{"head":4,"recs":2,"seq":7},"before":{"head":3,"recs":2,"seq":7},"call":"fetch","kind":"fetched","op":"hubRead","replyRecs":null,"replySnap":{"head":3,"recs":2,"seq":7}}
-{"after":{"head":3,"recs":3,"seq":7},"before":{"head":3,"recs":2,"seq":7},"call":"fetch","kind":"fetched","op":"hubRead","replyRecs":null,"replySnap":{"head":3,"recs":2,"seq":7}}
-{"after":{"head":3,"recs":2,"seq":7},"before":{"head":3,"recs":2,"seq":7},"call":"fetch","kind":"head","op":"hubRead","replyRecs":null,"replySnap":{"head":3,"recs":2,"seq":7}}
-{"after":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"before":{"embedding":[0,1,2],"parents":[[],[0],[0]],"rawParents":[[],[0],[0]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"before":{"embedding":[0,1,2],"parents":[[],[0],[0]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"before":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,1,2,3,3],"parents":[[],[0],[0],[1,2],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"before":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,2,1,3],"parents":[[],[0],[0],[2,1]],"rawParents":[[],[0],[0],[1,2]]},"before":{"embedding":[0,1,2],"parents":[[],[0],[0]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1,2],[0]]},"before":{"embedding":[0,1,2],"parents":[[],[0],[0]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
-{"after":{"embedding":[0,1,2,3],"parents":[[],[0],[0],[1,2]],"rawParents":[[],[0],[0],[1]]},"before":{"embedding":[0,1,2],"parents":[[],[0],[0]],"rawParents":[[],[0],[0],[1,2]]},"op":"nodeGrow"}
 {"op":"publication","commits":[[{"path":0,"object":0}],[{"path":1,"object":1}]],"sizes":[6,9000000],"operations":[{"id":1,"parents":[0],"snapshot":true,"frozen":null,"writes":[],"required":[0,1],"selections":[]},{"id":2,"parents":[1],"snapshot":false,"frozen":null,"writes":[{"commit":0,"workspaceTip":false,"rewritten":false}],"required":[0,1],"selections":[]},{"id":3,"parents":[2],"snapshot":true,"frozen":null,"writes":[],"required":[0],"selections":[]}],"known":[],"selected":[1,2],"view":[0],"maxFiles":1000,"maxBytes":8388608,"heads":[3],"expectedHeads":[3],"context":[7,8],"planIdentity":[22,33],"approval":null,"actual":null,"intentKnown":true}
 {"op":"publication","commits":[[{"path":0,"object":0}],[{"path":1,"object":1}]],"sizes":[6,9000000],"operations":[{"id":1,"parents":[0],"snapshot":true,"frozen":null,"writes":[],"required":[0,1],"selections":[]},{"id":2,"parents":[1],"snapshot":false,"frozen":null,"writes":[{"commit":0,"workspaceTip":false,"rewritten":false}],"required":[0,1],"selections":[]},{"id":3,"parents":[2],"snapshot":true,"frozen":null,"writes":[],"required":[0],"selections":[]}],"known":[],"selected":[1,2],"view":[0],"maxFiles":1000,"maxBytes":8388608,"heads":[3],"expectedHeads":[3],"context":[7,8],"planIdentity":[22,33],"approval":{"identity":[22,33],"extra":[{"path":1,"object":1}]},"actual":null,"intentKnown":true}
 {"op":"publication","commits":[[{"path":0,"object":0}],[{"path":1,"object":1}]],"sizes":[6,9000000],"operations":[{"id":1,"parents":[0],"snapshot":true,"frozen":null,"writes":[],"required":[0,1],"selections":[]},{"id":2,"parents":[1],"snapshot":false,"frozen":null,"writes":[{"commit":0,"workspaceTip":false,"rewritten":false}],"required":[0,1],"selections":[]},{"id":3,"parents":[2],"snapshot":true,"frozen":null,"writes":[],"required":[0],"selections":[]}],"known":[],"selected":[1,2],"view":[0],"maxFiles":1000,"maxBytes":8388608,"heads":[3],"expectedHeads":[2],"context":[7,8],"planIdentity":[22,33],"approval":{"identity":[22,32],"extra":[{"path":1,"object":1}]},"actual":null,"intentKnown":true}

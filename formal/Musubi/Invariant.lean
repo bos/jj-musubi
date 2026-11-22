@@ -23,9 +23,8 @@ def MsgOK (s : State) : Msg → Prop
 def Consistent (s : State) (n : Nat) : Prop :=
   (s.node n).known.seq ≤ s.hub.seq ∧ s.hub.hist (s.node n).known.seq = (s.node n).known.head
 
-/-- What every state satisfies, whether or not the hub can go back to an earlier head and whether
-or not a push may contract its expected head: the universe is a DAG rooted at `root`; the hub's
-history ends in its head, and the hub holds that head's closure (`hubClosed`: every ancestor
+/-- What every state satisfies, whether or not the hub can go back to an earlier head: the
+universe is a DAG rooted at `root`; the hub's history ends in its head, and the hub holds that head's closure (`hubClosed`: every ancestor
 of it, with its objects); and every node's repository is closed under parents, with a nonempty
 antichain of heads. -/
 structure Base (N : Nat) (s : State) : Prop where
@@ -50,9 +49,7 @@ structure Base (N : Nat) (s : State) : Prop where
   headsNonempty : ∀ n, ∃ h, (s.node n).heads h
 
 /-- `Base`, with the hub's history a chain of heads in original ancestry, and every operation
-a node made below one of its heads. Neither holds once a node can drop operations: a push can
-contract its expected head away, and records a node takes can drop work it made
-(`Supersede.lean`). -/
+a node made below one of its heads. The first fails once the hub can go back. -/
 structure Core (N : Nat) (s : State) : Prop extends Base N s where
   histStep : ∀ i, i < s.hub.seq →
     Anc s.U.par (s.hub.hist i) (s.hub.hist (i + 1)) ∧ s.hub.hist i ≠ s.hub.hist (i + 1)

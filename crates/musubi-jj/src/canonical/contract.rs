@@ -4,9 +4,14 @@
 //! themselves so replaced, and then each duplicate after the first removed. A survivor whose
 //! parents change is written again with the new ones, its view and metadata as they were, and
 //! so gets a new id; the others keep theirs. It is stamped with the presence it had, where the
-//! presence worked out from its new parents would differ (`formal/Musubi/PresenceContract.lean`;
-//! docs/internals/design.md, "Presence through an abandon"). Every party that drops the same
+//! presence worked out from its new parents would differ (docs/internals/design.md,
+//! "Presence through an abandon"). Every party that drops the same
 //! operations from the same history writes the same operations, with the same ids.
+//!
+//! Only tests use this now. `formal/Musubi/Contract.lean` keeps `cpar`, `exp` and the ancestry
+//! of survivors, which `musubi sync --prune` relies on, but no longer the ids, their
+//! composition or the presence stamps that the comments below name; they were lemmas of the
+//! deleted model of replicated `jj op abandon`.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -589,8 +594,7 @@ mod tests {
         );
     }
 
-    /// Recompute both answers without a memo shared with contraction
-    /// (`PresenceContract.pres_eq`).
+    /// Recompute both answers without a memo shared with contraction.
     fn assert_presence_preserved(
         store: &CanonicalStore,
         before: &CanonicalOp,
@@ -605,9 +609,9 @@ mod tests {
 
     /// Dropping first and then second gives the same images as dropping their union
     /// (`Contract.exp_union`), including dropped operations; surviving ids agree too
-    /// (`Contract.cid_union`, and with stamps, `PresenceContract.sid_union`). Also check
-    /// lookup-order independence, parent expansion (`Contract.cpar` and `Contract.exp`), survivor
-    /// identities (`cid_eq_mk`), and presence preservation (`PresenceContract.pres_eq`).
+    /// (`Contract.cid_union`, and with stamps). Also check lookup-order independence, parent
+    /// expansion (`Contract.cpar` and `Contract.exp`), survivor identities (`cid_eq_mk`), and
+    /// presence preservation.
     #[hegel::test(test_cases = 200)]
     fn dropping_twice_is_dropping_both(tc: TestCase) {
         let case = tc.draw(contraction_case());

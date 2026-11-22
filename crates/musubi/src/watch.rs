@@ -1,5 +1,6 @@
-//! Notices new local operations by watching `.jj/repo/op_heads/heads`, and a repository
-//! moved by watching where jj records its path.
+//! Notices new local operations by watching `.jj/repo/op_heads/heads`, a repository moved by
+//! watching where jj records its path, and the daemon's socket deleted by watching its
+//! directory.
 //!
 //! Every jj operation, from any process, ends by adding a file there, so a file added to that
 //! directory is the earliest moment a new operation is visible. Notifications are only
@@ -12,7 +13,7 @@ use notify::RecursiveMode;
 use notify::Watcher as _;
 use tokio::sync::mpsc;
 
-/// A directory watched for files added to it.
+/// A directory watched for changes: files added to it, or one file in it going.
 pub struct Watcher {
     _watcher: notify::RecommendedWatcher,
     events: mpsc::UnboundedReceiver<()>,
@@ -21,7 +22,9 @@ pub struct Watcher {
 impl Watcher {
     /// Watches for new operations in the repository at `repo_path` (its `.jj/repo`).
     pub fn op_heads(repo_path: &Path) -> anyhow::Result<Self> {
-        Self::watch(&repo_path.join("op_heads/heads"), false)
+        Self::watch(&repo_path.join("op_heads/heads"), |event| {
+            news(event, false)
+        })
     }
 
     /// Watches where jj records the path of the repository whose config lives in
@@ -31,14 +34,32 @@ impl Watcher {
     /// file of its own, then renames it into place, so the rename is news too: the file's
     /// creation may wake the daemon before the record says anything new.
     pub fn moves(config_dir: &Path) -> anyhow::Result<Self> {
-        Self::watch(config_dir, true)
+        Self::watch(config_dir, move |event| news(event, true))
     }
 
-    fn watch(dir: &Path, renames: bool) -> anyhow::Result<Self> {
+    /// Watches for the file at `path` going, as a temp cleaner deletes the daemon's socket, by
+    /// watching its directory, where other files' events are ignored. The directory going,
+    /// removed or moved aside, takes the file with it.
+    pub fn removal(path: &Path) -> anyhow::Result<Self> {
+        let dir = path.parent().context("a file at the root")?;
+        let name = path
+            .file_name()
+            .context("a path with no file name")?
+            .to_owned();
+        // As given, and as macOS's FSEvents reports it, with symbolic links resolved.
+        let mut dirs = vec![dir.to_owned()];
+        dirs.extend(dir.canonicalize().ok().filter(|real| real != dir));
+        Self::watch(dir, move |event| gone(event, &dirs, &name))
+    }
+
+    fn watch(
+        dir: &Path,
+        wanted: impl Fn(&notify::Event) -> bool + Send + 'static,
+    ) -> anyhow::Result<Self> {
         let (sender, events) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok_and(|event| news(&event, renames)) {
+                if event.is_ok_and(|event| wanted(&event)) {
                     // The daemon stopped listening; nothing to notify.
                     sender.send(()).ok();
                 }
@@ -88,6 +109,28 @@ fn news(event: &notify::Event, renames: bool) -> bool {
     added && (event.paths.is_empty() || event.paths.iter().any(|path| path.exists()))
 }
 
+/// Whether `event` in the watched directory, spelled as in `dirs`, may be the file `name`
+/// going: removed, or renamed away, or the directory itself removed or moved aside. The file's
+/// name, not its whole path, tells it from the directory's others, since macOS's FSEvents
+/// reports paths with symbolic links resolved, as `/private/var` for `/var`. A backend that
+/// can't say what happened, or to what, is believed.
+fn gone(event: &notify::Event, dirs: &[std::path::PathBuf], name: &std::ffi::OsStr) -> bool {
+    use notify::EventKind;
+    let removal = matches!(
+        event.kind,
+        EventKind::Remove(_)
+            | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            | EventKind::Any
+            | EventKind::Other
+    );
+    removal
+        && (event.paths.is_empty()
+            || event
+                .paths
+                .iter()
+                .any(|path| path.file_name() == Some(name) || dirs.iter().any(|dir| dir == path)))
+}
+
 #[cfg(test)]
 mod tests {
     use notify::Event;
@@ -120,5 +163,57 @@ mod tests {
         assert!(!news(&event(renamed, &here), false));
         assert!(!news(&event(renamed, &gone), true));
         assert!(news(&Event::new(EventKind::Any), false));
+    }
+
+    /// The removal of the watched file, or its rename away, may be its going, as may the
+    /// directory's own; another file's isn't, nor the file's creation, as the daemon makes its
+    /// socket again.
+    #[test]
+    fn only_the_file_or_its_directory_removed_may_be_gone() {
+        let name = std::ffi::OsStr::new("daemon.sock");
+        let dirs = [Path::new("/x").to_owned()];
+        let event = |kind, path: &str| Event::new(kind).add_path(Path::new("/x").join(path));
+        let removed = EventKind::Remove(RemoveKind::Any);
+        assert!(gone(&event(removed, "daemon.sock"), &dirs, name));
+        assert!(!gone(&event(removed, "daemon.log"), &dirs, name));
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::From));
+        assert!(gone(&event(renamed, "daemon.sock"), &dirs, name));
+        let created = EventKind::Create(CreateKind::Any);
+        assert!(!gone(&event(created, "daemon.sock"), &dirs, name));
+        assert!(gone(&Event::new(EventKind::Any), &dirs, name));
+        let dir = |kind| Event::new(kind).add_path(Path::new("/x").to_owned());
+        assert!(gone(
+            &dir(EventKind::Remove(RemoveKind::Folder)),
+            &dirs,
+            name
+        ));
+        assert!(gone(
+            &dir(EventKind::Modify(ModifyKind::Name(RenameMode::Any))),
+            &dirs,
+            name
+        ));
+    }
+
+    /// A file deleted in the watched directory is reported, so the daemon notices its socket
+    /// gone without waiting for its next look.
+    #[tokio::test]
+    async fn a_removal_is_reported() {
+        let dir = musubi_testutil::tempdir();
+        let path = dir.path().join("daemon.sock");
+        std::fs::write(&path, "").unwrap();
+        let mut watcher = Watcher::removal(&path).unwrap();
+        std::fs::write(dir.path().join("daemon.log"), "").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(60), watcher.changed())
+            .await
+            .expect("no event for the removal");
+        // And the directory moved aside, with a socket made again in it.
+        std::fs::write(&path, "").unwrap();
+        let mut watcher = Watcher::removal(&path).unwrap();
+        std::fs::rename(dir.path(), dir.path().with_extension("aside")).unwrap();
+        let moved =
+            tokio::time::timeout(std::time::Duration::from_secs(60), watcher.changed()).await;
+        std::fs::rename(dir.path().with_extension("aside"), dir.path()).unwrap();
+        moved.expect("no event for the directory moved aside");
     }
 }

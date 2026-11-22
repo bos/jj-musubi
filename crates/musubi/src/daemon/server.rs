@@ -23,6 +23,7 @@ use crate::control::Request;
 use crate::control::Response;
 use crate::control::Synced;
 use crate::socket::Socket;
+use crate::watch::Watcher;
 
 /// The copies being served, by machine key, and the connections to hubs they share.
 struct Supervisor {
@@ -183,6 +184,45 @@ fn own_connections() -> bool {
     }
 }
 
+/// How long the daemon leaves between listening again on its socket and the next time, so
+/// that whatever goes on deleting it, as a cleaner still running, doesn't keep it busy.
+const RELISTEN_GAP: Duration = Duration::from_secs(1);
+
+/// Watches for the daemon's socket going, where the system can say: a named pipe can't be
+/// deleted. Without a watch, the daemon still looks every few seconds.
+fn watch_socket(socket: &Socket) -> Option<Watcher> {
+    let Socket::Path(path) = socket else {
+        return None;
+    };
+    Watcher::removal(path)
+        .inspect_err(|err| {
+            tracing::debug!(
+                "not watching for {socket} to go, only looking every few seconds: {err:#}"
+            );
+        })
+        .ok()
+}
+
+/// Waits until it is time for the daemon to look at its lock file and socket: at `check`'s
+/// next tick, once `gone` reports the socket gone, or at `soon`.
+async fn look(
+    check: &mut tokio::time::Interval,
+    gone: Option<&mut Watcher>,
+    soon: Option<tokio::time::Instant>,
+) {
+    let soon = async {
+        match soon {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        _ = check.tick() => {}
+        () = crate::watch::changed(gone) => {}
+        () = soon => {}
+    }
+}
+
 /// Serves until stopped. Returns the binary to start again from, if an upgrade installed it.
 pub(super) async fn listen(
     socket: &Socket,
@@ -190,6 +230,8 @@ pub(super) async fn listen(
 ) -> anyhow::Result<Option<&'static Path>> {
     let copies = UserState::load()?.copies;
     let mut listener = socket.listen()?;
+    // Before reading what is bound, so that a deletion in between is news.
+    let mut gone = watch_socket(socket);
     let mut bound = socket.file();
     let daemon = Daemon {
         supervisor: Arc::new(Supervisor::new(Hubs::new(
@@ -210,8 +252,16 @@ pub(super) async fn listen(
     // A daemon whose lock file was deleted, as by cleaning up its directory, has nothing to
     // stop a second one starting, and no business running on. One whose socket was deleted,
     // as temp cleaners do, can't be reached, so it listens again; but one whose socket
-    // another process has taken leaves it be.
+    // another process has taken leaves it be. It looks every few seconds, and at once when
+    // its socket's directory reports the socket gone, so that a command run just after
+    // doesn't wait for the next look; but it listens again at most once in `RELISTEN_GAP`.
+    // A named pipe has no file to go, and lasts as long as its listener.
     let mut check = tokio::time::interval(Duration::from_secs(5));
+    let path = matches!(socket, Socket::Path(_));
+    // Gone before what was bound was read, and so before the watch saw it go.
+    let mut soon = (path && bound.is_none()).then(tokio::time::Instant::now);
+    // When the daemon may next listen again.
+    let mut allowed: Option<tokio::time::Instant> = None;
     let mut upgraded = None;
     loop {
         tokio::select! {
@@ -224,19 +274,35 @@ pub(super) async fn listen(
                 break;
             }
             () = crate::hub::interrupted() => break,
-            _ = check.tick() => {
+            () = look(&mut check, gone.as_mut(), soon) => {
+                soon = None;
                 if !lock_path.exists() {
                     tracing::warn!("{} is gone; stopping", lock_path.display());
                     break;
                 }
                 match socket.file() {
-                    now if now == bound => {}
-                    None => {
+                    // Before `bound`, which is none if the socket went before it was read.
+                    None if path => {
+                        let now = tokio::time::Instant::now();
+                        if let Some(next) = allowed.filter(|&next| next > now) {
+                            soon = Some(next);
+                            continue;
+                        }
+                        allowed = Some(now + RELISTEN_GAP);
                         tracing::warn!("{socket} is gone; listening there again");
                         match socket.listen() {
                             Ok(again) => {
                                 listener = again;
+                                // The watch ends only with the directory, which takes the
+                                // socket with it, so that the daemon comes here: re-armed
+                                // here, then, it covers the directory as made again. Before
+                                // reading what is bound, so that a deletion in between is
+                                // news.
+                                gone = watch_socket(socket);
                                 bound = socket.file();
+                                if bound.is_none() {
+                                    soon = allowed;
+                                }
                             }
                             Err(err) => {
                                 tracing::error!("{err:#}; stopping");
@@ -244,7 +310,9 @@ pub(super) async fn listen(
                             }
                         }
                     }
-                    Some(_) => {
+                    now if now == bound => {}
+                    // A file, since a pipe has none, which is never gone.
+                    _ => {
                         tracing::warn!("{socket} is another process's now; stopping");
                         bound = None;
                         break;

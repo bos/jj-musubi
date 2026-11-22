@@ -11,6 +11,13 @@
   committed secret from every machine. Abandoning operations from before a copy joined, or
   ones it hasn't sent yet, works as before.
 
+- When a temp cleaner deletes the daemon's socket, the daemon now notices at once where the
+  system reports the deletion, and listens there again, rather than at its next check a few
+  seconds later; otherwise it still notices within a few seconds. So a `musubi` command run
+  just after no longer waits for the daemon, or says it isn't listening. A daemon already
+  running keeps checking only every few seconds until it restarts: run `musubi daemon
+  restart` after upgrading.
+
 - A copy that was away before its first sync finished, or that the hive forgot, no longer
   stops syncing because other machines abandoned operations meanwhile.
 

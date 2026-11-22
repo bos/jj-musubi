@@ -69,21 +69,14 @@ runs, since jj records each command's arguments, temporary paths among them, in 
 so only the description and position identify the operation when reproducing a failure by hand.
 The trace names an operation both ways too.
 
-The reference separates structural comparison, native replay, rewrite evidence and workspace
-certification into child modules. Its adjudication classifies each operation's source, checks
-that source before replay, and names which independent native witness explains a differing
-merge. The tests beside its public checks deliberately remove or forge evidence: they protect
-the oracle itself from accepting an unsupported explanation.
+The reference keeps structural comparison, jj's merge and application of operations, and the
+record of what each merge rewrote in child modules. Its adjudication classifies each operation's
+source, checks that source before replay, and records each merge that differs from jj's as a
+deviation, which a failure lists.
 
 [Coverage](../../crates/musubi-sync/tests/e2e_search/coverage.rs) lists, as each test ends, the
 rules and setup or outcome events that never fired in it (shown with `--no-capture`). It
 claims no race: a rule firing says only that its precondition held.
-
-Private workspace replay pairs each canonical parent with its certificate in `CertifiedParent`.
-It qualifies a candidate's source mappings and certificates, then projects every base and both
-ordered parents into `ProjectedMergeInputs`. Replay consumes that value, keeping bases separate
-from parents. The maker's result is read only after the native merge, so it cannot determine the
-replay's inputs.
 
 Native jj commands cross one recorded-command boundary: observation, workspace command or
 command at an older operation. Each variant owns its capture and completion order, including
@@ -107,14 +100,6 @@ metadata relations used by evidence joins:
 
 These correlate candidates; exact native/canonical ids and source-body collision checks remain
 necessary. Native operation classification has one owner beside those key definitions.
-
-[Workspace certificates](../../crates/musubi-sync/tests/e2e_search/reference/workspaces.rs)
-keep each workspace's name authentication, binding, birth witness and presence together. Their
-transition table states which facts each action changes or retains. Authenticating a name does
-not authenticate its current binding. The derivation explicitly orders inheritance, observed
-bindings, command or merge evidence, membership reconciliation and authentication.
-A rejected native witness carries its missing prerequisite into the final mismatch explanation,
-so an absent source can be distinguished from a replay whose complete result differed.
 
 A convergence checkpoint has an explicit order:
 

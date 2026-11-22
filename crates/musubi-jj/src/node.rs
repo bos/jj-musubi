@@ -120,8 +120,9 @@ struct NameMemos {
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked: Mutex<presence::WorkedNames>,
-    /// What `has_working_copy_here` answered for each name, as of the workspace store's
-    /// metadata then: asked for every other machine's workspace of every operation.
+    /// Where jj's workspace store put each name's working copy, as `has_working_copy_here`
+    /// read it, as of the store's metadata then: asked for every other machine's workspace of
+    /// every operation.
     working_copies: Mutex<presence::WorkingCopies>,
 }
 

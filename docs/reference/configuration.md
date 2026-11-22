@@ -198,7 +198,8 @@ starting with `~/`.
 
 Commands without a socket override use the running daemon's socket, even under cron, after
 `sudo -u`, or with a different `XDG_RUNTIME_DIR`. A second daemon cannot serve the same state
-directory. If a temp cleaner deletes the socket, the daemon restores it within seconds.
+directory. If a temp cleaner deletes the socket, the daemon restores it at once, or within
+seconds if the system doesn't report the deletion.
 
 ### On the hub's machine
 

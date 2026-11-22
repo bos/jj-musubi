@@ -2087,7 +2087,7 @@ fn one_daemon_serves_a_machine_wherever_it_listens() {
     let status = status.lines().find(|line| line.starts_with("Daemon:"));
     insta::assert_snapshot!(status.unwrap(), @"Daemon: running (pid N), but not listening on $ROOT/home/.musubi/d.sock; restart it with `musubi daemon restart`; doesn't start at login");
     signal("-CONT");
-    // Once it notices, within seconds.
+    // Once it notices, which it does at once here.
     run(&env, &logs, musubi_on(None, &["daemon", "start"]));
     assert!(chosen.exists());
     fs::remove_file(&chosen).unwrap();

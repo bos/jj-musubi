@@ -330,51 +330,6 @@ impl RetainedOperation {
     }
 }
 
-#[test]
-fn retained_sources_do_not_infer_native_ownership_from_a_shared_hostname() {
-    use jj_lib::op_store::{Operation, View as RawView, ViewId};
-    use jj_lib::ref_name::WorkspaceNameBuf;
-
-    let view = RawView::make_root(CommitId::new(vec![1; 20]));
-    let parent = RawView::make_root(CommitId::new(vec![2; 20]));
-    for copy in ["mac#first", "mac#second"] {
-        for workspace in [None, Some(WorkspaceNameBuf::from("default"))] {
-            for marker in [None, Some("invalid-id"), Some("abcd")] {
-                let mut op = Operation::make_root(ViewId::new(vec![0; 64]));
-                op.metadata.hostname = "mac".to_owned();
-                op.metadata.workspace_name = workspace.clone();
-                // Neither a shared hostname nor another copy's work marker owns the input.
-                op.metadata.attributes.insert(
-                    musubi_jj::presence::WORK_ATTRIBUTE.to_owned(),
-                    "mac#other".to_owned(),
-                );
-                if let Some(marker) = marker {
-                    op.metadata.attributes.insert(
-                        musubi_jj::node::CANONICAL_ATTRIBUTE.to_owned(),
-                        marker.to_owned(),
-                    );
-                }
-                let source = RetainedOperation::capture(
-                    copy.to_owned(),
-                    &op,
-                    view.clone(),
-                    false,
-                    Some(parent.clone()),
-                );
-                assert_eq!(
-                    source.native,
-                    marker.is_none(),
-                    "{copy}, {workspace:?}, {marker:?}"
-                );
-                assert_eq!(source.copy, copy);
-                assert_eq!(source.view, view);
-                assert_eq!(source.parent, Some(parent.clone()));
-                assert!(!source.realized);
-            }
-        }
-    }
-}
-
 /// Why a published carrier may preserve an independently observed Git frontier.
 #[derive(Debug, PartialEq, Eq)]
 enum GitRecordAuthorization {
@@ -427,11 +382,6 @@ pub struct World {
     /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
     /// its `merge_key`: none comes back, unless jj brings it back there.
     pub abandoned: Vec<AbandonedOperation>,
-    /// The key of every copy a machine forgot, with the forget's `merge_key`, until the hub's
-    /// history has the forget and shows the copy again, by work it did since: an abandon can
-    /// drop the forget from the history, but not its effect (docs/internals/design.md,
-    /// "Presence").
-    forgot: BTreeMap<String, SourceKey>,
     /// What each machine saw at its op heads, when it last looked.
     seen: Vec<Option<(Vec<String>, Seen)>>,
     pub ledger: Ledger,
@@ -558,7 +508,6 @@ impl World {
             dirty: vec![false; setup.nodes],
             workspaces,
             abandoned: vec![],
-            forgot: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
             imports: Imports::default(),

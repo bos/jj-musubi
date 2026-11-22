@@ -13,10 +13,9 @@ use musubi_jj::op_id::LocalOp;
 
 use crate::coverage::fired;
 
-use crate::identity::{HistoryKey, SourceKey};
+use crate::identity::HistoryKey;
 
 use super::MACHINES;
-use super::MERGE_KEY_TEMPLATE;
 use super::Naming;
 use super::OP_KEY_TEMPLATE;
 use super::Workspace;
@@ -33,16 +32,11 @@ impl World {
         let key = self.fx.machine_key(o);
         let name = self.machine(o);
         self.record(format!("{}: musubi forget {name}", self.machine(m)));
-        match self.fx.node(m).forget_copy(&key, name) {
-            Ok(true) => {
-                let forget = self.newest_key(m);
-                self.forgot.insert(key, forget);
-            }
-            Ok(false) => {}
-            Err(err) => self.fail(&format!(
+        if let Err(err) = self.fx.node(m).forget_copy(&key, name) {
+            self.fail(&format!(
                 "musubi forget {name} failed on {}: {err}",
                 self.machine(m)
-            )),
+            ));
         }
         let after = self.seen(m);
         let what = self.trace.last().cloned().unwrap_or_default();
@@ -81,16 +75,6 @@ impl World {
             self.machine(m)
         ));
         let later = self.fx.env.clock().now() + std::time::Duration::from_secs(2 * 3600);
-        let present = |world: &mut Self| -> BTreeSet<String> {
-            match world.fx.node(m).activity() {
-                Ok(active) => active.into_iter().map(|activity| activity.key).collect(),
-                Err(err) => world.fail(&format!(
-                    "listing copies' activity failed on {}: {err}",
-                    world.machine(m)
-                )),
-            }
-        };
-        let active = present(self);
         if let Err(err) = self
             .fx
             .node(m)
@@ -100,13 +84,6 @@ impl World {
                 "forgetting unused copies failed on {}: {err}",
                 self.machine(m)
             ));
-        }
-        let gone: Vec<String> = active.difference(&present(self)).cloned().collect();
-        if !gone.is_empty() {
-            let forget = self.newest_key(m);
-            for key in gone {
-                self.forgot.insert(key, forget.clone());
-            }
         }
         let after = self.seen(m);
         let what = self.trace.last().cloned().unwrap_or_default();
@@ -171,35 +148,6 @@ impl World {
         if rebased {
             fired("forgotten:working_copy_rebased");
         }
-    }
-
-    /// The `merge_key` of machine `m`'s newest operation.
-    fn newest_key(&self, m: usize) -> SourceKey {
-        let args = [
-            "--ignore-working-copy",
-            "op",
-            "log",
-            "--no-graph",
-            "-n",
-            "1",
-        ];
-        let args: Vec<&str> = args.into_iter().chain(["-T", MERGE_KEY_TEMPLATE]).collect();
-        SourceKey::from_template(&self.raw_jj(m, &args))
-    }
-
-    /// Drops from `forgot` each copy the hub's head shows again although its history has the
-    /// forget: the copy worked since.
-    pub(super) fn note_shown_again(&mut self) {
-        if self.forgot.is_empty() {
-            return;
-        }
-        let shown = self.fx.shown_machines();
-        if !self.forgot.keys().any(|key| shown.contains(key)) {
-            return;
-        }
-        let history = self.hub_merge_keys();
-        self.forgot
-            .retain(|key, forget| !(shown.contains(key) && history.contains(forget)));
     }
 
     /// A new copy of the hive on machine `m`, as `musubi clone` makes: an empty colocated

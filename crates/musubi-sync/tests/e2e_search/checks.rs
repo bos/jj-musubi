@@ -18,12 +18,6 @@ use crate::reference::Reference;
 use crate::view::View;
 use crate::world::World;
 
-/// Whether `MUSUBI_SEARCH_MASK` (a comma-separated list) masks a known bug, so a search
-/// can look past it until it is fixed.
-pub fn masked(bug: &str) -> bool {
-    std::env::var("MUSUBI_SEARCH_MASK").is_ok_and(|v| v.split(',').any(|b| b == bug))
-}
-
 impl World {
     /// Finishes a generated prefix and checks it before starting the ledger afresh.
     ///
@@ -77,16 +71,6 @@ impl World {
         // concurrently with another machine's rewrite of it. Have it look, as rules do, so
         // the ledger records who rewrote it, then sync that.
         if self.snapshot_pending() {
-            self.sync_everything();
-        }
-        if masked("export-after-merge") {
-            // Masks found::bookmark_moved_by_a_node_merge_is_exported: a node's own merge
-            // can leave its `.git` behind its bookmarks. Any `jj` command that writes an
-            // operation exports everything (`jj git export` is a no-op when colocated).
-            for m in 0..self.nodes() {
-                self.jj(m, &["bookmark", "create", "mask-export", "-r", "@"]);
-                self.jj(m, &["bookmark", "delete", "mask-export"]);
-            }
             self.sync_everything();
         }
         // Native stale-workspace returns can happen on any copy, regardless of which

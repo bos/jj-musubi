@@ -1237,11 +1237,9 @@ Native origins are captured from unmarked local operations and qualified only by
 original identity. A later canonical marker does not make the author's own operation a foreign
 realization. The captured header and entire shared view must still match; only private workspace
 and Git fields can differ. Qualified origins survive cache loss, but never pass to a replacement
-copy. Observing an unknown source must not canonicalize it.
-`world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname` checks
-retained-source classification using constructed operations, without a repository fixture. The
-pure namespace controls cover a missing input certificate, an owner rename, and an owned literal
-that collides with a foreign alias.
+copy. Observing an unknown source must not canonicalize it. The pure namespace controls cover a
+missing input certificate, an owner rename, and an owned literal that collides with a foreign
+alias.
 
 To keep the search effective:
 

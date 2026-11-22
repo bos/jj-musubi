@@ -32,7 +32,6 @@
 //! - `MUSUBI_SEARCH_SHRINK`: `1` shrinks a failure, `0` reports it unshrunk (default: the
 //!   shards shrink, and the smoke tests, `e2e_smoke` and `e2e_join_after_upstream_rewrite`,
 //!   don't);
-//! - `MUSUBI_SEARCH_MASK`: known bugs to look past, comma-separated (see `checks::masked`);
 //! - `MUSUBI_SEARCH_TIMING`: print how long each case took;
 //! - `MUSUBI_SEARCH_VERIFY_OBSERVATIONS`: compare read-only staleness observations with
 //!   the original native `jj` probes, retaining their command seeds;

@@ -92,10 +92,9 @@ detector is not a zero count. Each report belongs to one test execution and incl
 concrete native operations behind its first witness; old report files never contribute.
 Under `target/tmp/e2e_search/`, `coverage-v2-<test>.txt` is the readable report and
 `counts-v2-<test>.json` records the same evidence and statuses. Use the files emitted by the
-current test command. `coverage.txt` contains a retirement notice for the former cross-test
-total. The coverage negative controls check single actions, same-copy and different-object
-pairs, causal barriers, absent native effects, failed cases, report isolation and stale files;
-the native bridge test also exercises both detectors through real jj commands.
+current test command. The coverage negative controls check single actions, same-copy and
+different-object pairs, causal barriers, absent native effects, failed cases, report isolation and
+stale files; the native bridge test also exercises both detectors through real jj commands.
 
 Private workspace replay pairs each canonical parent with its certificate in `CertifiedParent`.
 It qualifies a candidate's source mappings and certificates, then projects every base and both

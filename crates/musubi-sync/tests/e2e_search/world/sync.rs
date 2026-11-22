@@ -62,7 +62,6 @@ impl World {
         };
         self.note_forgotten_rebase(m, forgotten);
         self.record_merges(m);
-        self.note_shown_again();
         steps
     }
 

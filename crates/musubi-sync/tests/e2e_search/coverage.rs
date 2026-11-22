@@ -1,7 +1,7 @@
 //! Rule activity, approximate exploration guidance, and independently witnessed races.
 //!
 //! Catalogue rule combinations suggest where to search; their occurrence does not prove
-//! the named race happened. Only qualified native receipts from cases that completed all
+//! the named race happened. Only qualified native witnesses from cases that completed all
 //! checks count as witnessed. Each report covers its own test execution and reads no old files.
 
 use std::cell::RefCell;
@@ -707,13 +707,8 @@ fn render(name: &str, totals: &Totals) -> String {
     out
 }
 
-const RETIRED_TOTAL: &str = "The cross-test coverage total has been retired.\n\
-Coverage is reported per test execution in coverage-v2-<test>.txt and counts-v2-<test>.json.\n\
-Use the files emitted by the current test command.\n";
-
 fn write_report(dir: &Path, name: &str, totals: &Totals) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
-    fs::write(dir.join("coverage.txt"), RETIRED_TOTAL)?;
     fs::write(
         dir.join(format!("coverage-v2-{name}.txt")),
         render(name, totals),
@@ -892,8 +887,4 @@ fn old_reports_never_contribute_to_a_current_report() {
         assert_ne!(row["evidence"]["status"], "witnessed");
     }
     assert!(!dir.path().join("counts-current.txt").exists());
-    assert_eq!(
-        fs::read_to_string(dir.path().join("coverage.txt")).unwrap(),
-        RETIRED_TOTAL
-    );
 }

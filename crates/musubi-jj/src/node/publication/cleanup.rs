@@ -308,7 +308,6 @@ impl NodeRepo {
         &mut self,
     ) -> Result<(CanonicalOp, Vec<CanonicalOp>), NodeError> {
         self.settle()?;
-        self.retire_overtaken_moves()?;
         let base = self
             .stored_base()
             .unwrap_or_else(|| self.canonical.root_operation_id().clone());
@@ -525,10 +524,9 @@ impl NodeRepo {
             &checkpoint,
         )?;
         let checkpoint = LocalOp(checkpoint);
-        let from = HashMap::from([(source.head.clone(), vec![checkpoint.clone()])]);
         let read = std::slice::from_ref(&source.head);
         // `jj op abandon` takes no lock: one can have changed the head since it was read.
-        if !self.replace_heads(read, &from, std::slice::from_ref(&checkpoint), true)? {
+        if !self.replace_heads(read, std::slice::from_ref(&checkpoint), true)? {
             return Err(PublicationError::OutgoingChanged.into());
         }
         drop(lock);
@@ -749,7 +747,7 @@ impl NodeRepo {
         movements: &HashMap<LocalOp, Vec<LocalOp>>,
         checkpoint: &OperationId,
     ) -> Result<(), NodeError> {
-        let prepared = self.canonicalize_unchecked(&LocalOp(checkpoint.clone()))?;
+        let prepared = self.canonicalize(&LocalOp(checkpoint.clone()))?;
         if self.canonical.read_operation(&prepared)?.view_id != source.view {
             return Err(PublicationError::ViewChanged.into());
         }

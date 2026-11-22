@@ -643,19 +643,6 @@ open Musubi
 #assert_axioms Musubi.NodeSys.Fair.reaches_core
 
 -- Moving op heads that musubi read earlier (`OpHeads.lean`, `OpHeadsRace.lean`).
-#assert_axioms OpHeads.overtaken_below
-#assert_axioms OpHeads.overtaken_congr
-#assert_axioms OpHeads.lookPlan_nothing_congr
-#assert_axioms OpHeads.rewritten_empty_iff
-#assert_axioms OpHeads.lookPlan_nothing_iff
-#assert_axioms OpHeads.retire_out_put
-#assert_axioms OpHeads.retire_stay
-#assert_axioms OpHeads.retire_back_new
-#assert_axioms OpHeads.retire_back_covers
-#assert_axioms OpHeads.retire_shrinks
-#assert_axioms OpHeads.settle_nothing
-#assert_axioms OpHeads.entries_put
-#assert_axioms OpHeads.compose_put
 #assert_axioms OpHeads.Race.Inv.step
 #assert_axioms OpHeads.Race.Reachable.inv
 #assert_axioms OpHeads.Race.Inv.init
@@ -664,19 +651,5 @@ open Musubi
 #assert_axioms OpHeads.Race.writing_has_lock
 #assert_axioms OpHeads.Race.check_no_event
 #assert_axioms OpHeads.Race.check_step
-#assert_axioms OpHeads.Race.reachable_owed
-#assert_axioms OpHeads.Race.RewInv.step
-#assert_axioms OpHeads.Race.reachable_rew
-#assert_axioms OpHeads.Race.pre_image_older
-#assert_axioms OpHeads.Race.quiet_of_clear
-#assert_axioms OpHeads.Race.bad_merge_owed
-#assert_axioms OpHeads.Race.no_bad_merge_locked
-#assert_axioms OpHeads.Race.no_bad_merge_after_look
-#assert_axioms OpHeads.Race.Trace.remaining_case
+#assert_axioms OpHeads.Race.Trace.landing_before_the_lock
 #assert_axioms OpHeads.Race.Trace.landing_during_the_move
-#assert_axioms OpHeads.Race.Trace.saved_watch_survives
-#assert_axioms OpHeads.Race.Trace.unsaved_watch_lost
-#assert_axioms OpHeads.Race.Trace.read_during_the_move
-#assert_axioms OpHeads.Race.Trace.regression_trace
-#assert_axioms OpHeads.Race.Trace.at_op_case
-#assert_axioms OpHeads.Race.Trace.abandon_both_case

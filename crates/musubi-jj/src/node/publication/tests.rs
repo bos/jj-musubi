@@ -1185,7 +1185,7 @@ fn removing_a_snapshots_parent_does_not_turn_unrelated_work_into_intent() {
             .or_default();
     }
     let orphan = store.write_operation(&prepared).block_on().unwrap();
-    node.canonicalize_unchecked(&LocalOp(orphan)).unwrap();
+    node.canonicalize(&LocalOp(orphan)).unwrap();
     assert!(
         plan.after.files.iter().any(|f| f.path == "junk"),
         "the unselected bookmark operation still retains the old working copy"

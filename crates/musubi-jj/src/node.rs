@@ -60,7 +60,6 @@ pub use expiry::Activity;
 pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
-pub use heads::HeadRace;
 pub use join::JoinSummary;
 use join::Joins;
 pub use publication::APPROVAL_FILE;
@@ -173,9 +172,6 @@ pub struct NodeRepo {
     /// writes that loaded the repository before it, parents first: to reparent onto the
     /// rewrites.
     late: Vec<LocalOp>,
-    /// The op heads musubi took out lately, while what it put in their place is still an op
-    /// head (`NodeRepo::retire_overtaken`).
-    replaced: Mutex<Vec<heads::Replaced>>,
     /// Whether an earlier release left drops recorded here that it hadn't published
     /// (`legacy`).
     legacy_drops: bool,
@@ -265,7 +261,6 @@ impl NodeRepo {
             repo_config: None,
             machine,
             late: vec![],
-            replaced: Mutex::default(),
             legacy_drops,
             heads_locked: Arc::default(),
             head_races: heads::HeadRaces::default(),
@@ -430,10 +425,8 @@ impl NodeRepo {
         Ok(LocalOp(self.merged_repo()?.op_id().clone()))
     }
 
-    /// The repository at the single head [`Self::merge_heads`] leaves, after the look at the op
-    /// heads ([`Self::retire_overtaken_moves`]).
+    /// The repository at the single head [`Self::merge_heads`] leaves.
     fn merged_repo(&mut self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        self.retire_overtaken_moves()?;
         let repo = match self.colocation() {
             Some(colocation) => {
                 let heads = self.local_heads()?;
@@ -474,9 +467,8 @@ impl NodeRepo {
             // have replaced it. Then the heads are merged and exported again, the colocated
             // lock held throughout, so that `.git` is never ahead of the op heads it shows.
             let merged = LocalOp(merged.op_id().clone());
-            let from = HashMap::from([(merged.clone(), vec![exported.clone()])]);
             let new = std::slice::from_ref(&exported);
-            if self.replace_heads(std::slice::from_ref(&merged), &from, new, true)? {
+            if self.replace_heads(std::slice::from_ref(&merged), new, true)? {
                 return self.repo_at(&exported);
             }
         }

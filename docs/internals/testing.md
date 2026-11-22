@@ -859,12 +859,11 @@ runs, can take all a machine's memory on a proof it can't finish, and macOS enfo
 
 ## Generated end-to-end tests
 
-A Linux operation-head scheduler complements this search at a finer boundary. It pauses a
-real `jj op abandon` immediately before unlinking its old head, after jj has written its new
-head. Its other actor runs the same `NodeRepo::check_abandon` as the daemon, including an
-interruption after publishing a replacement and a reopen of the local store. With
-`--concurrent`, a second command races it from the same old head, another abandon or an
-ordinary write, and the daemon can also stop before moving any head and restart without its
+A Linux operation-head scheduler complements this search at a finer boundary. It pauses a real
+`jj describe` after jj has written its new op head and before it unlinks the old one, while it
+holds jj's op-heads lock. Its other actor runs what the daemon does as each of its steps begins,
+`NodeRepo::canonical_heads`, and reopens the local store. With `--concurrent`, a second command, a
+`jj new`, follows the first, and the daemon can also stop and restart, with or without its
 translation cache.
 
 ### Search and replay operation-head schedules
@@ -873,14 +872,12 @@ Use the pinned jj built with dynamic Linux libraries and a C compiler named `cc`
 jj binary cannot load the test shim, which gates creating a new head file through the `open`
 family and removing the old one through `unlink` and `unlinkat`. Run the search with
 `just head-schedule search`. Add `--unpublished` to start with local work above the synced
-operation, `--concurrent` to race two native abandons, and `--out PATH` to retain a separate
-schedule. With `--concurrent`, `--peer write` makes the second command an ordinary
-`jj describe` on the same old head instead of another abandon, `--peer second` makes it a
-second abandon that starts from the first one's result, and `--loader` adds a third,
-`jj op log`, which merges the heads it finds. `--receive`, with or without `--concurrent`, lets
-the daemon receive the other machine's work once the native commands have started. `--steps N`
-sets the most actions a schedule may take: 8 by default, 14 with `--concurrent` and 22 with
-`--loader`. `--jobs N` runs that many branches at once, half the CPUs by default.
+operation, `--concurrent` to follow the first command with a second, and `--out PATH` to retain a
+separate schedule. With `--concurrent`, `--loader` adds a third, `jj op log`, which merges the
+heads it finds. `--receive`, with or without `--concurrent`, lets the daemon receive the other
+machine's work once the first command has started. `--steps N` sets the most actions a schedule
+may take: 8 by default, 14 with `--concurrent` and 22 with `--loader`. `--jobs N` runs that many
+branches at once, half the CPUs by default.
 
 ```sh
 just head-schedule search
@@ -890,10 +887,10 @@ just head-schedule branch target/head-schedule.json --at 1
 
 Each worker continues one alternative and queues the other enabled actions for any worker.
 It skips revisiting an equivalent observed state with no more steps left to spend. The
-observation includes the head IDs, pending drops, whether jj is paused, and the state of the
-abandon check. Each branch restores the saved starting repositories and replays only the
-prefix it needs. The fixtures and compiled shim are cached per test build. This is a bounded
-search of the selected filesystem and daemon boundaries.
+observation includes the head IDs, whether jj is paused, and whether the daemon has checked the
+heads. Each branch restores the saved starting repositories and replays only the prefix it needs.
+The fixtures and compiled shim are cached per test build. This is a bounded search of the
+selected filesystem and daemon boundaries.
 
 The saved JSON contains each action and its resulting state. Search saves the first failure,
 or a longest observed schedule on success. Replay verifies the recorded states. Branch keeps
@@ -902,94 +899,73 @@ the first `--at` actions and tries other actions at that point, then saves a new
 changed build, whose intermediate head IDs may legitimately differ.
 
 The scheduler checks that at least one readable operation head exists after every controlled
-step. Where the abandon check put the history back, the settled head also has the original
-view and canonical identity, with no pending drops. Disabling the fresh-head stamping for
+step. Disabling the fresh-head stamping for
 [#166](https://github.com/bos/jj-musubi/issues/166) makes the search rediscover the empty
 head store by choosing a daemon check while jj waits, then letting jj finish its unlink.
 
 The concurrent search lets each command pause before it creates its new head as well as
-before its unlink, so both can read the same old head before either publishes. It adds
-actions to kill either command, to stop the daemon after it saves a move but before any head
-moves, to restart it without the translation cache, and to settle and merge the remaining
-heads. jj can order the parents of a merge with equal timestamps either way, so states compare
-a merge by its body with its parents sorted, and the search treats the two commands as
-interchangeable. It found that resuming a saved local move after that restart, once jj had
-unlinked the old head, could not find the local operation for a parent that only the old head
-reached. Recovery now replays the head and workspace moves saved before the crash, as it does
-for taking records, instead of working them out again from the translation cache.
+before its unlink. It adds actions to kill either command, to stop the daemon and start it
+again, with or without the translation cache, and to settle and merge the remaining heads. jj
+can order the parents of a merge with equal timestamps either way, so states compare a merge by
+its body with its parents sorted.
 
-An ordinary command publishes inside jj's op-heads lock, which it takes before adding its new head
-and holds until the old one is gone. `jj op abandon` doesn't take it, but loading the repository
-at several heads does, to merge them, and so does the daemon whenever it moves op heads: it moves
-them only if they are still those it read. While a native command holds the lock, the search
-merges no heads, and runs the daemon's check so that, should the daemon move op heads, the command
-finishes before it takes the lock, as the daemon would wait for it. Once everything has settled,
-every op head must still have the write's commit in its view if the write added its head, even if
-it was killed before removing the old one.
-
-With `--peer second`, once the first abandon has finished and left one op head, the second `jj op
-abandon` drops the operation below that head. Besides publishing and finishing it between the
-daemon's steps, the search can run the daemon's check with the second abandon landing inside the
-daemon's move of op heads, before it takes the lock or holding it, through
-`NodeRepo::race_head_move`: this is [#168](https://github.com/bos/jj-musubi/issues/168)'s race.
-Once everything has settled, the operation the second abandon dropped, known by its description,
-times and view, must not be below any op head, unless the daemon, seeing the second abandon's old
-and new op heads together, took out the old one, when it may put the history back, or the daemon
-or a native command merged the two, which brings it back as jj would. With `retire_overtaken`
-disabled, the search with `--unpublished` finds #168 again in about 30 runs: the daemon's rewrite
-of the first abandon lands beside the second's, and merging the two brings back what the second
-dropped.
-
-Two failures this search finds on main are open. With `--unpublished`, a second abandon that lands
-while the daemon holds the lock, after it checked the op heads, leaves the daemon's rewrite of the
-first beside the second's op head; the next look doesn't take it out, and merging the two brings
-back what the second dropped. With `--receive`, receiving the other machine's work, which still
-has an operation a local abandon dropped and the daemon holds as a pending drop, brings that
-operation back; the search's in-process sync skips the hub, so this may be the model rather than
-musubi.
+An ordinary command publishes inside jj's op-heads lock, which it takes before adding its new
+head and holds until the old one is gone, so the second command starts only once the first has
+finished or been killed, from the one op head that is left; a first command killed after it added
+its head leaves two, which the daemon or `--loader` merges first. Loading the repository at
+several heads takes the lock too, to merge them, and so does the daemon whenever it moves op
+heads: it moves them only if they are still those it read. While a native command holds the lock,
+the search merges no heads, and runs the daemon's check, or its receipt of the other machine's
+work, so that, should the daemon move op heads, the command finishes before it takes the lock, as
+the daemon would wait for it, through `NodeRepo::race_head_move`. Once everything has settled,
+every op head must still have the commit of each command that added its head, even if it was
+killed before removing the old one.
 
 With `--loader`, once there are several heads and no command holds the lock, the search can
 start a `jj op log`. Loading the repository, it takes the lock and merges the heads, or, where one
 is an ancestor of another, as a paused write's is of the old head, finishes that command's unlink
 for it. The shim pauses it before it adds a head and again before it removes each one, so the
-search can let it remove one head at a time, or finish, or kill it between two. Where the heads
-have settled by the time it holds the lock, it exits without either. While it holds the lock, the
-daemon merges no heads.
+search can let it finish, or kill it. Where the heads have settled by the time it holds the lock,
+it exits without either. While it holds the lock, the daemon merges no heads. Two commands never
+add heads beside the same old head, since both take the lock, so the merge here removes one head
+and never has the two to remove one at a time that `UnlinkLoader` is for.
 
-A native merge is not reproducible. jj orders the parents of a merge by their end times, and
-an abandon's rewrite has the end time of the operation it rewrote, so jj puts them in whatever
-order its hash set gives, which changes from run to run. musubi's rewrites of the merge, and
-the canonical forms it gives them, follow that order. States name each operation by a key:
-its id for the starting history, and otherwise a hash of its body with its parents' keys, a
-merge's sorted, and ids in its metadata replaced by their keys. That makes a merge and what is
-written on it comparable across runs, but not musubi's rewrites of a merge. Receiving at several
-heads merges them the same way. So a search with `--loader` or `--receive` replays a prefix
-without comparing its states, continues from the state it reaches, and drops the branch if a
-step of the prefix is no longer enabled there. It fails if it drops more than a tenth of its
-branches, which would mean the harness, not jj, disables steps. Such a search is best effort:
-it may miss a state a different merge order reaches.
-`replay` of such a schedule checks only that its actions are enabled, as `--actions-only`
-does, and a failure it saved may take several replays to happen again.
+A native merge is not reproducible. jj orders the parents of a merge by their end times, so
+jj puts them in whatever order its hash set gives, which changes from run to run. musubi's
+rewrites of the merge, and the canonical forms it gives them, follow that order. States name each
+operation by a key: its id for the starting history, and otherwise a hash of its body with its
+parents' keys, a merge's sorted, and ids in its metadata replaced by their keys. That makes a
+merge and what is written on it comparable across runs, but not musubi's rewrites of a merge.
+Receiving at several heads merges them the same way. So a search with `--loader` or `--receive`
+replays a prefix without comparing its states, continues from the state it reaches, and drops the
+branch if a step of the prefix is no longer enabled there. It fails if it drops more than a tenth
+of its branches, which would mean the harness, not jj, disables steps. Such a search is best
+effort: it may miss a state a different merge order reaches. `replay` of such a schedule checks
+only that its actions are enabled, as `--actions-only` does, and a failure it saved may take
+several replays to happen again.
 
 Receiving realizes the other machine's operations and publishes heads under the op-heads lock,
-so the search offers it only while no native command holds the lock. It may receive before the
-daemon has checked for an abandon, which the daemon's own sync does first; `advance` must
-revalidate either way. A single command pauses only once it has published, so receiving while
-an abandon is computed but not yet published needs `--concurrent`. Once everything has
-settled, every op head must still have the received commit in its view, and a put-back may
-sit below it; the check then compares canonical history, not views.
+so while a native command holds it the search offers the receipt as its own action, which lets the
+command finish just before the daemon's advance takes the lock. A single command pauses only once
+it has published, so receiving while a command is prepared but not yet published needs
+`--concurrent`. Once everything has settled, every op head must still have the received commit in
+its view.
 
-Without `--loader` or `--receive`, each search reaches every state it can within the default
-horizon: a deeper `--steps` finds no new ones. The single command has 20 states; two abandons have
-358, or 330 with unpublished work; an abandon with a write 163, and with a second abandon 174,
-each found in seconds; with unpublished work, a second abandon finds the open failure above. With
-`--loader`, two abandons reach about 7,900 states and an abandon with a write about 1,700; with
-`--receive` as well, an abandon with a loader reaches about 16,000. These take minutes, the last
-over 20 minutes with five jobs. Their counts vary by a few percent from run to run, as native
-merges do. With `--receive` alone, the single command reaches 34 states, two abandons about 830
-and an abandon with a write about 270. On a shared machine, pass a `--jobs` that leaves room for
-others. A command that misses its pause for 30 seconds under load is reported as a failed step;
-replay the saved schedule before believing it.
+Each search reaches every state it can within the default horizon, except with `--loader` or
+`--receive`, where native merges vary: a deeper `--steps` finds no new ones. The single command
+has 9 states, with or without unpublished work; with `--receive`, 11. With `--concurrent` there
+are 303, with `--receive` 756, with `--loader` about 930 and with both about 2,500; the first runs
+in seconds, the last in about a minute and a half with six jobs. Their counts vary by a few
+percent from run to run with `--loader` or `--receive`, as native merges do. On a shared machine,
+pass a `--jobs` that leaves room for others. A command that misses its pause for 30 seconds under
+load is reported as a failed step; replay the saved schedule before believing it.
+
+The search's repositories aren't colocated, so it never reaches `replace_heads`, which exports a
+merge, reparents a late command and cleans up after `--prune`; its daemon moves heads only in the
+advance. Removing the advance's check that the op heads are unchanged (`lock_if_unchanged`) goes
+unnoticed too: a command's head that lands first stays beside the daemon's, and a merge keeps
+both. What the check keeps is the daemon's realization standing on the heads it read. The lock and
+the check are covered by `heads_laws.rs` and the model's `check_no_event`.
 
 To take an instruction-level recording on a Linux host with counters supported by
 [rr](https://rr-project.org/), record a saved schedule:
@@ -1014,8 +990,7 @@ workaround.
 
 On a bare-metal Intel laptop (Core Ultra 5 125H, Fedora, rr 5.10.0) with
 `kernel.perf_event_paranoid` set to 1, rr records a `--concurrent` schedule, including its
-`jj op abandon` child processes, and replays it to the same test result. A 13-step schedule
-with two abandons made a 733 MB trace. That CPU mixes performance and efficiency cores, so, to
+`jj` child processes, and replays it to the same test result. That CPU mixes performance and efficiency cores, so, to
 be safe, pin recording and replay to one kind: `lscpu --extended` shows which CPUs are which,
 and CPUs 0-7 are the performance cores there.
 
@@ -1027,7 +1002,7 @@ taskset -c 0-7 rr replay -p PID target/head-schedule-rr
 ```
 
 `rr ps` lists the recorded processes. `-p PID` replays just that process, such as one
-`jj op abandon` child, under the debugger; add `-a` to replay it without one.
+`jj describe` child, under the debugger; add `-a` to replay it without one.
 
 ### Generated command and sync schedules
 

@@ -329,7 +329,7 @@ impl NodeRepo {
         heads: &[LocalOp],
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         for head in heads {
-            match self.canonicalize_unchecked(head) {
+            match self.canonicalize(head) {
                 Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
                 Err(err) => return Err(err),
             }

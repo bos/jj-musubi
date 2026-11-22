@@ -111,38 +111,6 @@ fn repeated_restores_keep_distinct_identities() {
     assert_ne!(a, x);
 }
 
-/// A local head whose history a native abandon can reparent while the daemon still sees it.
-pub(super) fn abandon_put_back_fixture(
-    unpublished: bool,
-) -> (TestEnv, NodeRepo, String, CanonicalOp) {
-    use pollster::FutureExt as _;
-
-    let env = TestEnv::new();
-    let a = env.init_repo("alpha");
-    let b = env.init_repo("beta");
-    let mut receiver = open(&b);
-    let mut sender = open(&a);
-    let joined = single_canonical_head(&mut receiver);
-    sync(&receiver, &mut sender, &joined);
-    a.jj(&["describe", "-m", "first"]);
-    a.jj(&["describe", "-m", "second"]);
-    let base = single_canonical_head(&mut sender);
-    sync(&sender, &mut receiver, &base);
-    let [realized]: [LocalOp; 1] = receiver.local_heads().unwrap().try_into().unwrap();
-    let store = receiver.loader().op_store().clone();
-    let parent = store
-        .read_operation(&realized.0)
-        .block_on()
-        .unwrap()
-        .parents[0]
-        .hex();
-    if unpublished {
-        b.jj(&["describe", "-m", "unpublished"]);
-    }
-    std::fs::write(b.repo_path().join("musubi/accepted_base"), base.0.hex()).unwrap();
-    (env, receiver, parent, base)
-}
-
 fn open(repo: &TestRepo) -> NodeRepo {
     NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap()
 }

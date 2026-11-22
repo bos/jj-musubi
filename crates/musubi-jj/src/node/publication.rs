@@ -164,7 +164,6 @@ impl NodeRepo {
         cache: &mut PublicationCache,
     ) -> Result<PublicationReport, NodeError> {
         self.settle()?;
-        self.retire_overtaken_moves()?;
         let base = self
             .stored_base()
             .unwrap_or_else(|| self.canonical.root_operation_id().clone());

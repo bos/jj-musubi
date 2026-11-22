@@ -430,7 +430,7 @@ least what they drop), `hnormalDef` and `hsend`.
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Publication.lean` | Cumulative snapshot accounting, exact approval, selected operation cleanup, and checks of the prepared result before installation. |
-| `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as pure functions for the oracle and the code: `lookPlan` (what to take out, put back and keep watching: `plan::look`), `entries` (`plan::entries`), `compose` (`plan::compose`) and `same` (`plan::same`); the theorems about `lookPlan`. |
+| `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as a pure function for the oracle and the code: `same` (`plan::same`); and what it reads of operations. |
 | `Musubi/OpHeadsJson.lean` | The oracle's `opHeads` request. |
 | `Musubi/OpHeadsRace.lean` | A small model of the op heads among jj commands, `jj op abandon`, `jj op integrate` and musubi's moves, and its theorems. |
 | `Musubi/NativeLifecycle.lean` | Entry point for the finite native lifecycle model. |
@@ -996,71 +996,31 @@ theirs, as the hub, which names every machine, lists them.
 
 musubi replaces op heads it read earlier, while jj commands, which publish under jj's op-heads
 lock, and `jj op abandon` and `jj op integrate`, which take no lock, change them. The model has
-the op heads, the operations (parents, a fingerprint, and whether musubi's cache knows each) and
-the lock; a command loads an operation and later publishes its own in place of it, or merges
-several op heads; `jj op abandon` writes jj's rewrite of an op head and later lands it, adding it
-and removing the head with no lock; musubi plans a move, locks, checks the op heads are those it
-read, writes each head, watches what it took out, rechecks and looks, and can save the watch and
-restart. A rewrite is an operation with the fingerprint of another and another id. [Conformance,
-"Moving op heads"](../docs/internals/conformance.md#moving-op-heads) says which code each step is
-and how it is checked.
+the op heads, the operations (their parents) and the lock; a command loads an operation and later
+publishes its own in place of it, or merges several op heads; `jj op abandon` and `jj op
+integrate` write an operation and later land it, adding it and removing what it replaces with no
+lock; musubi plans a move, locks, checks the op heads are those it read, writes each head, and
+lets go. [Conformance, "Moving op heads"](../docs/internals/conformance.md#moving-op-heads) says
+which code each step is and how it is checked.
 
-- `rewritten_empty_iff`, `lookPlan_nothing_iff`: `lookPlan` finds exactly the op heads beside a
-  rewrite of what musubi replaced (`Overtaken`): an op head that is none of musubi's, unknown to
-  its cache, with the replaced head's fingerprint and another id; and answers nothing exactly when
-  there is none. It doesn't look below the op heads, where the operation a replaced head was
-  rewritten from has that fingerprint too: `overtaken_below` says the walk it replaced found
-  whatever it finds, and `Trace.regression_trace` that it found more.
-- `retire_out_put`, `retire_stay`, `retire_back_new`, `retire_back_covers`: what it takes out is
-  only what musubi put in, and an op head beside stays; what a merge or realization it takes out
-  was on is put back, unless it is on a rewrite itself, or is what musubi replaced or put in
-  already. `retire_shrinks`, `settle_nothing`: each look that takes out leaves less to watch, so
-  looking again, as often as there are entries, ends with nothing to take out.
-- `entries_put`, `compose_put`: what musubi watches is made of operations it wrote.
 - `Inv.step`, `Reachable.inv`: the invariants of the race model, in every reachable state.
-  `RewInv.step`, `reachable_rew`, `pre_image_older`: a rewrite is made after what it rewrites and
-  has its fingerprint, the direction of the relation: what a head was rewritten from is older
-  than it. What keeps the look from taking a pre-image for a rewrite is not this but
-  `overtaken_congr`: whether a rewrite sits beside musubi's replacement depends on the op heads'
-  own fingerprints and what the cache knows, and on nothing below them.
 - `locked_blocks_commands`, `held_has_lock`, `writing_has_lock`: from taking the lock to letting
-  it go, which covers the check, every write, the watch, the recheck and a look that takes out
-  again, no command publishes or merges.
+  it go, which covers the check and every write, no command publishes or merges.
 - `check_no_event`, `check_step`: where musubi's check, under the lock, finds the op heads those
   it read, no command has published or merged, and no `jj op abandon` or `jj op integrate` has
-  landed, since it read them. The lock and the check keep commands out of the whole of a move.
-- `quiet_of_clear`, `bad_merge_owed`, `no_bad_merge_locked`, `no_bad_merge_after_look`: whenever
-  no look is owed, nothing sits beside a rewrite of what musubi replaced; a look is owed from a
-  landing, a command's publish or merge, a write of musubi's or a restart until a look finds
-  nothing. So a command can merge musubi's replacement with a rewrite of what it replaced, among
-  what musubi still watches, only where a look is owed, and never while musubi holds the lock.
-- `Trace.regression_trace`: the trace of the regression the walk below the op heads made: a
-  command that loaded an unpublished operation before an abandon rewrote it lands on it beside
-  musubi's replacement of the rewrite. The command's operation is no rewrite of the replaced head,
-  which was rewritten *from* the one it wrote on (`rew 2 = 1`), and the look at the op heads finds
-  nothing; the walk found the older one below it, and took the replacement out.
-- `Trace.remaining_case`: the case that remains for what musubi watches is reachable, as the model
-  builds it: the abandon lands after the move and a command merges the two before musubi looks
-  (the [races.md](../docs/internals/races.md#known-jj-limitations) row). Two more are the
-  exceptions that row names, where the rewrite stops being an op head before a look: a command run
-  `--at-op` at it (`Trace.at_op_case`), and another abandon that rewrites both
-  (`Trace.abandon_both_case`). `Trace.landing_during_the_move`: an abandon that lands between
-  musubi's writes is taken out by the recheck, under the lock. `Trace.saved_watch_survives`,
-  `Trace.unsaved_watch_lost`: a restart before the abandon lands keeps the watch only if
-  `records.json` was written after the move, and where it didn't, a look has nothing to find.
-  `Trace.read_during_the_move`: a second window the model found: an abandon that *reads* the op
-  heads between musubi's adding its new head and removing the old rewrites both, and nothing is
-  watched whose replacement is an op head, so a look finds nothing. It is the abandon-of-both
-  case, reached by one abandon that reads both heads while musubi moves them rather than by a
-  second after it.
+  landed, since it read them. The lock and the check keep commands out of the whole of a move, so
+  that no operation a command wrote is among those musubi takes out.
+- `Trace.landing_before_the_lock`: a landing between musubi's read and its lock makes the check
+  fail, and musubi moves nothing. `Trace.landing_during_the_move`: one between musubi's two
+  writes stays among the op heads.
 
 The model assumes of jj what `heads_laws.rs` pins, and of musubi nothing but what the conformance
-test checks of the functions and the order of steps `heads.rs` reads as. It says nothing of what
-is in a view, whether musubi's rewrite of an operation is the right one, or the hub; an operation
-musubi wrote is told from one jj wrote by the cache alone. The theorems leave out how the local
-moves refine the protocol model's steps, which are on canonical operations: a command's publish
-and merge have the shape of `EnvStep.userOp` and `EnvStep.merge` on the heads, but relating a
-local op head to its canonical operation is the translation, which this model abstracts away.
+test checks of `same` and the order of steps `heads.rs` reads as. It says nothing of what is in a
+view, whether musubi's rewrite of an operation is the right one, or the hub. The theorems leave
+out how the local moves refine the protocol model's steps, which are on canonical operations: a
+command's publish and merge have the shape of `EnvStep.userOp` and `EnvStep.merge` on the heads,
+but relating a local op head to its canonical operation is the translation, which this model
+abstracts away.
 
 ### Native preparation and publication (`NativeLifecycle/`)
 

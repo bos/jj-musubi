@@ -3,8 +3,9 @@
 //! changes the op heads publishes under the op-heads lock, but `jj op abandon` and `jj op
 //! integrate` put their operation in with no lock; `update_op_heads` adds before it removes
 //! and takes no notice of a head that isn't there; and jj's rewrite of an operation keeps its
-//! fingerprint, the content but for its parents, and takes another id. The lock is held here
-//! by the test, in process, as a jj command in another process would hold it.
+//! fingerprint, the content but for its parents, and takes another id, which is how a join point
+//! that `jj op abandon` rewrote is known. The lock is held here by the test, in process, as a jj
+//! command in another process would hold it.
 
 #![allow(clippy::unwrap_used)]
 
@@ -128,36 +129,6 @@ fn jj_op_abandon_takes_no_lock() {
     assert_eq!(now.len(), 1);
     assert_ne!(now[0], newest);
     drop(lock);
-}
-
-/// `jj op abandon` reads every op head it finds and replaces each, whether or not it merges them
-/// first: here the two op heads a command at an older operation leaves.
-#[test]
-fn jj_op_abandon_rewrites_each_op_head_it_finds() {
-    let env = TestEnv::new();
-    let (repo, older, newest) = repo_with_history(&env);
-    let store = loader(&repo).op_heads_store().clone();
-    repo.jj(&["--at-op", &older.hex(), "describe", "-m", "beside"]);
-    let before = heads(&store);
-    assert_eq!(before.len(), 2);
-    let op = loader(&repo).op_store().clone();
-    let prints = |ids: &[OperationId]| {
-        let mut prints: Vec<String> = ids
-            .iter()
-            .map(|id| fingerprint(&op.read_operation(id).block_on().unwrap()))
-            .collect();
-        prints.sort();
-        prints
-    };
-    assert!(before.contains(&newest));
-    repo.jj(&["op", "abandon", &older.hex()]);
-    let after = heads(&store);
-    assert_eq!(after.len(), 2);
-    assert!(
-        after.iter().all(|id| !before.contains(id)),
-        "each op head was replaced"
-    );
-    assert_eq!(prints(&after), prints(&before), "each by its rewrite");
 }
 
 /// `jj op integrate` adds its operation to the op heads while another process holds the lock,

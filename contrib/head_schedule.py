@@ -47,7 +47,7 @@ def main():
     search.add_argument("--unpublished", action="store_true", help="start with unpublished work")
     search.add_argument(
         "--concurrent", action="store_true",
-        help="race a second native command: an abandon, or what --peer says",
+        help="race a second native command, a write, with the first",
     )
     search.add_argument(
         "--receive", action="store_true",
@@ -56,10 +56,6 @@ def main():
     search.add_argument(
         "--loader", action="store_true",
         help="with --concurrent, also load the repository once at several heads, merging them",
-    )
-    search.add_argument(
-        "--peer", choices=["abandon", "write", "second"], default="abandon",
-        help="with --concurrent, what the second command does (default abandon)",
     )
     search.add_argument("--out", type=Path, default=ROOT / "target/head-schedule.json")
     replay = modes.add_parser("replay", help="replay a saved schedule and verify its states")
@@ -95,8 +91,6 @@ def main():
         parser.error("a C compiler named cc is required")
     if args.mode == "branch" and args.at < 0:
         parser.error("--at must be nonnegative")
-    if getattr(args, "peer", "abandon") != "abandon" and not args.concurrent:
-        parser.error("--peer requires --concurrent")
     if getattr(args, "loader", False) and not args.concurrent:
         parser.error("--loader requires --concurrent")
     if getattr(args, "jobs", None) is not None and args.jobs < 1:
@@ -129,7 +123,6 @@ def main():
         settings["MUSUBI_HEAD_SCHEDULE_RECEIVE"] = "1"
     if getattr(args, "concurrent", False):
         settings["MUSUBI_HEAD_SCHEDULE_CONCURRENT"] = "1"
-        settings["MUSUBI_HEAD_SCHEDULE_PEER"] = args.peer
         if args.loader:
             settings["MUSUBI_HEAD_SCHEDULE_LOADER"] = "1"
     if args.steps is not None:

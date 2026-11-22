@@ -1520,42 +1520,27 @@ this keeps published history readable across interruption and restart.
 
 ### Moving op heads
 
-musubi replaces op heads it read earlier: with its rewrite of the local history after an
-abandon, with the history records it takes name, with a command reparented after a renaming,
-and with the exported copy of a merge. Every jj command but two publishes its operation under
-jj's op-heads lock, in place of the op heads it loaded. `jj op abandon` and `jj op integrate`
-take no lock: an abandon puts its rewrite in place of each op head it read, however long ago it
-read them. A replacement of op heads that changed meanwhile would leave musubi's rewrite of the
-old history beside the newer one, sharing nothing with it above where the abandon rewrote from.
-Merged, by musubi or by the next jj command, the two bring back what the abandon dropped, and
-undo a command made on its rewrite.
+musubi replaces op heads it read earlier: with the realization of work it fetched, with the
+exported copy of a merge, and with the checkpoint that cleanup after `musubi sync --prune`
+writes. Every jj command but two publishes its operation under jj's op-heads lock, in place of
+the op heads it loaded. `jj op abandon` and `jj op integrate` take no lock: an abandon puts its
+rewrite in place of each op head it read, however long ago it read them. A replacement of op
+heads that changed meanwhile would leave musubi's operation beside the newer one, or take out an
+operation a jj command wrote on a head musubi never read.
 
 So musubi replaces op heads only under jj's op-heads lock, and only while they are exactly those
-it read. Otherwise it moves nothing and works the move out again from the op heads as they are, as
-after a crash before the move, from the plan it saved ([Taking the hub's](#taking-the-hubs)). An
-abandon can still put its rewrite in while musubi moves the op heads, or after. So musubi
-remembers each op head it took out, by its content but for its parents, while what it put in its
-place is still an op head. jj's rewrite of an operation keeps all but its parents: an op head
-beside musubi's that is such a rewrite was put in by an abandon that read the op heads before
-musubi moved them. It is the op head itself, since a jj command that loads two op heads merges
-them before writing on them, but for one run `--at-op` at the rewrite, or another abandon, which
-rewrites both. Below an op head, an operation with that content may instead be what the op head
-was rewritten from, as a command that loaded the repository before the abandon writes on, and
-musubi's replacement stays then. musubi takes out what it put in place of that op head, at once if
-it sees this as it finishes the move, still under the lock, or at the next look for an abandon,
-which comes before anything reads the op heads to merge them. That look then finds the abandon in
-the history jj left. What it remembers is saved with what else `records.json` saves, so a restart
-forgets it only after a move that saved nothing else. A jj command that merges the two first
-brings back what the abandon dropped, as it does on one machine where `jj op abandon` races
-another command ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+it read. Otherwise it moves nothing and works the move out again from the op heads as they are.
+It puts the new heads in before it takes the old ones out, so that a crash between leaves extra
+heads, which jj merges, rather than none. musubi doesn't try to undo a local `jj op abandon`
+that lands while it moves the op heads, or after: what the abandon dropped comes back when jj
+merges the two, as it does on one machine where `jj op abandon` races another command
+([races.md, "Known jj limitations"](races.md#known-jj-limitations)). A machine that loses
+history the hive has stops syncing, and says so.
 
 `OpHeadsRace.lean` models this among jj's commands and the lockless writers, and proves what
-holds: no command's operation lands between musubi's read and its move once the check passes; a
-look finds every op head of musubi's beside a rewrite of what it replaced and still watches, so a
-command can merge the two only where a look is owed, or where what it watches is gone or the
-rewrite is no op head, as in the exceptions above; and what a merge taken out was on is put back.
-It also finds a second window, an abandon that reads the op heads while musubi moves them, which a
-look doesn't cover ([conformance.md, "Moving op heads"](conformance.md#moving-op-heads)).
+holds: no command's operation lands between musubi's read and its move once the check passes, and
+no command runs while musubi holds the lock ([conformance.md, "Moving op
+heads"](conformance.md#moving-op-heads)).
 
 ## Compatibility
 

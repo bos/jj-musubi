@@ -141,7 +141,7 @@ impl NodeRepo {
         heads: &[LocalOp],
     ) -> Result<Arc<HashMap<CanonicalOp, LocalOp>>, NodeError> {
         for head in heads {
-            match self.canonicalize_unchecked(head) {
+            match self.canonicalize(head) {
                 Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
                 Err(err) => return Err(err),
             }
@@ -394,6 +394,7 @@ impl NodeRepo {
         captured: &mut [LocalOp],
         op_heads_store: &'a dyn OpHeadsStore,
     ) -> Result<Option<PublicationLocks<'a>>, NodeError> {
+        self.race();
         let git = self.colocation().map(Colocation::lock).transpose()?;
         let heads = self.lock_heads(op_heads_store)?;
         let mut now = self.local_heads()?;

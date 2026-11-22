@@ -31,7 +31,6 @@ impl NodeRepo {
     /// The canonical form of each local op head, but for one from before this repository
     /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]).
     pub fn canonical_heads(&mut self) -> Result<Vec<CanonicalOp>, NodeError> {
-        self.retire_overtaken_moves()?;
         let heads = self.local_heads()?;
         let mut canonical = vec![];
         for head in &heads {
@@ -169,7 +168,7 @@ impl NodeRepo {
                 })
                 .filter(|op| seen.insert(op.clone()))
                 .collect();
-            if self.replace_heads(&heads, &from, &new, true)? {
+            if self.replace_heads(&heads, &new, true)? {
                 break from;
             }
         };
@@ -228,17 +227,6 @@ impl NodeRepo {
     /// which jj makes, has the merged view, so it leaves the parents from before the join
     /// out of its canonical form.
     pub fn canonicalize(&mut self, local: &LocalOp) -> Result<CanonicalOp, NodeError> {
-        if self.canonical_of(local).is_none() {
-            self.retire_overtaken_moves()?;
-        }
-        self.canonicalize_unchecked(local)
-    }
-
-    /// [`Self::canonicalize`], which was once separate from this.
-    pub(super) fn canonicalize_unchecked(
-        &mut self,
-        local: &LocalOp,
-    ) -> Result<CanonicalOp, NodeError> {
         let op_store = self.loader.op_store().clone();
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];

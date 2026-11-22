@@ -149,9 +149,18 @@ fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &CanonicalOp) {
 
 /// Ships objects and canonical operations, then makes `head` an op head of `to`.
 pub(super) fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
+    try_sync(from, to, head).unwrap();
+}
+
+/// As [`sync`], with the error the advance returns, if it fails.
+pub(super) fn try_sync(
+    from: &NodeRepo,
+    to: &mut NodeRepo,
+    head: &CanonicalOp,
+) -> Result<(), musubi_jj::node::NodeError> {
     ship_objects(from, to, head);
     ship_operations(from, to, head);
-    to.advance(head).unwrap();
+    to.advance(head).map(drop)
 }
 
 /// Copies the canonical operations reachable from `head` that `to` lacks, as a bundle.

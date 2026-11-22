@@ -20,7 +20,7 @@
 //! With no git move, the only allowed explanation is jj's merge of concurrent op heads
 //! that both changed `git_refs`, even if one changed it back (`concurrent_records_revert`).
 //! Every record along that history must come from a native import, export or fetch, or a
-//! merge of those records, or, for a realization of a received trim, the records of the
+//! merge of those records, or, for a realization a forgotten copy took, the records of the
 //! native frontier captured before it was received, which it carries (`Log::ref_operation`).
 //! For Git refs, merges of more heads at once or with differing closest bases aren't modeled,
 //! and fail as unexplained.
@@ -107,7 +107,7 @@ pub struct Imports {
     /// Each machine's operations already looked at.
     seen: Vec<HashSet<OperationId>>,
     /// Each machine's imports already judged, by their native command metadata. The seeded
-    /// command clock gives each import its own times; contraction and per-machine exports
+    /// command clock gives each import its own times; `jj op abandon` and per-machine exports
     /// can change both parents and views without running another import (`judged_key`).
     judged: Vec<HashSet<ImportIdentity>>,
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
@@ -288,7 +288,7 @@ fn head(view: &View, ws: &str) -> RefTarget {
         .unwrap_or_else(RefTarget::absent)
 }
 
-/// A native import's identity across contraction and per-machine export. Each command gets
+/// A native import's identity across `jj op abandon` and per-machine export. Each command gets
 /// unique seeded times, and its ref and HEAD imports have distinct descriptions. A rewritten
 /// representation can have a different view as well as parents; neither is a new import.
 fn judged_key(op: &op_store::Operation) -> ImportIdentity {
@@ -455,11 +455,11 @@ impl Log {
         }
     }
 
-    /// [`Self::head_operation`], for the record of `r`: a publication carries the records of
-    /// the native frontier captured before it was received (`races.md`, "a received trim
-    /// replaces every local op head with the root"), so where its record is that frontier's
-    /// one head's, or jj's merge of its two over closest bases that agree, it is judged on
-    /// those heads, whose own history must then validate. Otherwise, on its source parents.
+    /// [`Self::head_operation`], for the record of `r`: a publication a forgotten copy takes
+    /// carries the records of the native frontier captured before it was received, so where
+    /// its record is that frontier's one head's, or jj's merge of its two over closest bases
+    /// that agree, it is judged on those heads, whose own history must then validate.
+    /// Otherwise, on its source parents.
     fn ref_operation(&mut self, id: &OperationId, r: &Ref) -> op_store::Operation {
         let op = self.record_operation(id);
         let now = self.record(id, r);
@@ -508,7 +508,7 @@ impl Log {
 
     fn captured_operation(&mut self, id: &OperationId) -> op_store::Operation {
         // jj's rewrite of a realization stands for the realization it rewrote, which may in
-        // turn stand for a source body a trim reparented.
+        // turn stand for a source body `jj op abandon` reparented.
         let op = match self.native_rewrites.get(id) {
             Some(original) => original.clone(),
             None => self.op(id).clone(),
@@ -521,8 +521,8 @@ impl Log {
             .unwrap_or(op)
     }
 
-    /// Validate the whole provenance of a record, including ancestors a trim erased from
-    /// physical history. A matching source body authenticates bytes, not their correctness.
+    /// Validate the whole provenance of a record, including ancestors `jj op abandon` erased
+    /// from physical history. A matching source body authenticates bytes, not their correctness.
     fn validate_record(
         &mut self,
         id: &OperationId,
@@ -1628,12 +1628,16 @@ fn preserved_ref_records_require_the_captured_frontier() {
         op.view_id = block_on(store.write_view(&v)).unwrap();
         block_on(store.write_operation(&op)).unwrap()
     };
-    let unrecorded = make("received trim", store.root_operation_id().clone(), &|v| {
-        v.git_refs.remove(GitRefName::new("refs/heads/main"));
-        if let Some(git) = v.remote_views.get_mut(REMOTE_NAME_FOR_LOCAL_GIT_REPO) {
-            git.bookmarks.remove(RefName::new("main"));
-        }
-    });
+    let unrecorded = make(
+        "root realization",
+        store.root_operation_id().clone(),
+        &|v| {
+            v.git_refs.remove(GitRefName::new("refs/heads/main"));
+            if let Some(git) = v.remote_views.get_mut(REMOTE_NAME_FOR_LOCAL_GIT_REPO) {
+                git.bookmarks.remove(RefName::new("main"));
+            }
+        },
+    );
     // The carrier records main as the frontier does, with the bookmark elsewhere, so that
     // it is no export's record either.
     let carrier = make("carrier", unrecorded.clone(), &|v| {
@@ -1832,7 +1836,7 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     )]))
     .validate_record(&inherited, setup, &record)
     .unwrap();
-    // A later contraction reidentifies the exact carrier on different native parents.
+    // A later `jj op abandon` reidentifies the exact carrier on different native parents.
     // The source frontier still proves its record, without another receipt or cache map.
     let mut alias = block_on(store.read_operation(&carrier)).unwrap();
     alias.parents = vec![store.root_operation_id().clone()];
@@ -1841,12 +1845,6 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
         .attributes
         .insert(CANONICAL_ATTRIBUTE.to_owned(), "new image".to_owned());
     let reidentified = block_on(store.write_operation(&alias)).unwrap();
-    let mut wrong_ancestry = alias.clone();
-    wrong_ancestry
-        .metadata
-        .attributes
-        .insert("musubi.original-parents".to_owned(), "other".to_owned());
-    let wrong_ancestry = block_on(store.write_operation(&wrong_ancestry)).unwrap();
     let mut changed_view = alias.clone();
     changed_view.view_id = block_on(store.read_operation(&wrong)).unwrap().view_id;
     changed_view.parents = vec![historical.clone()];
@@ -1873,7 +1871,7 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
         .validate_record(&reidentified, setup, &record)
         .unwrap();
 
-    for id in [&wrong_ancestry, &changed_view, &unmarked] {
+    for id in [&changed_view, &unmarked] {
         assert!(
             log(valid.clone())
                 .validate_record(id, setup, &record)
@@ -2343,7 +2341,7 @@ impl World {
                     r.git_ref()
                 ));
             }
-            // Trace this record's origin, including its authenticated pre-trim parents.
+            // Trace this record's origin, including its authenticated source parents.
             let op = log.record_operation(&at);
             if own_import(&log.owner, &op) {
                 return Err(format!(

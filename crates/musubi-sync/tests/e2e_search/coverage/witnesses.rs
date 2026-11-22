@@ -2,7 +2,7 @@
 //!
 //! Absence from today's operation ancestry cannot prove concurrency after an abandon.
 //! Instead, the two commands must be adjacent eligible rules on distinct copies, with no
-//! synchronization, operation-history contraction or unrelated command between them. Local
+//! synchronization, `jj op abandon` or unrelated command between them. Local
 //! preparation observations may snapshot or reconcile. Both commands must actually rewrite
 //! the same exact input; neither may include the other's operation in its input.
 

@@ -1,6 +1,6 @@
 //! Independent native evidence for the reference replay. Captures command inputs,
 //! operation bodies, original identities and workspace bindings before canonicalization or
-//! a history trim changes their representation. A realization marker alone is no witness.
+//! `jj op abandon` changes their representation. A realization marker alone is no witness.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -23,7 +23,6 @@ use super::NativeOrigin;
 use super::NativeOrigins;
 use super::OperationSource;
 use super::RetainedOperation;
-use super::WorkspaceTrim;
 use super::World;
 use super::merge_key;
 use super::operation_header;
@@ -58,9 +57,6 @@ pub struct NativeEvidence {
     pub(super) published_seen: BTreeSet<CanonicalOp>,
     pub(super) published_headers: BTreeSet<SourceHeader>,
     pub commands: BTreeMap<SourceKey, CommandSnapshot>,
-    /// The accepted history observed before a native trim, independent of its later fix-up.
-    pub(super) workspace_trim_inputs: BTreeMap<usize, WorkspaceTrim>,
-    pub workspace_fixup_inputs: BTreeMap<SourceKey, (String, CanonicalOp)>,
     /// Owned native bindings observed before each replacement copy joins. Its synthetic
     /// join has different metadata from the native prejoin head.
     pub workspace_joins: BTreeMap<SourceKey, BTreeMap<String, CommitId>>,
@@ -204,7 +200,7 @@ impl World {
     }
 
     /// The search creates plain workspace names, recording their births independently.
-    /// A known forgotten copy may preserve their current Git fields even without a trim.
+    /// A known forgotten copy may preserve their current Git fields.
     pub(super) fn private_git_names(&self, m: usize) -> Option<BTreeSet<String>> {
         let copy = self.fx.machine_key(m);
         let presence = self.fx.hive.hub.store().presence().ok()?;
@@ -284,10 +280,9 @@ impl World {
     }
 
     /// Observe operations before and after receipt too. A publisher cannot observe an
-    /// offline copy's old operation, but a received trim keeps its view while reparenting it.
+    /// offline copy's old operation, but `jj op abandon` keeps its view while reparenting it.
     pub(super) fn observe_operation_sources(&mut self, m: usize) {
         self.observe_native_origins(m);
-        self.observe_workspace_fixups(m);
         self.evidence
             .operation_seen
             .resize_with(self.nodes(), BTreeSet::new);
@@ -472,45 +467,8 @@ impl World {
             .collect()
     }
 
-    /// Canonicalization may replace a native fix-up at the heads with a marked version.
-    /// Read its immutable original too, but only files created during this local trim.
-    pub(super) fn observe_workspace_fixups(&mut self, m: usize) {
-        let copy = self.fx.machine_key(m);
-        let Some(trim) = self.evidence.workspace_trim_inputs.get_mut(&m) else {
-            return;
-        };
-        assert_eq!(trim.copy, copy, "trim evidence outlived its copy");
-        let node = self.fx.hive.members[m].adapter.repo();
-        let store = node.loader().op_store();
-        let files = fs::read_dir(node.repo_path().join("op_store/operations")).unwrap();
-        for file in files {
-            let file = file.unwrap();
-            let Some(id) = file.file_name().to_str().and_then(OpId::try_from_hex) else {
-                continue;
-            };
-            if !trim.seen.insert(id.clone()) {
-                continue;
-            }
-            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
-            if !op.metadata.attributes.contains_key("musubi.fixup")
-                || op
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-                || trim.before.contains(&merge_key(&op))
-            {
-                continue;
-            }
-            trim.wrote_fixup = true;
-            self.evidence
-                .workspace_fixup_inputs
-                .entry(merge_key(&op))
-                .or_insert_with(|| (trim.copy.clone(), trim.input.clone()));
-        }
-    }
-
     pub(super) fn remember_retained(&mut self, key: SourceKey, source: RetainedOperation) {
-        // A later trim must not replace the original input with an already-reparented one.
+        // A later abandon must not replace the original input with an already-reparented one.
         // An own operation knows that input; a received realization has a different parent.
         self.evidence
             .kept_operations
@@ -555,25 +513,14 @@ impl World {
         self.observe_operation_sources(m);
         self.observe_published_operations();
         self.resolve_retained_operations(m);
-        self.finish_workspace_trim(m);
         let after = self.seen(m);
         let what = format!("{}: merge by its node", self.machine(m));
         self.ledger.record_sync(m, &what, &after);
     }
 
-    fn finish_workspace_trim(&mut self, m: usize) {
-        if self
-            .evidence
-            .workspace_trim_inputs
-            .get(&m)
-            .is_some_and(|trim| trim.wrote_fixup)
-        {
-            self.evidence.workspace_trim_inputs.remove(&m);
-        }
-    }
-
     /// Remember only histories actually accepted by the hub, including ones a later
-    /// rollback or trim removes. A local command with similar metadata is not publication.
+    /// rollback or `jj op abandon` removes. A local command with similar metadata is not
+    /// publication.
     pub(super) fn observe_published_operations(&mut self) {
         let store = self.fx.hive.hub.store();
         let canonical = store.canonical();
@@ -645,35 +592,5 @@ impl World {
             i += 1;
             keep
         });
-    }
-
-    pub(super) fn begin_workspace_trim(&mut self, m: usize) {
-        self.observe_operation_sources(m);
-        self.finish_workspace_trim(m);
-        if !self.evidence.workspace_trim_inputs.contains_key(&m) {
-            let node = self.fx.hive.members[m].adapter.repo();
-            let seen: BTreeSet<_> = fs::read_dir(node.repo_path().join("op_store/operations"))
-                .unwrap()
-                .map(|file| file.unwrap())
-                .filter_map(|file| file.file_name().to_str().and_then(OpId::try_from_hex))
-                .collect();
-            let store = node.loader().op_store();
-            let before = seen
-                .iter()
-                .map(|id| futures::executor::block_on(store.read_operation(id)).unwrap())
-                .filter(|op| op.metadata.attributes.contains_key("musubi.fixup"))
-                .map(|op| merge_key(&op))
-                .collect();
-            self.evidence.workspace_trim_inputs.insert(
-                m,
-                WorkspaceTrim {
-                    copy: self.fx.machine_key(m),
-                    input: CanonicalOp(self.fx.hive.members[m].core.known().head.clone()),
-                    wrote_fixup: false,
-                    seen,
-                    before,
-                },
-            );
-        }
     }
 }

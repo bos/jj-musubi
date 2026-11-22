@@ -133,8 +133,7 @@ enum Rewrite {
     Rebase,
 }
 
-/// The command `at_op`, `late_command_after_trim` and `late_commands_after_trims` run at an
-/// older operation.
+/// The command `at_op` runs at an older operation.
 #[derive(Clone, Copy, Debug)]
 enum AtOpCommand {
     Describe,

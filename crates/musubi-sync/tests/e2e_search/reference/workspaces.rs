@@ -408,16 +408,6 @@ pub(super) fn abandoned_creation<'a>(
     !in_history(&chain) && !parents_have()
 }
 
-pub(super) fn workspace_fixup_input<'a>(
-    world: &'a World,
-    id: &CanonicalOp,
-    op: &'a op_store::Operation,
-) -> Option<(&'a str, &'a CanonicalOp)> {
-    let (trimmer, input) = world.evidence.workspace_fixup_inputs.get(&merge_key(op))?;
-    let owner = op.metadata.attributes.get("musubi.work")?;
-    (input != id && owner != trimmer).then_some((owner.as_str(), input))
-}
-
 /// The exact foreign alias is absent from this captured command's output. An owned
 /// literal never stands for a foreign slot, and an ambiguous foreign prefix is not absent.
 pub(super) fn foreign_alias_absent(
@@ -439,17 +429,6 @@ pub(super) fn foreign_alias_absent(
                             && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
                     })
         })
-}
-
-pub(super) fn workspace_source_parents(op: &op_store::Operation) -> Option<Vec<CanonicalOp>> {
-    match op.metadata.attributes.get("musubi.original-parents") {
-        Some(text) => text
-            .split_whitespace()
-            .map(OperationId::try_from_hex)
-            .map(|id| id.map(CanonicalOp))
-            .collect(),
-        None => Some(CanonicalOp::parents_of(op)),
-    }
 }
 
 /// The inputs already observed for one certificate derivation. Optional historical
@@ -491,29 +470,6 @@ impl WorkspaceDerivation<'_> {
                 }),
             )
             .any(|old| old.contains(target))
-    }
-
-    /// Follow a private binding only through an unambiguous chain in the captured jj
-    /// command. The retained canonical output cannot supply proof of its own rewrite.
-    fn retained_private_target<'a>(&'a self, original: &'a CommitId) -> Option<&'a CommitId> {
-        if !self.rewritten(original) {
-            return Some(original);
-        }
-        let predecessors = self.command?.predecessors.as_ref()?;
-        let mut target = original;
-        let mut seen = HashSet::from([original]);
-        loop {
-            let mut successors = predecessors
-                .iter()
-                .filter_map(|(next, previous)| previous.contains(target).then_some(next));
-            let Some(next) = successors.next() else {
-                return (target != original).then_some(target);
-            };
-            if successors.next().is_some() || !seen.insert(next) {
-                return None;
-            }
-            target = next;
-        }
     }
 
     /// Carry authenticated names, births and unchanged input bindings. This phase adds
@@ -598,7 +554,7 @@ impl Reference {
         op: &op_store::Operation,
         view: &View,
     ) -> BTreeSet<CommitId> {
-        let mut inputs = workspace_source_parents(op).unwrap_or_default();
+        let mut inputs = CanonicalOp::parents_of(op);
         inputs.extend(command_input.cloned());
         inputs.sort();
         inputs.dedup();
@@ -731,10 +687,7 @@ impl Reference {
         let Some(op) = Self::workspace_source(world, id) else {
             return vec![];
         };
-        let mut dependencies = workspace_source_parents(&op).unwrap_or_default();
-        if let Some(parent) = Self::contracted_workspace_parent(world, &op, &dependencies) {
-            dependencies.push(parent);
-        }
+        let mut dependencies = CanonicalOp::parents_of(&op);
         if let Some(input) = world
             .evidence
             .commands
@@ -743,14 +696,11 @@ impl Reference {
         {
             dependencies.push(input.clone());
         }
-        if let Some((_, input)) = workspace_fixup_input(world, id, &op) {
-            dependencies.push(input.clone());
-        }
         dependencies
     }
 
     /// Optional historical bases cannot borrow the certificate being proved, even
-    /// indirectly through a source parent, captured command or trim input. Preflight the
+    /// indirectly through a source parent or captured command input. Preflight the
     /// entire candidate before writing any certificate or changing the active proof stack.
     pub(super) fn workspace_dependencies_available(
         &self,
@@ -847,11 +797,7 @@ impl Reference {
         else {
             return WorkspaceCertificate::default();
         };
-        // Contraction preserves the original parent identities. Use those source parents
-        // to certify a retained operation, including a merge now represented on root.
-        let Some(parents) = workspace_source_parents(&op) else {
-            return WorkspaceCertificate::default();
-        };
+        let parents = CanonicalOp::parents_of(&op);
         let inputs: Vec<_> = parents
             .iter()
             .map(|parent| self.workspace_certificate(world, parent))
@@ -869,44 +815,16 @@ impl Reference {
         let mut result = WorkspaceCertificate::default();
         context.inherit_inputs(&mut result);
         context.seed_observed_bindings(world, &mut result);
-        self.repair_trim_workspace_bindings(world, &context, &mut result);
         if let Some(command) = command {
             self.derive_command_workspaces(world, &context, command, &mut result);
         } else if parents.len() > 1 {
             self.derive_merge_workspaces(world, &context, &mut result);
         }
         self.reconcile_present_workspace_bindings(world, &context, &mut result);
-        self.carry_contracted_private_bindings(world, &context, &mut result);
         result.authenticate_bindings();
         self.workspace_certificates
             .insert(id.clone(), result.clone());
         result
-    }
-
-    /// Confirm unchanged slots from a captured pre-trim input. A confirmed slot becomes
-    /// live and inherits its birth witness; the fix-up output cannot certify itself.
-    fn repair_trim_workspace_bindings(
-        &mut self,
-        world: &World,
-        context: &WorkspaceDerivation<'_>,
-        result: &mut WorkspaceCertificate,
-    ) {
-        let WorkspaceDerivation { id, op, view, .. } = *context;
-        // A full native trim removes the ancestry of other copies' last work. Its
-        // fix-up must preserve their accepted slots. Use the history observed before
-        // the trim, never the fix-up's work marker alone, to certify an unchanged slot.
-        if let Some((owner, input)) = workspace_fixup_input(world, id, op) {
-            let source = self.workspace_certificate(world, input);
-            for (key, target) in source.bindings() {
-                if key.split_once('/').is_some_and(|(copy, _)| copy == owner)
-                    && view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target)
-                {
-                    result
-                        .entry(key.clone())
-                        .confirm_live(target.clone(), source.evidence_for(key));
-                }
-            }
-        }
     }
 
     /// Check the actual owner command after its source is authenticated. This phase may
@@ -1204,44 +1122,13 @@ impl Reference {
                     certificate,
                 })
                 .collect();
-            let mut replays = vec![(ordinary, false)];
-            replays.extend(
-                self.workspace_private_replays(world, id, &certified)
-                    .into_iter()
-                    .map(|replay| (replay, false)),
-            );
-            if parents.len() == 2
-                && let Some(contracted) =
-                    Self::contracted_workspace_parents(world, context.op, parents)
-            {
-                let root = world.fx.hive.hub.store().canonical().root_operation_id();
-                let empty = WorkspaceCertificate::default();
-                let certified = contracted
-                    .iter()
-                    .zip(inputs)
-                    .map(|(canonical, certificate)| CertifiedParent {
-                        canonical,
-                        certificate: if canonical == root {
-                            &empty
-                        } else {
-                            certificate
-                        },
-                    })
-                    .collect::<Vec<_>>();
-                replays.extend(
-                    self.workspace_private_replays(world, id, &certified)
-                        .into_iter()
-                        .map(|replay| (replay, true)),
-                );
-            }
-            for (
-                WorkspaceReplay {
-                    view: native,
-                    parents: source_views,
-                    private,
-                },
-                private_only,
-            ) in replays
+            let mut replays = vec![ordinary];
+            replays.extend(self.workspace_private_replays(world, id, &certified));
+            for WorkspaceReplay {
+                view: native,
+                parents: source_views,
+                private,
+            } in replays
             {
                 let mut known = self.changes_of(copies.iter());
                 for source in &source_views {
@@ -1264,9 +1151,6 @@ impl Reference {
                 let structural = self.keys(&named, &|change| known.contains(change));
                 for (key, target) in &native.wc_commit_ids {
                     let name = key.as_str();
-                    if private_only && view.wc_commit_ids.contains_key(key) {
-                        continue;
-                    }
                     if world.evidence.workspace_births.contains(name)
                         && inputs.iter().zip(&source_views).any(|(input, source)| {
                             input.has_name(name) && source.wc_commit_ids.contains_key(key)
@@ -1323,83 +1207,6 @@ impl Reference {
                         inputs.iter().any(|input| input.has_merge_birth(key)),
                     );
                 }
-            }
-        }
-    }
-
-    /// A realization uses the contracted frontier even though the shared view came from
-    /// the original operation. Match surviving originals in order. A parent trimmed to the
-    /// root contributes no workspace bindings.
-    fn contracted_workspace_parents(
-        world: &World,
-        op: &op_store::Operation,
-        source_parents: &[CanonicalOp],
-    ) -> Option<Vec<CanonicalOp>> {
-        let parents = CanonicalOp::parents_of(op);
-        if parents.len() != source_parents.len() || parents == source_parents {
-            return None;
-        }
-        let root = world.fx.hive.hub.store().canonical().root_operation_id();
-        let original = |id| {
-            world
-                .fx
-                .hive
-                .members
-                .iter()
-                .find_map(|member| member.adapter.repo().canonical_store().original_id(id).ok())
-        };
-        parents
-            .iter()
-            .zip(source_parents)
-            .all(|(parent, source)| {
-                parent == root
-                    || parent == source
-                    || original(parent).is_some_and(|id| original(source) == Some(id))
-            })
-            .then_some(parents)
-    }
-
-    fn contracted_workspace_parent(
-        world: &World,
-        op: &op_store::Operation,
-        source_parents: &[CanonicalOp],
-    ) -> Option<CanonicalOp> {
-        let [_] = source_parents else {
-            return None;
-        };
-        Self::contracted_workspace_parents(world, op, source_parents)?.pop()
-    }
-
-    /// A contracted parent can have independently witnessed a private binding absent from
-    /// its original version. Carry it while the owner is absent, following any exact
-    /// rewrite observed in the command.
-    fn carry_contracted_private_bindings(
-        &mut self,
-        world: &World,
-        context: &WorkspaceDerivation<'_>,
-        result: &mut WorkspaceCertificate,
-    ) {
-        let Some(parent) = Self::contracted_workspace_parent(world, context.op, context.parents)
-        else {
-            return;
-        };
-        let source = self.workspace_certificate(world, &parent);
-        for (key, target) in source.bindings() {
-            let (owner, _) = key.split_once('/').unwrap();
-            if source.is_dormant(key)
-                && !context.presence.is_present(owner)
-                && !context
-                    .view
-                    .wc_commit_ids
-                    .contains_key(WorkspaceName::new(key))
-                && context.command.is_none_or(|command| command.copy != owner)
-                && let Some(target) = context.retained_private_target(target)
-            {
-                result.entry(key.clone()).carry_input(
-                    target.clone(),
-                    source.evidence_for(key),
-                    true,
-                );
             }
         }
     }

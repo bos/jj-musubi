@@ -150,7 +150,7 @@ impl Reference {
     /// Rebuilds the hub's canonical history, up to its head, in a new repository whose git
     /// store borrows machine 0's objects and the recorded command sources', with jj's
     /// record of their change ids and conflicts. A raw source base can contain commits
-    /// absent from the contracted canonical history, which machine 0 never fetched.
+    /// absent from the canonical history, which machine 0 never fetched.
     pub fn build(world: &World) -> Self {
         let dir = musubi_testutil::tempdir();
         let git = dir.path().join("git");
@@ -996,7 +996,7 @@ fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs(
 fn workspace_witnesses_walk_deep_histories_without_recursing() {
     use crate::world::{Naming, Setup};
 
-    let mut world = World::new(Setup {
+    let world = World::new(Setup {
         nodes: 2,
         naming: Naming::Default,
         prejoin: false,
@@ -1036,201 +1036,6 @@ fn workspace_witnesses_walk_deep_histories_without_recursing() {
     assert_eq!(
         reference.workspace_copy(&world, &head).unwrap().id(),
         &head.0
-    );
-    // A trim witness can refer outside its new root-parent graph. These dependencies
-    // must be preloaded too, rather than recursing once per earlier trim.
-    let owner = world.fx.machine_key(1);
-    let key = format!("{owner}/default");
-    let target = original.binding(&key).unwrap().clone();
-    operation.parents = vec![store.root_operation_id().0.clone()];
-    operation
-        .metadata
-        .attributes
-        .insert("musubi.work".to_owned(), owner);
-    for n in 0..512 {
-        operation.metadata.description = format!("trim workspace source {n}");
-        let next = store.write_operation(&operation).unwrap();
-        world
-            .evidence
-            .workspace_fixup_inputs
-            .insert(merge_key(&operation), (world.fx.machine_key(0), head));
-        head = next;
-    }
-    let certificate = reference.workspace_certificate(&world, &head);
-    assert_eq!(certificate.binding(&key), Some(&target));
-    assert!(certificate.has_name(&key));
-    assert_eq!(
-        certificate.has_merge_birth(&key),
-        original.has_merge_birth(&key)
-    );
-    assert!(!certificate.is_dormant(&key));
-}
-
-#[test]
-fn contracted_merge_replays_the_forgotten_receivers_workspace() {
-    use musubi_jj::canonical::Contraction;
-
-    use crate::world::{Naming, Setup};
-
-    let mut world = World::new(Setup {
-        nodes: 3,
-        naming: Naming::Own,
-        prejoin: true,
-        secondary: false,
-    });
-    let base = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
-    let key = format!("{}/beta", world.fx.machine_key(1));
-    world.jj(
-        2,
-        &["describe", "-m", "rewrite beta's workspace", "beta/beta@"],
-    );
-    world.forget_copy(0, 1);
-    world.sync(0);
-    world.sync(2);
-    world.sync(1);
-
-    let head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
-    let node = world.fx.hive.members[1].adapter.repo();
-    let store = node.canonical_store();
-    let shared = store.read_operation_view(&head).unwrap();
-    assert!(!shared.wc_commit_ids.contains_key(WorkspaceName::new(&key)));
-    let dropped = store.ancestors_until(&[base], |_| false).unwrap();
-    let mut contraction = Contraction::new(store, dropped.clone()).unwrap();
-    let [contracted] = contraction
-        .images(store, &head)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_ne!(contracted, head);
-    let original = store.read_operation(&head).unwrap();
-    let parents = store.parents(&contracted).unwrap();
-    assert_eq!(parents.len(), 2);
-    assert_ne!(parents, CanonicalOp::parents_of(&original));
-
-    let mut reference = Reference::build(&world);
-    assert!(
-        !reference
-            .workspace_certificate(&world, &contracted)
-            .has_merge_birth(&key)
-    );
-
-    world.fx.node(1).realize(&contracted).unwrap();
-    let mut reference = Reference::build(&world);
-    let certificate = reference.workspace_certificate(&world, &contracted);
-    assert!(certificate.has_merge_birth(&key));
-    assert!(certificate.is_dormant(&key));
-    let target = certificate.binding(&key).unwrap();
-
-    // Gamma's retained command can carry a private binding through a contracted parent.
-    world.sync(2);
-    world.jj(2, &["bookmark", "create", "after-merge", "-r", "@"]);
-    let gamma = world.fx.node(2);
-    let [child] = gamma.canonical_heads().unwrap().try_into().unwrap();
-    let store = gamma.canonical_store();
-    assert_eq!(store.parents(&child).unwrap(), std::slice::from_ref(&head));
-    let mut contraction = Contraction::new(store, dropped).unwrap();
-    let [contracted_child] = contraction
-        .images(store, &child)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        store.parents(&contracted_child).unwrap(),
-        std::slice::from_ref(&contracted)
-    );
-    let mut reference = Reference::build(&world);
-    // Leave the native replay of the contracted parent as the only witness.
-    reference
-        .workspace_certificates
-        .insert(head.clone(), WorkspaceCertificate::default());
-    let carried = reference.workspace_certificate(&world, &contracted_child);
-    assert_eq!(carried.binding(&key), Some(target));
-    assert!(carried.has_merge_birth(&key));
-    assert!(carried.is_dormant(&key));
-
-    world.jj(
-        2,
-        &["describe", &target.hex(), "-m", "rewrite dormant beta"],
-    );
-    let gamma = world.fx.node(2);
-    let [operation] = gamma.local_heads().unwrap().try_into().unwrap();
-    let native = block_on(gamma.loader().op_store().read_operation(&operation.0)).unwrap();
-    let [successor] = native
-        .commit_predecessors
-        .unwrap()
-        .into_iter()
-        .filter_map(|(new, old)| old.contains(target).then_some(new))
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-    let [rewritten] = gamma.canonical_heads().unwrap().try_into().unwrap();
-    let [contracted_rewrite] = contraction
-        .images(gamma.canonical_store(), &rewritten)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let mut reference = Reference::build(&world);
-    reference
-        .workspace_certificates
-        .insert(head.clone(), WorkspaceCertificate::default());
-    let carried = reference.workspace_certificate(&world, &contracted_rewrite);
-    assert_eq!(carried.binding(&key), Some(&successor));
-    assert!(carried.has_merge_birth(&key));
-    assert!(carried.is_dormant(&key));
-
-    // Trim the forget's entire line this time. The receiver can still replay the
-    // surviving parent's private binding against the native root.
-    let node = world.fx.hive.members[1].adapter.repo();
-    let store = node.canonical_store();
-    let forgotten = CanonicalOp::parents_of(&original)
-        .into_iter()
-        .find(|parent| {
-            !store
-                .read_operation_view(parent)
-                .unwrap()
-                .wc_commit_ids
-                .contains_key(WorkspaceName::new(&key))
-        })
-        .unwrap();
-    let dropped = store.ancestors_until(&[forgotten], |_| false).unwrap();
-    let mut contraction = Contraction::new(store, dropped).unwrap();
-    let [root_contracted] = contraction
-        .images(store, &head)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let parents = store.parents(&root_contracted).unwrap();
-    assert_eq!(parents.len(), 2);
-    assert!(parents.contains(store.root_operation_id()));
-    let mut reference = Reference::build(&world);
-    assert!(
-        !reference
-            .workspace_certificate(&world, &root_contracted)
-            .has_merge_birth(&key)
-    );
-    world.fx.node(1).realize(&root_contracted).unwrap();
-    let mut reference = Reference::build(&world);
-    let certificate = reference.workspace_certificate(&world, &root_contracted);
-    assert_eq!(certificate.binding(&key), Some(target));
-    assert!(certificate.has_merge_birth(&key));
-    assert!(certificate.is_dormant(&key));
-
-    world.evidence.workspace_births.remove(&key);
-    let mut reference = Reference::build(&world);
-    assert!(
-        !reference
-            .workspace_certificate(&world, &root_contracted)
-            .has_merge_birth(&key)
-    );
-    assert!(
-        !reference
-            .workspace_certificate(&world, &contracted)
-            .has_merge_birth(&key)
-    );
-    assert!(
-        !reference
-            .workspace_certificate(&world, &contracted_child)
-            .has_merge_birth(&key)
     );
 }
 

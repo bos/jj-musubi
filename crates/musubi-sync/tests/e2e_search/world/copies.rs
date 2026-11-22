@@ -339,7 +339,6 @@ impl World {
         self.evidence
             .operation_sources
             .retain(|(copy, _), _| *copy != m);
-        self.evidence.workspace_trim_inputs.remove(&m);
         self.evidence
             .operation_seen
             .resize_with(self.nodes(), BTreeSet::new);

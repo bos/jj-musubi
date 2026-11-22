@@ -155,7 +155,6 @@ impl World {
     /// the native operations `dropped`. An operation with another reachable local version
     /// has not been removed from the replicated history.
     pub fn abandon_ops(&mut self, m: usize, spec: &str, dropped: &[String]) {
-        self.begin_workspace_trim(m);
         self.observe_published_operations();
         let store = self.fx.hive.members[m]
             .adapter
@@ -184,7 +183,7 @@ impl World {
             })
             .collect();
         // Every survivor keeps its view when jj changes its parents, including commands
-        // and internal fix-ups with one parent. Pin that independent source for the reference.
+        // with one parent. Pin that independent source for the reference.
         let before = self.ops_by_key(m);
         let prior_originals: BTreeMap<_, _> = before
             .values()

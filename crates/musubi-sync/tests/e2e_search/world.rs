@@ -46,8 +46,7 @@ use self::evidence::NativeEvidence;
 
 /// Machine directories. Their hostnames are the same, unless the setup shares one.
 pub const MACHINES: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
-/// How many machines a search's hive grows to: the fourth is for the dropped merge's setup
-/// only (`World::hold_dropped_merge`).
+/// How many machines a search's hive grows to.
 pub const SEARCH_MACHINES: usize = 3;
 /// Small pools, so that machines collide on names.
 pub const BOOKMARKS: [&str; 3] = ["main", "feature", "topic"];
@@ -270,7 +269,7 @@ impl std::fmt::Debug for PastOp {
 /// expand its parent. This is independent source evidence for the reference replay.
 #[derive(Clone)]
 pub struct CommandSnapshot {
-    /// The native operation, before contraction or a per-machine export changes it.
+    /// The native operation, before a per-machine export or `jj op abandon` changes it.
     pub id: jj_lib::op_store::OperationId,
     pub copy: String,
     pub copies: BTreeSet<String>,
@@ -293,7 +292,7 @@ pub(super) enum CommandOutcome {
 const MAX_RECOVERIES: usize = 10;
 
 /// An operation observed before replication can reparent it, independently of the eventual
-/// canonical view. Its source view remains the oracle for a later contraction's survivor.
+/// canonical view. Its source view remains the oracle for a later `jj op abandon`'s survivor.
 struct OperationSource {
     operation: jj_lib::op_store::Operation,
     retained: RetainedOperation,
@@ -413,14 +412,6 @@ fn shared_origin_view(mut view: jj_lib::op_store::View) -> jj_lib::op_store::Vie
     view
 }
 
-struct WorkspaceTrim {
-    copy: String,
-    input: CanonicalOp,
-    wrote_fixup: bool,
-    seen: BTreeSet<jj_lib::op_store::OperationId>,
-    before: BTreeSet<SourceKey>,
-}
-
 pub struct World {
     pub fx: Fixture,
     pub origin: Origin,
@@ -455,7 +446,6 @@ pub struct World {
     recovery_ops: BTreeSet<String>,
     /// The change of every commit seen so far, for `fingerprint`.
     change_of: BTreeMap<String, String>,
-    /// Whether the hub has restarted since it last pruned, for coverage.
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -559,8 +549,6 @@ impl World {
                 published_seen: BTreeSet::new(),
                 published_headers: BTreeSet::new(),
                 commands: BTreeMap::new(),
-                workspace_trim_inputs: BTreeMap::new(),
-                workspace_fixup_inputs: BTreeMap::new(),
                 workspace_joins: BTreeMap::new(),
                 command_sources: BTreeMap::new(),
             },
@@ -896,142 +884,6 @@ fn a_native_return_allows_only_the_parent_version_jj_brought_back() {
     assert!(
         message.contains("has the operation") && message.contains("which alpha abandoned"),
         "{message}"
-    );
-}
-
-#[test]
-fn marked_native_repairs_keep_their_author_after_cache_loss() {
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::SharedHostname,
-        prejoin: false,
-        secondary: false,
-    });
-    let parent = OpId::try_from_hex(world.latest_op_head(0)).unwrap();
-    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
-    let store = loader.op_store().clone();
-    let mut op = futures::executor::block_on(store.read_operation(&parent)).unwrap();
-    let view = futures::executor::block_on(store.read_view(&op.view_id)).unwrap();
-    op.parents = vec![parent];
-    op.metadata.attributes.clear();
-    op.metadata.workspace_name = None;
-    op.metadata.description = "native repair carrying another copy's work".to_owned();
-    op.metadata.time.start.timestamp.0 += 1000;
-    op.metadata.time.end.timestamp.0 += 1000;
-    op.metadata
-        .attributes
-        .insert("musubi.fixup".to_owned(), "1".to_owned());
-    op.metadata
-        .attributes
-        .insert("musubi.work".to_owned(), world.fx.machine_key(1));
-    op.metadata.attributes.insert(
-        "musubi.worked-at".to_owned(),
-        op.metadata.time.end.timestamp.0.to_string(),
-    );
-    let raw = futures::executor::block_on(store.write_operation(&op)).unwrap();
-    // Creating the fixture's operation is an actor action; observing it below must
-    // neither canonicalize another source nor write a new native operation.
-    let canonical = world.fx.node(0).canonicalize(&LocalOp(raw)).unwrap();
-    world.observe_native_origins(0);
-    let data = world.fx.hive.members[0].adapter.repo().canonical_store();
-    let canonical_op = data.read_operation(&canonical).unwrap();
-    let canonical_view = data.read_view(&canonical_op.view_id).unwrap();
-    // A second copy can already hold immutable staged data before advancing to it.
-    let receiver = world.fx.hive.members[1].adapter.repo().canonical_store();
-    assert_eq!(
-        receiver.write_view(&canonical_view).unwrap(),
-        canonical_op.view_id
-    );
-    assert_eq!(receiver.write_operation(&canonical_op).unwrap(), canonical);
-    let mut alias = op.clone();
-    alias.metadata.attributes.insert(
-        musubi_jj::node::CANONICAL_ATTRIBUTE.to_owned(),
-        canonical.0.hex(),
-    );
-    assert!(
-        !world.realized(0, &canonical, &alias),
-        "work ownership is not the native author"
-    );
-    assert!(
-        world.realized(1, &canonical, &alias),
-        "a shared hostname and own-work marker prove no local creation"
-    );
-    let mut private = view.clone();
-    private.wc_commit_ids.clear();
-    private.git_heads.clear();
-    private.git_refs.clear();
-    private
-        .remote_views
-        .remove(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-    alias.view_id = futures::executor::block_on(store.write_view(&private)).unwrap();
-    assert!(
-        !world.realized(0, &canonical, &alias),
-        "private export/projection changes do not change authorship"
-    );
-    let mut wrong = private.clone();
-    wrong.head_ids.clear();
-    let mut changed = alias.clone();
-    changed.view_id = futures::executor::block_on(store.write_view(&wrong)).unwrap();
-    assert!(
-        world.realized(0, &canonical, &changed),
-        "native origin cannot excuse changed shared heads"
-    );
-    let mut wrong = private;
-    let mut remote = jj_lib::op_store::RemoteView::default();
-    remote.bookmarks.insert(
-        "extra".into(),
-        jj_lib::op_store::RemoteRef {
-            target: jj_lib::op_store::RefTarget::normal(
-                view.head_ids.iter().next().unwrap().clone(),
-            ),
-            state: jj_lib::op_store::RemoteRefState::Tracked,
-        },
-    );
-    wrong.remote_views.insert("other".into(), remote);
-    changed.view_id = futures::executor::block_on(store.write_view(&wrong)).unwrap();
-    assert!(
-        world.realized(0, &canonical, &changed),
-        "non-Git remote changes remain shared payload"
-    );
-    let mut unknown = op;
-    unknown.metadata.description = "unpublished unknown native source".to_owned();
-    let unknown = futures::executor::block_on(store.write_operation(&unknown)).unwrap();
-    let before: BTreeSet<_> = world.fx.hive.members[0]
-        .adapter
-        .repo()
-        .canonical_store()
-        .operation_ids()
-        .unwrap()
-        .into_iter()
-        .collect();
-    world.observe_native_origins(0);
-    assert!(
-        world.fx.hive.members[0]
-            .adapter
-            .repo()
-            .canonical_of(&LocalOp(unknown))
-            .is_none()
-    );
-    assert_eq!(
-        world.fx.hive.members[0]
-            .adapter
-            .repo()
-            .canonical_store()
-            .operation_ids()
-            .unwrap()
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        before
-    );
-    world.crash(0, true, 0);
-    assert!(
-        !world.realized(0, &canonical, &alias),
-        "qualified native origin survives cache loss"
-    );
-    world.clone_copy(0);
-    assert!(
-        world.realized(0, &canonical, &alias),
-        "a replacement cannot inherit the old copy's native origin"
     );
 }
 

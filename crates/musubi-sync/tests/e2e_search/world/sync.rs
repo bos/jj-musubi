@@ -62,9 +62,6 @@ impl World {
         };
         self.note_forgotten_rebase(m, forgotten);
         self.record_merges(m);
-        // A fully driven sync also finishes an unpublished-only trim, which produces
-        // no shared drop or fix-up at all.
-        self.evidence.workspace_trim_inputs.remove(&m);
         self.note_shown_again();
         steps
     }
@@ -139,8 +136,6 @@ impl World {
         };
         deliver(self, poll)?;
         self.fx.hive.members[m].adapter.before_sync()?;
-        self.observe_workspace_fixups(m);
-        self.evidence.workspace_trim_inputs.remove(&m);
         let mut realized = 0;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];

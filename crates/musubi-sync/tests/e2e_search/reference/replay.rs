@@ -685,8 +685,7 @@ impl Reference {
                 failures.reject(kind, Some(machine), RejectionCause::RealizationIsNotMaker);
                 continue;
             }
-            // A later `jj op abandon`, or musubi reparenting this machine's operations to
-            // match the hive's contraction, gives a merge other parents and keeps its view,
+            // A later `jj op abandon` gives a merge other parents and keeps its view,
             // which jj computed on the parents it had. So where the merge itself fails, each
             // native version of it, the same but for its parents, can witness it, qualifying
             // and replaying as the merge itself does. A version's parent may be an earlier

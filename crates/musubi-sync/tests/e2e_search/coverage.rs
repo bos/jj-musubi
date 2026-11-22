@@ -48,9 +48,6 @@ pub const RULES: &[&str] = &[
     "undo",
     "at_op",
     "op_abandon",
-    "trim_below_accepted_push",
-    "trim_below_accepted_forget",
-    "late_command_after_trim",
     "abandon_while_forgotten",
     "status",
     "workspace_add",
@@ -78,7 +75,6 @@ pub const RULES: &[&str] = &[
     "remake_hub",
     "lose_reply",
     "join",
-    "late_commands_after_trims",
 ];
 
 /// Events that are not rules: how the hive was set up, and outcomes some rows need.
@@ -88,7 +84,6 @@ pub const EVENTS: &[&str] = &[
     "setup:shared_hostname",
     "setup:prejoin",
     "setup:empty",
-    "setup:dropped_merge",
     "push:accepted",
     "crash:writes_in_flight",
     // Imports of git refs, by what explains each ref they changed (`imports`).
@@ -99,40 +94,8 @@ pub const EVENTS: &[&str] = &[
     "import:concurrent_heads",
     "join:with_history",
     "join:fetch_conflict",
-    "remake_hub:joiner_with_prefix",
     // A forgotten copy's sync rebased a hidden working copy of its own.
     "forgotten:working_copy_rebased",
-    // The shapes `late_commands_after_trims` reached: a late command on an operation from
-    // before the machine's latest full trim, or two trims before it; on a merge; with the
-    // clock stepped back; among three machines. A merge of op heads after late commands, and
-    // one where a head is a command with the clock stepped back, which ends before every other
-    // operation, so that jj puts a stepped-back head first. What another machine did between
-    // trims.
-    "late:earlier_trim",
-    "late:two_trims_earlier",
-    "late:on_merge",
-    "late:clock_back",
-    "late:three_machines",
-    "late:merge",
-    "late:merge_after_clock_back",
-    "late:meanwhile_sync",
-    "late:meanwhile_commit",
-    "late:meanwhile_workspace_add",
-    "late:meanwhile_workspace_rename",
-    "late:meanwhile_workspace_forget",
-    "late:meanwhile_forget_copy",
-    "late:meanwhile_join",
-    // Late commands that bring back an earlier view, an abandon of a late operation brought
-    // back, and a machine joining under an existing machine's name.
-    "late:undo",
-    "late:restore",
-    "late:abandon",
-    "late:meanwhile_join_same_name",
-    // The old-alias shape: a late restore, after a same-name join, to an operation from before
-    // it, a late command on what a late undo or restore wrote, and an abandon of that.
-    "late:restore_to_before_join",
-    "late:on_restore",
-    "late:abandon_restore",
 ];
 
 /// Approximate exploration guidance for each race-catalogue test. These rule combinations
@@ -375,92 +338,9 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
-    ("op_abandon_replicates", Some(&["op_abandon"])),
-    (
-        "abandoning_another_machines_latest_operation_keeps_its_git_head",
-        Some(&["commit", "op_abandon"]),
-    ),
-    (
-        "a_trim_above_a_dropped_base_keeps_materialized_work",
-        Some(&["op_abandon", "crash", "trim_below_accepted_push"]),
-    ),
-    (
-        "a_full_trim_keeps_a_forgotten_receivers_private_workspaces",
-        Some(&["trim_below_accepted_forget", "edit_unsnapshotted"]),
-    ),
-    (
-        "a_full_trim_below_unpublished_work_keeps_workspace_owners",
-        Some(&["op_abandon", "new_commit"]),
-    ),
-    (
-        "abandoning_where_a_sync_showed_a_workspace_again_keeps_its_owner",
-        Some(&["forget_other_workspace", "sync", "op_abandon"]),
-    ),
-    (
-        "abandoning_twice_where_a_sync_showed_a_workspace_again_keeps_its_owner",
-        Some(&["forget_other_workspace", "sync", "op_abandon"]),
-    ),
-    (
-        "abandoning_a_rename_a_forget_saw_keeps_the_new_name",
-        Some(&[
-            "workspace_rename",
-            "hub_goes_back",
-            "forget_copy",
-            "op_abandon",
-        ]),
-    ),
-    // A plain jj repository, without musubi.
-    (
-        "jj_brings_back_a_forgotten_workspace_after_a_full_trim",
-        None,
-    ),
-    (
-        "a_full_trim_brings_back_a_name_its_owner_renamed_as_jj_does",
-        Some(&["workspace_rename", "op_abandon"]),
-    ),
-    // The workspace-name pool has no foreign alias containing a slash.
-    (
-        "a_trim_does_not_reserve_a_forgotten_copys_workspace_name",
-        None,
-    ),
-    // This requires a native command inside one adapter advance, between policy calls.
-    ("a_command_inside_a_full_trim_keeps_workspace_owners", None),
-    (
-        "a_late_command_after_a_trim_to_the_root_keeps_others_workspaces_theirs",
-        Some(&["late_command_after_trim"]),
-    ),
-    (
-        "e2e_late_command_after_trim",
-        Some(&["late_command_after_trim"]),
-    ),
-    (
-        "a_late_command_after_a_second_trim_to_the_root_keeps_others_workspaces_theirs",
-        Some(&["late_commands_after_trims", "late:earlier_trim"]),
-    ),
-    (
-        "a_merge_of_late_commands_after_two_trims_keeps_others_workspaces_theirs",
-        Some(&[
-            "late_commands_after_trims",
-            "late:meanwhile_join",
-            "late:merge_after_clock_back",
-        ]),
-    ),
-    (
-        "abandoning_a_late_command_after_a_rename_keeps_others_workspaces_theirs",
-        Some(&[
-            "late_commands_after_trims",
-            "late:earlier_trim",
-            "late:meanwhile_workspace_rename",
-            "op_abandon",
-        ]),
-    ),
     // The search has no operation-restore rule.
     (
         "abandoning_a_restore_of_an_old_alias_keeps_others_workspaces_theirs",
-        None,
-    ),
-    (
-        "abandoning_a_late_restore_of_an_old_alias_keeps_others_workspaces_theirs",
         None,
     ),
     (
@@ -468,57 +348,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("abandoning_the_add_of_an_own_workspace_keeps_it_here", None),
-    (
-        "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
-        Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),
-    ),
-    (
-        "e2e_git_change_while_taking_a_trim",
-        Some(&[
-            "trim_below_accepted_push",
-            "sync_partial",
-            "bookmark_delete",
-        ]),
-    ),
-    (
-        "a_trim_below_an_accepted_forget_keeps_the_copy_forgotten",
-        Some(&["trim_below_accepted_forget"]),
-    ),
-    (
-        "e2e_trim_below_accepted_forget",
-        Some(&["trim_below_accepted_forget"]),
-    ),
-    // The search interleaves whole policy steps, not a command inside adapter.advance.
-    (
-        "a_forward_bookmark_survives_a_command_inside_a_trim_advance",
-        None,
-    ),
-    // This needs two range trims retaining an independently cached root branch.
-    (
-        "a_second_trim_keeps_git_state_with_a_cached_root_realization",
-        None,
-    ),
-    (
-        "a_trim_below_an_accepted_push_keeps_the_other_copy_present",
-        Some(&["trim_below_accepted_push"]),
-    ),
-    (
-        "e2e_trim_below_accepted_push",
-        Some(&["trim_below_accepted_push"]),
-    ),
-    // The search does not run jj's object-pruning gc after restoring and abandoning a base.
-    (
-        "collected_objects_of_an_abandoned_fetch_base_are_fetched_again",
-        None,
-    ),
     // Hub remakes are between generated syncs, not between requests of a running round.
     ("an_empty_object_reply_retries_from_the_remade_hub", None),
-    // These require exact cuts within record taking, not just a partial sync and rollback.
-    (
-        "a_sync_stopped_while_taking_an_abandon_the_hub_then_loses",
-        None,
-    ),
-    ("taking_an_abandon_resumes_where_it_stopped", None),
     // This correspondence case fixes identical operation metadata on different copies;
     // generated commands advance their timestamps instead.
     ("independent_merges_can_reuse_a_canonical_operation", None),
@@ -527,171 +358,9 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "interrupted_git_export_can_leave_aliased_operation_heads",
         None,
     ),
-    // These require a receiver that has only record metadata for a dropped operation,
-    // followed by rollback and a different raw version of the same immutable original.
-    (
-        "record_bodies_keep_pending_drops_named_after_hub_rollback",
-        None,
-    ),
-    (
-        "lost_records_follow_an_older_name_the_receiver_never_held",
-        None,
-    ),
-    // The search's fixed participants never leave. These native boundary checks also need
-    // exact cuts before realization/advancement or a dropped merge with separate images.
-    // The generated core survivor_advance_conformance separately targets the new steps.
-    (
-        "received_records_survive_departure_and_drop_local_aliases",
-        None,
-    ),
-    (
-        "an_operation_first_received_after_rollback_uses_the_applied_namespace",
-        None,
-    ),
-    (
-        "lost_received_records_preserve_work_before_the_fixup_arrives",
-        None,
-    ),
-    (
-        "a_dropped_head_published_again_is_dropped_by_who_took_it",
-        None,
-    ),
-    (
-        "advancing_to_what_survives_of_a_dropped_head",
-        Some(&["setup:dropped_merge"]),
-    ),
-    (
-        "advancing_to_what_survives_refuses_what_jj_cannot_merge",
-        None,
-    ),
-    (
-        "realizing_an_operation_this_machine_dropped_writes_nothing",
-        None,
-    ),
-    // This also needs explicit integration and work on an unpublished realization.
-    (
-        "pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup",
-        None,
-    ),
-    (
-        "a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup",
-        None,
-    ),
-    // These need a specific interrupted adoption across two record histories, not merely
-    // the op_abandon and hub_goes_back rules occurring in the same generated sequence.
-    (
-        "a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup",
-        None,
-    ),
-    (
-        "a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known",
-        None,
-    ),
-    (
-        "op_abandon_under_a_realized_head_replicates",
-        Some(&["op_abandon"]),
-    ),
-    (
-        "op_abandon_below_a_merge_with_concurrent_work_replicates",
-        Some(&["op_abandon"]),
-    ),
-    (
-        "concurrent_op_abandons_on_two_machines",
-        Some(&["op_abandon"]),
-    ),
-    (
-        "a_jj_command_in_flight_during_the_rewrite",
-        Some(&["op_abandon", "at_op"]),
-    ),
-    // The search runs native abandon to completion before the next daemon step.
-    ("abandon_put_back_survives_the_native_head_removal", None),
-    // It runs native commands between the daemon's steps, never between the daemon reading
-    // the op heads and moving them.
-    ("jj_commands_while_the_daemon_rewrites_an_abandon", None),
-    ("a_second_abandon_while_the_daemon_moves_the_op_heads", None),
-    // Both stop or race the daemon's move of the op heads to a record's history, which the
-    // search never interleaves with a native command.
-    (
-        "an_abandon_while_the_daemon_moves_to_what_a_record_names",
-        None,
-    ),
-    ("an_abandon_before_a_restart_that_finishes_taking_one", None),
-    ("a_second_abandon_while_the_daemon_rewrites_the_first", None),
-    ("a_second_abandon_after_the_daemon_moves_the_op_heads", None),
-    (
-        "a_command_from_before_an_abandon_lands_beside_the_daemons_rewrite",
-        None,
-    ),
-    (
-        "a_second_abandon_merged_before_the_daemon_looks_again",
-        None,
-    ),
     (
         "a_native_serial_merge_can_repeat_a_rebase_after_abandon",
         Some(&["op_abandon", "at_op"]),
-    ),
-    (
-        "an_offline_machine_comes_back_after_an_abandon",
-        Some(&["op_abandon"]),
-    ),
-    (
-        "hub_restarts_during_and_after_a_rewrite",
-        Some(&["op_abandon", "restart_hub"]),
-    ),
-    (
-        "hub_goes_back_or_is_remade_after_a_rewrite",
-        Some(&["op_abandon", "hub_goes_back"]),
-    ),
-    (
-        "an_abandon_a_stale_workspace_brought_back_stays",
-        Some(&["op_abandon", "workspace_commit"]),
-    ),
-    // The search runs no `jj util gc`.
-    ("op_abandon_then_gc", None),
-    (
-        "a_trim_makes_the_hub_smaller",
-        Some(&["op_abandon", "prune"]),
-    ),
-    (
-        "an_offline_machine_holds_pruning_back",
-        Some(&["prune:held_back", "prune"]),
-    ),
-    (
-        "a_forgotten_copy_behind_pruned_records_stops",
-        Some(&["prune:stopped"]),
-    ),
-    (
-        "a_forgotten_copy_that_took_the_pruned_records_comes_back",
-        Some(&["prune:forgotten_took", "commit"]),
-    ),
-    // The search's joins finish their first sync at once, their first push landing.
-    (
-        "a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on",
-        None,
-    ),
-    // Expiry permutations are checked by the hub's repository-free policy table.
-    (
-        "hub::tests::pruning_waits_for_recent_joins_and_restart_grace",
-        None,
-    ),
-    ("a_copy_joining_again_is_waited_for", None),
-    // The search delivers every reply at once, never one held up across a prune.
-    (
-        "a_machine_takes_records_from_a_pruned_one_it_held_before",
-        None,
-    ),
-    ("a_machine_joins_after_a_prune", Some(&["join:after_prune"])),
-    (
-        "hub_restarts_after_a_prune",
-        Some(&["restart_hub:after_prune", "prune:after_restart"]),
-    ),
-    (
-        "hub_goes_back_across_a_prune",
-        Some(&["hub_loses_prune", "prune:after_restart"]),
-    ),
-    (
-        "a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again",
-        Some(&["remake_hub:joiner_with_prefix"]),
     ),
     ("restart_with_lost_cache", Some(&["lose_cache"])),
     (
@@ -702,20 +371,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "crash_with_writes_in_flight",
         Some(&["crash:writes_in_flight"]),
     ),
-    // Fixed timestamps intentionally defeat jj metadata uniqueness; the search advances
-    // time per command, so this limitation is covered by a targeted jj test.
-    (
-        "repeated_restores_keep_distinct_identities_when_contracted",
-        None,
-    ),
-    (
-        "coalesced_history_after_gc_is_refused_before_publishing_drops",
-        None,
-    ),
     // A negative control of a design musubi does not use.
     ("verbatim_replication_reverts_bookmarks", None),
-    // Native callbacks pause inside an adapter call; generated rules run between calls.
-    ("helper_exports_when_a_second_head_arrives", None),
 ];
 
 /// Counts belong to one report, including every attempted case's rule activity. A witness

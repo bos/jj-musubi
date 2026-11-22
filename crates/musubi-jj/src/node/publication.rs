@@ -83,7 +83,6 @@ impl NodeRepo {
             known: &known,
             roots: std::slice::from_ref(&self.root_op_id().0),
             is_join: &|op| self.is_join_point(op),
-            parents: &|_| Ok(None),
         };
         let expected = git::format_expected(&git::expected_values(
             repo.store(),

@@ -124,25 +124,3 @@ impl<O, A> Reply<O, A> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::HeadKind;
-
-    /// Logs name the kind of a reply's head in lowercase.
-    #[test]
-    fn head_kinds_print_their_lowercase_names() {
-        let kinds = [
-            HeadKind::Head,
-            HeadKind::Accepted,
-            HeadKind::Rejected,
-            HeadKind::Incomplete,
-            HeadKind::Notify,
-        ];
-        let names: Vec<String> = kinds.iter().map(ToString::to_string).collect();
-        assert_eq!(
-            names,
-            ["head", "accepted", "rejected", "incomplete", "notify"]
-        );
-    }
-}

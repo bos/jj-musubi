@@ -416,22 +416,6 @@ impl World {
         self.round_trip(sent_before);
     }
 
-    /// [`Self::exchange`], with the measures checked across it, as `quiesce` checks them.
-    pub fn exchange_checked(&mut self, node: usize, merge_objs: usize) {
-        let mut measure = self.measure();
-        let before = self.node_view(node);
-        self.exchange(node, merge_objs);
-        self.check_measure(node, before, &mut measure);
-    }
-
-    /// [`Self::poll_now`], with the measures checked across it, as `quiesce` checks them.
-    pub fn poll_now_checked(&mut self, node: usize) {
-        let mut measure = self.measure();
-        let before = self.node_view(node);
-        self.poll_now(node);
-        self.check_measure(node, before, &mut measure);
-    }
-
     /// Delivers each request sent since `sent_before` to the hub, and its reply straight back.
     fn round_trip(&mut self, sent_before: usize) {
         let mut i = sent_before;
@@ -776,21 +760,6 @@ impl World {
 
     pub fn parents(&self, op: Op) -> Vec<Op> {
         self.univ.borrow().parents[op as usize].clone()
-    }
-
-    /// The objects operation `op` made.
-    pub fn objects(&self, op: Op) -> Vec<Obj> {
-        self.univ.borrow().objs[op as usize].clone()
-    }
-
-    /// Whether the hub stores operation `op` and every operation and object it reaches.
-    pub fn hub_closed(&self, op: Op) -> bool {
-        self.hub.closed(op)
-    }
-
-    /// Whether the hub stores object `obj`.
-    pub fn hub_has_object(&self, obj: Obj) -> bool {
-        self.hub.objs.contains(&obj)
     }
 
     pub fn known(&self, node: usize) -> (u64, Op) {

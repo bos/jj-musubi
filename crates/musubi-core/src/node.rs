@@ -116,7 +116,8 @@ pub trait LocalRepo {
 
     /// This node learned that the hub's head is `head`, from a reply to its own request: if
     /// that is what it pushed last, the hub took it, though the base may not have moved to
-    /// it yet, so that a `jj op abandon` of it must be noticed as one of the base would be.
+    /// it yet, so that losing it, as a `jj op abandon` of it would, stops this node as losing
+    /// the base would.
     fn learned(&mut self, _head: &Self::Op) -> Result<(), Self::Error> {
         Ok(())
     }

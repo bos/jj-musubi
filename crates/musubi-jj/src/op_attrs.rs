@@ -84,7 +84,7 @@ impl<'a> OpAttrs<&'a BTreeMap<String, String>> {
         self.get(ARGS)
     }
 
-    /// The presence a contraction stamped this with.
+    /// The presence an earlier release's contraction stamped this with.
     pub fn presence(&self) -> Option<&'a str> {
         self.get(origin::PRESENCE)
     }

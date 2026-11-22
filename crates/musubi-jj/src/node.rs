@@ -166,9 +166,9 @@ pub struct NodeRepo {
     presences: Arc<crate::canonical::PresenceMemo>,
     /// Merge diagnosis retained across retries and reopening the same repository.
     merge_diagnosis: MergeDiagnosis,
-    /// Local operations canonicalized on operations a renaming superseded, as a `jj` command
-    /// writes that loaded the repository before it, parents first: to reparent onto the
-    /// rewrites.
+    /// Local operations canonicalized on a local operation that isn't the preferred realization
+    /// of its canonical parent, as a `jj` command writes that loaded the repository before it,
+    /// parents first: to reparent onto that realization.
     late: Vec<LocalOp>,
     /// Whether an earlier release left drops recorded here that it hadn't published
     /// (`legacy`).

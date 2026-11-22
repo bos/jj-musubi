@@ -421,7 +421,7 @@ mod tests {
                 .any(|key| key.as_str() == second)
         );
         let mut dropped = Work::of(store, &old).unwrap();
-        // Contraction retains the original identity while removing its operation.
+        // Work that no operation stands for, as an earlier release's stamp can name.
         dropped.op = None;
         let concrete = Work::of(store, &current).unwrap();
         let old_names = BTreeSet::from([dropped.clone()]);
@@ -456,7 +456,7 @@ mod tests {
             0,
             "two erased operations provide no ordering evidence"
         );
-        // Newer work an abandon dropped, on a line that saw the older concrete work, as
+        // Newer work no operation stands for, on a line that saw the older concrete work, as
         // a forget that saw a rename: that line has the newer workspaces.
         let older = BTreeSet::from([Work::of(store, &old).unwrap()]);
         let mut newer = Work::of(store, &current).unwrap();

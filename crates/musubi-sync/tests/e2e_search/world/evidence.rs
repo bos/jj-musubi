@@ -1,13 +1,13 @@
-//! Independent native evidence for the reference replay. Captures command inputs,
-//! operation bodies, original identities and workspace bindings before canonicalization or
-//! `jj op abandon` changes their representation. A realization marker alone is no witness.
+//! Independent native evidence for the checks and the reference replay. Captures command
+//! inputs, operation bodies, original identities and workspace births before canonicalization
+//! or `jj op abandon` changes their representation. A realization marker alone is no evidence
+//! of who made an operation.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
@@ -30,12 +30,11 @@ use super::shared_origin_view;
 
 /// Inputs captured before later actors can rewrite their native representation. The
 /// baseline and join cuts identify the history being judged; command and operation sources
-/// record what actually happened; workspace and publication witnesses qualify when that
-/// source may explain a later result. Live actors and their recovery policy belong to World.
+/// record what actually happened; workspace births and publications say which names a copy
+/// made and what the hub accepted. Live actors and their recovery policy belong to World.
 pub struct NativeEvidence {
     /// Names actually created in each copy, independent of the resulting hive namespace.
     pub workspace_births: BTreeSet<String>,
-    pub initial_workspace_keys: BTreeSet<String>,
     /// Each machine's operation ids and keys once the hive was set up.
     pub(super) baseline_ids: Vec<BTreeSet<String>>,
     pub baseline_keys: Vec<BTreeSet<HistoryKey>>,
@@ -56,9 +55,6 @@ pub struct NativeEvidence {
     pub(super) published_seen: BTreeSet<CanonicalOp>,
     pub(super) published_headers: BTreeSet<SourceHeader>,
     pub commands: BTreeMap<SourceKey, CommandSnapshot>,
-    /// Owned native bindings observed before each replacement copy joins. Its synthetic
-    /// join has different metadata from the native prejoin head.
-    pub workspace_joins: BTreeMap<SourceKey, BTreeMap<String, CommitId>>,
     /// The object and jj metadata stores of command sources, including copies later
     /// replaced. The fixture retains their directories until the case ends.
     pub command_sources: BTreeMap<PathBuf, PathBuf>,
@@ -120,7 +116,7 @@ impl World {
                 let input = self.fx.hive.members[m]
                     .adapter
                     .repo()
-                    .canonical_of(&LocalOp(parent_id.clone()))
+                    .canonical_of(&LocalOp(parent_id))
                     .filter(|input| {
                         self.fx.hive.members[m]
                             .adapter
@@ -131,17 +127,9 @@ impl World {
                             || self.baseline_operation(&merge_key(&parent))
                     });
                 CommandSnapshot {
-                    parent: parent_id,
-                    input,
-                    predecessors: op.commit_predecessors.clone(),
                     id: id.clone(),
                     copy: self.fx.machine_key(m),
-                    copies: self
-                        .evidence
-                        .workspace_births
-                        .iter()
-                        .filter_map(|key| key.split_once('/').map(|(copy, _)| copy.to_owned()))
-                        .collect(),
+                    input,
                     base: store.read_view(&parent.view_id).await.unwrap(),
                     made: store.read_view(&op.view_id).await.unwrap(),
                 }

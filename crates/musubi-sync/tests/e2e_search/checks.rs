@@ -14,6 +14,7 @@ use musubi_jj::op_id::LocalOp;
 use musubi_sync::OpId;
 
 use crate::identity::HistoryKey;
+use crate::reference::RebaseTwice;
 use crate::reference::Reference;
 use crate::view::View;
 use crate::world::World;
@@ -101,7 +102,6 @@ impl World {
     }
 
     /// Checks agreement, retention and translation, then judges the same history against jj.
-    /// Workspace certificates are collected before the history and conflict checks use them.
     fn check_converged_history(&mut self) {
         let views: Vec<View> = (0..self.nodes()).map(|m| self.view_at_head(m)).collect();
         self.check_heads();
@@ -109,7 +109,7 @@ impl World {
         self.check_operations();
         self.check_tags();
         let mut reference = Reference::build(self);
-        self.check_workspaces(&views, &mut reference);
+        self.check_workspaces(&views);
         self.check_history(&mut reference);
         let beyond = reference.beyond_jj();
         self.check_divergence(&views[0], &mut reference, &beyond);
@@ -268,7 +268,7 @@ impl World {
     /// copies are visible, but for a machine the hive has forgotten, whose working copy can
     /// stay on the hidden commit its forget abandoned until its next work. (It shows the other
     /// machines' too, as `machine/workspace`: `exercise_workspace_visibility`.)
-    fn check_workspaces(&mut self, views: &[View], reference: &mut Reference) {
+    fn check_workspaces(&mut self, views: &[View]) {
         // No rule names a workspace with a `/` (`WORKSPACES`, and the machines' own names), so
         // a copy given one took another machine's workspace, as it shows it (`beta/default`),
         // for its own.
@@ -280,7 +280,6 @@ impl World {
                 "the hive gives a copy another machine's workspace as its own: {key}"
             ));
         }
-        let witnessed = reference.witnessed_workspace_names(self);
         let shown = self.fx.shown_machines();
         for (m, view) in views.iter().enumerate() {
             let listed: BTreeSet<String> = self
@@ -293,25 +292,28 @@ impl World {
                 .iter()
                 .map(|ws| ws.name.clone())
                 .collect();
+            // A machine may list a workspace it has no directory for, but only under a name
+            // it created.
             let owner = self.fx.machine_key(m);
-            self.logical_extras[m] = witnessed
+            let extras: BTreeSet<String> = listed.difference(&physical).cloned().collect();
+            let unborn: Vec<&String> = extras
                 .iter()
-                .filter_map(|key| {
-                    let (copy, name) = key.split_once('/')?;
-                    (copy == owner && !name.contains('/') && !physical.contains(name))
-                        .then(|| name.to_owned())
+                .filter(|name| {
+                    !self
+                        .evidence
+                        .workspace_births
+                        .contains(&format!("{owner}/{name}"))
                 })
                 .collect();
-            let expected: BTreeSet<String> = physical
-                .into_iter()
-                .chain(self.logical_extras[m].iter().cloned())
-                .collect();
-            if listed != expected {
+            let missing: Vec<&String> = physical.difference(&listed).collect();
+            if !missing.is_empty() || !unborn.is_empty() {
                 self.fail(&format!(
-                    "{} lists workspaces {listed:?}, expected {expected:?}; unmapped native source inputs: {:?}",
-                    self.machine(m), reference.workspace_unmapped
+                    "{} lists workspaces {listed:?}: without {missing:?}, which it has \
+                     directories for, and with {unborn:?}, which it never created",
+                    self.machine(m)
                 ));
             }
+            self.logical_extras[m] = extras;
             if !shown.contains(&self.fx.machine_key(m)) {
                 continue;
             }
@@ -331,8 +333,10 @@ impl World {
     /// (`Reference::beyond_jj`), and never by the same rebase done twice, which the
     /// hub's sequencing exists to prevent: the ledger finds two alike commits of a change
     /// that no two commands explain, and the reference confirms that two merges rewrote one
-    /// commit alike (`Reference::same_rebase_twice`).
-    fn check_divergence(&self, view: &View, reference: &mut Reference, beyond: &[String]) {
+    /// commit alike, where jj's own merge of neither's parents does
+    /// (`Reference::same_rebase_twice`). jj's own repeat, after `jj op abandon`, goes in the
+    /// trace instead.
+    fn check_divergence(&mut self, view: &View, reference: &mut Reference, beyond: &[String]) {
         let alike = self.ledger.alike_commits(view, |a, b| {
             let diff = self.raw_jj(
                 0,
@@ -374,8 +378,16 @@ impl World {
             .map(|change| format!("{change} (more than jj makes)"))
             .collect();
         for change in &alike {
-            if reference.same_rebase_twice(change) {
-                spurious.push(format!("{change} (the same rebase twice)"));
+            match reference.same_rebase_twice(change) {
+                RebaseTwice::No => {}
+                RebaseTwice::ByJj => self.record(format!(
+                    "{change}: two alike commits, the same rebase done twice by jj's own merge \
+                     too, as after `jj op abandon` (docs/internals/races.md, \"Known jj \
+                     limitations\"): not musubi's"
+                )),
+                RebaseTwice::ByMerges => {
+                    spurious.push(format!("{change} (the same rebase twice)"));
+                }
             }
         }
         if !spurious.is_empty() {
@@ -403,9 +415,9 @@ impl World {
                 }
             }
             self.fail(&format!(
-                "spurious divergence: {}\n{history}\nwhere jj's merges differ from the hive's:\n{}\n{}",
+                "spurious divergence: {}\n{history}\n{}\n{}",
                 details.join(", "),
-                reference.deviations.join("\n"),
+                reference.deviation_report(),
                 self.raw_jj(0, &["op", "log", "-n", "40", "--no-graph"])
             ));
         }
@@ -465,9 +477,9 @@ impl World {
             .collect();
         if !spurious.is_empty() {
             self.fail(&format!(
-                "spurious conflicts: {}\nwhere jj's merges differ from the hive's:\n{}",
+                "spurious conflicts: {}\n{}",
                 spurious.join(", "),
-                reference.deviations.join("\n")
+                reference.deviation_report()
             ));
         }
     }
@@ -488,9 +500,9 @@ impl World {
         }
         if !reference.unexplained.is_empty() {
             self.fail(&format!(
-                "operations made changes diverge or names conflict, unlike jj: {}\nwhere jj's merges differ from the hive's:\n{}",
+                "operations made changes diverge or names conflict, unlike jj: {}\n{}",
                 reference.unexplained.join("\n"),
-                reference.deviations.join("\n")
+                reference.deviation_report()
             ));
         }
     }
@@ -725,4 +737,43 @@ fn translation_replay_preserves_actor_bytes_clock_and_randomness() {
         (world.fingerprint(), world.next_actor_randomness())
     };
     assert_eq!(run(false), run(true));
+}
+
+/// A machine may list a workspace it has no directory for only under a name it created.
+#[test]
+fn a_listed_workspace_without_a_directory_needs_a_name_its_copy_created() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    // Made outside the world's own actions, so neither a directory it knows of nor a birth.
+    let path = world.fx.env.root().join("stray");
+    world.raw_jj(
+        0,
+        &[
+            "workspace",
+            "add",
+            "--name",
+            "stray",
+            path.to_str().unwrap(),
+        ],
+    );
+    let views: Vec<View> = (0..world.nodes()).map(|m| world.view_at_head(m)).collect();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.check_workspaces(&views);
+    }))
+    .expect_err("a name the copy never created fails");
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("[\"stray\"], which it never created"),
+        "{message}"
+    );
+    let birth = format!("{}/stray", world.fx.machine_key(0));
+    world.evidence.workspace_births.insert(birth);
+    world.check_workspaces(&views);
+    assert!(world.logical_extras[0].contains("stray"));
 }

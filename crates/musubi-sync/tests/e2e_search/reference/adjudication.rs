@@ -1,25 +1,21 @@
-//! Classify each history entry, check its source evidence, and adjudicate its native replay.
+//! Classify each history entry, check it against its recorded source, and compare jj's replay
+//! of it with the hive's.
 //!
-//! Source-recorded commands and retained operations have payload checks before replay.
-//! A differing merge needs one of three independent native witnesses, tried in order:
-//! captured maker inputs, certified private workspace bindings, then the native DAG/index.
-//! Structural equality alone can rejoin the hive only across the full deviation frontier.
+//! Source-recorded commands and retained operations have payload checks before replay. A merge
+//! unlike jj's merge of the same parents is a deviation, and fails only for what it has beyond
+//! jj's. Structural equality can rejoin the hive only across the full deviation frontier.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures::executor::block_on;
-use jj_lib::backend::ChangeId;
+use jj_lib::backend::CommitId;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::op_store;
 use jj_lib::op_store::View;
 use jj_lib::operation::Operation;
 use musubi_jj::op_id::CanonicalOp;
 
-use super::comparison::Summary;
-use super::replay::CertifiedParent;
 use super::rewrites::MergeRewrite;
-use super::witnesses::{RejectionCause, WitnessFailures, WitnessKind};
 use super::{Made, Reference, describe, dominates, explained};
 use crate::world::{CommandSnapshot, RetainedOperation, World, merge_key};
 
@@ -132,30 +128,6 @@ impl<'a> ReplayHistory<'a> {
     }
 }
 
-enum Agreement {
-    Exact,
-    Native(Box<NativeMergeWitness>),
-    Different(Option<WitnessFailures>),
-}
-
-/// The independent observation that licenses a merge unlike the canonical-parent replay.
-/// Every variant has already passed complete structural comparison with the candidate.
-enum NativeMergeWitness {
-    CapturedMakerInputs { merged: View, machine: &'static str },
-    CertifiedPrivateBindings { merged: View, machine: &'static str },
-    NativeDag { merged: View, machine: &'static str },
-}
-
-impl NativeMergeWitness {
-    fn into_result(self) -> (View, &'static str) {
-        match self {
-            Self::CapturedMakerInputs { merged, machine }
-            | Self::CertifiedPrivateBindings { merged, machine }
-            | Self::NativeDag { merged, machine } => (merged, machine),
-        }
-    }
-}
-
 impl Reference {
     /// Check the payload against its independently recorded sources before constructing
     /// any replay. Retained operations and commands can both supply evidence for one entry.
@@ -196,7 +168,6 @@ impl Reference {
                     operation: id.0.clone(),
                     new: new.clone(),
                     predecessors: predecessors.clone(),
-                    native_inputs: Arc::default(),
                 });
             }
         }
@@ -290,6 +261,51 @@ impl Reference {
         }
     }
 
+    /// The working copies of other copies' workspaces that the canonical view `view` of `op`
+    /// keeps visible where `copy`'s own operation hid them: musubi keeps another machine's
+    /// working copy visible even when a local operation drops its alias or rewrites it. Only
+    /// a target bound to the same workspace in one of the operation's inputs, visible there,
+    /// and still bound to it in `view` counts.
+    fn retained_foreign_targets(
+        &mut self,
+        world: &World,
+        copy: &str,
+        command_input: Option<&CanonicalOp>,
+        op: &op_store::Operation,
+        view: &View,
+    ) -> BTreeSet<CommitId> {
+        let mut inputs = CanonicalOp::parents_of(op);
+        inputs.extend(command_input.cloned());
+        inputs.sort();
+        inputs.dedup();
+        let mut targets = BTreeSet::new();
+        for input in inputs {
+            let Some(source) = world.fx.hive.members.iter().find_map(|member| {
+                let store = member.adapter.repo().canonical_store();
+                let input = store
+                    .has_operation(&input)
+                    .then(|| store.read_operation(&input).ok())??;
+                store.read_view(&input.view_id).ok()
+            }) else {
+                continue;
+            };
+            let visible = self.visible(&source);
+            for (name, target) in &source.wc_commit_ids {
+                let foreign = name
+                    .as_str()
+                    .split_once('/')
+                    .is_some_and(|(owner, _)| owner != copy);
+                if foreign
+                    && view.wc_commit_ids.get(name) == Some(target)
+                    && visible.contains(target)
+                {
+                    targets.insert(target.clone());
+                }
+            }
+        }
+        targets
+    }
+
     /// Store the canonical payload on copied canonical parents, independently of replay.
     pub(super) fn copy_operation(
         &self,
@@ -312,11 +328,10 @@ impl Reference {
         block_on(self.loader.load_operation(&copy_id)).unwrap()
     }
 
-    /// Replay the operation, then choose whether it agrees, has an independent native
-    /// explanation, or must remain a deviation. The deviation frontier controls rejoining.
+    /// Replay the operation, then record whether it agrees with the hive's or deviates.
+    /// The deviation frontier controls rejoining.
     pub(super) fn replay_operation(
         &mut self,
-        world: &World,
         entry: &HistoryEntry<'_>,
         copy: &Operation,
         history: &mut ReplayHistory<'_>,
@@ -331,199 +346,206 @@ impl Reference {
         // A merge `jj op abandon` gave other parents keeps its view, as jj keeps every
         // operation's: it goes in as the hive has it, as a command does.
         if (!is_merge || kept.is_some()) && agreed {
-            copy.clone()
+            return copy.clone();
+        }
+        let (replayed, how) = if !is_merge {
+            let replayed = if let [parent] = op_parents.as_slice() {
+                self.apply(&history.copies[parent], copy, parents[0])
+            } else {
+                // Lift the command's payload between independently merged copy
+                // and replay frontiers, retaining the existing deviation tracking.
+                let input = self.merge(op_parents.iter().map(|p| &history.copies[p]).collect());
+                let onto = self.merge(parents);
+                self.apply(&input.op, copy, &onto.op)
+            };
+            (replayed, "applied")
         } else {
-            let (replayed, how) = if !is_merge {
-                let replayed = if let [parent] = op_parents.as_slice() {
-                    self.apply(&history.copies[parent], copy, parents[0])
-                } else {
-                    // Lift the command's payload between independently merged copy
-                    // and replay frontiers, retaining the existing deviation tracking.
-                    let input = self.merge(op_parents.iter().map(|p| &history.copies[p]).collect());
-                    let onto = self.merge(parents);
-                    self.apply(&input.op, copy, &onto.op)
-                };
-                (replayed, "applied")
-            } else {
-                (self.merge(parents), "merged")
-            };
-            let known = self.changes_of(
-                op_parents
-                    .iter()
-                    .flat_map(|p| [&history.copies[p], &history.replays[p]]),
-            );
-            let ours = self.summary(view, &known);
-            let theirs = self.summary(&replayed.view, &known);
-            if is_merge && agreed && ours == theirs {
-                self.certify_serial_rebases(
-                    id,
-                    op,
-                    &replayed,
-                    op_parents,
-                    &history.views,
-                    (&ours, &theirs),
-                );
-            }
-            // The same parents on both sides, but a different merge: it may be jj's own,
-            // on the machine that made it, of the parents as that machine had them.
-            let agreement = if ours == theirs {
-                Agreement::Exact
-            } else if is_merge && agreed {
-                self.native_merge_witness(world, entry, &replayed.view, &ours, &known, history)
-                    .map_or_else(
-                        |failures| Agreement::Different(Some(failures)),
-                        |witness| Agreement::Native(Box::new(witness)),
-                    )
-            } else {
-                Agreement::Different(None)
-            };
-            if is_merge && agreed && matches!(&agreement, Agreement::Different(_)) {
-                // What the hive's merge did beyond jj's is musubi's, whatever later
-                // operations make of it.
-                let beyond = self.beyond(view, &replayed.view, &known);
-                if !beyond.is_empty() {
-                    self.unexplained.push(format!(
-                        "{}: {} beyond jj's merge of the same parents",
-                        describe(id, op),
-                        beyond.join(", ")
-                    ));
-                }
-            }
-            match agreement {
-                Agreement::Native(witness) => {
-                    let (merged, machine) = (*witness).into_result();
-                    self.deviations.push(format!(
-                        "{} merged by jj as {} had its parents",
-                        describe(id, op),
-                        machine
-                    ));
-                    if history.can_rejoin(id) {
-                        copy.clone()
-                    } else {
-                        // Its own, as where jj's merge agrees but other lines have parted.
-                        history.deviated.insert(id.clone());
-                        let parents = op_parents.iter().map(|p| history.replays[p].id().clone());
-                        self.write_like(copy, &merged, parents.collect())
-                    }
-                }
-                Agreement::Exact if history.can_rejoin(id) => {
-                    if !agreed {
-                        self.deviations
-                            .push(format!("agrees again at {}", describe(id, op)));
-                    }
-                    copy.clone()
-                }
-                Agreement::Exact => {
-                    history.deviated.insert(id.clone());
-                    replayed.op
-                }
-                Agreement::Different(failures) => {
-                    let diff = self.difference(view, &replayed.view, &known);
-                    let attempts = failures
-                        .map(|failures| format!("; native witnesses rejected: {failures}"))
-                        .unwrap_or_default();
-                    self.deviations.push(format!(
-                        "{} {how} by jj differs from the hive's: {diff}{attempts}",
-                        describe(id, op)
-                    ));
-                    history.deviated.insert(id.clone());
-                    replayed.op
-                }
+            (self.merge(parents), "merged")
+        };
+        if is_merge {
+            let alike = self.alike_changes(&replayed.view);
+            if !alike.is_empty() {
+                self.jj_alike.insert(id.0.clone(), alike);
             }
         }
+        let known = self.changes_of(
+            op_parents
+                .iter()
+                .flat_map(|p| [&history.copies[p], &history.replays[p]]),
+        );
+        let ours = self.summary(view, &known);
+        let theirs = self.summary(&replayed.view, &known);
+        let exact = ours == theirs;
+        if is_merge && agreed && !exact {
+            // What the hive's merge did beyond jj's is musubi's, whatever later
+            // operations make of it.
+            let beyond = self.beyond(view, &replayed.view, &known);
+            if !beyond.is_empty() {
+                self.unexplained.push(format!(
+                    "{}: {} beyond jj's merge of the same parents",
+                    describe(id, op),
+                    beyond.join(", ")
+                ));
+            }
+        }
+        // A merge unlike jj's of the same parents has had its excess judged above. Where no
+        // other line has parted, the reference goes on from the hive's merge, as from jj's
+        // own, so that the merges after it are judged each against jj's merge too.
+        let rejoin = (exact || (is_merge && agreed)) && history.can_rejoin(id);
+        if !exact {
+            let diff = self.difference(view, &replayed.view, &known);
+            let then = if rejoin {
+                "; the reference goes on from the hive's"
+            } else {
+                ""
+            };
+            self.deviations.push(format!(
+                "{} {how} by jj differs from the hive's: {diff}{then}",
+                describe(id, op)
+            ));
+        } else if rejoin && !agreed {
+            self.deviations
+                .push(format!("agrees again at {}", describe(id, op)));
+        }
+        if rejoin {
+            return copy.clone();
+        }
+        history.deviated.insert(id.clone());
+        replayed.op
     }
+}
 
-    /// Try native explanations in evidence order. A failed or structurally different
-    /// witness cannot authorize the next one; each candidate must qualify independently.
-    fn native_merge_witness(
-        &mut self,
-        world: &World,
-        entry: &HistoryEntry<'_>,
-        canonical: &View,
-        ours: &Summary,
-        known: &HashSet<ChangeId>,
-        history: &ReplayHistory<'_>,
-    ) -> Result<NativeMergeWitness, WitnessFailures> {
-        let mut failures = WitnessFailures::default();
-        match self.merged_as_made(
-            world,
-            entry.id,
-            &entry.parents,
-            canonical,
-            &history.copies,
-            &history.views,
-        ) {
-            Ok((merged, machine)) if self.summary(&merged, known) == *ours => {
-                return Ok(NativeMergeWitness::CapturedMakerInputs { merged, machine });
-            }
-            Ok((_, machine)) => failures.reject(
-                WitnessKind::CapturedMakerInputs,
-                Some(machine),
-                RejectionCause::StructuralResultDiffers,
-            ),
-            Err(rejection) => failures.push(rejection),
+/// The allowance for another machine's working copy that the canonical view keeps visible
+/// where a native command hid it extends a command's payload only by a commit bound to the
+/// same foreign workspace in an input, visible there, and still bound in the output.
+#[test]
+fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs() {
+    use std::collections::HashSet;
+
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::op_store::OperationId;
+    use jj_lib::ref_name::WorkspaceName;
+
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let key = format!("{}/default", world.fx.machine_key(1));
+    let base = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let template = store.read_operation(&base).unwrap();
+    let source_view = store.read_view(&template.view_id).unwrap();
+    let old = source_view.wc_commit_ids[WorkspaceName::new(&key)].clone();
+    let native_base = world.latest_op_head(0);
+    world.jj(0, &["describe", &old.hex(), "-m", "first foreign rewrite"]);
+    let first = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    world.jj_at_op(
+        0,
+        &native_base,
+        &["describe", &old.hex(), "-m", "second foreign rewrite"],
+    );
+    let second = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let snapshot = |id: &OperationId| {
+        world
+            .evidence
+            .commands
+            .values()
+            .find(|c| c.id == *id)
+            .unwrap()
+            .clone()
+    };
+    // The one commit each rewrite made of the foreign working copy.
+    let replacement = |id: &OperationId| {
+        let command = snapshot(id);
+        let before: HashSet<_> = command.base.head_ids.iter().cloned().collect();
+        let made: Vec<_> = command
+            .made
+            .head_ids
+            .iter()
+            .filter(|head| !before.contains(*head))
+            .cloned()
+            .collect();
+        let [made] = made.as_slice() else {
+            panic!("one rewrite of the working copy: {made:?}");
+        };
+        made.clone()
+    };
+    let (first_version, second_version) = (replacement(&first), replacement(&second));
+    let mut command = snapshot(&first);
+    command.made.head_ids = HashSet::from([first_version.clone()]);
+    let mut reference = Reference::build(&world);
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let root = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .store()
+        .root_commit_id()
+        .clone();
+    for case in ["retained", "missing slot", "hidden", "new target", "own"] {
+        let mut source = source_view.clone();
+        if case == "missing slot" {
+            source.wc_commit_ids.remove(WorkspaceName::new(&key));
         }
-        let inputs: Vec<_> = entry
-            .parents
-            .iter()
-            .map(|parent| self.workspace_certificate(world, parent))
-            .collect();
-        let parents: Vec<_> = entry
-            .parents
-            .iter()
-            .zip(&inputs)
-            .map(|(canonical, certificate)| CertifiedParent {
-                canonical,
-                certificate,
-            })
-            .collect();
-        let candidates = self.workspace_private_candidates(world, entry.id, &parents);
-        failures.extend(candidates.rejections);
-        for replay in candidates.replays {
-            let Some((maker, _)) = replay.private else {
-                failures.reject(
-                    WitnessKind::CertifiedPrivateBindings,
-                    None,
-                    RejectionCause::PrivateMakerMissing,
-                );
-                continue;
-            };
-            let Some(m) = (0..world.nodes()).find(|&m| world.fx.machine_key(m) == maker) else {
-                failures.reject(
-                    WitnessKind::CertifiedPrivateBindings,
-                    Some(&maker),
-                    RejectionCause::MakerNotActive,
-                );
-                continue;
-            };
-            if self.summary(&replay.view, known) == *ours {
-                return Ok(NativeMergeWitness::CertifiedPrivateBindings {
-                    merged: replay.view,
-                    machine: world.machine(m),
-                });
-            }
-            failures.reject(
-                WitnessKind::CertifiedPrivateBindings,
-                Some(world.machine(m)),
-                RejectionCause::StructuralResultDiffers,
+        if case == "hidden" {
+            source.head_ids = HashSet::from([root.clone()]);
+        }
+        let mut input = template.clone();
+        input.metadata.attributes.clear();
+        input.metadata.description = format!("foreign visibility input: {case}");
+        input.parents = vec![base.0.clone()];
+        input.view_id = store.write_view(&source).unwrap();
+        let input_id = store.write_operation(&input).unwrap();
+        command.input = Some(input_id.clone());
+        command.copy = world.fx.machine_key(if case == "own" { 1 } else { 0 });
+        let mut output = input;
+        output.parents = vec![input_id.0];
+        let mut canonical = command.made.clone();
+        canonical.head_ids.insert(old.clone());
+        canonical.wc_commit_ids.insert(
+            key.clone().into(),
+            if case == "new target" {
+                second_version.clone()
+            } else {
+                old.clone()
+            },
+        );
+        let protected = reference.retained_foreign_targets(
+            &world,
+            &command.copy,
+            command.input.as_ref(),
+            &output,
+            &canonical,
+        );
+        assert_eq!(protected.contains(&old), case == "retained", "{case}");
+        let mut expected = command.made.clone();
+        expected.head_ids.extend(protected);
+        let unexpected =
+            reference.unexplained_command_changes(&command.base, &expected, &canonical);
+        assert_eq!(
+            unexpected.is_empty(),
+            case == "retained",
+            "{case}: {unexpected:?}"
+        );
+        if case == "retained" {
+            canonical.head_ids.insert(second_version.clone());
+            assert!(
+                !reference
+                    .unexplained_command_changes(&command.base, &expected, &canonical)
+                    .is_empty(),
+                "a third version is still extra"
             );
-        }
-        match self.native_merge_matches(
-            world,
-            entry.id,
-            &entry.parents,
-            &entry.view,
-            known,
-            &history.views,
-        ) {
-            Ok(machine) => Ok(NativeMergeWitness::NativeDag {
-                merged: entry.view.clone(),
-                machine,
-            }),
-            Err(rejections) => {
-                failures.extend(rejections);
-                Err(failures)
-            }
+            canonical.head_ids.remove(&first_version);
+            assert!(
+                !reference
+                    .unexplained_command_changes(&command.base, &expected, &canonical)
+                    .is_empty(),
+                "equal counts cannot hide a different version"
+            );
         }
     }
 }

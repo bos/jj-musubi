@@ -551,8 +551,8 @@ impl World {
     pub fn free_workspace_names(&self, m: usize) -> Vec<String> {
         let mut pool: Vec<String> = WORKSPACES.iter().map(|w| (*w).to_owned()).collect();
         pool.push(self.machine(m).to_owned());
-        // Operation preconditions use jj's actual occupied names. Certification of those
-        // names remains a separate invariant, so this never authorizes a spurious name.
+        // jj's actual occupied names, including any a merge kept without a directory, which
+        // `check_workspaces` judges separately.
         let occupied: BTreeSet<String> = self
             .workspace_names_at_heads(m)
             .into_iter()

@@ -1,106 +1,75 @@
-//! Detect independent merges that perform the same rebase twice.
-//!
-//! A repeated native serial rebase is allowed only when an independent native replay
-//! certifies its entire shared result and exact predecessor relation.
+//! Detect independent merges that perform the same rebase twice, apart from jj's own repeat
+//! of a rebase after `jj op abandon`.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
-use jj_lib::op_store;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
-use musubi_jj::op_id::CanonicalOp;
 
 use super::Reference;
-use super::comparison::Summary;
-use super::replay::Replayed;
 
 #[derive(Clone)]
 pub(super) struct MergeRewrite {
     pub(super) operation: OperationId,
     pub(super) new: CommitId,
     pub(super) predecessors: Vec<CommitId>,
-    /// Inputs of an independently replayed native merge that made this exact rewrite.
-    /// A result already visible there was not made by an independent concurrent merge.
-    pub(super) native_inputs: Arc<HashSet<CommitId>>,
 }
 
-/// Whether the native replay certifies this rewrite, including its complete shared result.
-pub(super) fn native_rebase_matches<'a>(
-    results: (&Summary, &Summary),
-    key: u64,
-    predecessors: &[CommitId],
-    native: impl IntoIterator<Item = (u64, &'a [CommitId])>,
-) -> bool {
-    results.0 == results.1
-        && native.into_iter().any(|(native_key, native_predecessors)| {
-            native_key == key && native_predecessors == predecessors
-        })
+/// Whether a change's alike commits come from the same rebase done twice, and by whom.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RebaseTwice {
+    No,
+    /// jj's own merge of one of the merges' parents made the same alike pair: jj's known
+    /// repeat of a rebase after `jj op abandon` (docs/internals/races.md, "Known jj
+    /// limitations").
+    ByJj,
+    /// Two of the hive's merges did it, and jj's merge of neither's parents does.
+    ByMerges,
 }
 
-pub(super) fn repeated_rebase(rewrites: &[MergeRewrite], keys: &HashMap<CommitId, u64>) -> bool {
+/// The pairs of merges in `rewrites` that rewrote one commit into commits with the same
+/// structural key.
+pub(super) fn repeated_rebases(
+    rewrites: &[MergeRewrite],
+    keys: &HashMap<CommitId, u64>,
+) -> Vec<(OperationId, OperationId)> {
     let mut made: HashMap<(CommitId, u64), Vec<&MergeRewrite>> = HashMap::new();
+    let mut pairs = vec![];
     for rewrite in rewrites {
         for predecessor in &rewrite.predecessors {
             let previous = made
                 .entry((predecessor.clone(), keys[&rewrite.new]))
                 .or_default();
-            if previous.iter().any(|other| {
-                other.operation != rewrite.operation
-                    && other.new != rewrite.new
-                    && !rewrite.native_inputs.contains(&other.new)
-                    && !other.native_inputs.contains(&rewrite.new)
-            }) {
-                return true;
+            for other in previous.iter() {
+                if other.operation != rewrite.operation && other.new != rewrite.new {
+                    pairs.push((other.operation.clone(), rewrite.operation.clone()));
+                }
             }
             previous.push(rewrite);
         }
     }
-    false
+    pairs
 }
 
 impl Reference {
-    /// Record inputs only when an independent native replay has the entire shared result
-    /// and the exact predecessor relation. Neither ancestry, a retained view, nor an
-    /// earlier result visible in a parent alone certifies a serial native rebase.
-    pub(super) fn certify_serial_rebases(
-        &mut self,
-        id: &CanonicalOp,
-        op: &op_store::Operation,
-        replayed: &Replayed,
-        parents: &[CanonicalOp],
-        views: &HashMap<CanonicalOp, View>,
-        results: (&Summary, &Summary),
-    ) {
-        let native = &replayed.op.store_operation().commit_predecessors;
-        let new: Vec<_> = op
-            .commit_predecessors
-            .iter()
-            .flatten()
-            .chain(native.iter().flatten())
-            .map(|(new, _)| new.clone())
-            .collect();
-        let keys = self.keys(&new, &|_| true);
-        let mut inputs = HashSet::new();
-        for parent in parents {
-            inputs.extend(self.visible(&views[parent]).iter().cloned());
+    /// The changes with two visible commits alike in `view` (by structural key), as jj's own
+    /// merge made them: recorded for each merge the reference replays, so that a repeated
+    /// rebase jj makes too isn't taken for the hive's.
+    pub(super) fn alike_changes(&mut self, view: &View) -> BTreeSet<String> {
+        let visible: Vec<CommitId> = self.visible(view).iter().cloned().collect();
+        let keys = self.keys(&visible, &|_| true);
+        let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
+        for id in &visible {
+            let change = self.facts(id).change.reverse_hex();
+            *seen.entry((change, keys[id])).or_default() += 1;
         }
-        let inputs = Arc::new(inputs);
-        for rewrite in self.rewrites.iter_mut().filter(|r| r.operation == id.0) {
-            if native_rebase_matches(
-                results,
-                keys[&rewrite.new],
-                &rewrite.predecessors,
-                native
-                    .iter()
-                    .flatten()
-                    .map(|(new, predecessors)| (keys[new], predecessors.as_slice())),
-            ) {
-                rewrite.native_inputs = inputs.clone();
-            }
-        }
+        seen.into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|((change, _), _)| change)
+            .collect()
     }
 
     /// Whether two of the hive's independent merges rewrote one commit of `change` alike: into
@@ -109,11 +78,11 @@ impl Reference {
     /// sequencing exists to prevent. Two commits of a change can also end up alike when jj
     /// rebases two different rewrites of it onto the same parents, or when a command and a
     /// merge each rebase it the same way, as a `jj rebase -r` of its parent and a merge with
-    /// a concurrent abandon of that parent do; neither is it. A native merge can also rebase
-    /// the original again after an operation abandon, with the first result already visible
-    /// in its inputs. Only an independently replayed full result and predecessor relation
-    /// certify that serial case; independent duplicate merges remain forbidden.
-    pub fn same_rebase_twice(&mut self, change: &str) -> bool {
+    /// a concurrent abandon of that parent do; neither is it. jj's own merge can also rebase
+    /// the original again after `jj op abandon`, with the first result already in its inputs
+    /// (docs/internals/races.md, "Known jj limitations"): where jj's replay of either merge
+    /// has the same alike pair, the repeat is jj's.
+    pub fn same_rebase_twice(&mut self, change: &str) -> RebaseTwice {
         let ours: Vec<_> = self
             .rewrites
             .clone()
@@ -122,6 +91,18 @@ impl Reference {
             .collect();
         let ids: Vec<CommitId> = ours.iter().map(|rewrite| rewrite.new.clone()).collect();
         let keys = self.keys(&ids, &|_| true);
-        repeated_rebase(&ours, &keys)
+        let pairs = repeated_rebases(&ours, &keys);
+        let by_jj = |op: &OperationId| {
+            self.jj_alike
+                .get(op)
+                .is_some_and(|changes| changes.contains(change))
+        };
+        if pairs.is_empty() {
+            RebaseTwice::No
+        } else if pairs.iter().all(|(a, b)| by_jj(a) || by_jj(b)) {
+            RebaseTwice::ByJj
+        } else {
+            RebaseTwice::ByMerges
+        }
     }
 }

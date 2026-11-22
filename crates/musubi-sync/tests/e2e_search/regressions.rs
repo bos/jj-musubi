@@ -240,3 +240,113 @@ fn expect_unexplained(mut world: World, what: &str) {
     assert!(message.contains(&format!("changed {what}")), "{message}");
     assert!(message.contains("plain jj"), "{message}");
 }
+
+/// jj's known limitation after `jj op abandon` (docs/internals/races.md, "Known jj
+/// limitations"): a command that loaded the repository before the abandon writes on an
+/// operation it removed, and jj's merge of that rebases a child again from the original into an
+/// identical divergent copy, though the merge's inputs already hold the first rebase. Abandoning
+/// the copy recovers. Once jj stops making the copy, this fails, so that the row goes.
+#[test]
+fn a_native_serial_merge_can_repeat_a_rebase_after_abandon() {
+    let env = musubi_testutil::TestEnv::new();
+    // No Git working tree or branch import: this is unrelated to the snapshot/import
+    // divergence when Git points a branch at an unsnapshotted working copy (#41).
+    let repo = env.init_non_colocated_repo("native");
+    let op = || {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "id",
+        ])
+        .trim()
+        .to_owned()
+    };
+    let commit = || {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "commit_id",
+        ])
+        .trim()
+        .to_owned()
+    };
+    let children = || {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "description(substring:\"child\")",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ])
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    repo.jj(&["describe", "-m", "parent"]);
+    let parent = commit();
+    let base = op();
+    repo.jj(&["new", "-m", "child"]);
+    let original = commit();
+    let left = op();
+    repo.jj(&[
+        "--at-op",
+        &base,
+        "describe",
+        &parent,
+        "-m",
+        "rewritten parent",
+    ]);
+    repo.jj(&["status"]);
+    let first = commit();
+
+    // The merge keeps its result after its child-creation parent disappears. A delayed
+    // command still has the old operation: jj rebases the original child again.
+    repo.jj(&["op", "abandon", &left]);
+    repo.jj(&[
+        "--at-op", &left, "bookmark", "create", "delayed", "-r", &original,
+    ]);
+    repo.jj(&["status"]);
+    let visible = children();
+    assert_eq!(
+        visible.len(),
+        2,
+        "notice when jj no longer makes this divergence"
+    );
+    let second = visible.iter().find(|id| **id != first).unwrap().clone();
+    let show = |id: &str| {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            id,
+            "-T",
+            "change_id ++ parents.map(|p| p.commit_id()).join(\",\") ++ description",
+        ])
+    };
+    assert_eq!(show(&first), show(&second), "an identical copy");
+    let diff = repo.jj(&[
+        "--ignore-working-copy",
+        "diff",
+        "--summary",
+        "--from",
+        &first,
+        "--to",
+        &second,
+    ]);
+    assert!(diff.is_empty(), "an identical copy: {diff}");
+
+    repo.jj(&["abandon", &second]);
+    assert_eq!(children(), [first]);
+}

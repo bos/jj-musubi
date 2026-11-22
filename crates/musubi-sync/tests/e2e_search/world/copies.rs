@@ -4,8 +4,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 
-use musubi_jj::op_id::LocalOp;
-
 use crate::coverage::fired;
 
 use crate::identity::HistoryKey;
@@ -16,7 +14,6 @@ use super::OP_KEY_TEMPLATE;
 use super::Workspace;
 use super::World;
 use super::join_fingerprint;
-use super::merge_key;
 use super::native_head;
 
 impl World {
@@ -158,21 +155,8 @@ impl World {
         let join_point = join_input.clone();
         self.fx.add(repo);
         let node = self.fx.hive.members.last().unwrap().adapter.repo();
-        let joined = node.canonical_of(&LocalOp(join_point.clone())).unwrap();
-        let join_key = merge_key(&node.canonical_store().read_operation(&joined).unwrap());
         let store = node.loader().op_store();
         let joined_from = futures::executor::block_on(store.read_operation(&join_point)).unwrap();
-        let join_bindings = futures::executor::block_on(store.read_view(&joined_from.view_id))
-            .unwrap()
-            .wc_commit_ids
-            .into_iter()
-            .map(|(name, target)| {
-                (
-                    format!("{}/{}", node.machine().key(), name.as_str()),
-                    target,
-                )
-            })
-            .collect();
         let join_point = join_fingerprint(&joined_from);
         let primary = vec![Workspace {
             name: "default".to_owned(),
@@ -211,12 +195,8 @@ impl World {
         self.logical_extras[m].clear();
         for ws in &self.workspaces[m] {
             let key = format!("{}/{}", self.fx.machine_key(m), ws.name);
-            self.evidence.workspace_births.insert(key.clone());
-            self.evidence.initial_workspace_keys.insert(key);
+            self.evidence.workspace_births.insert(key);
         }
-        self.evidence
-            .workspace_joins
-            .insert(join_key, join_bindings);
         self.evidence.baseline_merge_keys.extend(self.merge_keys(m));
         self.evidence
             .operation_sources

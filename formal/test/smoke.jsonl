@@ -51,3 +51,7 @@
 {"op":"publication","commits":[[{"path":0,"object":0}],[{"path":1,"object":1}]],"sizes":[6,9000000],"operations":[{"id":1,"parents":[0],"snapshot":true,"frozen":null,"writes":[],"required":[0,1],"selections":[]},{"id":2,"parents":[1],"snapshot":false,"frozen":null,"writes":[{"commit":0,"workspaceTip":false,"rewritten":false}],"required":[0,1],"selections":[]},{"id":3,"parents":[2],"snapshot":true,"frozen":null,"writes":[],"required":[0],"selections":[]}],"known":[],"selected":[1,2],"view":[0],"maxFiles":1000,"maxBytes":8388608,"heads":[3],"expectedHeads":[3],"context":[7,8],"planIdentity":[22,33],"approval":null,"actual":null,"intentKnown":false}
 {"op":"opHeads","call":"same","a":[1,2],"b":[2,1]}
 {"op":"opHeads","call":"look","heads":[0]}
+{"op":"realization","parents":[[1,[0]],[2,[1]],[3,[1]]],"heads":[2],"realization":3}
+{"op":"realization","parents":[[1,[0]],[2,[1]]],"heads":[1],"realization":2}
+{"op":"realization","parents":[[1,[0]],[2,[1]],[3,[1]],[4,[0]]],"heads":[1,2,4],"realization":3}
+{"op":"realization","parents":[[1,[2]],[2,[0]]],"heads":[1],"realization":2}

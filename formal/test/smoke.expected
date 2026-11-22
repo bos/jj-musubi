@@ -51,3 +51,7 @@
 {"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":false,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}
 {"ok":true,"same":true}
 {"error":"bad request: unknown call look","ok":false}
+{"kept":[0,1,2,3],"merge":[2,3],"ok":true}
+{"kept":[0,1,2],"merge":[2],"ok":true}
+{"kept":[0,1,2,3,4],"merge":[2,4,3],"ok":true}
+{"error":"bad request: every parent must be numbered before its operation","ok":false}

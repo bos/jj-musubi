@@ -17,6 +17,7 @@ import Musubi.Names
 import Musubi.RefsExec
 import Musubi.ExpectedExec
 import Musubi.OpHeadsJson
+import Musubi.RealizeJson
 
 namespace Musubi.Exec.Json
 
@@ -673,7 +674,8 @@ or the model refusing what was decoded. -/
 def badRequestOps : List (String × (Json → Except String Json)) :=
   [("publication", publicationReply), ("chunks", chunksReply), ("refresh", refreshReply),
     ("attempts", attemptsReply), ("names", namesReply), ("copies", copiesReply),
-    ("expected", expectedReply), ("refs", refsReply), ("opHeads", OpHeads.Json.reply)]
+    ("expected", expectedReply), ("refs", refsReply), ("opHeads", OpHeads.Json.reply),
+    ("realization", Realize.Json.reply)]
 
 /-- Requests that need no session, by `op`, whose errors are whole messages, not bad requests. -/
 def wholeMessageOps : List (String × (Json → Except String Json)) :=

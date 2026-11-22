@@ -3,10 +3,9 @@
 //! A queued operation is visible in the in-memory translation map before its write finishes.
 //! Settling joins every writer before persisting any translation. Failure or simulated crash
 //! invalidates the last-parent, own-workspace and prepared-view caches together, but leaves
-//! unrelated published ancestry and kept-name context alone.
+//! unrelated published ancestry alone.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -21,7 +20,6 @@ use super::super::NodeRepo;
 use super::super::view::LocalView;
 use super::super::view::PerMachine;
 use super::Realization;
-use super::workspaces::Kept;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -39,20 +37,11 @@ pub(in crate::node) struct State {
     unwritten: Vec<Unwritten>,
     prepared: Option<PreparedViews>,
     last_own: Option<OwnWorkspaces>,
-    kept: Option<KeptMemo>,
 }
 
 struct PreparedViews {
     per_machine: Arc<PerMachine>,
-    reserved: Arc<BTreeSet<WorkspaceNameBuf>>,
     views: HashMap<CanonicalOp, LocalView>,
-}
-
-struct KeptMemo {
-    heads: Vec<LocalOp>,
-    start: LocalOp,
-    renaming: BTreeSet<WorkspaceNameBuf>,
-    kept: Kept,
 }
 
 struct Unwritten {
@@ -86,10 +75,9 @@ impl State {
         &mut self,
         id: &CanonicalOp,
         per_machine: &Arc<PerMachine>,
-        reserved: &Arc<BTreeSet<WorkspaceNameBuf>>,
     ) -> Option<LocalView> {
         let prepared = self.prepared.as_mut()?;
-        if Arc::ptr_eq(&prepared.per_machine, per_machine) && prepared.reserved == *reserved {
+        if Arc::ptr_eq(&prepared.per_machine, per_machine) {
             prepared.views.remove(id)
         } else {
             None
@@ -99,14 +87,9 @@ impl State {
     pub(super) fn prepare(
         &mut self,
         per_machine: Arc<PerMachine>,
-        reserved: Arc<BTreeSet<WorkspaceNameBuf>>,
         views: HashMap<CanonicalOp, LocalView>,
     ) {
-        self.prepared = Some(PreparedViews {
-            per_machine,
-            reserved,
-            views,
-        });
+        self.prepared = Some(PreparedViews { per_machine, views });
     }
 
     pub(super) fn clear_prepared(&mut self) {
@@ -119,46 +102,6 @@ impl State {
         self.last_realized = None;
         self.last_own = None;
         self.prepared = None;
-    }
-
-    pub(super) fn pending_among(&self, starts: &[LocalOp]) -> bool {
-        self.unwritten
-            .iter()
-            .any(|write| starts.contains(&write.local))
-    }
-
-    pub(super) fn kept(
-        &self,
-        heads: &[LocalOp],
-        start: &LocalOp,
-        renaming: &BTreeSet<WorkspaceNameBuf>,
-    ) -> Option<Kept> {
-        let memo = self.kept.as_ref()?;
-        (memo.heads.as_slice() == heads && memo.start == *start && memo.renaming == *renaming)
-            .then(|| memo.kept.clone())
-    }
-
-    pub(super) fn remember_kept(
-        &mut self,
-        heads: Vec<LocalOp>,
-        start: LocalOp,
-        renaming: BTreeSet<WorkspaceNameBuf>,
-        kept: Kept,
-    ) {
-        self.kept = Some(KeptMemo {
-            heads,
-            start,
-            renaming,
-            kept,
-        });
-    }
-
-    pub(super) fn advance_kept(&mut self, starts: &[LocalOp], realized: &LocalOp) {
-        if let Some(memo) = &mut self.kept
-            && starts == [memo.start.clone()]
-        {
-            memo.start = realized.clone();
-        }
     }
 }
 
@@ -212,8 +155,7 @@ impl NodeRepo {
     ///
     /// If a native write failed, all writers are still joined and the map forgets the whole
     /// batch: a later realization may refer to the failed one. Retrying writes the same
-    /// operations unless this machine's own names in its op heads changed meanwhile
-    /// (`reserved_names`). A writer's panic is propagated after that same cleanup.
+    /// operations. A writer's panic is propagated after that same cleanup.
     ///
     /// A translation-file error can leave only part of the batch recorded, while its
     /// mappings remain in memory. The queue has already been consumed: a later empty

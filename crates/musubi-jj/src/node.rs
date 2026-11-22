@@ -95,44 +95,29 @@ pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 /// Where the sync adapter keeps the head this machine pushed that the hub took, once it knows.
 pub const ACCEPTED_PUSH: &str = "accepted_push";
 
-/// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
-struct ReservedNames {
-    heads: Vec<LocalOp>,
-    names: Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
-}
+/// The workspaces in a local view, with their commits.
+type LocalWorkspaces = std::collections::BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>;
 
 /// Workspace names worked out already, kept to save working them out again. Each is kept with
 /// the operations it was worked out from and used only for those same operations, so none is
 /// ever cleared.
 #[derive(Default)]
 struct NameMemos {
-    /// This machine's own names that could clash with another machine's as of the op heads
-    /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
-    reserved: Option<ReservedNames>,
     /// This machine's own workspaces with a `/` in their names as of the op heads last asked
     /// about (`NodeRepo::slashed_workspaces`).
     slashed: Mutex<slashed::SlashedMemo>,
     /// Where jj's workspace store records the directories of the names asked about, while
     /// its file is unchanged.
     records: Mutex<slashed::Records>,
-    /// The workspace names in the view of the operation `canonical_view` last canonicalized,
-    /// usually the next one's parent.
-    last_view: Mutex<
-        Option<(
-            jj_lib::op_store::OperationId,
-            Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
-        )>,
-    >,
+    /// The workspaces, with their commits, in the view of the operation `canonical_view` last
+    /// canonicalized, usually the next one's parent.
+    last_view: Mutex<Option<(jj_lib::op_store::OperationId, Arc<LocalWorkspaces>)>>,
     /// Private ownership reconstructed from immutable native operation views.
     private:
         Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked: Mutex<presence::WorkedNames>,
-    /// Where jj's workspace store put each name's working copy, as `has_working_copy_here`
-    /// read it, as of the store's metadata then: asked for every other machine's workspace of
-    /// every operation.
-    working_copies: Mutex<presence::WorkingCopies>,
 }
 
 /// A local jj repository's identities, translation, and publication state.

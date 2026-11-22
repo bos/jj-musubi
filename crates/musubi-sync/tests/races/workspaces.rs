@@ -693,6 +693,99 @@ fn a_workspace_with_a_slash_added_during_a_sync_stops_it() {
     }
 }
 
+/// `jj workspace forget` of a workspace of alpha's own named `beta/x`, as on being refused,
+/// leaves jj's record of its directory. Once alpha shows beta's workspace `x` by that name,
+/// whether beta adds it after or alpha shows it again after forgetting it here, alpha takes
+/// the record for a workspace of its own and refuses to sync, but knows the name is beta's,
+/// so the hint doesn't say to rename it there. `jj workspace remove beta/x`, which the hint
+/// gives, keeps the old directory's files in a commit of alpha's, deletes the directory and
+/// the record, and moves nothing of beta's; alpha syncs on.
+#[test]
+fn a_forgotten_workspace_with_a_slash_is_removed_to_sync_on() {
+    for shown_before in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        if shown_before {
+            add_workspace(&hive, 1, "x", "beta-x");
+            hive.sync();
+            hive.repo(0).jj(&["workspace", "forget", "beta/x"]);
+        }
+        let old = add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+        old.write_file("old", "alpha's old files");
+        old.jj(&["status"]);
+        let old_commit = hive.workspaces(0)["beta/x"].clone();
+        // Not yet snapshotted when the workspace is forgotten.
+        old.write_file("unsaved", "alpha's unsaved edit");
+        hive.repo(0).jj(&["workspace", "forget", "beta/x"]);
+        if !shown_before {
+            hive.sync();
+            add_workspace(&hive, 1, "x", "beta-x");
+        }
+        let theirs = hive.workspaces(1)["x"].clone();
+        hive.hive.sync(1).unwrap();
+        // The sync that shows beta's `x` puts it in alpha's view, then stops.
+        let err = hive.hive.sync(0).unwrap_err();
+        assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
+        let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
+        assert!(slashed.is_theirs("beta/x"), "shown before: {shown_before}");
+
+        hive.repo(0).jj(&["workspace", "remove", "beta/x"]);
+        hive.sync();
+        hive.sync();
+        assert_eq!(hive.workspaces(0).get("beta/x"), Some(&theirs));
+        assert_eq!(hive.workspaces(1).get("x"), Some(&theirs));
+        assert!(!hive.env.root().join("alpha-beta-x").exists());
+        let kept = hive.visible(1);
+        assert!(
+            kept.iter().any(|line| line.starts_with(&old_commit)),
+            "{kept:?}"
+        );
+        let snapshot = hive.repo(1).jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            "description(substring:\"SNAPSHOT OF REMOVED WORKSPACE\")",
+            "-T",
+            "parents.map(|p| p.commit_id()) ++ \"\\n\"",
+        ]);
+        assert_eq!(snapshot.trim(), old_commit, "shown before: {shown_before}");
+        hive.assert_converged();
+    }
+}
+
+/// alpha adds a workspace `beta/x` while a sync publishes the realization that shows beta's
+/// `x` by that name, so that each is an op head: alpha's added workspace isn't taken for beta's,
+/// as it is in one head and not the other, and the hint says to rename it.
+#[test]
+fn a_workspace_with_a_slash_added_beside_another_machines_of_its_name_is_ones_own() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    add_workspace(&hive, 1, "x", "beta-x");
+    hive.hive.sync(1).unwrap();
+    let before = hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "--no-integrate-operation",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    hive.hive.sync(0).unwrap();
+    let path = hive.env.root().join("alpha-beta-x");
+    hive.repo(0).jj(&[
+        "--at-op",
+        before.trim(),
+        "workspace",
+        "add",
+        "--name",
+        "beta/x",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(hive.node(0).local_heads().unwrap().len(), 2);
+    let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
+    assert!(!slashed.is_theirs("beta/x"));
+}
+
 /// A workspace of alpha's own named `beta/x` isn't taken for beta's, which beta hasn't got.
 #[test]
 fn a_workspace_with_a_slash_of_ones_own_is_not_another_machines() {
@@ -703,30 +796,141 @@ fn a_workspace_with_a_slash_of_ones_own_is_not_another_machines() {
     assert!(!slashed.is_theirs("beta/x"));
 }
 
-/// A known limitation (docs/internals/races.md, "Workspaces"): alpha forgets beta's workspace
-/// `beta/beta` here and adds one of its own by that name, then works in it before renaming it,
-/// as the refusal says. Canonicalized after the rename, the commands run in it take the name
-/// for beta's workspace, as the hive shows it, and beta's working copy moves to alpha's commit.
-/// This fails once the limitation goes away; then the row changes with it.
+/// alpha forgets a workspace of its own named `beta/x`, as it might on being refused, and syncs;
+/// beta adds `x`, which alpha shows as `beta/x`. `jj op restore` of the operation before the
+/// forget, as `jj undo` restores, or `jj op revert` of the forget brings alpha's `beta/x` back
+/// over beta's in alpha's view: the name stands for beta's workspace only where the view
+/// brought back has it at the commit the hive gave beta's there, and alpha's was at its own,
+/// so beta's working copy doesn't move.
 #[test]
-fn work_in_a_workspace_named_like_one_forgotten_here_moves_that_one_once_renamed() {
+fn going_back_to_a_workspace_named_like_another_machines_moves_nothing_of_that_one() {
+    for how in ["restore", "revert"] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        let own = add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+        own.write_file("from-alpha", "alpha's beta/x");
+        own.jj(&["describe", "-m", "alpha's beta/x"]);
+        let last_op = |hive: &Fixture| {
+            hive.repo(0).jj(&[
+                "--ignore-working-copy",
+                "--no-integrate-operation",
+                "op",
+                "log",
+                "--no-graph",
+                "-n1",
+                "-T",
+                "id",
+            ])
+        };
+        let before = last_op(&hive);
+        hive.repo(0).jj(&["workspace", "forget", "beta/x"]);
+        let forget = last_op(&hive);
+        hive.sync();
+        add_workspace(&hive, 1, "x", "beta-x");
+        let theirs = hive.workspaces(1)["x"].clone();
+        hive.hive.sync(1).unwrap();
+        // alpha shows beta's `x` now, under the name its own had, whose record jj kept.
+        let err = hive.hive.sync(0).unwrap_err();
+        assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
+        if how == "restore" {
+            hive.repo(0).jj(&["op", "restore", before.trim()]);
+        } else {
+            hive.repo(0).jj(&["op", "revert", forget.trim()]);
+        }
+        own.jj(&["workspace", "rename", "mine"]);
+        hive.sync();
+        hive.sync();
+        let beta = hive.workspaces(1);
+        assert_eq!(beta.get("x"), Some(&theirs), "{how}: {beta:?}");
+        let alpha = hive.workspaces(0);
+        assert_eq!(alpha.get("beta/x"), Some(&theirs), "{how}: {alpha:?}");
+        hive.assert_converged();
+    }
+}
+
+/// alpha forgets beta's workspace `beta/x` here, adds one of its own by that name, and reverts
+/// the forget (`jj op revert`), which brings beta's back beside alpha's in the view. Whichever
+/// commit the name ends at, beta's working copy stays where it is.
+#[test]
+fn reverting_a_forget_of_another_machines_workspace_beside_ones_own_moves_nothing_of_it() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
+    add_workspace(&hive, 1, "x", "beta-x");
     hive.sync();
-    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
-    let own = add_workspace(&hive, 0, "beta/beta", "alpha-beta");
-    own.write_file("from-alpha", "alpha's work");
-    own.jj(&["describe", "-m", "alpha's beta/beta"]);
-    let alphas = hive.workspaces(0)["beta/beta"].clone();
-    assert_refused(
-        &mut hive,
-        0,
-        "this repository can't sync while its workspace beta/beta has a \"/\" in its name",
-    );
+    let theirs = hive.workspaces(1)["x"].clone();
+    hive.repo(0).jj(&["workspace", "forget", "beta/x"]);
+    let forget = hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "--no-integrate-operation",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    let own = add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+    own.write_file("from-alpha", "alpha's beta/x");
+    own.jj(&["describe", "-m", "alpha's beta/x"]);
+    let alphas = hive.workspaces(0)["beta/x"].clone();
+    hive.repo(0).jj(&["op", "revert", forget.trim()]);
+    // jj's merge keeps alpha's under the name.
+    assert_eq!(hive.workspaces(0).get("beta/x"), Some(&alphas));
+    let err = hive.hive.sync(0).unwrap_err();
+    assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
     own.jj(&["workspace", "rename", "mine"]);
     hive.sync();
     hive.sync();
-    assert_eq!(hive.workspaces(0).get("mine"), Some(&alphas));
-    assert_eq!(hive.workspaces(1).get("beta"), Some(&alphas));
+    assert_eq!(hive.workspaces(1).get("x"), Some(&theirs));
+    assert_eq!(hive.workspaces(1).get("alpha/mine"), Some(&alphas));
+    assert_eq!(hive.workspaces(0).get("beta/x"), Some(&theirs));
+    hive.assert_converged();
+}
+
+/// alpha forgets beta's workspace `beta/beta` here and adds one of its own by that name, which
+/// stops alpha syncing until it is renamed. Adding it alone, `jj workspace add` moves the new
+/// workspace to its commit in a second operation that starts from a view with `beta/beta`,
+/// and alpha may work in it before renaming it. Canonicalized only after the rename, none of
+/// these takes the name for beta's workspace, which the hive shows at another commit: beta's
+/// working copy stays where it is.
+#[test]
+fn a_workspace_named_like_one_forgotten_here_moves_nothing_of_that_one() {
+    for work in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.sync();
+        let theirs = hive.workspaces(1)["beta"].clone();
+        hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+        let own = add_workspace(&hive, 0, "beta/beta", "alpha-beta");
+        if work {
+            own.write_file("from-alpha", "alpha's work");
+            own.jj(&["describe", "-m", "alpha's beta/beta"]);
+        }
+        let alphas = hive.workspaces(0)["beta/beta"].clone();
+        assert_refused(
+            &mut hive,
+            0,
+            "this repository can't sync while its workspace beta/beta has a \"/\" in its name",
+        );
+        // Not at the commit the hive gives beta's, it is alpha's, to rename.
+        let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
+        assert!(!slashed.is_theirs("beta/beta"), "work: {work}");
+        own.jj(&["workspace", "rename", "mine"]);
+        hive.sync();
+        hive.sync();
+        let alpha = hive.workspaces(0);
+        assert_eq!(alpha.get("mine"), Some(&alphas), "work: {work}: {alpha:?}");
+        assert_eq!(
+            alpha.get("beta/beta"),
+            Some(&theirs),
+            "work: {work}: {alpha:?}"
+        );
+        let beta = hive.workspaces(1);
+        assert_eq!(beta.get("beta"), Some(&theirs), "work: {work}: {beta:?}");
+        assert_eq!(
+            beta.get("alpha/mine"),
+            Some(&alphas),
+            "work: {work}: {beta:?}"
+        );
+        hive.assert_converged();
+    }
 }
 
 /// Three machines with the same hostname: musubi tells them apart by a random suffix, and

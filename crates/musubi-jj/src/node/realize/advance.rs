@@ -20,7 +20,6 @@ use super::super::git::Colocation;
 use super::super::heads::HeadsLock;
 use super::super::translate::target_of;
 use super::super::view::PerMachine;
-use super::with_kept;
 use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
@@ -163,9 +162,9 @@ impl NodeRepo {
 
     /// Re-render only unpublished suffixes against actual published parent aliases.
     /// Every operation validates its full inputs, so partial writes recover after restart.
-    /// Each shows other machines' workspaces clear of this machine's own names in the op heads
-    /// as they are now (`reserved_for`), so one made before a crash, or before a `jj` command
-    /// added such a name, is made again rather than published as it was.
+    /// None is published beside a workspace of this machine's with a `/` in its name, which a
+    /// `jj` command may have added since the realization was made, as before a crash: then
+    /// another machine's workspace shown by that name would be one with it to jj's merge.
     pub(super) fn current_realization(
         &mut self,
         canonical: &CanonicalOp,
@@ -184,7 +183,7 @@ impl NodeRepo {
                 Ok((id, op))
             })
             .collect::<Result<Vec<_>, NodeError>>()?;
-        // Bind the actual published frontier before choosing merge bases for kept names.
+        // Bind the actual published frontier first: the realizations above refer to it.
         for (_, op) in &order {
             let mut references = CanonicalOp::parents_of(op);
             if let Some((_, target)) = target_of(&op.metadata.description) {
@@ -196,7 +195,6 @@ impl NodeRepo {
                 }
             }
         }
-        let (reserved, kept) = self.reserved_for(&order)?;
         for (id, op) in &order {
             let old = self.local_of(id);
             let mut cached = None;
@@ -239,12 +237,10 @@ impl NodeRepo {
                 }
                 _ => self.inherited_per_machine(&parents)?,
             };
-            let view = self.local_view(id, op, &fields, &reserved)?;
-            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
+            let view = self.local_view(id, op, &fields)?;
+            let view = self.with_own_workspaces(id, op, &parents, view)?;
             let own = self.own_of(&view);
-            let view = with_kept(view, &kept);
-            let expected =
-                self.realize_one(id, op, parents, view, &own, &reserved, fields.clone())?;
+            let expected = self.realize_one(id, op, parents, view, &own, fields.clone())?;
             self.realizing.remember_own(expected.id.clone(), own);
             if old.as_ref() == Some(&expected.id) {
                 self.realizing.remember_last(expected.id, fields);

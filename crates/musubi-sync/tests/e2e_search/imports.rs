@@ -2425,6 +2425,12 @@ impl World {
         let plain = block_on(loader.op_store().read_view(&op.view_id)).unwrap();
         let at_parent = block_on(loader.load_at(&block_on(loader.load_operation(parent)).unwrap()))
             .map_err(|err| format!("loading the import's parent: {err}"))?;
+        // This rule depends on jj's incrementally built operation index: a commit that a later
+        // rebase hid stays in the index of the parent's operation, so a commit it has is one
+        // that existed when the import began, and one it lacks is one the import made. A
+        // reindex would rebuild the index from the parent's heads alone and lose those. The
+        // harness never reindexes or gcs a repository (it runs no `jj util reindex` or `jj util
+        // gc`, nor musubi's `gc::collect`), and `copy_tree` above keeps the index as it was.
         let existed = |id: &CommitId| block_on(at_parent.index().has_id(id)).unwrap();
         let store = loader.store();
         let key = |id: &CommitId| {
@@ -2455,6 +2461,22 @@ impl World {
                 .map(|(label, (_, target, state))| (label, (target, state)))
                 .collect::<BTreeMap<_, _>>()
         };
+        // A subject no view names would compare absent against absent, whatever the import
+        // did: it is a naming mismatch between the rules and `ref_targets`, so it fails.
+        // (A ref the import deleted is named by the parent's view alone.)
+        let named: BTreeSet<String> = [
+            ref_targets(&before),
+            ref_targets(after),
+            ref_targets(&plain),
+        ]
+        .iter()
+        .flat_map(|refs| refs.values().map(|(subject, ..)| subject.clone()))
+        .collect();
+        let unnamed: Vec<&String> = unexplained.difference(&named).collect();
+        assert!(
+            unnamed.is_empty(),
+            "`ref_targets` names no ref {unnamed:?}, so the comparison would pass them unseen"
+        );
         let (made, plain) = (judged(ref_targets(after)), judged(ref_targets(&plain)));
         let labels: BTreeSet<&String> = made.keys().chain(plain.keys()).collect();
         let absent = (RefTarget::absent(), String::new());

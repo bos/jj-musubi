@@ -74,7 +74,8 @@ then check `musubi status`; stopping does not undo an exchange or guarantee it h
 can start it again.
 
 To remove one copy, [leave its hive](#take-a-repo-or-machine-out). Leaving attempts a
-final sync, even with `musubi leave --force`; pause the daemon while deciding what to send.
+final sync, even with `musubi leave --force`, unless a workspace's name has a `/`; stop the
+daemon while deciding what to send.
 
 ## Take a repo or machine out
 
@@ -87,7 +88,9 @@ is dropped.
 If the final sync fails, `musubi leave` fails and the repo stays in its hive.
 `musubi leave --force` attempts the same sync but leaves even if it fails; other machines may
 show the copy until one forgets it. Fix the reported cause and retry, or pause background
-traffic with `musubi daemon stop` while deciding what to send.
+traffic with `musubi daemon stop` while deciding what to send. A workspace whose name has a
+`/` stops `musubi leave` before it changes anything; rename it as the hint says, or use
+`musubi leave --force`, which then leaves without snapshotting files or sending the last work.
 
 ### Forget a machine that went away
 

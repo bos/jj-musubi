@@ -94,8 +94,11 @@ stores triggers on that root.
 
 ## Coding agents
 
-Give each agent a workspace with `jj workspace add` so agents don't share files. Their work
-appears on every machine as `devbox/default@` or `laptop/agent-2@`. Review it from any machine:
+Give each agent a workspace with `jj workspace add` so agents don't share files, as
+`jj workspace add --name agent-2 ../agent-2`. If you pass `--name`, leave out `/`: a repo with
+a workspace named like `agents/2` [doesn't sync](../how-it-works.md#other-machines-workspaces).
+Their work appears on every machine as `devbox/default@` or `laptop/agent-2@`. Review it from
+any machine:
 
 ```sh
 jj log -r 'working_copies()'   # what every agent on every machine is working on

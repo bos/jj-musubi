@@ -44,7 +44,7 @@ Agent-run commands have the same default. See [Set up a hub and machines](../gui
 | Command | Use it to |
 | --- | --- |
 | `list` | Show hubs' hives, local copies and sync state. `-T` uses a template; see `musubi list --help`. Use `-T 'json(self) ++ "\n"'` for JSON. |
-| `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with sync or enabled background snapshots, and of this copy's workspaces that other machines don't show, because their names have a `/` ([why](../how-it-works.md#other-machines-workspaces)). Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
+| `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with sync or enabled background snapshots, such as a workspace whose name has a `/`, which keeps this copy from syncing ([why](../how-it-works.md#other-machines-workspaces)). Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
 | `sync` | Sync this copy now. `--outgoing` inspects snapshot overhead without sending. `--approve TOKEN` approves the inspected history. `--prune OPERATION...` snapshots current edits and deletions, then discards unpublished operations while preserving current work and explicit change versions. Add `--dry-run` to preview recorded history without snapshotting or changing it. See [snapshot cleanup](../guides/snapshots.md). |
 | `top` | Watch hub traffic and machines that are offline, behind, or failing. |
 

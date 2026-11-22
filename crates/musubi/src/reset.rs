@@ -138,6 +138,7 @@ pub fn resume(
     force: bool,
 ) -> anyhow::Result<()> {
     let (located, hive, entry) = the_copy(ui, start, socket)?;
+    located.refuse_slashed_workspaces(false)?;
     let id = HiveId::from(hive.hive);
     let asked = block_on(hub::ask(
         &hive.hub,

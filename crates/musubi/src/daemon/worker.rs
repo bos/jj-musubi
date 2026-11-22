@@ -18,6 +18,7 @@ use bytes::Bytes;
 use musubi_hub::activity::Report;
 use musubi_hub::hub_dir::HiveId;
 use musubi_sync::driver::NodeDriver;
+use musubi_sync::node::slashed_workspaces;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -363,6 +364,8 @@ struct Attempt {
     held_before: bool,
     /// Whether the hive was paused before it.
     paused_before: bool,
+    /// Why the sync before it failed, if it did.
+    error_before: Option<String>,
 }
 
 /// One copy served in its hive, from opening it until something calls for starting over.
@@ -577,6 +580,7 @@ impl<'a> Session<'a> {
         self.reconnections.seen();
         let held_before = self.status.publication_held();
         let paused_before = self.status.hive_paused();
+        let error_before = self.status.snapshot().error;
         let result = self.driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&self.driver);
@@ -590,6 +594,7 @@ impl<'a> Session<'a> {
             synced,
             held_before,
             paused_before,
+            error_before,
         }
     }
 
@@ -601,6 +606,7 @@ impl<'a> Session<'a> {
             synced,
             held_before,
             paused_before,
+            error_before,
         } = attempt;
         let result = result.map_err(|err| crate::reset::mark_own(&self.located, err));
         // The hive was reset from another copy: leave it for good, then say so, as for a
@@ -671,6 +677,16 @@ impl<'a> Session<'a> {
             Err(err) if HivePaused::of(&err).is_some() => {
                 if !paused_before {
                     tracing::info!("{err:#}; waiting for the pause to be lifted");
+                }
+                self.retry = false;
+                self.backoff.reset();
+                Ok(Flow::Again)
+            }
+            // Nor is a workspace with a `/` in its name: renaming it, a local operation, wakes
+            // the next sync, which goes on.
+            Err(err) if slashed_workspaces(&err) => {
+                if error_before.as_deref() != Some(format!("{err:#}").as_str()) {
+                    tracing::warn!("{err:#}");
                 }
                 self.retry = false;
                 self.backoff.reset();

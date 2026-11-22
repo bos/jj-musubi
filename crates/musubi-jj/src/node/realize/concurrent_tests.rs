@@ -46,6 +46,7 @@ use musubi_testutil::TestRepo;
 use pollster::FutureExt as _;
 use serde_json::json;
 
+use super::super::NodeError;
 use super::super::NodeRepo;
 use super::advance_tests::assert_exported;
 use super::advance_tests::fixture;
@@ -589,51 +590,61 @@ fn a_command_finishing_before_publication_is_merged_and_exported() {
     }
 }
 
-/// Another machine's workspace is shown clear of the names of this machine's own, so a
-/// workspace the user named `alpha/c` is theirs, not alpha's, however the race goes. Prepared
-/// before the workspace existed, the realization shows alpha's as `alpha/c`, which merged with
-/// the user's would be one workspace to jj: the user's directory would snapshot into alpha's
-/// working copy.
+/// A workspace the user names `alpha/c` while alpha's workspace `c` arrives stops `advance`
+/// before it publishes anything, whether the user added it before the realization was prepared
+/// or after: published beside it, alpha's workspace, shown as `alpha/c` too, would be one
+/// workspace with the user's to jj's merge, and the user's directory would snapshot into
+/// alpha's working copy. Renamed, the user's workspace keeps its commit, as `a` and `b` do,
+/// and alpha's shows as `alpha/c`.
 #[test]
-fn a_workspace_named_like_another_machines_stays_this_machines() {
+fn a_workspace_with_a_slash_added_meanwhile_stops_advance() {
     for prepared_first in [false, true] {
         let mut hive = hive(false);
         let alpha_working_copy = commit_of(&hive.alpha, "c@");
         if prepared_first {
             hive.node.realize(&hive.incoming).unwrap();
         }
+        let clash = hive.env.root().join("clash");
         hive.beta.jj(&[
             "workspace",
             "add",
             "--name",
             "alpha/c",
-            hive.env.root().join("clash").to_str().unwrap(),
+            clash.to_str().unwrap(),
         ]);
         let own = commit_of(&hive.beta, "alpha/c@");
         let before: Vec<_> = ["a", "b"]
             .map(|name| commit_of(&hive.beta, &format!("{name}@")))
             .into();
-        hive.node.advance(&hive.incoming).unwrap();
+        let heads = hive.node.local_heads().unwrap();
+        let err = hive.node.advance(&hive.incoming).unwrap_err();
+        assert!(
+            matches!(err, NodeError::SlashedWorkspaces(_)),
+            "prepared first: {prepared_first}: {err}"
+        );
+        assert_eq!(hive.node.local_heads().unwrap(), heads);
 
+        hive.beta
+            .another_copy(&clash)
+            .jj(&["workspace", "rename", "c"]);
+        hive.node.advance(&hive.incoming).unwrap();
         let heads = hive.node.local_heads().unwrap();
         assert_eq!(heads.len(), 1, "prepared first: {prepared_first}");
         let repo = hive.node.repo_at(&heads[0]).unwrap();
         let workspaces = repo.view().wc_commit_ids();
         assert_eq!(
-            workspaces[WorkspaceName::new("alpha/c")].hex(),
+            workspaces[WorkspaceName::new("c")].hex(),
             own,
+            "prepared first: {prepared_first}: {workspaces:?}"
+        );
+        assert_eq!(
+            workspaces[WorkspaceName::new("alpha/c")].hex(),
+            alpha_working_copy,
             "prepared first: {prepared_first}: {workspaces:?}"
         );
         for (name, before) in ["a", "b"].into_iter().zip(&before) {
             assert_eq!(workspaces[WorkspaceName::new(name)].hex(), *before);
         }
-        let alpha_name = workspaces
-            .iter()
-            .find(|(_, commit)| commit.hex() == alpha_working_copy)
-            .map(|(name, _)| name.as_str().to_owned())
-            .expect("alpha's workspace is still shown");
-        assert!(alpha_name.contains("alpha"), "{alpha_name}");
-        assert_ne!(alpha_name, "alpha/c");
     }
 }
 

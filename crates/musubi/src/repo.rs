@@ -105,6 +105,26 @@ impl Located {
         self.open_as(settings, machine)
     }
 
+    /// Refuses, saying what to run, while the repository has a workspace of its own with a `/`
+    /// in its name, which keeps it from syncing (`NodeRepo::slashed_workspaces`). A copy says
+    /// too which of them are other machines' workspaces by names its own left records of;
+    /// a repository that isn't one has none. `leaving` says the command is `musubi leave`.
+    pub fn refuse_slashed_workspaces(&self, leaving: bool) -> anyhow::Result<()> {
+        let settings = settings::load(&self.workspace_root, &self.repo_path)?;
+        let slashed = if NodeRepo::machine_of(&self.repo_path)?.is_some() {
+            self.open_with_settings(&settings)?.slashed_workspaces()?
+        } else {
+            musubi_jj::node::slashed_workspaces(&self.repo_path, &settings)?
+        };
+        match slashed {
+            Some(slashed) => Err(crate::ui::with_hint(
+                anyhow::anyhow!("{slashed}"),
+                crate::status::slashed_hint(&slashed, leaving),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Opens the repository as `machine`'s, storing no key, for joining as it.
     pub fn open_as(
         &self,

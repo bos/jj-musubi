@@ -253,10 +253,12 @@ pub enum Command {
     /// It records what changed in the working copy, then tells the hive, with this copy's
     /// last work, so that the other machines stop showing its working copies. The repository
     /// keeps everything it has, its working copy included, and the hive keeps everything it
-    /// sent. If the hive can't be told, it fails, and the repository stays part of the hive.
+    /// sent. If the hive can't be told, it fails, and the repository stays part of the hive,
+    /// as it does, before changing anything, while one of its workspaces has a `/` in its name.
     Leave {
         /// Leave even if the hive can't be told. The other machines go on showing this copy
-        /// until one of them forgets it.
+        /// until one of them forgets it. While a workspace has a `/` in its name, it leaves
+        /// without recording the working copy or syncing.
         #[arg(long)]
         force: bool,
         /// Instead, stop syncing the copy that was at this path, which is gone: deleted, say.

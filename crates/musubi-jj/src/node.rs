@@ -52,6 +52,7 @@ mod realize;
 #[cfg(test)]
 mod realize_laws;
 mod rewrites;
+mod slashed;
 mod translate;
 mod view;
 mod working_copies;
@@ -83,6 +84,8 @@ use realize::MergeDiagnosis;
 use realize::PublishedHistoryCache;
 pub use realize::REALIZE_AT_ONCE;
 use realize::State as RealizationState;
+pub use slashed::SlashedWorkspaces;
+pub use slashed::slashed_workspaces;
 pub(crate) use view::LOCAL_WORKSPACES;
 pub(crate) use view::RESERVED_WORKSPACES;
 
@@ -106,6 +109,12 @@ struct NameMemos {
     /// This machine's own names that could clash with another machine's as of the op heads
     /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
     reserved: Option<ReservedNames>,
+    /// This machine's own workspaces with a `/` in their names as of the op heads last asked
+    /// about (`NodeRepo::slashed_workspaces`).
+    slashed: Mutex<slashed::SlashedMemo>,
+    /// Where jj's workspace store records the directories of the names asked about, while
+    /// its file is unchanged.
+    records: Mutex<slashed::Records>,
     /// The workspace names in the view of the operation `canonical_view` last canonicalized,
     /// usually the next one's parent.
     last_view: Mutex<

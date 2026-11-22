@@ -22,6 +22,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::settings::UserSettings;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::node::SlashedWorkspaces;
 use musubi_jj::op_id::CanonicalOp;
 
 use crate::config::HiveConfig;
@@ -69,8 +70,8 @@ pub struct Hive {
     pub working_copies: Vec<WorkingCopy>,
     /// Each copy in the hive.
     pub copies: Vec<Copy>,
-    /// This machine's workspaces that other machines don't show, having a `/` in their names.
-    pub unpublished: Vec<String>,
+    /// This copy's workspaces with a `/` in their names, which keep it from syncing.
+    pub slashed: Option<SlashedWorkspaces>,
 }
 
 /// A working copy, as `jj workspace list` shows one.
@@ -269,7 +270,7 @@ impl Hive {
             forgotten: false,
             working_copies: vec![],
             copies: vec![],
-            unpublished: vec![],
+            slashed: None,
             sync,
             snapshot_issues,
         };
@@ -314,7 +315,7 @@ impl Hive {
             .collect();
         // This machine's first, as its working copies are.
         self.copies.sort_by_key(|copy| !copy.this);
-        self.unpublished = node.unpublished_workspaces()?.into_iter().collect();
+        self.slashed = node.slashed_workspaces()?;
         Ok(())
     }
 
@@ -483,20 +484,12 @@ impl Hive {
                 "Background snapshot skipped for {workspace}@ ({reason})."
             )?;
         }
-        for workspace in &self.unpublished {
-            writeln!(
-                ui.warning(),
-                "Other machines don't show workspace {workspace}@, because its name has a \
-                 \"/\"."
-            )?;
-            writeln!(
-                ui.hint(),
-                "Run `jj workspace rename <new name>`, with no \"/\", in {workspace}'s \
-                 directory (`jj workspace root --name {workspace}`)."
-            )?;
-        }
-        let failing = self.failing();
-        if let Some(pause) = self
+        let failing = self.failing() || self.slashed.is_some();
+        if let Some(slashed) = &self.slashed {
+            // What keeps it from syncing now, whatever the daemon's last attempt found.
+            writeln!(ui.warning(), "{}.", capitalized(&slashed.to_string()))?;
+            writeln!(ui.hint(), "{}", slashed_hint(slashed, false))?;
+        } else if let Some(pause) = self
             .sync
             .as_ref()
             .and_then(|sync| sync.hive_paused.as_ref())
@@ -802,6 +795,111 @@ fn sent(node: &NodeRepo, sync: Option<&daemon::Status>) -> Option<bool> {
 pub const HISTORY_LOST_HINT: &str = "Make a new copy with `musubi clone`, bring this one's work \
      across, then run `musubi leave --force` here; \"Rescue work in a new copy\" in the \
      troubleshooting guide says how.";
+
+/// The way on while workspaces of this repository's have a `/` in their names, which commands
+/// print as a hint: `jj workspace rename` renames the workspace it runs in, so in its
+/// directory; where that is missing, as on a disk not mounted, `jj workspace forget`. Where the
+/// name is another machine's workspace here, the directory is likely one a workspace of this
+/// machine's left when `jj workspace forget` kept its record, and renaming would make the other
+/// machine's workspace this machine's: `jj workspace remove` deletes the directory, keeping its
+/// tracked files in a commit, and the record. It may be one just added, as a sync showed the
+/// other machine's, which renaming suits; musubi can't tell, so the hint says both. `leaving` adds the way to leave without syncing.
+pub fn slashed_hint(slashed: &SlashedWorkspaces, leaving: bool) -> String {
+    let word = |text: &str| crate::ui::shell_word(text);
+    let path = |path: &Path| word(&path.display().to_string());
+    let several = slashed.workspaces().count() > 1;
+    let mut rename = vec![];
+    let mut forget = vec![];
+    let mut hint = vec![];
+    for (name, dir) in slashed.workspaces() {
+        if slashed.is_theirs(name) {
+            hint.push(if dir.exists() {
+                format!(
+                    "If {} is a workspace of yours that `jj workspace forget` left, move out any \
+                     ignored files you want to keep, then run `jj workspace remove {}`: it saves \
+                     the rest in a commit and deletes the directory. If you have just added it, \
+                     run `jj workspace rename <new name>` in it instead, with no \"/\" in the new \
+                     name.",
+                    path(dir),
+                    word(name)
+                )
+            } else {
+                format!(
+                    "If {}, missing now, is a workspace of yours that `jj workspace forget` left, \
+                     bring it back, move out any ignored files you want to keep, then run `jj \
+                     workspace remove {}`: it saves the rest in a commit and deletes the \
+                     directory.",
+                    path(dir),
+                    word(name)
+                )
+            });
+        } else if dir.exists() {
+            rename.push(if several {
+                format!("{} ({name})", path(dir))
+            } else {
+                path(dir)
+            });
+        } else {
+            forget.push((name, dir));
+        }
+    }
+    if !rename.is_empty() {
+        let names = if rename.len() == 1 { "name" } else { "names" };
+        hint.insert(
+            0,
+            format!(
+                "Run `jj workspace rename <new name>` in {}, with no \"/\" in the new {names}.",
+                and_list(rename)
+            ),
+        );
+    }
+    match forget.as_slice() {
+        [] => {}
+        [(name, dir)] => hint.push(format!(
+            "{name}'s directory ({}) is missing: run `jj workspace forget {}`.",
+            path(dir),
+            word(name)
+        )),
+        several => {
+            let dirs: Vec<String> = several
+                .iter()
+                .map(|(name, dir)| format!("{name} ({})", path(dir)))
+                .collect();
+            let words: Vec<String> = several.iter().map(|(name, _)| word(name)).collect();
+            hint.push(format!(
+                "The directories of {} are missing: run `jj workspace forget {}`.",
+                and_list(dirs),
+                words.join(" ")
+            ));
+        }
+    }
+    if leaving {
+        hint.push(
+            "Or run `musubi leave --force` to leave without sending this copy's last work."
+                .to_owned(),
+        );
+    }
+    hint.join(" ")
+}
+
+/// `items` as a list in words: `a`, `a and b`, `a, b and c`.
+fn and_list(items: Vec<impl std::fmt::Display>) -> String {
+    let items: Vec<String> = items.into_iter().map(|item| item.to_string()).collect();
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// `text` with its first letter a capital, as a warning starts.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
 
 /// The way on while a hive is paused, which commands print as a hint.
 pub const PAUSED_HINT: &str = "`musubi resume` in a copy you've cleaned up resets the hive \

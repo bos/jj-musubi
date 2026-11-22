@@ -226,6 +226,7 @@ pub fn sync(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<()> {
 /// the repository isn't running.
 pub fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)> {
     let (located, hive, entry) = the_copy(ui, start, socket)?;
+    located.refuse_slashed_workspaces(false)?;
     let mut stopped = false;
     let through_daemon = block_on(async {
         let Some(client) = daemon::running(socket).await? else {

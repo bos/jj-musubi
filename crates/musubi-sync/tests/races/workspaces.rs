@@ -696,10 +696,9 @@ fn a_workspace_with_a_slash_added_during_a_sync_stops_it() {
 /// `jj workspace forget` of a workspace of alpha's own named `beta/x`, as on being refused,
 /// leaves jj's record of its directory. Once alpha shows beta's workspace `x` by that name,
 /// whether beta adds it after or alpha shows it again after forgetting it here, alpha takes
-/// the record for a workspace of its own and refuses to sync, but knows the name is beta's,
-/// so the hint doesn't say to rename it there. `jj workspace remove beta/x`, which the hint
-/// gives, keeps the old directory's files in a commit of alpha's, deletes the directory and
-/// the record, and moves nothing of beta's; alpha syncs on.
+/// the record for a workspace of its own and refuses to sync. `jj workspace remove beta/x`,
+/// which the hint offers beside renaming, keeps the old directory's files in a commit of
+/// alpha's, deletes the directory and the record, and moves nothing of beta's; alpha syncs on.
 #[test]
 fn a_forgotten_workspace_with_a_slash_is_removed_to_sync_on() {
     for shown_before in [false, true] {
@@ -725,8 +724,6 @@ fn a_forgotten_workspace_with_a_slash_is_removed_to_sync_on() {
         // The sync that shows beta's `x` puts it in alpha's view, then stops.
         let err = hive.hive.sync(0).unwrap_err();
         assert!(musubi_sync::node::slashed_workspaces(&err), "{err:#}");
-        let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
-        assert!(slashed.is_theirs("beta/x"), "shown before: {shown_before}");
 
         hive.repo(0).jj(&["workspace", "remove", "beta/x"]);
         hive.sync();
@@ -750,50 +747,6 @@ fn a_forgotten_workspace_with_a_slash_is_removed_to_sync_on() {
         assert_eq!(snapshot.trim(), old_commit, "shown before: {shown_before}");
         hive.assert_converged();
     }
-}
-
-/// alpha adds a workspace `beta/x` while a sync publishes the realization that shows beta's
-/// `x` by that name, so that each is an op head: alpha's added workspace isn't taken for beta's,
-/// as it is in one head and not the other, and the hint says to rename it.
-#[test]
-fn a_workspace_with_a_slash_added_beside_another_machines_of_its_name_is_ones_own() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    add_workspace(&hive, 1, "x", "beta-x");
-    hive.hive.sync(1).unwrap();
-    let before = hive.repo(0).jj(&[
-        "--ignore-working-copy",
-        "--no-integrate-operation",
-        "op",
-        "log",
-        "--no-graph",
-        "-n1",
-        "-T",
-        "id",
-    ]);
-    hive.hive.sync(0).unwrap();
-    let path = hive.env.root().join("alpha-beta-x");
-    hive.repo(0).jj(&[
-        "--at-op",
-        before.trim(),
-        "workspace",
-        "add",
-        "--name",
-        "beta/x",
-        path.to_str().unwrap(),
-    ]);
-    assert_eq!(hive.node(0).local_heads().unwrap().len(), 2);
-    let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
-    assert!(!slashed.is_theirs("beta/x"));
-}
-
-/// A workspace of alpha's own named `beta/x` isn't taken for beta's, which beta hasn't got.
-#[test]
-fn a_workspace_with_a_slash_of_ones_own_is_not_another_machines() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
-    hive.hive.sync(0).unwrap_err();
-    let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
-    assert!(!slashed.is_theirs("beta/x"));
 }
 
 /// alpha forgets a workspace of its own named `beta/x`, as it might on being refused, and syncs;
@@ -909,9 +862,6 @@ fn a_workspace_named_like_one_forgotten_here_moves_nothing_of_that_one() {
             0,
             "this repository can't sync while its workspace beta/beta has a \"/\" in its name",
         );
-        // Not at the commit the hive gives beta's, it is alpha's, to rename.
-        let slashed = hive.node(0).slashed_workspaces().unwrap().unwrap();
-        assert!(!slashed.is_theirs("beta/beta"), "work: {work}");
         own.jj(&["workspace", "rename", "mine"]);
         hive.sync();
         hive.sync();

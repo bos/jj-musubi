@@ -110,9 +110,11 @@ Because names with a `/` are how machines show each other's workspaces, a repo w
 workspace of yours named that way, such as `feat/x`, doesn't sync; other repos on the machine
 sync on. `musubi sync` and `musubi status` say which workspace it is. Run `jj workspace rename
 <new name>` in that workspace's directory, with no `/` in the new name, and the repo syncs
-again, with the work you did meanwhile. If the directory is missing, as on a disk not mounted,
-run `jj workspace forget <name>` from another workspace of the repo instead, or mount the disk
-and rename it there.
+again, with the work you did meanwhile. If you ran `jj workspace forget` on it earlier, and
+another machine's workspace now uses its name, [run `jj workspace remove <name>`
+instead](troubleshooting.md#start-with-this-copy). If the directory is missing, as on a disk not
+mounted, run `jj workspace forget <name>` from another workspace of the repo instead, or mount
+the disk and rename it there.
 
 Moving a repo will maintain its identity in jj-musubi's eyes, but copying its files makes a
 *duplicate* with the same identity that cannot sync. Use the [move, copy and restore

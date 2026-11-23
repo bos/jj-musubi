@@ -3,7 +3,6 @@
 //! "Which workspaces are this machine's own" in docs/internals/design.md).
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
@@ -28,9 +27,6 @@ use crate::op_id::LocalOp;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlashedWorkspaces {
     dirs: BTreeMap<String, PathBuf>,
-    /// Those that are another machine's workspace as this machine shows it, by a name whose
-    /// record a workspace of this machine's left, as `jj workspace forget` leaves it.
-    theirs: BTreeSet<String>,
 }
 
 impl SlashedWorkspaces {
@@ -40,40 +36,22 @@ impl SlashedWorkspaces {
             .iter()
             .map(|(name, path)| (name.as_str(), path.as_path()))
     }
-
-    /// Whether workspace `name` is another machine's as this machine shows it, and its
-    /// directory one a workspace of this machine's by that name left.
-    pub fn is_theirs(&self, name: &str) -> bool {
-        self.theirs.contains(name)
-    }
 }
 
 impl fmt::Display for SlashedWorkspaces {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (theirs, own): (Vec<&String>, Vec<&String>) = self
-            .dirs
-            .keys()
-            .partition(|name| self.theirs.contains(*name));
-        let mut why = vec![];
-        match own.as_slice() {
-            [] => {}
-            [name] => why.push(format!("its workspace {name} has a \"/\" in its name")),
-            several => why.push(format!(
-                "its workspaces {} have a \"/\" in their names",
+        let names: Vec<&String> = self.dirs.keys().collect();
+        match names.as_slice() {
+            [name] => write!(
+                f,
+                "this repository can't sync while its workspace {name} has a \"/\" in its name"
+            ),
+            several => write!(
+                f,
+                "this repository can't sync while its workspaces {} have a \"/\" in their names",
                 and_list(several)
-            )),
+            ),
         }
-        match theirs.as_slice() {
-            [] => {}
-            [name] => why.push(format!(
-                "jj keeps a directory for {name}, now another machine's workspace"
-            )),
-            several => why.push(format!(
-                "jj keeps directories for {}, now other machines' workspaces",
-                and_list(several)
-            )),
-        }
-        write!(f, "this repository can't sync while {}", why.join(", and "))
     }
 }
 
@@ -129,10 +107,7 @@ fn slashed_at(
             }
         }
     }
-    Ok((!found.is_empty()).then_some(SlashedWorkspaces {
-        dirs: found,
-        theirs: BTreeSet::new(),
-    }))
+    Ok((!found.is_empty()).then_some(SlashedWorkspaces { dirs: found }))
 }
 
 /// The modification time and length of jj's workspace store's file, which every change to
@@ -209,74 +184,11 @@ impl NodeRepo {
             return Ok(slashed.clone());
         }
         let stamp = self.store_stamp();
-        let mut slashed = slashed_at(&self.loader, heads.iter().cloned(), |name| {
+        let slashed = slashed_at(&self.loader, heads.iter().cloned(), |name| {
             self.recorded_directory(name, &stamp)
         })?;
-        if let Some(slashed) = &mut slashed {
-            slashed.theirs = self.shown_for_others(&heads, slashed.dirs.keys())?;
-        }
         *memo = Some((heads, slashed.clone()));
         Ok(slashed)
-    }
-
-    /// Which of `names`, in the views of op heads `heads`, are other machines' workspaces as
-    /// this machine shows them: in every head whose view has the name, named for another
-    /// machine's workspace in the canonical form of the nearest operation at or below the
-    /// head that has one, and at the commit it gives that workspace, as a realization shows it
-    /// (`canonical_view`'s rule). A head with a workspace of this machine's added by the name,
-    /// as beside a realization published meanwhile, keeps it from counting. jj keeps the
-    /// record of a workspace of this machine's by such a name after `jj workspace forget`.
-    fn shown_for_others<'a>(
-        &self,
-        heads: &[LocalOp],
-        names: impl IntoIterator<Item = &'a String>,
-    ) -> Result<BTreeSet<String>, NodeError> {
-        let names: BTreeSet<&String> = names.into_iter().collect();
-        let op_store = self.loader.op_store();
-        // For each name, whether every head that has it shows another machine's workspace.
-        let mut theirs: BTreeMap<String, bool> = BTreeMap::new();
-        for head in heads {
-            let op = op_store.read_operation(&head.0).block_on()?;
-            let view = op_store.read_view(&op.view_id).block_on()?;
-            let mut below = vec![head.clone()];
-            let mut seen = BTreeSet::new();
-            let canonical = loop {
-                let Some(local) = below.pop() else {
-                    break None;
-                };
-                if !seen.insert(local.clone()) {
-                    continue;
-                }
-                if let Some(canonical) = self.canonical_of(&local) {
-                    break Some(canonical);
-                }
-                let op = op_store.read_operation(&local.0).block_on()?;
-                below.extend(LocalOp::parents_of(&op));
-            };
-            let mut shown = BTreeSet::new();
-            if let Some(canonical) = canonical
-                && canonical != *self.canonical.root_operation_id()
-            {
-                let canonical_view = self.canonical.read_operation_view(&canonical)?;
-                for (key, name) in self.local_names(&canonical, &canonical_view)? {
-                    if !self.is_own_key(&key)
-                        && view.wc_commit_ids.get(&name) == canonical_view.wc_commit_ids.get(&key)
-                    {
-                        shown.insert(name);
-                    }
-                }
-            }
-            for name in view.wc_commit_ids.keys() {
-                if names.contains(&name.as_str().to_owned()) {
-                    *theirs.entry(name.as_str().to_owned()).or_insert(true) &= shown.contains(name);
-                }
-            }
-        }
-        Ok(theirs
-            .into_iter()
-            .filter(|(_, theirs)| *theirs)
-            .map(|(name, _)| name)
-            .collect())
     }
 
     /// Refuses to go on while this copy has an own workspace whose name has a `/`
@@ -333,34 +245,20 @@ mod tests {
 
     #[test]
     fn says_which_workspaces_have_a_slash() {
-        let one = SlashedWorkspaces {
-            dirs: BTreeMap::from([("feat/x".to_owned(), PathBuf::from("/x"))]),
-            theirs: BTreeSet::new(),
+        let some = |names: &[&str]| SlashedWorkspaces {
+            dirs: names
+                .iter()
+                .map(|name| ((*name).to_owned(), PathBuf::from("/x")))
+                .collect(),
         };
         assert_eq!(
-            one.to_string(),
+            some(&["feat/x"]).to_string(),
             "this repository can't sync while its workspace feat/x has a \"/\" in its name"
         );
-        let three = SlashedWorkspaces {
-            dirs: ["c/z", "a/x", "b/y"]
-                .into_iter()
-                .map(|name| (name.to_owned(), PathBuf::from("/x")))
-                .collect(),
-            theirs: BTreeSet::new(),
-        };
         assert_eq!(
-            three.to_string(),
+            some(&["c/z", "a/x", "b/y"]).to_string(),
             "this repository can't sync while its workspaces a/x, b/y and c/z have a \"/\" in \
              their names"
-        );
-        let mixed = SlashedWorkspaces {
-            theirs: BTreeSet::from(["b/y".to_owned(), "c/z".to_owned()]),
-            ..three
-        };
-        assert_eq!(
-            mixed.to_string(),
-            "this repository can't sync while its workspace a/x has a \"/\" in its name, and jj \
-             keeps directories for b/y and c/z, now other machines' workspaces"
         );
     }
 }

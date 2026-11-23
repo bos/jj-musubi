@@ -23,15 +23,17 @@ Follow the symptom:
 - **This repository lost history the hive has:**
   [rescue work in a new copy](#rescue-work-in-a-new-copy).
 - **This repository can't sync while its workspace … has a "/" in its name:** rename the
-  workspace as the hint says; see [Other machines'
-  workspaces](how-it-works.md#other-machines-workspaces). If its directory is missing, as on
-  a disk not mounted, run `jj workspace forget <name>` from another workspace of the repo, or
-  mount the disk and rename the workspace there.
-- **This repository can't sync while jj keeps a directory for …, now another machine's
-  workspace:** usually a workspace of yours that `jj workspace forget` dropped had that name,
-  and jj kept its directory. Move out any ignored files you want to keep from that directory,
-  then run `jj workspace remove <name>`, as the hint says: it saves the rest in a commit and
-  deletes the directory. If you had just added the workspace, rename it instead.
+  workspace in its directory, as the hint says; see [Other machines'
+  workspaces](how-it-works.md#other-machines-workspaces). If you ran `jj workspace forget` on
+  it earlier, and another machine's workspace now uses its name, don't rename it: jj kept the
+  directory, and renaming there would make the other machine's workspace yours. Move out any
+  ignored files you want to keep from that directory, then run `jj workspace remove <name>`: it
+  saves the rest in a commit and deletes the directory. If the directory is missing, as on a
+  disk not mounted, mount the disk and rename the workspace there, or run `jj workspace forget
+  <name>` from another workspace of the repo if you no longer need it. If you ran `jj workspace
+  forget` on it earlier and then lost the directory, `jj workspace remove` can't open it:
+  run `jj workspace add --name restore <the directory>` to make one, then `jj workspace remove
+  <name>`, then `jj workspace forget restore`.
 - **Another sync error:** follow the command's hint, fix the cause, then run `musubi sync`.
   If it persists, [collect the logs](#report-a-problem).
 

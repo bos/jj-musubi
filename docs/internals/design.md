@@ -304,15 +304,21 @@ operation wakes it. So whenever musubi canonicalizes, realizes or shows other ma
 workspaces, every `/` name in this machine's op heads is another machine's workspace, or one
 `jj undo` brings back under a name the hive no longer gives it (`names_other_machine`).
 
-A record `jj workspace forget` left counts once this machine shows another machine's workspace
-by its name, and the copy stops syncing. musubi tells such a name by the rule below, in every op
-head that has it: the name at the commit the canonical form gives the other machine's workspace
-(`shown_for_others`). The hint then says that if the directory is one `jj workspace forget` left,
-`jj workspace remove` keeps its tracked files in a commit, deletes it and drops the record, and
-that if the workspace was just added, as while a sync showed the other machine's, renaming it
-suits; `jj workspace rename` in a directory `jj workspace forget` left would make the other
-machine's workspace this machine's. musubi doesn't drop the record itself: outside jj's locks it
-could drop that of a workspace being added under the name.
+A record `jj workspace forget` left counts once this machine shows another machine's workspace by
+its name, or the copy adds a workspace of its own by it, and the copy stops syncing. musubi
+doesn't tell the two apart, and says so in one hint (`slashed_hint`): rename the workspace in its
+directory, or, if the user ran `jj workspace forget` on it earlier, move out any ignored files to
+keep and run `jj workspace remove`, which keeps the tracked files in a commit, deletes the
+directory and drops the record; `jj workspace rename` there would make the other machine's
+workspace this machine's. Where the directory is missing, the hint adds `jj workspace forget` for
+a workspace no longer needed, and mounting the disk to rename it there; for a leftover whose
+directory is gone, `jj workspace remove` can't open it, and the troubleshooting guide gives the
+commands that make one to remove. musubi tried to tell by the commit the hive gives the other
+machine's workspace, and by the operation and change a directory's working-copy state records;
+each took some live workspace, after a rebase or a squash or abandon of its commit, for a
+leftover, and so pointed at a removal that deletes the directory of a workspace in use, so the
+user, who knows, chooses. musubi doesn't drop the record itself: outside jj's locks it could drop
+that of a workspace being added under the name.
 
 Otherwise a workspace this machine adds as `laptop/x`, beside the laptop's `x`, which the laptop
 adds meanwhile, would be one workspace to jj's merge with it, and its directory would snapshot

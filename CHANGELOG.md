@@ -7,9 +7,12 @@
   `laptop/default`. Before, other machines showed it as `laptop/feat/x`. `musubi sync`,
   `musubi status`, `musubi create`, `musubi join`, `musubi resume` and `musubi leave` say which
   workspace it is and what to run: `jj workspace rename <new name>` in its directory, with no
-  `/` in the new name. If the directory is missing, as on a disk not mounted, run `jj workspace
-  forget <name>` from another workspace of the repo instead. Syncing then picks up again, with
-  what you did meanwhile. After upgrading, run `musubi daemon restart` on every machine: a
+  `/` in the new name. If instead it is a workspace you ran `jj workspace forget` on earlier,
+  whose name another machine's workspace now uses, don't rename it: move out any ignored files
+  you want to keep, then run `jj workspace remove <name>`, which saves the rest in a commit and
+  deletes the directory. If the directory is missing, as on a disk not mounted, mount the disk
+  and rename the workspace there, or run `jj workspace forget <name>` from another workspace of
+  the repo. Syncing then picks up again, with what you did meanwhile. After upgrading, run `musubi daemon restart` on every machine: a
   daemon already running keeps the old behaviour until it restarts.
 
 - `jj op abandon` of operations the hive already has no longer reaches other machines. The

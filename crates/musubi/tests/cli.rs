@@ -4040,21 +4040,21 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     let refused = musubi_fails(&env, &logs, &alpha, &["sync"]);
     insta::assert_snapshot!(refused, @r#"
     Error: this repository can't sync while its workspaces local/linked and tmp/y have a "/" in their names
-    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked (local/linked) and '$ROOT/alpha other' (tmp/y), with no "/" in the new names.
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked (local/linked) and '$ROOT/alpha other' (tmp/y), with no "/" in the new names. For one you ran `jj workspace forget` on earlier, run `jj workspace remove <name>` instead, after moving out any ignored files to keep: it deletes the directory, saving the rest in a commit.
     "#);
-    // Its directory gone, as on a disk not mounted, a workspace is forgotten instead.
+    // With its directory gone, as on a disk not mounted, the hint says what to do about that.
     fs::remove_dir_all(&other).unwrap();
     let (_, warnings) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(warnings, @r#"
     Warning: This repository can't sync while its workspaces local/linked and tmp/y have a "/" in their names.
-    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked (local/linked), with no "/" in the new name. tmp/y's directory ('$ROOT/alpha other') is missing: run `jj workspace forget tmp/y`.
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name. If you ran `jj workspace forget` on it earlier, run `jj workspace remove local/linked` instead, after moving out any ignored files to keep: it deletes the directory, saving the rest in a commit. tmp/y's directory ('$ROOT/alpha other') is missing. If you no longer need that workspace, run `jj workspace forget tmp/y`; if its disk isn't mounted, mount it and rename it there. If you ran `jj workspace forget` on it earlier, the troubleshooting guide says what to do.
     "#);
     alpha.jj(&["workspace", "forget", "tmp/y"]);
     // Leaving tells the hive, which takes a sync.
     let refused = musubi_fails(&env, &logs, &alpha, &["leave"]);
     insta::assert_snapshot!(refused, @r#"
     Error: this repository can't sync while its workspace local/linked has a "/" in its name
-    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name. Or run `musubi leave --force` to leave without sending this copy's last work.
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name. If you ran `jj workspace forget` on it earlier, run `jj workspace remove local/linked` instead, after moving out any ignored files to keep: it deletes the directory, saving the rest in a commit. Or run `musubi leave --force` to leave without sending this copy's last work.
     "#);
     // The daemon, which found the same, syncs once the workspace is renamed.
     in_linked(&["workspace", "rename", "linked"]);
@@ -4064,7 +4064,7 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     let (_, warnings) = status_in(&env, &logs, &alpha);
     assert_eq!(warnings, "");
     // A workspace forgotten with `jj workspace forget` leaves jj's record of its directory;
-    // once another machine's workspace shows by its name, the hint says how to drop it.
+    // once another machine's workspace shows by its name, the hint offers how to drop it.
     let stale = env.root().join("alpha-stale");
     alpha.jj(&[
         "workspace",
@@ -4085,8 +4085,8 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     assert!(!synced);
     let refused = musubi_fails(&env, &logs, &alpha, &["sync"]);
     insta::assert_snapshot!(refused, @r#"
-    Error: this repository can't sync while jj keeps a directory for beta/z, now another machine's workspace
-    Hint: If $ROOT/alpha-stale is a workspace of yours that `jj workspace forget` left, move out any ignored files you want to keep, then run `jj workspace remove beta/z`: it saves the rest in a commit and deletes the directory. If you have just added it, run `jj workspace rename <new name>` in it instead, with no "/" in the new name.
+    Error: this repository can't sync while its workspace beta/z has a "/" in its name
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-stale, with no "/" in the new name. If you ran `jj workspace forget` on it earlier, run `jj workspace remove beta/z` instead, after moving out any ignored files to keep: it deletes the directory, saving the rest in a commit.
     "#);
     alpha.jj(&["workspace", "remove", "beta/z"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
@@ -4116,7 +4116,7 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     let refused = musubi_fails(&env, &logs, &alpha, &["create", "again"]);
     insta::assert_snapshot!(refused, @r#"
     Error: this repository can't sync while its workspace local/linked has a "/" in its name
-    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name.
+    Hint: Run `jj workspace rename <new name>` in $ROOT/alpha-linked, with no "/" in the new name. If you ran `jj workspace forget` on it earlier, run `jj workspace remove local/linked` instead, after moving out any ignored files to keep: it deletes the directory, saving the rest in a commit.
     "#);
     in_linked(&["workspace", "rename", "linked"]);
     musubi_in(&env, &logs, &alpha, &["create", "again"]);

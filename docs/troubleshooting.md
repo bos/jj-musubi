@@ -55,7 +55,7 @@ copy](guides/working-across-machines.md#when-another-machine-rewrites-your-worki
 
 ## Reaching the hub
 
-Run `musubi list` to check the connection. For a remote hub, check ssh and the executable
+Run `musubi list` to check the connection. For an ssh hub, check ssh and the executable
 from this machine, replacing `devbox` with the hub's ssh name:
 
 ```sh
@@ -77,6 +77,19 @@ On the hub's machine, check that `musubi hub` is running and inspect its
 `~/.ssh/authorized_keys` needs `command="musubi hub connect --dir <dir>"` too.
 For a hub that stops at logout or reboot, see
 [service setup](guides/setup.md#keep-the-hub-running).
+
+For a `musubi://host:port` TLS hub, check the TCP address and firewall, not ssh. The address must
+reach the TLS listener directly; an HTTP-only forwarding URL cannot relay this connection.
+On the hub's machine, check its log for listener errors. Its `--listen` bind address and
+`--advertise` address are kept in `hub.toml`; see [TLS setup](guides/setup.md#connect-over-tls).
+
+If enrollment refuses the key, ask the hub's owner for a fresh invitation: it may have been
+revoked or consumed by a single-use enrollment. If the hub's identity does not match, verify
+the address with its owner and obtain a new key from that hub; do not bypass the identity check.
+If the client certificate is revoked, or the hub was recreated, run
+`musubi enroll --hub musubi://host:port` with a newly authorized key, then
+`musubi daemon restart`. Changing a hub's address also requires enrollment at the new address.
+Invitation revocation alone does not stop clients already enrolled.
 
 For an incompatible protocol or a daemon running an older build, follow
 [Upgrade jj-musubi](guides/upgrading.md). The hub and machines need the same release or source

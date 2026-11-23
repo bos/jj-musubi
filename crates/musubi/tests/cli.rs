@@ -401,6 +401,321 @@ impl Drop for Hub {
     }
 }
 
+#[test]
+fn tls_setup_enrolls_once_and_reconnects_without_the_invitation() {
+    use std::io::Write as _;
+    use termlens::Terminal;
+
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let mut daemons = Daemons::default();
+    for repo in [&alpha, &beta] {
+        logs.daemon_of(&env, repo);
+        daemons.of(repo);
+    }
+    // Reserve an available port until just before spawning the real listener.
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    let endpoint = format!("musubi://{address}");
+    let dir = env.root().join("hub");
+    let hub_command = || {
+        let mut command = alpha.program(musubi());
+        command.args(["hub", "--dir", dir.to_str().unwrap()]);
+        command
+    };
+    let mut command = hub_command();
+    command.args(["--listen", &address.to_string(), "--advertise", &endpoint]);
+    drop(reservation);
+    let mut hub = Hub::spawn(&env, &mut logs, "hub", command, dir.clone());
+    let mut transcript = hub.printed.join("\n");
+    let invite_command = hub
+        .printed
+        .iter()
+        .find(|line| line.starts_with("Other machines need a join key"))
+        .unwrap()
+        .split('`')
+        .nth(1)
+        .unwrap();
+    let mut invite_args: Vec<&str> = invite_command.split_whitespace().skip(1).collect();
+    invite_args.push("--single-use");
+    let terminal_output = |args: &[&str]| {
+        let command = alpha.program(musubi());
+        let mut terminal = Terminal::builder()
+            .size(80, 60)
+            .timeout(DEADLINE)
+            .env_clear()
+            .envs(
+                command
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .current_dir(command.get_current_dir().unwrap())
+            .args(args)
+            .spawn(musubi())
+            .unwrap();
+        assert!(terminal.wait_exit().unwrap().success());
+        let screen = terminal.screen();
+        (0..60)
+            .map(|row| screen.row_text(row).trim_end().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let key_lines = terminal_output(&invite_args);
+    for line in &key_lines[..8] {
+        assert!(line.starts_with("  "), "{line}");
+        assert_eq!(line.split_ascii_whitespace().count(), 6);
+    }
+    let key = format!("{}\n", key_lines[..8].join("\n"));
+    let canonical_key = key.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    let is_phrase = |key: &str| {
+        let words = key.split_ascii_whitespace().collect::<Vec<_>>();
+        assert_eq!(words.len(), 48);
+        assert!(
+            words
+                .iter()
+                .all(|word| word.bytes().all(|b| b.is_ascii_lowercase()))
+        );
+    };
+    is_phrase(&key);
+    let key_path = env.root().join("join-key");
+    fs::write(&key_path, &key).unwrap();
+    let with_key = |repo: &TestRepo, args: &[&str]| {
+        let mut command = repo.program(musubi());
+        command.args(args).stdin(fs::File::open(&key_path).unwrap());
+        run(&env, &logs, command)
+    };
+    alpha.write_file("a", "from alpha");
+    alpha.jj(&["commit", "-m", "from alpha"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    transcript.push_str("\n$ musubi create --hub $TLS\n");
+    transcript.push_str(&with_key(&alpha, &["create", "--hub", &endpoint]));
+    let status_args = ["status", "--hub-dir", dir.to_str().unwrap()];
+    let current_key = |repo: &TestRepo| {
+        let status = musubi_in(&env, &logs, repo, &status_args);
+        let line = status
+            .lines()
+            .find(|line| line.starts_with("Single-use join key: "))
+            .unwrap()
+            .to_owned();
+        (
+            line.strip_prefix("Single-use join key: ")
+                .unwrap()
+                .to_owned(),
+            line,
+        )
+    };
+    let (successor, line) = current_key(&alpha);
+    is_phrase(&successor);
+    assert_ne!(successor, key.trim());
+    transcript.push_str("$ musubi status --hub-dir $ROOT/hub\n");
+    transcript.push_str(&line.replace(&successor, "[join-key]"));
+    transcript.push('\n');
+    let mut block = String::new();
+    for words in successor
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .chunks(6)
+    {
+        writeln!(block, "  {}", words.join(" ")).unwrap();
+    }
+    fetch_history(&alpha, &beta);
+    transcript.push_str("$ musubi join --hub $TLS\n");
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(block.as_bytes()).unwrap();
+    let mut join = beta.program(musubi());
+    join.args(["join", "--hub", &endpoint]).stdin(reader);
+    // Keep stdin open: enrollment must stop after the complete block, not await EOF.
+    transcript.push_str(&run(&env, &logs, join));
+    drop(writer);
+    let (next_key, _) = current_key(&alpha);
+    is_phrase(&next_key);
+    assert_ne!(next_key, successor);
+    assert_ne!(next_key, key.trim());
+    let status_lines = terminal_output(&status_args);
+    let heading = status_lines
+        .iter()
+        .position(|line| line == "Single-use join key:")
+        .unwrap();
+    let printed = &status_lines[heading + 1..heading + 9];
+    assert!(
+        printed
+            .iter()
+            .all(|line| line.starts_with("  ") && line.split_ascii_whitespace().count() == 6)
+    );
+    assert_eq!(
+        printed
+            .join(" ")
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        next_key
+    );
+    // Plain status in the hub directory also discovers it, but JSON never contains keys.
+    let mut local_status = alpha.program(musubi());
+    local_status.current_dir(&dir).arg("status");
+    assert!(run(&env, &logs, local_status).contains(&next_key));
+    let mut json_status = alpha.program(musubi());
+    json_status
+        .current_dir(&dir)
+        .args(["status", "-T", "json(self)"]);
+    assert!(!run(&env, &logs, json_status).contains(&next_key));
+    assert!(!transcript.contains(&canonical_key));
+    let invitation = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "invitations", "--dir", dir.to_str().unwrap()],
+    );
+    let id = invitation.split_whitespace().next().unwrap();
+    transcript.push_str("$ musubi hub invitations --dir $ROOT/hub\n");
+    transcript.push_str(&invitation.replace(id, "[invitation]"));
+    let clients = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "clients", "--dir", dir.to_str().unwrap()],
+    );
+    assert_eq!(clients.lines().count(), 2);
+    assert!(
+        clients.lines().any(|line| line.ends_with(" alpha")),
+        "{clients}"
+    );
+    assert!(
+        clients.lines().any(|line| line.ends_with(" beta")),
+        "{clients}"
+    );
+    assert!(!clients.contains(key.trim()));
+    let mut no_key = beta.program(musubi());
+    no_key
+        .args(["enroll", "--hub", &endpoint])
+        .stdin(Stdio::null());
+    let (ok, out, err) = try_run(&logs, &env, no_key);
+    assert!(!ok);
+    assert!(out.is_empty());
+    transcript.push_str("$ musubi enroll --hub $TLS < /dev/null\n");
+    transcript.push_str(&err);
+    for malformed in ["not-a-word\n", "waytoolong\n"] {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(malformed.as_bytes()).unwrap();
+        let mut enroll = beta.program(musubi());
+        enroll.args(["enroll", "--hub", &endpoint]).stdin(reader);
+        let (ok, out, err) = try_run(&logs, &env, enroll);
+        assert!(!ok && out.is_empty());
+        assert!(err.contains("48-word join phrase"), "{err}");
+        assert!(err.contains("musubi hub invite"), "{err}");
+        drop(writer);
+    }
+    musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "revoke-invite", id, "--dir", dir.to_str().unwrap()],
+    );
+    assert!(!musubi_in(&env, &logs, &alpha, &status_args).contains("Single-use join key:"));
+    let missing = env.root().join("missing");
+    let mut unavailable = alpha.program(musubi());
+    unavailable.args(["status", "--hub-dir", missing.to_str().unwrap()]);
+    let (ok, out, err) = try_run(&logs, &env, unavailable);
+    assert!(ok, "{err}");
+    assert!(out.contains("Hive: alpha on "), "{out}");
+    assert!(!out.contains("Single-use join key:"));
+    let warning = err
+        .lines()
+        .find(|line| line.starts_with("Warning: Cannot read single-use join keys: "))
+        .unwrap();
+    transcript.push_str("$ musubi status --hub-dir $ROOT/missing\n");
+    transcript.push_str(
+        &warning.replace(
+            warning
+                .strip_prefix("Warning: Cannot read single-use join keys: ")
+                .unwrap(),
+            "[problem]",
+        ),
+    );
+    transcript.push('\n');
+    let reusable = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "invite", "--dir", dir.to_str().unwrap()],
+    );
+    let mut reusable_status = alpha.program(musubi());
+    reusable_status.args(status_args);
+    let (ok, out, err) = try_run(&logs, &env, reusable_status);
+    assert!(ok, "{err}");
+    assert!(!out.contains(reusable.trim()));
+    assert!(!err.contains(reusable.trim()));
+    assert!(!out.contains("Single-use join key:"));
+    let hint = err
+        .lines()
+        .find(|line| line.starts_with("Hint: To get a reusable join key"))
+        .unwrap();
+    assert!(hint.contains(&format!("musubi hub invite --dir {}", dir.display())));
+    transcript.push_str("$ musubi status --hub-dir $ROOT/hub (reusable invitation)\n");
+    transcript.push_str(hint);
+    transcript.push('\n');
+    hub.kill();
+    // No --listen or --advertise: both survive in hub settings.
+    let _restarted = Hub::spawn(&env, &mut logs, "restarted", hub_command(), dir);
+    alpha.write_file("after", "after restarting and revoking the invitation");
+    alpha.jj(&["status"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    assert_eq!(
+        beta.jj(&["file", "show", "-r", "alpha/alpha@", "after"]),
+        "after restarting and revoking the invitation"
+    );
+    let clone_dir = env.root().join("tls-clone");
+    transcript.push_str("$ musubi clone alpha $ROOT/tls-clone --hub $TLS\n");
+    transcript.push_str(&musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &[
+            "clone",
+            "alpha",
+            clone_dir.to_str().unwrap(),
+            "--hub",
+            &endpoint,
+        ],
+    ));
+    assert_eq!(
+        beta.another_copy(&clone_dir)
+            .jj(&["file", "show", "-r", "alpha/alpha@", "after"]),
+        "after restarting and revoking the invitation"
+    );
+    assert!(!status_in(&env, &logs, &alpha).0.contains(&canonical_key));
+    let _filters = snapshot_filters(&env);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&regex_escape(&endpoint), "$$TLS");
+    let _filters = settings.bind_to_scope();
+    insta::assert_snapshot!(transcript, @"
+        Created a new hub in $ROOT/hub
+        To share a repository:               musubi create --hub $TLS
+        To add another machine's copy of it: musubi join --hub $TLS
+        To make a new copy of a hive:        musubi clone <name> [<dir>] --hub $TLS
+        Other machines need a join key from `musubi hub invite --dir $ROOT/hub` on this machine.
+        On this machine, leave out --hub.
+        $ musubi create --hub $TLS
+        Created hive alpha
+        $ musubi status --hub-dir $ROOT/hub
+        Single-use join key: [join-key]
+        $ musubi join --hub $TLS
+        Joined hive alpha (matched commits), 2 machines
+        $ musubi hub invitations --dir $ROOT/hub
+        [invitation] single-use
+        $ musubi enroll --hub $TLS < /dev/null
+        Error: expected a join key from `musubi hub invite` on stdin
+        $ musubi status --hub-dir $ROOT/missing
+        Warning: Cannot read single-use join keys: [problem]
+        $ musubi status --hub-dir $ROOT/hub (reusable invitation)
+        Hint: To get a reusable join key for another machine: `musubi hub invite --dir $ROOT/hub`.
+        $ musubi clone alpha $ROOT/tls-clone --hub $TLS
+        Cloned hive alpha into $ROOT/tls-clone
+        ");
+}
+
 /// Removes `dir`, retrying for a while: on Windows a process just killed, or one it
 /// started, can hold files in it open a little longer, which Windows refuses to remove as
 /// a sharing violation (error 32). Any other error fails at once.
@@ -1536,10 +1851,10 @@ fn hub_join_sync_clone_and_list() {
               `musubi.forget-after` in repo config, overriding its existing value
 
           --hub <HUB>
-              The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine by,
-              or on that machine, the hub's directory, or the machine's name or `localhost`, for the hub
-              `musubi hub` serves there without `--dir`, reached without ssh [default: this machine's
-              default hub]
+              The hub, as `musubi hub` prints it: musubi://host:port for authenticated TLS, the name
+              this machine ssh-es to the hub's machine by, or on that machine, the hub's directory, or
+              the machine's name or `localhost`, for the hub `musubi hub` serves there without `--dir`,
+              reached without ssh [default: this machine's default hub]
 
       -h, --help
               Print help (see a summary with '-h')

@@ -41,6 +41,11 @@ choosing. Without `--lease`, all three keep the copy's configured
 [`musubi.forget-after`](configuration.md#settings), or set `never` when none is configured.
 Agent-run commands have the same default. See [Set up a hub and machines](../guides/setup.md).
 
+A `musubi://host:port` hub uses authenticated TLS. The first `create`, `join` or `clone`
+asks for a join key; later connections use saved client credentials. `enroll --hub <address>`
+enrolls explicitly or replaces credentials, taking the key on stdin for scripts. See
+[Connect over TLS](../guides/setup.md#connect-over-tls).
+
 ## See how syncing goes
 
 | Command | Use it to |
@@ -60,6 +65,18 @@ fits, not that it was sent. See [Snapshot limits and cleanup](../guides/snapshot
 workflow and [configuration](configuration.md#each-repos) for setting semantics.
 
 ### `musubi status` as JSON
+
+Plain status on the hub's machine also prints current single-use join keys from local files.
+Keys are 48-word English phrases, not chosen passwords. Terminals show six words per line;
+redirected output remains one line. Paste all words in order, with spaces or line breaks.
+Enrollment stops after the complete phrase without waiting for stdin to close.
+When reusable invitations exist, status hints at the exact local `hub invite --dir PATH`
+command to make a new key, without exposing existing reusable secrets.
+Each successful enrollment invalidates its key and generates a fresh single-use successor.
+For a custom local hub, run status in its directory or use `--hub-dir PATH`. Keep this output
+private: possession permits enrollment. No keys are fetched over the network; reusable keys
+and template/JSON output omit secrets. `--hub-dir` cannot be combined with `-T`.
+If local keys cannot be read, status still prints its report and warns without exposing keys.
 
 `musubi status -T 'json(self) ++ "\n"'` prints one JSON object. Times are seconds since the Unix
 epoch; durations are seconds. Unknown or inapplicable values are `null`, where `-T` keywords
@@ -155,7 +172,12 @@ the daemon if running, or syncs directly with a warning. Each shows progress on 
 
 | Command | Use it to |
 | --- | --- |
-| `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
+| `hub` | Run a hub in the foreground. `--dir` chooses its directory; `--advertise` chooses the ssh name or `musubi://host:port` address other machines use. `--listen [IP:PORT]` enables authenticated TLS, using `0.0.0.0:49655` without a value. Addresses are kept for subsequent starts. |
+| `hub invite` | Print a secret 48-word English join phrase. Reusable by default; `--single-use` allows one successful enrollment per key, then atomically replaces it with a fresh single-use phrase. Local `status` shows current single-use keys. Run locally on the hub's machine. |
+| `hub invitations` | List invitation ids and whether they are reusable or single-use, without secrets. |
+| `hub revoke-invite <id>` | Prevent new enrollments with this invitation, keeping existing clients authorized. |
+| `hub clients` | List authorized TLS client certificate ids and descriptive machine names captured at enrollment. Names can repeat; revoke by id. |
+| `hub revoke-client <id>` | End this client's connections and refuse reconnects, across all hives on the hub. Revoke its invitations separately. |
 | `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. On illumos it starts at boot either way; installing it uses pfexec and the Service Management rights profile (see [illumos](../guides/setup.md#illumos)). Accepts the same flags as `hub`. macOS, Linux and illumos only. |
 | `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo; on illumos, removing the hub's SMF service uses pfexec. |
 | `hub rename <hive> <new-name>` | Rename a hive. |

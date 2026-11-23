@@ -27,7 +27,7 @@ with `--user`.
 
 | Key | Effect |
 | --- | --- |
-| `musubi.hub` | The hub to use without `--hub`, overriding the saved default: the first hub used, or the local hub's directory. Takes an ssh host name or, on the hub's machine, its directory (which may start with `~/`). That machine's own name or `localhost` reaches the hub served by `musubi hub` without `--dir`, without ssh. |
+| `musubi.hub` | The hub to use without `--hub`, overriding the saved default: the first hub used, or the local hub's directory. Takes `musubi://host:port` for authenticated TLS, an ssh host name, or a local hub directory (which may start with `~/`). That machine's own name or `localhost` reaches the hub served by `musubi hub` without `--dir`, without ssh. |
 | `musubi.hub-dir` | The data directory for `musubi hub` and `musubi hub install` on the hub's machine. Takes an absolute path or one starting with `~/`. `--dir` takes precedence, followed by the current directory if it already contains a hub, then this setting, then `~/musubi-hub` if an earlier release made a hub there, then [the default](#on-the-hubs-machine). |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | Override the daemon's control socket with an absolute path or one starting with `~/`. See [Files and directories](#files-and-directories). |
@@ -111,6 +111,24 @@ For a hub serving another directory, add `--dir <dir>` to that command.
 If `hub_key.pub` is missing or empty, jj-musubi recreates it from the private key with
 `ssh-keygen`. If that fails, check the reported permissions or passphrase error. For a
 passphrase-protected key, restore `hub_key.pub` and retry. Keep the private key.
+
+## TLS
+
+A `musubi://host:port` endpoint uses direct TLS with a pinned hub identity and an authorized
+client certificate. `create`, `join` and `clone` ask for a join key on first use;
+`musubi enroll --hub <address>` enrolls explicitly or replaces credentials. Keys go on stdin,
+not in command-line arguments. Each address has separate private credentials in the
+[state directory](#on-every-machine), shared by commands and the daemon. They are not jj config
+and do not replicate. Restart the daemon after replacing credentials.
+
+The hub keeps its listener and advertised address in `hub.toml`, so `hub install` and later
+starts use the same configuration. Its `tls/identity.json` keeps the server identity and
+separate signing key; `tls/authorization.json` keeps invitation secret tags, current single-use
+secrets for local status, and authorized client certificate fingerprints. Reusable invitation
+secrets are not stored or shown by status. Each machine's `tls/<endpoint-hash>.json` in the state
+directory keeps that address's hub pin, client certificate and private key. These files are
+private to their user. No system trust-store changes are needed.
+See [TLS setup and revocation](../guides/setup.md#connect-over-tls).
 
 ## Logging
 
@@ -212,7 +230,7 @@ changelog will announce; to keep serving it there for good, set `musubi.hub-dir`
 
 | Path | Holds |
 | --- | --- |
-| `hub.toml` | The hub's settings: the name `--advertise` gave it. |
+| `hub.toml` | The hub's settings: the address `--advertise` gave it and, if enabled, the TLS listener from `--listen`. |
 | `<hive id>/` | One directory per hive: its name, in `hive.toml`, and its operations and objects. |
 | `removed/` | Hives removed by `musubi hub remove`, emptied after a day; the empty directories prevent their recreation. Hives reset by `musubi resume`, emptied at once but for their name and settings and what they were reset to, which the hub tells their old copies. Also holds corrupt stores for about a day after the hub replaces them. |
 | `run/hub.sock` | The socket the hub listens on, which only you can reach. |

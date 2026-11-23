@@ -214,6 +214,40 @@ a daemon or hub killed before it flushes its profile can still look unexecuted. 
 skip for missing prerequisites and processes that abort have the same limitation. Check test
 output and process lifetimes before treating a blank region as a missing test.
 
+`tls_setup_enrolls_once_and_reconnects_without_the_invitation` runs real hub and daemon
+processes: the first create and join read one pasted key each, a single-use invitation rotates
+after each enrollment, and local status supplies the next key without showing a consumed one.
+Status in the hub directory discovers it; JSON omits secrets. Revocation removes the current
+key from status. Generated invitations and successors have exactly 48 words, with no header.
+PTY output shows six words per line for both invitation creation and current-key status.
+The first enrollment consumes that actual block; the second reads a multiline pipe left open,
+so waiting for EOF breaks the test. Narrow input tests pin exact stopping boundaries for
+complete 48-word blocks, malformed tokens and interrupted or oversized input.
+The codec's fixed vectors pin both full fields and the domain-separated lookup id.
+Malformed words/counts/checksums are rejected. Invalid invitation state is refused without
+rewriting it: every single-use entry must retain a valid secret matching its verifier and
+derived lookup id; reusable entries do not store secrets.
+An unreadable local hub leaves the repo's report available with a warning.
+For a reusable invitation, status prints the actual local invitation command without exposing
+its key; the hub settings test covers quoting a custom directory with spaces and an apostrophe.
+Synchronization resumes after revoking that invitation and restarting the
+hub without repeating its listener flags. It checks that the other copy receives new work
+and that setup output does not disclose the key. Removing TLS enrollment
+from the first-use path, forgetting listener settings, or making connections depend on a still
+valid invitation breaks this workflow.
+
+`tls::tests` covers pin verification before enrollment-secret disclosure, TLS handshake
+signatures despite a matching copied certificate, CSR proof of possession, rejected anonymous
+sync and unauthorized certificates, independent invitation/client revocation, and single-use
+enrollment races across both network requests and independently opened hub handles. Successful
+single-use enrollment creates exactly one usable successor; invalid secrets and malformed or
+forged CSRs neither consume nor rotate it.
+`revocation_closes_existing_stream_and_refuses_reconnect` revokes through a separate local
+manager, checks an established stream closes, then checks both refused reconnect and explicit
+re-enrollment. These are in-process TLS peers, not real jj repositories. The `enrollment`
+fuzzer exercises the production bounded invitation, enrollment, reply/certificate and CSR
+decoders without a network or filesystem.
+
 ## CI
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code the

@@ -16,6 +16,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+bip39.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
@@ -41,7 +48,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

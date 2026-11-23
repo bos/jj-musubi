@@ -214,6 +214,54 @@ a daemon or hub killed before it flushes its profile can still look unexecuted. 
 skip for missing prerequisites and processes that abort have the same limitation. Check test
 output and process lifetimes before treating a blank region as a missing test.
 
+`tls_setup_enrolls_once_and_reconnects_without_the_invitation` runs real hub and daemon
+processes: the first create and join read one separately created single-use invitation each,
+and each invitation rotates after enrollment. Plain, terminal and JSON status in the hub
+directory omit the one current single-use invitation, and the removed `status --hub-dir` option
+is rejected. Invitations have exactly 48 words, with no header; lower-level TLS tests exercise
+rotated invitations. PTY invitation output shows six words per line. The first enrollment
+consumes that actual block; the second reads a multiline pipe left open, rejects reuse after
+enrollment, and so breaks if enrollment waits for EOF or leaves the invitation valid. Narrow
+input tests pin exact stopping boundaries
+for complete 48-word blocks, malformed tokens and interrupted or oversized input. The codec's
+fixed vectors pin both full fields and the domain-separated lookup id.
+Malformed words/counts/checksums are rejected. Invalid invitation state is refused without
+rewriting it: every single-use entry must retain a valid secret matching its verifier and
+derived lookup id; reusable entries do not store secrets. Synchronization resumes after
+revoking an invitation and restarting the hub without repeating its listener flags. It checks
+that the other copy receives new work and that setup and status output do not disclose
+invitation secrets. Its final fault makes authorization invalid: a TLS sync that just succeeded
+must fail, the same hub must still create a hive over its local transport, and TLS must recover
+after restoring the file.
+Removing TLS enrollment from the first-use path, forgetting listener settings, or making
+connections depend on a still valid invitation breaks this workflow.
+
+`tls::tests` covers pin verification before enrollment-secret disclosure, TLS handshake
+signatures despite a matching copied certificate, CSR proof of possession, rejected anonymous
+sync and unauthorized certificates, independent invitation/client revocation, and single-use
+enrollment races across both network requests and independently opened hub handles. Successful
+single-use enrollment creates exactly one usable successor; invalid secrets and malformed or
+forged CSRs neither consume nor rotate it. A request with both an invalid secret and malformed
+CSR must fail as an invalid invitation, proving it reaches no CSR parsing or signing.
+`transient_accept_errors_are_retried` advances paused time through the listener's bounded
+backoff before a later accept succeeds. `anonymous_enrollments_do_not_take_authenticated_capacity`
+fills a separate anonymous pool while old and new authenticated connections still carry
+requests. `authentication_uses_one_overall_deadline` begins TLS near the end of a shortened test
+deadline and proves enrollment receives no fresh timeout.
+`authorization_reload_does_not_block_the_async_runtime` holds the authorization lock while a
+current-thread Tokio runtime continues to schedule.
+`pathless_watcher_events_refresh_authorization` pins overflow/rescan notifications as reload
+triggers. `expired_enrollment_does_not_consume_its_invitation` requires a timed-out blocking
+enrollment to leave invitations and clients unchanged.
+`enrollment_after_listener_start_needs_no_hub_restart` completes an anonymous handshake, creates
+an invitation through a separate local manager, then enrolls and opens an authenticated stream
+through the still-running server. `revocation_closes_existing_stream_and_refuses_reconnect` uses a
+separate local manager to revoke the client, checks an established stream closes, then checks
+both refused reconnect and explicit re-enrollment. These are in-process TLS peers, not real jj
+repositories. The `enrollment`
+fuzzer exercises the production bounded invitation, enrollment, reply/certificate and CSR
+decoders without a network or filesystem.
+
 ## CI
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code the

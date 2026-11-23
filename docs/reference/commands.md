@@ -41,6 +41,11 @@ choosing. Without `--lease`, all three keep the copy's configured
 [`musubi.forget-after`](configuration.md#settings), or set `never` when none is configured.
 Agent-run commands have the same default. See [Set up a hub and machines](../guides/setup.md).
 
+A `musubi://host:port` hub uses authenticated TLS. The first `create`, `join` or `clone`
+asks for an invitation; later connections use saved client credentials. `enroll --hub <address>`
+enrolls explicitly or replaces credentials, taking the invitation on stdin for scripts. See
+[Connect over TLS](../guides/setup.md#connect-over-tls).
+
 ## See how syncing goes
 
 | Command | Use it to |
@@ -155,7 +160,12 @@ the daemon if running, or syncs directly with a warning. Each shows progress on 
 
 | Command | Use it to |
 | --- | --- |
-| `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
+| `hub` | Run a hub in the foreground. `--dir` chooses its directory; `--advertise` chooses the ssh name or `musubi://host:port` address other machines use. `--listen [IP:PORT]` enables authenticated TLS, using `0.0.0.0:49655` without a value. Addresses are kept for subsequent starts. |
+| `hub invite` | Create and print a secret 48-word English invitation. Reusable by default; `--single-use` allows one successful enrollment with the invitation, then atomically replaces it with a fresh single-use invitation. Run locally on the hub's machine, and run it again whenever you need to print a new single-use invitation. |
+| `hub invitations` | List invitation ids and whether they are reusable or single-use, without secrets. |
+| `hub revoke-invite <id>` | Prevent new enrollments with this invitation, keeping existing clients authorized. |
+| `hub clients` | List authorized TLS client certificate ids and descriptive machine names captured at enrollment. Names can repeat; revoke by id. |
+| `hub revoke-client <id>` | End this client's connections and refuse reconnects, across all hives on the hub. Revoke its invitations separately. |
 | `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. On illumos it starts at boot either way; installing it uses pfexec and the Service Management rights profile (see [illumos](../guides/setup.md#illumos)). Accepts the same flags as `hub`. macOS, Linux and illumos only. |
 | `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo; on illumos, removing the hub's SMF service uses pfexec. |
 | `hub rename <hive> <new-name>` | Rename a hive. |

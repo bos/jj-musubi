@@ -1,8 +1,8 @@
 # Setup: hub and daemons
 
-The **hub** stores shared history and passes updates over ssh. A background **daemon** on each
-machine syncs its repositories with the hub. Copies of one repo form a **hive**; a hub can serve
-several hives.
+The **hub** stores shared history and passes updates over ssh or authenticated TLS. A background
+**daemon** on each machine syncs its repositories with the hub. Copies of one repo form a
+**hive**; a hub can serve several hives.
 
 We'll walk you through choosing what machine the hub will run on, sharing a repo, and
 adding other machines. These examples use `devbox` for the hub's ssh name and `app` for the
@@ -14,7 +14,7 @@ You need a few prerequisites on every machine:
 
 - jj-musubi, which provides the `musubi` command. See [Install jj-musubi](#install-jj-musubi).
 - `jj` and `git`.
-- [ssh access](#connect-over-ssh) from every machine to the hub machine.
+- [ssh access](#connect-over-ssh) or [a TLS connection](#connect-over-tls) to the hub machine.
 
 Use a jj repo with at least one commit and complete history (shallow and partial clones are not
 supported). To try things out, I recommend you use a disposable clone of some project.
@@ -43,7 +43,7 @@ On macOS, downloads via browser will not run by default because `musubi` isn't n
 
 ## Choose the hub machine
 
-Choose a machine that's usually available and reachable over ssh, such as a devbox or home
+Choose a machine that's usually available and reachable over ssh or TLS, such as a devbox or home
 server. When it's unavailable (e.g. sleeping, shut down), other machines can't sync.
 
 The hub can coexist on a machine alongside the daemons.
@@ -103,6 +103,93 @@ starting the hub:
 ```sh
 jj config set --user musubi.hub-dir '~/data/musubi-hub'
 ```
+
+## Connect over TLS
+
+If the hub's machine cannot run an ssh server, use direct TLS instead of the startup command
+in [Start the hub](#start-the-hub). Stop an already-running foreground hub with Ctrl-C before
+enabling TLS. For an installed hub, run `musubi hub install` with the TLS flags below in place
+of starting another foreground process; it restarts the service with the new settings.
+No HTTP server, certificate files or trust-approval prompts are needed. The hub still serves its
+local socket, and existing ssh connections keep working.
+
+On the hub's machine, choose a reachable address and allow its TCP port through your firewall.
+For example, with a Tailscale address of `100.114.177.64`:
+
+```sh
+musubi hub --listen --advertise musubi://100.114.177.64:49655
+```
+
+This command keeps running; leave its terminal open. `--listen` without a value uses
+`0.0.0.0:49655`. The hub keeps both addresses in its directory, so later starts and
+`musubi hub install` use them too. TLS and client authentication are always required, even
+on a private network. Use a directly reachable TCP port, not an HTTP-only forwarding URL.
+
+In a second terminal on the hub's machine, make an invitation:
+
+```sh
+musubi hub invite
+```
+
+Its output is the invitation: a 48-word English phrase. In a terminal it prints six words
+per line in a tidy block; when redirected it remains one line. Copy the entire block,
+keeping the words in order. It encodes the hub identity and a random enrollment secret;
+checksums help detect typing errors. It is not a short password you choose.
+Share it privately: anyone with it can enroll a machine that can read and write **every hive on
+this hub**. Invitations are reusable by default;
+`musubi hub invite --single-use` creates and prints an invitation that allows exactly one
+successful enrollment, even if several machines try at once. That enrollment invalidates the
+invitation and atomically generates a fresh single-use invitation. Failed enrollment attempts
+do not replace the invitation. Run the command again whenever you need to print a new
+single-use invitation. `musubi status` and `musubi hub invitations` never print invitation
+secrets.
+
+In a repo on another machine, use the TLS address in place of the ssh name:
+
+```sh
+musubi create --hub musubi://100.114.177.64:49655
+```
+
+Or, if the hive already exists, run `musubi join --hub musubi://100.114.177.64:49655` in
+another copy, or `musubi clone <hive> --hub musubi://100.114.177.64:49655` to make a copy.
+The first command asks `Please enter the invitation (paste the whole block):`. Paste the whole
+block, then press Enter after its last line. Enrollment proceeds once all 48
+words arrive, without waiting for EOF or an extra blank line. One-line input still works;
+word case, spaces and line breaks do not matter. A blank line ends an incomplete entry so it
+can report an error.
+The invitation pins the hub's certificate before the secret is sent. This machine generates
+its own private key, proves possession, and keeps its issued client certificate for unattended
+reconnections. The invitation contains neither the hub's private key nor its signing key.
+Follow [Your first sync](#your-first-sync) to check that recorded work reaches the other copy.
+
+To enroll before running a command, or replace revoked credentials with a new invitation:
+
+```sh
+musubi enroll --hub musubi://100.114.177.64:49655
+```
+
+For a script, feed the invitation on standard input rather than putting it in command-line
+arguments.
+Credentials are kept separately for each hub address in this machine's state directory.
+Changing the address requires enrollment at the new address. A running daemon reads replaced
+credentials when it next connects; it does not need restarting.
+
+On the hub's machine, list invitation ids with `musubi hub invitations`, then stop new
+enrollments with `musubi hub revoke-invite <id>`. To rotate an invitation, revoke it and make
+another. Existing clients stay authorized. List client certificate ids with
+`musubi hub clients`; each line gives a certificate id and the descriptive machine name from
+its jj `operation.hostname` at enrollment. Choose that machine's id for
+`musubi hub revoke-client <id>`, which ends its connections and prevents reconnecting. Names
+can repeat and are not authorization identities; use the certificate id to distinguish them.
+Revoke invitations it knows too, or it could enroll again.
+These commands run locally on the hub's machine, not through enrollment.
+
+### A separate hub directory
+
+The commands above use your default hub. If you instead start a separate hub with
+`musubi hub --dir PATH`, also pass `--dir PATH` to its invitation and client-management
+commands. Generated instructions include the directory so they cannot accidentally target a
+different hub.
 
 ## Share a repo
 

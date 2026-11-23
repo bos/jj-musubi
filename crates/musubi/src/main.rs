@@ -26,6 +26,7 @@ mod socket;
 mod ssh;
 mod status;
 mod sync;
+mod tls;
 mod top;
 mod ui;
 mod upgrade;
@@ -49,7 +50,6 @@ use crate::cli::Command;
 use crate::cli::DaemonAction;
 use crate::cli::Debug;
 use crate::cli::HubAction;
-use crate::cli::HubArgs;
 use crate::config::Settings;
 use crate::socket::Socket;
 use crate::ui::Ui;
@@ -224,18 +224,51 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     }
     let socket = || Socket::locate(cli.socket.as_deref());
     match cli.command.unwrap_or(Command::List { template: None }) {
+        Command::Hub { action: None, args } => hub::serve(ui, args.into()),
         Command::Hub {
-            action: None,
-            args: HubArgs { dir, advertise },
-        } => hub::serve(ui, hub::ServeArgs { dir, advertise }),
-        Command::Hub {
-            action:
-                Some(HubAction::Install {
-                    args: HubArgs { dir, advertise },
-                    at_boot,
-                }),
+            action: Some(HubAction::Install { args, at_boot }),
             ..
-        } => hub::install(ui, hub::ServeArgs { dir, advertise }, at_boot),
+        } => hub::install(ui, args.into(), at_boot),
+        Command::Enroll { hub } => block_on(hub::enroll(ui, &hub)),
+        Command::Hub {
+            action: Some(HubAction::Invite { dir, single_use }),
+            ..
+        } => {
+            let (_, key) = hub::tls_hub(dir)?.invite(single_use)?;
+            if std::io::stdout().is_terminal() {
+                writeln!(ui.stdout(), "{}", tls::key_block(&key))?;
+            } else {
+                writeln!(ui.stdout(), "{key}")?;
+            }
+            Ok(())
+        }
+        Command::Hub {
+            action: Some(HubAction::Invitations { dir }),
+            ..
+        } => {
+            for (id, single_use) in hub::tls_hub(dir)?.invitations()? {
+                let use_kind = if single_use { "single-use" } else { "reusable" };
+                writeln!(ui.stdout(), "{id} {use_kind}")?;
+            }
+            Ok(())
+        }
+        Command::Hub {
+            action: Some(HubAction::RevokeInvite { dir, id }),
+            ..
+        } => hub::tls_hub(dir)?.revoke_invite(&id),
+        Command::Hub {
+            action: Some(HubAction::Clients { dir }),
+            ..
+        } => {
+            for (id, name) in hub::tls_hub(dir)?.clients()? {
+                writeln!(ui.stdout(), "{id} {name}")?;
+            }
+            Ok(())
+        }
+        Command::Hub {
+            action: Some(HubAction::RevokeClient { dir, id }),
+            ..
+        } => hub::tls_hub(dir)?.revoke_client(&id),
         Command::Hub {
             action: Some(HubAction::Uninstall),
             ..

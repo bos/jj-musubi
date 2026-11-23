@@ -4,6 +4,8 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::io::BufRead as _;
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -43,6 +45,7 @@ use crate::login::Service;
 use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
+use crate::tls;
 use crate::ui::Ui;
 
 /// What marks a directory as a hub's, and holds its settings.
@@ -63,9 +66,43 @@ struct HubSettings {
     /// machine's own name for itself isn't always one they can use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     advertise: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    listen: Option<std::net::SocketAddr>,
 }
 
 impl HubSettings {
+    fn configure(&mut self, args: &ServeArgs) -> anyhow::Result<()> {
+        if let Some(listen) = args.listen {
+            anyhow::ensure!(
+                listen.port() != 0,
+                "the TLS listener needs a fixed, nonzero port"
+            );
+            self.listen = Some(listen);
+            if args.advertise.is_none() && !self.advertise.as_deref().is_some_and(tls::is_tls) {
+                let host = whoami::hostname().context("finding this machine's host name")?;
+                self.advertise = Some(format!("musubi://{host}:{}", listen.port()));
+            }
+        }
+        if let Some(advertise) = &args.advertise {
+            self.advertise = Some(advertise.clone());
+        }
+        if let Some(advertise) = &self.advertise {
+            if tls::is_tls(advertise) {
+                tls::validate_endpoint(advertise)?;
+                anyhow::ensure!(
+                    self.listen.is_some(),
+                    "a TLS hub address needs --listen IP:PORT"
+                );
+            } else {
+                anyhow::ensure!(
+                    self.listen.is_none(),
+                    "advertise the TLS address as musubi://host:port"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn load(dir: &Path) -> anyhow::Result<Self> {
         let path = dir.join(HUB_FILE);
         let text = fs::read_to_string(&path).with_context(|| format!("reading {path:?}"))?;
@@ -80,6 +117,17 @@ impl HubSettings {
 pub struct ServeArgs {
     pub dir: Option<PathBuf>,
     pub advertise: Option<String>,
+    pub listen: Option<std::net::SocketAddr>,
+}
+
+impl From<crate::cli::HubArgs> for ServeArgs {
+    fn from(args: crate::cli::HubArgs) -> Self {
+        Self {
+            dir: args.dir,
+            advertise: args.advertise,
+            listen: args.listen,
+        }
+    }
 }
 
 /// The directory to serve, in order of precedence: `dir`, the current directory if it is a
@@ -141,10 +189,21 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
     let mut text = format!(
         "To share a repository:               musubi create --hub {public}\n\
          To add another machine's copy of it: musubi join --hub {public}\n\
-         To make a new copy of a hive:        musubi clone <name> [<dir>] --hub {public}\n\
-         Other machines reach this hub over ssh: use the name they ssh to this machine by, if \
-         it isn't {public}.\n"
+         To make a new copy of a hive:        musubi clone <name> [<dir>] --hub {public}\n"
     );
+    if settings.listen.is_some() {
+        writeln!(
+            text,
+            "Other machines need an invitation from `musubi hub invite --dir {}` on this machine.",
+            crate::ui::shell_word(&local)
+        )?;
+    } else {
+        writeln!(
+            text,
+            "Other machines reach this hub over ssh: use the name they ssh to this machine by, \
+             if it isn't {public}."
+        )?;
+    }
     if default_here {
         text.push_str("On this machine, leave out --hub.\n");
     } else {
@@ -160,7 +219,7 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
 
 pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     let default = args.dir.is_none();
-    let (dir, old_default) = choose_dir(args.dir)?;
+    let (dir, old_default) = choose_dir(args.dir.clone())?;
     // One hub per user by default; `--dir` runs more on purpose.
     let state = config::state_dir()?;
     let _user_lock = if default {
@@ -204,8 +263,19 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     } else {
         HubSettings::load(&dir)?
     };
-    if args.advertise.is_some() {
-        settings.advertise = args.advertise;
+    settings.configure(&args)?;
+    let tls_hub = settings
+        .listen
+        .map(|_| tls::Hub::open(&dir).map(Arc::new))
+        .transpose()?;
+    // Bind before announcing success; a service must not appear ready with TLS unavailable.
+    let tls_listener = settings
+        .listen
+        .map(std::net::TcpListener::bind)
+        .transpose()
+        .context("binding the TLS hub listener")?;
+    if let Some(listener) = &tls_listener {
+        listener.set_nonblocking(true)?;
     }
     let socket = socket_for(&dir)?;
     settings.save(&dir)?;
@@ -230,6 +300,15 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
         let listener = socket.listen()?;
         let (answering, answers) = oneshot::channel();
         let accepting = accept(listener, Arc::new(network.connect()), answers);
+        let tls_accepting = async {
+            match (tls_hub, tls_listener) {
+                (Some(hub), Some(listener)) => {
+                    let listener = tokio::net::TcpListener::from_std(listener)?;
+                    hub.serve(listener, Arc::new(network.connect())).await
+                }
+                _ => std::future::pending().await,
+            }
+        };
         let ready = || {
             answering.send(()).ok();
             // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
@@ -243,6 +322,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
         tokio::select! {
             result = server.run(Arc::new(network.connect()), ready) => result,
             () = accepting => Ok(()),
+            result = tls_accepting => result,
             () = interrupted() => Ok(()),
         }
     });
@@ -257,7 +337,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
 pub fn install(ui: &Ui, args: ServeArgs, at_boot: bool) -> anyhow::Result<()> {
     anyhow::ensure!(!cfg!(windows), "musubi can't run a hub at login on Windows");
     login::prepare_hub_install(at_boot)?;
-    let (dir, _) = choose_dir(args.dir)?;
+    let (dir, _) = choose_dir(args.dir.clone())?;
     fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
     // The path the hub, run there, finds its directory by, symbolic links resolved, which it
     // saves as this machine's default hub.
@@ -268,8 +348,9 @@ pub fn install(ui: &Ui, args: ServeArgs, at_boot: bool) -> anyhow::Result<()> {
     } else {
         HubSettings::default()
     };
-    if args.advertise.is_some() {
-        settings.advertise = args.advertise;
+    settings.configure(&args)?;
+    if settings.listen.is_some() {
+        tls::Hub::open(&dir)?;
     }
     let state = config::create_state_dir()?;
     // Before stopping the hub an earlier install runs, which may serve another directory:
@@ -409,7 +490,14 @@ enum Place {
     /// The directory of a hub on this machine.
     Local(PathBuf),
     /// An ssh destination, and what ssh says of it.
-    Ssh { hub: String, health: ssh::Health },
+    Ssh {
+        hub: String,
+        health: ssh::Health,
+    },
+    Tls {
+        hub: String,
+        link: tls::Link,
+    },
 }
 
 impl Connection {
@@ -422,6 +510,7 @@ impl Connection {
             Place::Ssh { hub, health } => {
                 health.problem().map(|problem| out_of_reach(hub, &problem))
             }
+            Place::Tls { hub, link } => link.problem().map(|problem| out_of_reach(hub, &problem)),
         }
     }
 
@@ -431,6 +520,7 @@ impl Connection {
         let problem = match &self.place {
             Place::Local(_) => None,
             Place::Ssh { health, .. } => health.problem_once_known().await,
+            Place::Tls { link, .. } => link.problem(),
         };
         match problem {
             Some(problem) => err.context(problem),
@@ -449,6 +539,9 @@ pub fn is_local(hub: &str) -> bool {
 /// [`local_dir`] gives, which given relative would be taken for an ssh destination, and a
 /// name for this machine made the directory of its hub, as [`on_this_machine`] does.
 pub fn resolve(hub: &str) -> String {
+    if tls::is_tls(hub) {
+        return hub.to_owned();
+    }
     let dir = Path::new(hub);
     if (is_local(hub) || dir.join(HUB_FILE).is_file())
         && let Ok(dir) = local_dir(dir)
@@ -529,6 +622,27 @@ pub async fn connect_with(
     limit: Duration,
     while_disconnected: WhileDisconnected,
 ) -> anyhow::Result<Connection> {
+    if tls::is_tls(hub) {
+        let link = tls::Link::new(hub)?;
+        let connecting = StreamTransport::connect_with(Arc::new(link.clone()), while_disconnected);
+        let transport = tokio::time::timeout(limit, connecting)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(out_of_reach(
+                    hub,
+                    &link
+                        .problem()
+                        .unwrap_or_else(|| "connection timed out".to_owned())
+                ))
+            })??;
+        return Ok(Connection {
+            transport: Arc::new(transport),
+            place: Place::Tls {
+                hub: hub.to_owned(),
+                link,
+            },
+        });
+    }
     let unreachable = |problem: Option<String>| match problem {
         Some(problem) => anyhow::anyhow!(out_of_reach(hub, &problem)),
         None => anyhow::anyhow!("the hub at {hub} is out of reach"),
@@ -550,6 +664,7 @@ pub async fn connect_with(
             place: Place::Local(dir),
         });
     }
+
     let link = ssh::Link::new(hub)?;
     let health = link.health();
     let connecting = StreamTransport::connect_with(Arc::new(link), while_disconnected);
@@ -568,6 +683,69 @@ pub async fn connect_with(
 /// That the hub at `hub` is out of reach, and why.
 fn out_of_reach(hub: &str, problem: &str) -> String {
     format!("the hub at {hub} is out of reach: {problem}")
+}
+
+/// Local administration of TLS identity and authorization, never over the enrollment link.
+pub fn tls_hub(dir: Option<PathBuf>) -> anyhow::Result<tls::Hub> {
+    let (dir, _) = choose_dir(dir)?;
+    let settings = HubSettings::load(&dir)?;
+
+    if settings.listen.is_none() {
+        return Err(crate::ui::with_hint(
+            anyhow::anyhow!("this hub has no TLS listener"),
+            format!(
+                "Run `musubi hub --dir {} --listen IP:PORT`.",
+                crate::ui::shell_word(&dir.display().to_string())
+            ),
+        ));
+    }
+
+    tls::Hub::open(&dir)
+}
+
+pub async fn prepare_tls(ui: &Ui, hub: &str) -> anyhow::Result<()> {
+    if !tls::has_credentials(hub)? {
+        enroll(ui, hub).await?;
+    }
+    Ok(())
+}
+
+pub async fn enroll(ui: &Ui, hub: &str) -> anyhow::Result<()> {
+    tls::validate_endpoint(hub)?;
+    if io::stdin().is_terminal() {
+        let mut out = ui.stderr();
+        writeln!(out, "Please enter the invitation (paste the whole block):")?;
+        out.flush()?;
+    }
+    let invitation = read_invitation(io::stdin().lock())?;
+    let settings = ui.settings()?;
+    tls::prepare(hub, invitation.trim(), settings.operation_hostname()).await
+}
+
+fn read_invitation(input: impl io::BufRead) -> anyhow::Result<String> {
+    let mut input = input.take(8193);
+    let mut key = String::new();
+    loop {
+        let before = key.len();
+        if input.read_line(&mut key)? == 0 || key[before..].trim().is_empty() {
+            break;
+        }
+        let words = key.split_ascii_whitespace().count();
+        // English BIP-39 words have at most eight ASCII letters. Reject malformed tokens
+        // without waiting for EOF or another line.
+        if words >= 48
+            || key
+                .split_ascii_whitespace()
+                .any(|word| word.len() > 8 || !word.bytes().all(|b| b.is_ascii_alphabetic()))
+        {
+            break;
+        }
+    }
+    anyhow::ensure!(
+        !key.trim().is_empty() && key.len() <= 8192,
+        "expected an invitation from `musubi hub invite` on stdin"
+    );
+    Ok(key)
 }
 
 /// Opens connections to a hub on this machine, through its socket.
@@ -733,6 +911,86 @@ pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_settings_survive_restart_without_changing_ssh_hubs() {
+        let mut settings = HubSettings::default();
+        let args = ServeArgs {
+            dir: None,
+            advertise: Some("musubi://100.114.177.64:49655".to_owned()),
+            listen: Some("0.0.0.0:49655".parse().unwrap()),
+        };
+        settings.configure(&args).unwrap();
+        let saved = toml::to_string(&settings).unwrap();
+        let mut restored: HubSettings = toml::from_str(&saved).unwrap();
+        restored
+            .configure(&ServeArgs {
+                dir: None,
+                advertise: None,
+                listen: None,
+            })
+            .unwrap();
+        assert_eq!(restored.listen, args.listen);
+        assert_eq!(restored.advertise, args.advertise);
+        let old: HubSettings = toml::from_str("advertise = 'devbox'").unwrap();
+        assert!(old.listen.is_none());
+        assert_eq!(old.advertise.as_deref(), Some("devbox"));
+        assert_eq!(
+            resolve("musubi://localhost:49655"),
+            "musubi://localhost:49655"
+        );
+    }
+
+    #[test]
+    fn tls_invitation_input_stops_at_a_complete_block_or_malformed_token() -> anyhow::Result<()> {
+        let group = format!("{}art", "abandon ".repeat(23));
+        let phrase = format!("{group} {group}");
+        let block = format!("{}\n", tls::key_block(&phrase));
+        let mut input = io::Cursor::new(format!("{block}not part of the invitation\n"));
+        assert_eq!(read_invitation(&mut input)?, block);
+        assert_eq!(input.position(), block.len() as u64);
+        let short = format!("{group} {group}");
+        for text in [
+            format!("{}\n", tls::key_block(&short)),
+            format!("{short}\n"),
+        ] {
+            let mut input = io::Cursor::new(format!("{text}not part of the invitation\n"));
+            assert_eq!(read_invitation(&mut input)?, text);
+            assert_eq!(input.position(), text.len() as u64);
+        }
+        for malformed in ["not-a-word\n", "waytoolong\n"] {
+            let mut input = io::Cursor::new(format!("{malformed}{phrase}\n"));
+            assert_eq!(read_invitation(&mut input)?, malformed);
+            assert_eq!(input.position(), malformed.len() as u64);
+        }
+        assert!(read_invitation(io::Cursor::new("")).is_err());
+        assert!(read_invitation(io::Cursor::new("a".repeat(8193))).is_err());
+        assert_eq!(
+            read_invitation(io::Cursor::new("abandon\n\nanother line\n"))?,
+            "abandon\n\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tls_settings_refuse_an_unusable_advertised_address() {
+        for (advertise, listen) in [
+            ("musubi://host:49655", None),
+            ("host", Some("0.0.0.0:49655")),
+            ("musubi://host:49655/path", Some("0.0.0.0:49655")),
+            ("musubi://host:0", Some("0.0.0.0:0")),
+        ] {
+            let args = ServeArgs {
+                dir: None,
+                advertise: Some(advertise.to_owned()),
+                listen: listen.map(|address| address.parse().unwrap()),
+            };
+            assert!(
+                HubSettings::default().configure(&args).is_err(),
+                "{advertise}"
+            );
+        }
+    }
 
     #[test]
     fn names_for_this_machine_skip_ssh() {

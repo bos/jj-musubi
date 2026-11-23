@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Hubs can accept direct, mutually authenticated TLS connections alongside existing local
+  socket and ssh access. Paste an invitation once; each machine keeps its own credentials
+  for later connections. Invitations are reusable by default; `hub invite --single-use`
+  creates and prints an invitation for one successful enrollment. Revoke invitations to stop
+  new enrollments, or clients to disconnect enrolled machines. Invalid TLS authorization drops
+  TLS sessions and pauses TLS admission until it recovers, without stopping local or ssh hub
+  service; listener accept errors are retried. Enrollment checks a secret before signing its
+  certificate, and separate limits and one deadline bound handshakes and anonymous enrollment.
+  Existing SSH and local setups need no enrollment or coordinated upgrade for TLS.
+  See [TLS setup](docs/guides/setup.md#connect-over-tls).
+
 - A repo with a workspace of yours whose name has a `/`, such as `feat/x`, doesn't sync until
   you rename it, since other machines show each other's workspaces by names like
   `laptop/default`. Before, other machines showed it as `laptop/feat/x`. `musubi sync`,

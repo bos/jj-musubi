@@ -56,7 +56,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Run a hub, which stores hives and orders their updates. Serves every hive in its
-    /// directory, to other machines over ssh.
+    /// directory, to other machines over ssh or authenticated TLS.
     ///
     /// Runs until stopped, logging what it does. The first time, it creates the directory.
     /// If this machine has no default hub yet, it becomes it. It prints the commands other
@@ -68,6 +68,17 @@ pub enum Command {
         action: Option<HubAction>,
         #[command(flatten)]
         args: HubArgs,
+    },
+    /// Enroll this machine with a TLS hub, or replace its saved TLS credentials.
+    ///
+    /// Paste the invitation made by `musubi hub invite` when asked. The invitation pins the
+    /// hub's identity and authorizes enrollment; this machine generates and keeps its own
+    /// private key. Later connections need no input. For a script, supply the invitation on
+    /// stdin.
+    Enroll {
+        /// The TLS hub's address, as musubi://host:port.
+        #[arg(long)]
+        hub: String,
     },
     /// Start a hive on the hub from the repository in the current directory, for other
     /// copies of it to join.
@@ -423,7 +434,8 @@ pub struct Member {
     /// Sets `musubi.forget-after` in repo config, overriding its existing value.
     #[arg(long, value_name = "DURATION", value_parser = parse_lease)]
     pub lease: Option<Duration>,
-    /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
+    /// The hub, as `musubi hub` prints it: musubi://host:port for authenticated TLS, the
+    /// name this machine ssh-es to the hub's machine
     /// by, or on that machine, the hub's directory, or the machine's name or `localhost`, for
     /// the hub `musubi hub` serves there without `--dir`, reached without ssh [default: this
     /// machine's default hub].
@@ -446,10 +458,17 @@ pub struct HubArgs {
     /// ~/.local/share/musubi/hub].
     #[arg(short, long, value_hint = ValueHint::DirPath)]
     pub dir: Option<PathBuf>,
-    /// The host name other machines ssh to this one by, for the commands it prints
-    /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
+    /// The ssh host name, or musubi://host:port TLS address, other machines use
+    /// [default: this machine's host name, with the listener port for TLS].
+    /// Once given, the hub keeps it in hub.toml.
     #[arg(long)]
     pub advertise: Option<String>,
+    /// Also listen for authenticated TLS connections on this IP address and port.
+    /// With no value, uses 0.0.0.0:49655. Kept in hub.toml for subsequent starts and services.
+    /// Use --advertise musubi://host:port for the address other machines can reach.
+    #[arg(long, value_name = "IP:PORT", num_args = 0..=1,
+          default_missing_value = "0.0.0.0:49655")]
+    pub listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(Subcommand)]
@@ -463,6 +482,50 @@ pub enum Debug {
 
 #[derive(Subcommand)]
 pub enum HubAction {
+    /// Make an invitation for enrolling machines with this TLS hub. Prints only the
+    /// invitation: a 48-word English phrase. Terminals show six words per line; redirected
+    /// output keeps one line. Paste the whole block when enrolling. Checksums detect
+    /// transcription errors.
+    ///
+    /// Run on the hub's machine. Anyone with the invitation can enroll; share it privately.
+    /// Invitations are reusable by default. Revoking an invitation prevents enrollment,
+    /// without revoking machines already enrolled through it.
+    Invite {
+        /// The hub's directory [default: the directory `musubi hub` would serve].
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+        /// Permit one successful enrollment with this invitation, then generate a new
+        /// single-use invitation.
+        #[arg(long)]
+        single_use: bool,
+    },
+    /// List this TLS hub's invitation ids, without their secrets.
+    Invitations {
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
+    /// Prevent new enrollments with an invitation. Existing clients stay authorized.
+    RevokeInvite {
+        /// An id from `musubi hub invitations`.
+        id: String,
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
+    /// List this TLS hub's authorized client certificate ids and descriptive machine names.
+    Clients {
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
+    /// Revoke a TLS client certificate, ending its connections to every hive on this hub.
+    ///
+    /// This does not revoke an invitation. To prevent the machine enrolling again with an
+    /// invitation it knows, revoke that invitation too.
+    RevokeClient {
+        /// An id from `musubi hub clients`; names are descriptive, not authorization identities.
+        id: String,
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
     /// Remove a hive from the hub. Each machine's copy stops syncing with it as it hears,
     /// keeping everything it has.
     ///

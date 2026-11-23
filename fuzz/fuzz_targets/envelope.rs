@@ -44,6 +44,7 @@ fuzz_target!(|data: &[u8]| {
             roots: vec![],
             remote_targets: vec![],
             machine: "alpha#aaaa".to_owned(),
+            carried: vec![],
         };
         let snapshot = musubi_jj::remote_url::JoinRemotes {
             urls: Default::default(),

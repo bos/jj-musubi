@@ -2781,7 +2781,8 @@ fn copies_make_a_lost_hive_again_on_its_hub_or_another() {
 }
 
 /// A hive removed from the hub is over: each copy leaves it as it hears, keeping everything
-/// it has, whether its daemon hears or `musubi sync` does.
+/// it has, whether its daemon hears or `musubi sync` does. Immediate removal leaves only
+/// an empty tombstone, even if an older corrupt store for the hive was set aside.
 #[test]
 fn copies_leave_a_removed_hive() {
     let env = TestEnv::with_real_op_times();
@@ -2794,8 +2795,28 @@ fn copies_leave_a_removed_hive() {
     // Without its daemon, which would otherwise sync at any moment and hear first, beta
     // hears through `musubi sync`.
     musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
-    let out = musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
-    insta::assert_snapshot!(out, @"Removed hive alpha");
+    let hive = fs::read_dir(&hub.dir)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.path().join("hive.toml").is_file())
+        .unwrap();
+    let removed = hub.dir.join("removed");
+    let corrupt = removed.join(format!("{}-0.corrupt", hive.file_name().to_str().unwrap()));
+    fs::create_dir_all(&corrupt).unwrap();
+    fs::write(corrupt.join("old-history"), "old history").unwrap();
+    let out = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "rm", "--immediately", "alpha"],
+    );
+    insta::assert_snapshot!(out, @"Removed hive alpha and deleted its history from the hub");
+    let tombstones: Vec<_> = fs::read_dir(&removed)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(tombstones.len(), 1);
+    assert!(fs::read_dir(tombstones[0].path()).unwrap().next().is_none());
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
     insta::assert_snapshot!(err, @"Error: this repository's hive was removed from the hub, so this repository no longer syncs with it; everything it has stays");
     assert_eq!(membership(&beta), "removed");

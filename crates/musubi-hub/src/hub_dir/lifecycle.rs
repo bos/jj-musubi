@@ -1,7 +1,7 @@
 //! A hive's store over its life on disk, past what joins and pushes do to it: made again
 //! when a power cut leaves it corrupt, set aside under `removed/` when the hive is made again
-//! or removed, and deleted or emptied a day later. A removed hive's directory stays under
-//! `removed/`, emptied, as its tombstone.
+//! or removed, and deleted or emptied after their retention period. A removed hive's
+//! directory stays under `removed/`, emptied, as its tombstone.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -10,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use uuid::Uuid;
 
 use super::HIVE_FILE;
@@ -110,7 +111,7 @@ impl HubDir {
             });
             if replaced {
                 let (id, path) = (id.clone(), path.clone());
-                std::thread::spawn(move || match fs::remove_dir_all(&path) {
+                std::thread::spawn(move || match delete_dir(&path) {
                     Ok(()) => tracing::info!("deleted hive {id}'s corrupt store"),
                     Err(err) => tracing::warn!("deleting {}: {err}", path.display()),
                 });
@@ -126,7 +127,7 @@ impl HubDir {
 
     /// Takes a hive out of the hub, keeping its store under `removed/`. The caller has
     /// stopped serving it.
-    pub fn remove(&mut self, id: &HiveId) -> Result<HiveInfo, Refusal> {
+    pub fn remove(&mut self, id: &HiveId) -> Result<(HiveInfo, RemovedStore), Refusal> {
         let info = self.info(id).ok_or_else(|| format!("no hive {id}"))?;
         let removed = self.dir.join("removed");
         fs::create_dir_all(&removed).map_err(refusal)?;
@@ -138,10 +139,45 @@ impl HubDir {
         self.removed.insert(id.clone());
         self.unemptied.push(SetAside {
             id: id.clone(),
-            path,
+            path: path.clone(),
             stamp,
         });
-        Ok(info)
+        Ok((
+            info,
+            RemovedStore {
+                id: id.clone(),
+                path,
+            },
+        ))
+    }
+}
+
+/// A removed hive's store, which can be emptied without holding the hub directory lock.
+pub struct RemovedStore {
+    id: HiveId,
+    path: PathBuf,
+}
+
+impl RemovedStore {
+    /// Empties the store and deletes any corrupt stores set aside for the same hive.
+    /// The empty directory remains the hive's tombstone.
+    pub fn purge(self) -> anyhow::Result<()> {
+        let removed = self.path.parent().expect("store under removed/");
+        let entries =
+            fs::read_dir(removed).with_context(|| format!("reading {}", removed.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", removed.display()))?;
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .and_then(aside_name)
+                .is_some_and(|(id, _, corrupt)| corrupt && id == self.id.as_str())
+            {
+                delete_dir(&entry.path())
+                    .with_context(|| format!("deleting {}", entry.path().display()))?;
+            }
+        }
+        empty_dir(&self.path).with_context(|| format!("emptying {}", self.path.display()))
     }
 }
 
@@ -215,14 +251,7 @@ pub(super) fn set_aside(dir: &Path) -> SetAsides {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        let (stem, corrupt) = match name.strip_suffix(".corrupt") {
-            Some(stem) => (stem, true),
-            None => (name.as_str(), false),
-        };
-        let Some((id, stamp)) = stem.rsplit_once('-') else {
-            continue;
-        };
-        let (Ok(stamp), Ok(_)) = (stamp.parse(), Uuid::parse_str(id)) else {
+        let Some((id, stamp, corrupt)) = aside_name(&name) else {
             continue;
         };
         let aside = SetAside {
@@ -240,6 +269,25 @@ pub(super) fn set_aside(dir: &Path) -> SetAsides {
         }
     }
     found
+}
+
+/// Reads the hive id, time and whether the store was set aside as corrupt.
+fn aside_name(name: &str) -> Option<(&str, u64, bool)> {
+    let (stem, corrupt) = match name.strip_suffix(".corrupt") {
+        Some(stem) => (stem, true),
+        None => (name, false),
+    };
+    let (id, stamp) = stem.rsplit_once('-')?;
+    Uuid::parse_str(id).ok()?;
+    Some((id, stamp.parse().ok()?, corrupt))
+}
+
+/// A sweep and an explicit purge can both delete a corrupt store.
+fn delete_dir(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !path.try_exists()? => Ok(()),
+        result => result,
+    }
 }
 
 /// Deletes everything in `dir`, leaving it empty.

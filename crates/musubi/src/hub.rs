@@ -610,13 +610,29 @@ async fn open_local(dir: &Path) -> anyhow::Result<Stream> {
 }
 
 /// `musubi hub remove`: removes a hive from a hub.
-pub async fn remove(ui: &Ui, hive: String, hub: Option<String>) -> anyhow::Result<()> {
+pub async fn remove(
+    ui: &Ui,
+    hive: String,
+    immediately: bool,
+    hub: Option<String>,
+) -> anyhow::Result<()> {
     let hub = config::UserState::hub(hub.as_deref())?;
-    let reply = ask(&hub, HubWideRequest::Remove { name: hive }).await?;
+    let reply = ask(
+        &hub,
+        HubWideRequest::Remove {
+            name: hive,
+            immediately,
+        },
+    )
+    .await?;
     if let HubWideReply::Hive(info) = reply {
         let mut out = ui.stdout();
         write!(out, "Removed hive ")?;
-        writeln!(out.labeled("hive"), "{}", info.name)?;
+        write!(out.labeled("hive"), "{}", info.name)?;
+        if immediately {
+            write!(out, " and deleted its history from the hub")?;
+        }
+        writeln!(out)?;
     }
     Ok(())
 }

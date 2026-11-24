@@ -1479,6 +1479,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
+        assert!(tombstone.join(HIVE_FILE).is_file());
         // A day later, as a hub started then finds it, with a corrupt store beside it.
         let day_ago = now() - SET_ASIDE_LIFETIME.as_secs() - 60;
         let old = removed.join(format!("{id}-{day_ago}"));

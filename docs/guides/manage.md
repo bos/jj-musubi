@@ -49,8 +49,10 @@ syncing and learn the name at their next sync, within half a minute, or next `mu
 
 `musubi hub remove` takes the hive's whole name or id. It waits for ongoing work, such as a
 large fetch, while other hives remain available. Each copy leaves at its next sync, keeping
-everything it has. The hub keeps the data in `removed/` for a day, then an empty directory
-that prevents copies from recreating the removed hive.
+everything it has. The hub keeps the data in `removed/` for about a day by default.
+`musubi hub remove --immediately` waits for the hub to delete the store. An empty directory
+remains to prevent copies from recreating the removed hive. To share again after clearing
+unwanted history, see [Purge shared history](../troubleshooting.md#purge-shared-history).
 
 To share again, start a hive with `musubi create` and run `musubi join --hive <name>` in other
 copies. A plain `musubi join` refuses while the copy records a removed hive; run

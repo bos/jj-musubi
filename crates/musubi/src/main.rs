@@ -253,9 +253,14 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             ..
         } => hub::relay(dir),
         Command::Hub {
-            action: Some(HubAction::Remove { hive, hub }),
+            action:
+                Some(HubAction::Remove {
+                    hive,
+                    immediately,
+                    hub,
+                }),
             ..
-        } => block_on(hub::remove(ui, hive, hub)),
+        } => block_on(hub::remove(ui, hive, immediately, hub)),
         Command::Hub {
             action:
                 Some(HubAction::Rename {

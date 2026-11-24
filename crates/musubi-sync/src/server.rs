@@ -262,7 +262,9 @@ impl HubServer {
                     HubWideReply::Renamed { from, hive }
                 })
             }
-            HubWideRequest::Remove { name } => self.remove(&name).map(HubWideReply::Hive),
+            HubWideRequest::Remove { name, immediately } => {
+                self.remove(&name, immediately).map(HubWideReply::Hive)
+            }
             HubWideRequest::Report { hive, report } => {
                 // Under the hub, so that a removal can't forget the hive's activity between
                 // the two: nothing takes the hub while holding the activity.
@@ -301,7 +303,7 @@ impl HubServer {
 
     /// Removes the hive whose name or id is exactly `name`, once its thread has finished
     /// what it has queued and closed its store.
-    fn remove(&self, name: &str) -> Result<HiveInfo, Refusal> {
+    fn remove(&self, name: &str, immediately: bool) -> Result<HiveInfo, Refusal> {
         let (id, worker) = {
             let mut workers = self.workers();
             let id = self.lock().resolve_exact(name)?;
@@ -312,7 +314,7 @@ impl HubServer {
             (id, worker)
         };
         // However the removal ends: failing, the hive is served again, by a new thread.
-        let _removing = Removing {
+        let removing = Removing {
             server: self,
             id: &id,
         };
@@ -320,12 +322,19 @@ impl HubServer {
             drop(worker.requests);
             worker.thread.join().ok();
         }
-        let removed = self.lock().remove(&id);
-        if let Ok(info) = &removed {
-            self.activity().forget(&id);
-            tracing::info!("removed hive {}", info.name);
+        let (info, store) = self.lock().remove(&id)?;
+        self.activity().forget(&id);
+        tracing::info!("removed hive {}", info.name);
+        drop(removing);
+        if immediately {
+            store.purge().map_err(|err| {
+                format!(
+                    "hive {} was removed, but the hub couldn't delete its history: {err:#}",
+                    info.name
+                )
+            })?;
         }
-        removed
+        Ok(info)
     }
 }
 

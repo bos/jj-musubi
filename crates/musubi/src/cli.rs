@@ -425,14 +425,16 @@ pub enum HubAction {
     /// Remove a hive from the hub. Each machine's copy stops syncing with it as it hears,
     /// keeping everything it has.
     ///
-    /// The hive's store moves to the hub's `removed/` directory, and is emptied a day or so
-    /// later. Its machines leave it as `musubi leave` would; `musubi create` and `musubi
-    /// join` make a new hive of the repository if it's wanted again.
+    /// The hive's store moves to the hub's `removed/` directory. It is emptied after about
+    /// a day by default.
     #[command(alias = "rm")]
     Remove {
         /// The hive: its whole name, or its id.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
+        /// Delete the hive's stored history on the hub before reporting success.
+        #[arg(long)]
+        immediately: bool,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,

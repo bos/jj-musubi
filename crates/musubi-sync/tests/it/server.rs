@@ -293,6 +293,7 @@ async fn one_hub_many_hives() {
     // Only by its whole name or id, which a prefix is too easily mistaken for.
     let remove = |name: &str| HubWideRequest::Remove {
         name: name.to_owned(),
+        immediately: false,
     };
     assert!(matches!(
         hub_wide(&*client, remove("ga")).await,

@@ -22,6 +22,13 @@ fuzz_target!(|data: &[u8]| {
     };
     if choice & 0x40 != 0 {
         let identity = String::from_utf8_lossy(rest).into_owned();
+        round_trip::<HubWideRequest>(
+            &Envelope::encode(HubWideRequest::Remove {
+                name: identity.clone(),
+                immediately: choice & 1 != 0,
+            })
+            .unwrap(),
+        );
         let backend = match choice & 0x3 {
             0 => musubi_jj::objects::Backend::GIT,
             1 => musubi_jj::objects::Backend::Git(musubi_jj::objects::GitHash::Sha256),

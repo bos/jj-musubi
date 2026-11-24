@@ -214,7 +214,7 @@ changelog will announce; to keep serving it there for good, set `musubi.hub-dir`
 | --- | --- |
 | `hub.toml` | The hub's settings: the name `--advertise` gave it. |
 | `<hive id>/` | One directory per hive: its name, in `hive.toml`, and its operations and objects. |
-| `removed/` | Hives removed by `musubi hub remove`, emptied after a day; the empty directories prevent their recreation. Also holds corrupt stores for about a day after the hub replaces them. |
+| `removed/` | Hives removed by `musubi hub remove`, emptied after about a day or at once with `--immediately`. The empty directories prevent recreation. Also holds corrupt stores for about a day after the hub replaces them. |
 | `run/hub.sock` | The socket the hub listens on, which only you can reach. |
 | `hub.lock` | A lock that keeps a second hub from serving the directory. |
 

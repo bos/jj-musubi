@@ -157,7 +157,7 @@ the daemon if running, or syncs directly with a warning. Each shows progress on 
 | `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. On illumos it starts at boot either way; installing it uses pfexec and the Service Management rights profile (see [illumos](../guides/setup.md#illumos)). Accepts the same flags as `hub`. macOS, Linux and illumos only. |
 | `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo; on illumos, removing the hub's SMF service uses pfexec. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
-| `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
+| `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `--immediately` clears the hive's history from the hub before reporting success. `rm` is an alias. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines use it over ssh. |
 
 Hives can be named by an unambiguous prefix or id. `hub remove` requires a whole name or id.

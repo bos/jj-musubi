@@ -198,6 +198,35 @@ Describe or commit the copied work with jj, then run `musubi sync` there. Keep t
 until you've checked the wanted work on another machine. For whole commits, use the rescue
 below; fetching also brings ancestors, which may contain unwanted content.
 
+## Purge shared history
+
+If an accidental snapshot or commit reached the hub, dropping it with jj can fix the current
+state while the old operation history still holds it. To purge that history, remove the hive
+and share a fresh repo. The example uses a hive named `app` on your default hub. Pass `--hub`
+to each hub removal, creation or clone command if the hive lives elsewhere.
+
+1. Keep the old checkouts while you recover wanted work from them. Remove the hive and clear
+   its history from the hub:
+
+   ```sh
+   musubi hub remove --immediately app
+   ```
+
+   Wait for the command to say it deleted the hive's history. This clears the hive's store on
+   the hub. Other hives, Git remotes, backups and the old checkouts may still hold the data.
+
+2. Start with a fresh repo, such as one made with `jj git init ../app-clean`. Copy over the
+   wanted files and commit them in the fresh repo. To keep existing commits, use the [transfer
+   steps below](#rescue-work-in-a-new-copy) with the fresh repo as the destination. Check the
+   entire ancestry of every commit you transfer. When in doubt, copy only the files you want.
+   Joining or creating from an old checkout can send its old operation history again.
+
+3. In the fresh repo, run `musubi create app`. On each other machine, run
+   `musubi clone app ../app-clean` from the old checkout. Copy any remaining wanted work into
+   the new copies, check it with jj, and run `musubi sync`. Once you've verified the wanted
+   work, remove the old repo directories and any additional workspaces to clear their local
+   copies of the history.
+
 ## Rescue work in a new copy
 
 If the error says this repo lost history the hive has, retrying or rejoining won't help:

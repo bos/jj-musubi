@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `musubi hub remove --immediately <hive>` deletes the hive's stored history from the hub
+  before reporting success. See [Purge shared history](docs/troubleshooting.md#purge-shared-history)
+  for replacing the hive and its copies. Upgrade the hub and its machines together.
+
 - A repo with a workspace of yours whose name has a `/`, such as `feat/x`, doesn't sync until
   you rename it, since other machines show each other's workspaces by names like
   `laptop/default`. Before, other machines showed it as `laptop/feat/x`. `musubi sync`,

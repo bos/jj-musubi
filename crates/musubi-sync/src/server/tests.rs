@@ -447,6 +447,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     hold.held().await;
     let removal = tokio::spawn(hub_wide(HubWideRequest::Remove {
         name: "busy".to_owned(),
+        immediately: true,
     }));
     let deadline = Instant::now() + TIMEOUT;
     while !watched.workers().removing.contains(&busy) {
@@ -471,6 +472,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     );
     let again = hub_wide(HubWideRequest::Remove {
         name: "busy".to_owned(),
+        immediately: true,
     })
     .await;
     assert!(
@@ -613,4 +615,27 @@ fn hub_survives_malformed_clone_preflights() {
         server.handle_hub_wide(&bytes, 4096),
         HubWideReply::Hive(_)
     ));
+}
+
+/// A remove request missing its deletion flag, or with trailing bytes, leaves the hive
+/// and its store alone.
+#[test]
+fn hub_refuses_malformed_removals() {
+    let dir = musubi_testutil::tempdir();
+    let server = HubServer::open(dir.path()).unwrap();
+    let id = server.lock().create("project", Backend::GIT).unwrap();
+    let bytes = encode(HubWideRequest::Remove {
+        name: "project".to_owned(),
+        immediately: true,
+    });
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    for request in [&bytes[..bytes.len() - 1], &trailing] {
+        assert!(matches!(
+            server.handle_hub_wide(request, 4096),
+            HubWideReply::Error(_)
+        ));
+        assert!(server.lock().info(&id).is_some());
+        assert!(dir.path().join(id.as_str()).join("hive.toml").is_file());
+    }
 }

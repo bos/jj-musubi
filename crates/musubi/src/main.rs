@@ -94,6 +94,7 @@ fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilte
 /// The crates of jj's that musubi builds, as targets of what they log.
 const JJ_CRATES: &[&str] = &[
     "jj_cli",
+    "jj_config",
     "jj_core",
     "jj_core_proc_macros",
     "jj_default_index",
@@ -102,7 +103,9 @@ const JJ_CRATES: &[&str] = &[
     "jj_git_backend",
     "jj_lib",
     "jj_local_util",
+    "jj_local_working_copy",
     "jj_simple_stores",
+    "jj_working_copy",
 ];
 
 /// What the hub and the daemon log unless told otherwise: what they do, and only warnings

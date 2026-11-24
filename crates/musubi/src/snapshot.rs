@@ -259,7 +259,8 @@ async fn snapshot_async(
         (Outcome::Unchanged, None)
     } else {
         let immutable = env
-            .resolve_immutable_expression(repo.as_ref(), false)?
+            .resolve_immutable_expression(repo.as_ref(), false)
+            .await?
             .intersection(&RevsetExpression::commit(commit_id.clone()))
             .evaluate(repo.as_ref())?;
         let mut tx = repo.start_transaction();

@@ -207,7 +207,20 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(60), watcher.changed())
             .await
             .expect("no event for the removal");
-        // And the directory moved aside, with a socket made again in it.
+    }
+
+    /// The directory moved aside, with the socket in it, is reported too.
+    ///
+    /// Not on Windows: `ReadDirectoryChangesW` reports what happens to the entries of the
+    /// watched directory, not to the directory itself, so renaming it away is no event there;
+    /// and when the directory is deleted, notify ends the watch without one. The daemon
+    /// never relies on it: there its socket is a named pipe, which has no watch
+    /// (`watch_socket`) and can't be deleted, so only the periodic look matters.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_directory_moved_aside_is_reported() {
+        let dir = musubi_testutil::tempdir();
+        let path = dir.path().join("daemon.sock");
         std::fs::write(&path, "").unwrap();
         let mut watcher = Watcher::removal(&path).unwrap();
         std::fs::rename(dir.path(), dir.path().with_extension("aside")).unwrap();

@@ -1,6 +1,8 @@
 //! Races found by the generated end-to-end search (tests/e2e_search), reduced to
 //! deterministic regressions.
 
+use std::collections::BTreeSet;
+
 use crate::fixture::Fixture;
 
 /// A node merges its own concurrent work with an operation from the hub, and jj's merge
@@ -126,4 +128,58 @@ fn a_loop_through_unshared_work_names_the_rebase() {
         .repo(1)
         .jj(&["log", "-r", "divergent()", "--no-graph", "-T", "commit_id"]);
     assert_eq!(divergent, "");
+}
+
+/// Found by Antithesis (#172): a `jj` command loads the repository, musubi realizes beta's
+/// rebase meanwhile, and the command then commits its own rebase on the operation it loaded,
+/// beside the realization: the two loop, and jj panics merging them ("graph has cycle") on
+/// every load, `jj op log` and a plain `jj op revert` included. `check_mergeable` can't see
+/// the command coming. Here alpha's rebase runs at the old operation (`--at-op`), which
+/// commits on it as the command in flight did. The sync must say that jj fails, not that it
+/// keeps working, and name alpha's rebase, not beta's, with a revert that works: at itself.
+#[test]
+fn a_loop_committed_by_a_command_in_flight_names_a_revert_that_works() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let alpha = hive.repo(0);
+    alpha.jj(&["new", "root()", "-m", "X"]);
+    alpha.jj(&["new", "-m", "Y"]);
+    alpha.jj(&["new", "root()", "-m", "Z"]);
+    alpha.jj(&["new", "root()"]);
+    hive.sync();
+    let [x, y, z] = ["X", "Y", "Z"].map(|m| hive.commit_id(0, m));
+    // Where alpha's command loads the repository, before musubi realizes beta's rebase.
+    let loaded = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    hive.repo(1).jj(&["rebase", "-s", &x, "-o", &z]);
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync(0).unwrap();
+    let heads = |hive: &Fixture| -> BTreeSet<String> {
+        std::fs::read_dir(hive.repo(0).repo_path().join("op_heads/heads"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let before = heads(&hive);
+    hive.repo(0)
+        .jj(&["--at-op", &loaded, "rebase", "-s", &z, "-o", &y]);
+    let added: Vec<String> = heads(&hive).difference(&before).cloned().collect();
+    let [ours] = added.as_slice() else {
+        panic!("expected the rebase beside the realization: {added:?}")
+    };
+    let ours = &ours[..12];
+    let err = format!("{:#}", hive.hive.sync(0).unwrap_err());
+    let advice = format!("`jj --at-op {ours} op revert {ours}`");
+    assert!(err.contains(&advice), "expected {advice}: {err}");
+    assert!(!err.contains("keeps working"), "{err}");
+    // A retry with nothing new reuses the search, which writes operations.
+    let searches = hive.node(0).unmergeable_searches();
+    assert!(searches > 0);
+    let again = format!("{:#}", hive.hive.sync(0).unwrap_err());
+    assert_eq!(again, err);
+    assert_eq!(hive.node(0).unmergeable_searches(), searches);
+    hive.repo(0).jj(&["--at-op", ours, "op", "revert", ours]);
+    hive.repo(0).jj(&["status"]);
+    hive.sync();
+    hive.assert_converged();
 }

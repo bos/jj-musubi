@@ -21,6 +21,7 @@ use super::super::NodeError;
 use super::super::NodeRepo;
 use super::super::catch_jj_panic;
 use super::super::view::PerMachine;
+use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -48,6 +49,9 @@ impl MergeDiagnosis {
 #[derive(Clone, Default)]
 struct UnmergeableMemo {
     last: Option<UnmergeableSearch>,
+    /// The last op heads jj couldn't merge, and the one of them to revert, if found: they
+    /// stay so until someone reverts one, and each search writes operations.
+    last_heads: Option<(Vec<LocalOp>, Option<LocalOp>)>,
     searches: usize,
 }
 
@@ -307,28 +311,7 @@ impl NodeRepo {
             if op.view().block_on()?.heads() == parent.view().block_on()?.heads() {
                 continue;
             }
-            let (at_op, at_parent) = (
-                self.loader.load_at(op).block_on()?,
-                self.loader.load_at(&parent).block_on()?,
-            );
-            let revert_op = catch_jj_panic(|| {
-                let mut tx = head.start_transaction();
-                Ok(async {
-                    tx.repo_mut().merge(&at_op, &at_parent).await?;
-                    // `jj op revert` keeps git's refs as they are.
-                    let mut view = tx.repo().view().store_view().clone();
-                    view.git_refs = head.view().store_view().git_refs.clone();
-                    view.git_heads = head.view().store_view().git_heads.clone();
-                    tx.repo_mut().set_view(view);
-                    tx.repo_mut().rebase_descendants().await?;
-                    let reverted = tx
-                        .write(format!("revert operation {}", op.id().hex()))
-                        .await?;
-                    Ok::<_, NodeError>(reverted.leave_unpublished().operation().clone())
-                }
-                .block_on())
-            });
-            let Ok(Ok(revert_op)) = revert_op else {
+            let Some(revert_op) = self.revert_on(&head, op, &parent)? else {
                 continue;
             };
             if self.try_merge(vec![revert_op, realized.clone()]).is_ok() {
@@ -336,6 +319,153 @@ impl NodeRepo {
             }
         }
         Ok(None)
+    }
+
+    /// `op`, whose parent is `parent`, reverted as `jj op revert` would on top of `head`, into
+    /// an operation written but not published (though it rebases immutable commits too, where
+    /// `jj op revert` leaves them). `None` if jj fails or panics reverting it.
+    fn revert_on(
+        &self,
+        head: &Arc<ReadonlyRepo>,
+        op: &Operation,
+        parent: &Operation,
+    ) -> Result<Option<Operation>, NodeError> {
+        let (at_op, at_parent) = (
+            self.loader.load_at(op).block_on()?,
+            self.loader.load_at(parent).block_on()?,
+        );
+        let revert_op = catch_jj_panic(|| {
+            let mut tx = head.start_transaction();
+            Ok(async {
+                tx.repo_mut().merge(&at_op, &at_parent).await?;
+                // `jj op revert` keeps git's refs as they are.
+                let mut view = tx.repo().view().store_view().clone();
+                view.git_refs = head.view().store_view().git_refs.clone();
+                view.git_heads = head.view().store_view().git_heads.clone();
+                tx.repo_mut().set_view(view);
+                tx.repo_mut().rebase_descendants().await?;
+                let reverted = tx
+                    .write(format!("revert operation {}", op.id().hex()))
+                    .await?;
+                Ok::<_, NodeError>(reverted.leave_unpublished().operation().clone())
+            }
+            .block_on())
+        });
+        Ok(match revert_op {
+            Ok(Ok(revert_op)) => Some(revert_op),
+            _ => None,
+        })
+    }
+
+    /// The error for op heads `heads` that jj can't merge, failing for `reason`: as when a
+    /// `jj` command that loaded the repository before musubi realized the hive's operations
+    /// commits a rebase beside them that loops with one of them (#172). Every `jj` command
+    /// here then fails or panics, `jj op log` and a plain `jj op revert` included, so the
+    /// error names the operation to revert at itself: the newest op head of this machine's
+    /// own, not a realization, a merge or a checkpoint, whose revert, on top of it, jj can
+    /// merge with the other heads. Failing one, it lists this machine's own op heads.
+    pub(in crate::node) fn unmergeable_heads(
+        &self,
+        heads: &[LocalOp],
+        reason: String,
+    ) -> NodeError {
+        let mut own = vec![];
+        for head in heads {
+            let Ok(op) = self.loader.load_operation(&head.0).block_on() else {
+                continue;
+            };
+            let attrs = OpAttrs(&op.metadata().attributes);
+            if op.parent_ids().len() == 1 && !attrs.has_original_parents() && !attrs.is_checkpoint()
+            {
+                own.push(op);
+            }
+        }
+        own.sort_by(|a, b| {
+            (b.metadata().time.end.timestamp, b.id())
+                .cmp(&(a.metadata().time.end.timestamp, a.id()))
+        });
+        let ours: Vec<LocalOp> = own.iter().map(|op| LocalOp(op.id().clone())).collect();
+        let mut sorted_heads = heads.to_vec();
+        sorted_heads.sort();
+        let memo = self
+            .merge_diagnosis
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_heads
+            .clone();
+        let culprit = match memo {
+            Some((last, culprit)) if last == sorted_heads => culprit,
+            _ => {
+                let culprit = own.iter().find_map(|op| self.revert_merges(heads, op));
+                let mut memo = self
+                    .merge_diagnosis
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                memo.searches += 1;
+                memo.last_heads = Some((sorted_heads, culprit.clone()));
+                culprit
+            }
+        };
+        let revert = |id: &LocalOp| {
+            let short = &id.0.hex()[..12];
+            format!("`jj --at-op {short} op revert {short}`")
+        };
+        let advice = match (&culprit, ours.is_empty()) {
+            (Some(op), _) => format!(
+                "To go on, revert this machine's operation {} with {}. That undoes only what it \
+                 did, and what other machines did stays; musubi then catches up",
+                self.describe(op),
+                revert(op)
+            ),
+            (None, false) => {
+                let listed: Vec<String> = ours.iter().map(|op| self.describe(op)).collect();
+                format!(
+                    "To go on, revert this machine's own operations among the heads one at a \
+                     time, newest first ({}), with `jj --at-op <id> op revert <id>`, until \
+                     `jj status` works again",
+                    listed.join(", ")
+                )
+            }
+            (None, true) => "None of the heads is an operation of this machine's own to revert, \
+                             which is a bug: please report it with this message"
+                .to_owned(),
+        };
+        NodeError::UnmergeableHeads {
+            ours,
+            culprit,
+            advice,
+            reason,
+        }
+    }
+
+    /// `op`, one of the op heads `heads`, if reverting it on top of itself, as
+    /// `jj --at-op <op> op revert <op>` does, lets jj merge the result with the other heads.
+    fn revert_merges(&self, heads: &[LocalOp], op: &Operation) -> Option<LocalOp> {
+        let mut operations = heads
+            .iter()
+            .filter(|head| head.0 != *op.id())
+            .map(|head| self.loader.load_operation(&head.0).block_on())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let parent = op.parents().block_on().ok()?.remove(0);
+        let at_op = self.loader.load_at(op).block_on().ok()?;
+        operations.push(self.revert_on(&at_op, op, &parent).ok()??);
+        self.try_merge(operations)
+            .is_ok()
+            .then(|| LocalOp(op.id().clone()))
+    }
+
+    /// An operation's short id and description, as an error names it.
+    fn describe(&self, id: &LocalOp) -> String {
+        let description = self
+            .loader
+            .load_operation(&id.0)
+            .block_on()
+            .map(|op| op.metadata().description.clone())
+            .unwrap_or_default();
+        format!("{} ({description})", &id.0.hex()[..12])
     }
 
     /// Of this machine's operations the hive doesn't have, `ours` (newest first), the oldest
@@ -404,15 +534,7 @@ impl NodeRepo {
         reason: String,
     ) -> NodeError {
         const SHOWN: usize = 5;
-        let describe = |id: &LocalOp| {
-            let description = self
-                .loader
-                .load_operation(&id.0)
-                .block_on()
-                .map(|op| op.metadata().description.clone())
-                .unwrap_or_default();
-            format!("{} ({description})", &id.0.hex()[..12])
-        };
+        let describe = |id: &LocalOp| self.describe(id);
         let advice = match &culprit {
             Some(op) => format!(
                 "To go on, revert this machine's operation {} with `jj op revert {}`: \

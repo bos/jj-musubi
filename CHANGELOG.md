@@ -111,6 +111,13 @@
 - `contrib/upgrade-from-source` works on illumos, whose `tar` it used to fail with. If you
   copied it into your dotfiles, copy it again.
 
+- A `jj` command that runs while musubi applies another machine's rebase can commit a rebase
+  that loops with it. jj then panics ("graph has cycle") on every command. The sync error
+  used to say jj kept working, and named operations whose revert panicked too. It now says
+  that jj fails, and names this machine's operation to revert, with the command that works:
+  `jj --at-op <id> op revert <id>`. That undoes only that operation; the other machine's
+  rebase stays.
+
 ## 0.47.1
 
 This is the initial release.

@@ -213,6 +213,23 @@ pub enum NodeError {
         advice: String,
         reason: String,
     },
+    /// jj cannot merge this machine's op heads, as when a `jj` command that loaded the
+    /// repository before musubi realized the hive's operations commits a rebase that loops
+    /// with one of them: jj 0.47 then panics ("graph has cycle") on every load.
+    #[error(
+        "jj cannot merge this machine's operation heads ({reason}), so every `jj` command here \
+         fails, `jj op log` and a plain `jj op revert` included. {advice}"
+    )]
+    UnmergeableHeads {
+        /// The op heads that are this machine's own operations, not realizations, merges or
+        /// checkpoints, newest first.
+        ours: Vec<LocalOp>,
+        /// This machine's op head whose revert, on top of it, lets jj merge the others, if
+        /// one is found.
+        culprit: Option<LocalOp>,
+        advice: String,
+        reason: String,
+    },
     #[error("repo config {path}: {message}")]
     Config { path: PathBuf, message: String },
     /// `jj op abandon`, or something else, made operations that the hub accepted unreachable.

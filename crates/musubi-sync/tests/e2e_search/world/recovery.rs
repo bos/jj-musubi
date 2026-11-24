@@ -18,12 +18,19 @@ impl World {
     /// error names, or where it names none, as a user given its list would: the newest, other
     /// than the recovery's own. Fails the case on any other error, or if the operation to
     /// revert is one already reverted, or a revert the recovery made: reverting it would put
-    /// back what it reverted.
+    /// back what it reverted. Where jj can't merge the op heads themselves, so that no command
+    /// loads the repository, it reverts the operation at itself (`--at-op`), as the error says.
     pub(super) fn recover(&mut self, m: usize, what: &str, err: &anyhow::Error) {
+        let mut at_op = false;
         let found = err
             .chain()
             .find_map(|e| match e.downcast_ref::<NodeError>() {
                 Some(NodeError::Unmergeable { ours, culprit, .. }) => {
+                    Some((ours.clone(), culprit.clone()))
+                }
+                // jj can't load the repository at all, so the revert runs at the operation.
+                Some(NodeError::UnmergeableHeads { ours, culprit, .. }) => {
+                    at_op = true;
                     Some((ours.clone(), culprit.clone()))
                 }
                 _ => None,
@@ -40,7 +47,11 @@ impl World {
                 self.machine(m)
             ));
         };
-        let ops = self.op_summaries(m);
+        let ops = if at_op {
+            self.op_summaries_unmerged(m)
+        } else {
+            self.op_summaries(m)
+        };
         let op = match culprit {
             Some(op) => Some(op.0.hex()).filter(|op| !self.recovery_ops.contains(op)),
             // As `can_undo` does, skip merges, which jj refuses to revert, and workspace
@@ -60,7 +71,11 @@ impl World {
             ));
         };
         self.recovery_actions += 1;
-        self.jj(m, &["op", "revert", &op]);
+        if at_op {
+            self.jj(m, &["--at-op", &op, "op", "revert", &op]);
+        } else {
+            self.jj(m, &["op", "revert", &op]);
+        }
         let written: Vec<String> = self
             .op_summaries(m)
             .into_keys()
@@ -73,25 +88,32 @@ impl World {
     /// Every operation in machine `m`'s operation log, by hex id, with its number of parents
     /// and the first line of its description.
     fn op_summaries(&self, m: usize) -> BTreeMap<String, (usize, String)> {
-        self.raw_jj(
-            m,
-            &[
-                "--ignore-working-copy",
-                "op",
-                "log",
-                "--no-graph",
-                "-T",
-                r#"id ++ "\t" ++ parents.len() ++ "\t" ++ description.first_line() ++ "\n""#,
-            ],
-        )
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let id = fields.next()?;
-            let parents = fields.next()?.parse().ok()?;
-            Some((id.to_owned(), (parents, fields.next()?.to_owned())))
-        })
-        .collect()
+        self.op_summaries_at(m, &[])
+    }
+
+    /// [`Self::op_summaries`], read at each op head in turn, for op heads jj can't merge.
+    fn op_summaries_unmerged(&self, m: usize) -> BTreeMap<String, (usize, String)> {
+        let mut ops = BTreeMap::new();
+        for head in self.op_heads(m) {
+            ops.extend(self.op_summaries_at(m, &["--at-op", &head]));
+        }
+        ops
+    }
+
+    fn op_summaries_at(&self, m: usize, at: &[&str]) -> BTreeMap<String, (usize, String)> {
+        let template = r#"id ++ "\t" ++ parents.len() ++ "\t" ++ description.first_line() ++ "\n""#;
+        let mut args = vec!["--ignore-working-copy"];
+        args.extend_from_slice(at);
+        args.extend_from_slice(&["op", "log", "--no-graph", "-T", template]);
+        self.raw_jj(m, &args)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let id = fields.next()?;
+                let parents = fields.next()?.parse().ok()?;
+                Some((id.to_owned(), (parents, fields.next()?.to_owned())))
+            })
+            .collect()
     }
 
     /// Takes an abandoned operation that a `jj` command on machine `m` brought back into its

@@ -488,7 +488,7 @@ impl NodeRepo {
         match loaded {
             Ok(Ok(repo)) => Ok(repo),
             Ok(Err(err)) => Err(err),
-            Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
+            Err(reason) => Err(self.unmergeable_heads(&self.local_heads()?, reason)),
         }
     }
 

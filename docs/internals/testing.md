@@ -610,6 +610,15 @@ one request while two time out behind it, a chunk of an upload and another, then
 thread stored the chunk, and, in the hub's activity, that it answered the requests before and
 after but not the other one. It fails if the thread works out every request it takes, as it
 did, or lets go of the chunk too.
+`server::tests::a_node_hears_the_hub_answer_unless_the_hive_is_paused` counts the replies a
+node's driver hears through its hook, across syncs before, during and after a pause: the daemon
+forgets a pause it remembers at a sync's first answered request, so that `musubi status` stops
+saying the hive is paused before the sync downloads or applies other machines' work. It fails
+if the hook hears the hub's refusal of a paused hive, or nothing at all.
+`remote::tests::a_reply_is_heard_before_it_downloads` checks that the hook hears a reply too
+large to send whole before any of it downloads, and
+`daemon::status::tests::an_answer_forgets_a_remembered_pause` that the daemon then clears the
+pause and its error in memory and in the status file.
 
 The existing `a_request_that_panics_the_hub_gets_an_error` separately reaches a real jj decoder
 panic from malformed peer input; the protocol storage-call fault tests cover their own boundaries.

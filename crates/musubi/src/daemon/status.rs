@@ -81,6 +81,17 @@ impl Status {
         self.reset_unfinished = error.is_some_and(crate::reset::unfinished);
     }
 
+    /// Forgets a pause the last attempt found, and the error it failed with, once the hub has
+    /// answered a request of a sync since, which it doesn't while the hive is paused. Returns
+    /// whether there was one.
+    pub(super) fn pause_lifted(&mut self) -> bool {
+        let lifted = self.hive_paused.take().is_some();
+        if lifted {
+            self.error = None;
+        }
+        lifted
+    }
+
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out
     /// at once a file truncated to nothing, or renamed over another. A reader that comes
     /// while it is written may find no status.
@@ -171,6 +182,16 @@ impl SharedStatus {
             .is_some()
     }
 
+    /// Records, in memory and in `copy`'s status file, that the hub has answered a request of
+    /// the sync under way, so that `musubi status` stops saying the hive is paused while the
+    /// sync brings in what the hive did meanwhile, rather than until it ends.
+    pub(super) fn answered(&self, copy: &Located) {
+        let mut status = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if status.sync.pause_lifted() {
+            status.sync.save(&copy.repo_path);
+        }
+    }
+
     pub(super) fn publication_held(&self) -> bool {
         self.0
             .lock()
@@ -186,5 +207,48 @@ impl SharedStatus {
         if let Some(located) = copy {
             status.sync.save(&located.repo_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hub answering a sync's request forgets a pause the last attempt found, with its
+    /// error, in memory and in the status file, which `musubi status` reads without a daemon;
+    /// with no pause remembered, it changes and writes nothing. Keeping the error, or not
+    /// saving, fails it.
+    #[test]
+    fn an_answer_forgets_a_remembered_pause() {
+        let dir = musubi_testutil::tempdir();
+        let copy = Located {
+            workspace_root: dir.path().to_owned(),
+            repo_path: dir.path().join("repo"),
+        };
+        fs::create_dir_all(copy.repo_path.join("musubi")).unwrap();
+        let pause = Pause {
+            by: "alpha".to_owned(),
+            at: 0,
+        };
+        let mut paused = Status::default();
+        paused.failed(&HivePaused(pause).into());
+        assert!(paused.hive_paused.is_some() && paused.error.is_some());
+        let shared = SharedStatus::new(paused);
+        shared.answered(&copy);
+        let saved = Status::load(&copy.repo_path).expect("saved");
+        for status in [shared.snapshot(), saved] {
+            assert_eq!((status.hive_paused, status.error), (None, None));
+        }
+
+        fs::remove_file(Status::path(&copy.repo_path)).unwrap();
+        let mut failing = Status::default();
+        failing.failed(&anyhow::anyhow!("the hub is out of reach"));
+        let shared = SharedStatus::new(failing);
+        shared.answered(&copy);
+        assert_eq!(
+            shared.snapshot().error.as_deref(),
+            Some("the hub is out of reach")
+        );
+        assert!(Status::load(&copy.repo_path).is_none());
     }
 }

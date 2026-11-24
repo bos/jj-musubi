@@ -41,6 +41,13 @@ impl NodeDriver {
         })
     }
 
+    /// Calls `on_answer` whenever the hub answers one of this node's requests
+    /// ([`RemoteHub::on_answer`]), as soon as it does, before anything the reply names
+    /// downloads.
+    pub fn on_answer(&mut self, on_answer: impl Fn() + Send + Sync + 'static) {
+        self.remote.on_answer(on_answer);
+    }
+
     pub fn known(&self) -> &Head<OpId> {
         self.core.known()
     }

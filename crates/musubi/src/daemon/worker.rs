@@ -421,7 +421,9 @@ impl<'a> Session<'a> {
         let opened = identity(&located.repo_path);
         let connection = hubs.connect(&hive.hub).await?;
         let own = hubs.own_connections(&hive.hub);
-        let (driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
+        let (mut driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
+        let (answered, copy) = (status.clone(), located.clone());
+        driver.on_answer(move || answered.answered(&copy));
         let transport = &connection.transport;
         let notices = transport.subscribe(&hive.head_subject()).await?;
         let reconnections = transport.reconnections();

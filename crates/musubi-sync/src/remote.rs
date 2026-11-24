@@ -277,6 +277,8 @@ pub struct RemoteHub {
     /// deadline still take the link's time, delaying the next attempt's.
     window: AtomicUsize,
     full: AtomicUsize,
+    /// Called as the hub answers a request ([`RemoteHub::on_answer`]).
+    on_answer: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl RemoteHub {
@@ -296,7 +298,17 @@ impl RemoteHub {
             told: Mutex::new(vec![]),
             window: AtomicUsize::new(WINDOW),
             full: AtomicUsize::new(0),
+            on_answer: None,
         })
+    }
+
+    /// Calls `on_answer` whenever the hub answers a protocol request with a reply to it, as
+    /// soon as the reply comes, before anything it names downloads. The hub answers no
+    /// request for a paused hive but to say it is paused, so a caller that remembers a pause
+    /// learns that it was lifted before a large reply, as after a long pause, downloads, and
+    /// before the sync applies anything the hive did meanwhile.
+    pub fn on_answer(&mut self, on_answer: impl Fn() + Send + Sync + 'static) {
+        self.on_answer = Some(Box::new(on_answer));
     }
 
     /// Records what its calls are doing in `progress`.
@@ -441,6 +453,13 @@ impl RemoteHub {
         // Deleted when the call ends, but for those the reply refers to, which go once the
         // caller is done with it.
         let mut downloads = Downloads::default();
+        // A reply too large to send whole is one the hub worked out, as it doesn't for a
+        // paused hive.
+        if matches!(reply, HubReply::Protocol(_) | HubReply::Indirect { .. })
+            && let Some(on_answer) = &self.on_answer
+        {
+            on_answer();
+        }
         if let HubReply::Indirect { blob, len } = reply {
             self.progress.set(Activity::Receiving {
                 done: 0,
@@ -1065,6 +1084,55 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("failed its hash check"), "{err:#}");
         assert_eq!(transport.chunks.load(Ordering::SeqCst), RESTARTS + 1);
+    }
+
+    /// The hub answering is heard as soon as its reply comes, before anything it names
+    /// downloads, as a large fetch after a long pause would, but not when it says the hive is
+    /// paused. Calling the hook once the download is done, or on any reply, fails it.
+    #[tokio::test]
+    async fn a_reply_is_heard_before_it_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Corrupting {
+            chunks: AtomicUsize::new(0),
+        });
+        let mut remote = RemoteHub::new(
+            transport.clone(),
+            "rpc".into(),
+            dir.path(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        // How many chunks had been asked for at each answer heard.
+        let heard = Arc::new(Mutex::new(vec![]));
+        let (record, link) = (heard.clone(), transport.clone());
+        remote.on_answer(move || {
+            let chunks = link.chunks.load(Ordering::SeqCst);
+            record.lock().unwrap().push(chunks);
+        });
+        let mut lanes = Lanes::new(&remote);
+        let pause = Pause {
+            by: "alpha".to_owned(),
+            at: 0,
+        };
+        let err = remote
+            .receive(
+                HubReply::Paused(pause),
+                &mut lanes,
+                &mut Furthest::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(HivePaused::of(&err).is_some(), "{err:#}");
+        assert!(heard.lock().unwrap().is_empty());
+        let reply = HubReply::Indirect {
+            blob: BlobId::of_bytes(b"right"),
+            len: 5,
+        };
+        remote
+            .receive(reply, &mut lanes, &mut Furthest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(*heard.lock().unwrap(), [0]);
     }
 
     /// Small, so that a blob of a few kilobytes is many windows of chunks.

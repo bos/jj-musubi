@@ -283,6 +283,50 @@ async fn a_hub_slower_than_the_timeout_still_syncs() {
     worker.stop().await;
 }
 
+/// A node hears the hub answer its requests except while the hive is paused, which is how the
+/// daemon learns at a sync's first request that a pause it remembers was lifted, before the
+/// sync applies what other machines did meanwhile. Calling the hook on a refusal, or not at
+/// all, fails the counts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_hears_the_hub_answer_unless_the_hive_is_paused() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("work", "work\n");
+    alpha.jj(&["commit", "-m", "work"]);
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let server = HubServer::open(&dir).unwrap();
+    let hive = create_hive(&server, &alpha).await;
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let worker = RunningWorker::start(&server, &network, &hive, None).await;
+    let mut driver = driver(&alpha, Arc::new(network.connect()), &hive);
+    let answers = Arc::new(AtomicUsize::new(0));
+    let counted = answers.clone();
+    driver.on_answer(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+    });
+    let hub_wide = |request: HubWideRequest| {
+        server.handle_hub_wide(&Envelope::encode(request).unwrap(), 1024 * 1024)
+    };
+    let id = HiveId::from(hive.clone());
+
+    driver.sync().await.unwrap();
+    let before = answers.load(Ordering::SeqCst);
+    assert!(before > 0);
+    hub_wide(HubWideRequest::Pause {
+        hive: id.clone(),
+        machine: "alpha".to_owned(),
+    });
+    let err = driver.sync().await.unwrap_err();
+    assert!(crate::remote::HivePaused::of(&err).is_some(), "{err:#}");
+    assert_eq!(answers.load(Ordering::SeqCst), before);
+    hub_wide(HubWideRequest::Unpause { hive: id });
+    driver.sync().await.unwrap();
+    assert!(answers.load(Ordering::SeqCst) > before);
+
+    worker.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_reopens_its_service_after_a_panic() {
     let env = TestEnv::new();

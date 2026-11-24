@@ -4,6 +4,8 @@
 //! foreground sync records its result with the same persisted status as a worker.
 
 use std::fs;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use jj_lib::object_id::ObjectId as _;
 use musubi_sync::driver::NodeDriver;
@@ -149,7 +151,18 @@ pub async fn sync_once(
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
     let opened = async {
         let connection = crate::hub::connect(&hive.hub, CONNECT_TIMEOUT).await?;
-        let (driver, _) = open_driver(located, hive, &connection, None, progress)?;
+        let (mut driver, _) = open_driver(located, hive, &connection, None, progress)?;
+        // As the daemon does, for `musubi status` in the meantime: once, at the first answer.
+        if status.hive_paused.is_some() {
+            let mut lifted = status.clone();
+            lifted.pause_lifted();
+            let (lifted, repo_path) = (Mutex::new(Some(lifted)), located.repo_path.clone());
+            driver.on_answer(move || {
+                if let Some(lifted) = lifted.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    lifted.save(&repo_path);
+                }
+            });
+        }
         anyhow::Ok((connection, driver))
     };
     let (connection, mut driver) = match opened.await {

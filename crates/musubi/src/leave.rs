@@ -31,10 +31,13 @@ use crate::ui::Ui;
 pub fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
     // As entries are: canonical, though the copy is gone, by the directory that held it.
     let path = std::path::absolute(path)?;
-    let path = match (path.parent().map(Path::canonicalize), path.file_name()) {
+    let path = match (path.parent().map(dunce::canonicalize), path.file_name()) {
         (Some(Ok(parent)), Some(name)) => parent.join(name),
         _ => path,
     };
+    // The plain form of the whole path, as entries are saved: it may be short enough for it
+    // where the canonical parent, just checked, isn't, or the other way about.
+    let path = crate::config::plain(&path);
     let state = UserState::load()?;
     let entry = state
         .copies

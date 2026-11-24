@@ -15,6 +15,17 @@
   the repo. Syncing then picks up again, with what you did meanwhile. After upgrading, run `musubi daemon restart` on every machine: a
   daemon already running keeps the old behaviour until it restarts.
 
+- On Windows, the paths musubi prints for a copy, as in `musubi list`, in the daemon's log and
+  in hints that name a directory, no longer start with `\\?\`, the form cmd can't `cd` to:
+  `C:\Users\me\app`, not `\\?\C:\Users\me\app`. A path that needs the prefix keeps it: one
+  on a network share (`\\?\UNC\...`), one too long without it, or one with a name Windows
+  reserves. A copy joined by an earlier release needs nothing done: the first musubi command
+  to read `state.toml` rewrites its path. That conversion goes after 2027-02-23. On a machine
+  that hasn't run musubi before then, `state.toml` keeps the old spelling, which no longer
+  equals the path musubi finds the copy at: `musubi leave <path>` doesn't find the copy, and
+  joining it again adds a second entry for it. Running any musubi command there before it
+  upgrades past that date avoids this.
+
 - `jj op abandon` of operations the hive already has no longer reaches other machines. The
   copy where you ran it stops syncing, with "this repository lost history the hive has (was
   `jj op abandon` run?)", and the other machines keep the operations; [Rescue work in a new

@@ -2581,6 +2581,7 @@ dependencies = [
  "clap_complete",
  "clap_complete_nushell",
  "ctrlc",
+ "dunce",
  "etcetera",
  "futures 0.3.34",
  "gix",

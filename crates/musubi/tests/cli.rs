@@ -39,12 +39,30 @@ fn musubi() -> &'static Path {
 #[must_use]
 fn snapshot_filters(env: &TestEnv) -> impl Sized {
     let mut settings = insta::Settings::clone_current();
-    // The canonical form first: on macOS it holds the other, under /private.
-    for root in [env.root().canonicalize().unwrap(), env.root().to_owned()] {
+    // The canonical form first: on macOS it holds the other, under /private, and on Windows it
+    // is the verbatim `\\?\C:\...`, which holds the plain one. musubi shows the plain form
+    // (`dunce`), with a short name like RUNNER~1 in a temporary directory's path written out.
+    // The verbatim form is its own token, so that musubi showing it, as cmd can't use it, fails
+    // a snapshot rather than passing as the root.
+    let roots = [
+        env.root().canonicalize().unwrap(),
+        dunce::canonicalize(env.root()).unwrap(),
+        env.root().to_owned(),
+    ];
+    for root in roots {
+        let root = root.to_str().unwrap();
         // `$$` is a `$` in a replacement.
-        settings.add_filter(&regex_escape(root.to_str().unwrap()), "$$ROOT");
+        let token = if root.starts_with(r"\\?\") {
+            "$$VERBATIM_ROOT"
+        } else {
+            "$$ROOT"
+        };
+        settings.add_filter(&regex_escape(root), token);
     }
     if cfg!(windows) {
+        // Where a path has a space, cmd's quotes are `"..."` and sh's are `'...'`. Only a path
+        // with one is quoted: a plain Windows path needs none, as on Unix (`shell_word`).
+        settings.add_filter(r#""(\$ROOT[^"]* [^"]*)""#, "'$1'");
         settings.add_filter(r"\\", "/");
         settings.add_filter(r"(?m)^Usage: musubi\.exe ", "Usage: musubi ");
     }
@@ -1254,8 +1272,7 @@ fn hub_join_sync_clone_and_list() {
     .unwrap();
     let include = format!(
         "includeIf.gitdir:{}.path",
-        env.root()
-            .canonicalize()
+        dunce::canonicalize(env.root())
             .unwrap()
             .join("conflicting-parent/clone/.git")
             .display()
@@ -4076,7 +4093,10 @@ fn moved_copies_sync_again() {
     ");
     // Away for a while, as on a disk unmounted, it syncs again when it's back.
     settled(&env, &logs, &alpha, &moved);
-    let missing = format!("{} is missing", moved.canonicalize().unwrap().display());
+    let missing = format!(
+        "{} is missing",
+        dunce::canonicalize(&moved).unwrap().display()
+    );
     let away = env.root().join("away");
     fs::rename(&moved, &away).unwrap();
     beta.write_file("b", "b");
@@ -4142,7 +4162,7 @@ fn deleted_copies_stop_syncing() {
     let path = alpha.path().to_str().unwrap();
     let missing = format!(
         "{} is missing",
-        alpha.path().canonicalize().unwrap().display()
+        dunce::canonicalize(alpha.path()).unwrap().display()
     );
     fs::remove_dir_all(alpha.path()).unwrap();
     // Work announced while it's gone wakes the daemon, which writes nothing.
@@ -4297,7 +4317,10 @@ fn a_replaced_copy_is_never_synced_into_its_hive() {
     fs::rename(&other, alpha.path()).unwrap();
     alpha.write_file("p", "p");
     alpha.jj(&["commit", "-m", "other's work, moved"]);
-    let here = format!("here: {}", alpha.path().canonicalize().unwrap().display());
+    let here = format!(
+        "here: {}",
+        dunce::canonicalize(alpha.path()).unwrap().display()
+    );
     wait_for(
         &logs,
         "alpha's daemon to sync the other hive from there",

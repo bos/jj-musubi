@@ -40,11 +40,11 @@ impl Located {
     /// one does but its repository can't be reached, as when a secondary workspace's main
     /// one has moved.
     pub fn search(start: &Path) -> anyhow::Result<Option<Self>> {
-        let start = start.canonicalize()?;
+        let start = dunce::canonicalize(start)?;
         let Some(workspace_root) = start
             .ancestors()
             .find(|dir| dir.join(".jj").is_dir())
-            .map(Path::to_owned)
+            .map(crate::config::plain)
         else {
             return Ok(None);
         };
@@ -61,7 +61,7 @@ impl Located {
             repo
         };
         // As one line, as jj says it.
-        let repo_path = repo_path.canonicalize().map_err(|err| {
+        let repo_path = dunce::canonicalize(&repo_path).map_err(|err| {
             anyhow::anyhow!(
                 "can't reach this workspace's repository, {}: {err}",
                 lexically_normal(&repo_path).display()
@@ -80,8 +80,10 @@ impl Located {
     pub fn repository_root(&self) -> PathBuf {
         let root = self.repo_path.parent().and_then(Path::parent);
         match root {
+            // As entries are saved, the plain form where there is one: a path near the length
+            // limit keeps its prefix as `repo_path`, below the root, but not as the root.
             Some(root) if copy::same_directory(&root.join(".jj/repo"), &self.repo_path) => {
-                root.to_owned()
+                crate::config::plain(root)
             }
             _ => self.workspace_root.clone(),
         }

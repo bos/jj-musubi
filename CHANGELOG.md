@@ -5,7 +5,7 @@
 - A repo with a workspace of yours whose name has a `/`, such as `feat/x`, doesn't sync until
   you rename it, since other machines show each other's workspaces by names like
   `laptop/default`. Before, other machines showed it as `laptop/feat/x`. `musubi sync`,
-  `musubi status`, `musubi create`, `musubi join`, `musubi resume` and `musubi leave` say which
+  `musubi status`, `musubi create`, `musubi join` and `musubi leave` say which
   workspace it is and what to run: `jj workspace rename <new name>` in its directory, with no
   `/` in the new name. If instead it is a workspace you ran `jj workspace forget` on earlier,
   whose name another machine's workspace now uses, don't rename it: move out any ignored files
@@ -31,9 +31,7 @@
   `jj op abandon` run?)", and the other machines keep the operations; [Rescue work in a new
   copy](docs/troubleshooting.md#rescue-work-in-a-new-copy) says how to carry on there. Passing
   an abandon on never removed the abandoned data from the hub, or from other machines' disks.
-  `musubi pause` and `musubi resume`, coming in this release, will remove data such as a
-  committed secret from every machine. Abandoning operations from before a copy joined, or
-  ones it hasn't sent yet, works as before.
+  Abandoning operations from before a copy joined, or ones it hasn't sent yet, works as before.
 
 - When a temp cleaner deletes the daemon's socket, the daemon now notices at once where the
   system reports the deletion, and listens there again, rather than at its next check a few

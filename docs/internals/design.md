@@ -297,8 +297,8 @@ workspace rename`; musubi makes no working copies for other machines' workspaces
 recorded for them. `jj workspace forget` leaves the record, but jj ignores it once the name has
 left the view, and so does musubi. A sync stops as it starts, before it shows other machines'
 workspaces again, and at each step, before it reads the op heads or publishes a realization
-(`refuse_slashed_workspaces`). `musubi sync`, `musubi status`, `musubi create`, `musubi join`,
-`musubi resume` and `musubi leave`, unless `--force`d, say so first, with the command to run.
+(`refuse_slashed_workspaces`). `musubi sync`, `musubi status`, `musubi create`, `musubi join`
+and `musubi leave` (unless forced) say so first, with the command to run.
 The daemon waits for the next local operation, as for a publication hold, so the rename's
 operation wakes it. So whenever musubi canonicalizes, realizes or shows other machines'
 workspaces, every `/` name in this machine's op heads is another machine's workspace, or one

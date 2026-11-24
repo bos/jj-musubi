@@ -157,6 +157,12 @@ fn musubi_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// `path` as jj and cmd write it: on Windows, without the verbatim prefix `\\?\` where the path is
+/// valid without it (not for a network share, a path too long, or a reserved name).
+pub fn plain(path: &Path) -> PathBuf {
+    dunce::simplified(path).to_owned()
+}
+
 /// What musubi keeps for itself, in `state.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserState {
@@ -310,13 +316,40 @@ impl UserState {
         Ok(state_dir()?.join("state.toml"))
     }
 
+    /// The saved state, with the paths an earlier release saved in Windows's verbatim form
+    /// written in the plain form, in the file too: the first command to read it rewrites it,
+    /// as an update would.
     pub fn load() -> anyhow::Result<Self> {
-        let path = Self::path()?;
-        match fs::read_to_string(&path) {
-            Ok(text) => Ok(toml::from_str(&text).with_context(|| format!("{path:?}"))?),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(err) => Err(err).with_context(|| format!("reading {path:?}")),
+        let (state, converted) = Self::read(&Self::path()?, plain)?;
+        if !converted {
+            return Ok(state);
         }
+        // If it can't be saved, as where the state directory is read-only, this read still
+        // sees the plain paths.
+        Self::update(|_| {}).or(Ok(state))
+    }
+
+    /// The state saved at `path`, and whether `plain` changed the path of any entry.
+    fn read(path: &Path, plain: impl Fn(&Path) -> PathBuf) -> anyhow::Result<(Self, bool)> {
+        let mut state: Self = match fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text).with_context(|| format!("{path:?}"))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(err) => return Err(err).with_context(|| format!("reading {path:?}")),
+        };
+        // Compatibility until 2027-02-23: earlier releases saved each copy's path in Windows's
+        // verbatim form, `\\?\C:\...`, which cmd can't `cd` to and which never equals the plain
+        // form that `Located` now finds. Remove `plain`, this loop, `load`'s save of what it
+        // converted, and their tests, with CHANGELOG.md's note. On other platforms
+        // `dunce::simplified` returns a path as it is, so nothing converts.
+        let mut converted = false;
+        for entry in &mut state.copies {
+            let path = plain(&entry.path);
+            if path != entry.path {
+                entry.path = path;
+                converted = true;
+            }
+        }
+        Ok((state, converted))
     }
 
     fn save(&self) -> anyhow::Result<()> {
@@ -328,10 +361,10 @@ impl UserState {
     /// at once (two joins, say) don't lose either's change.
     pub fn update(change: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
         let _lock = crate::lock::lock(&state_dir()?.join("state.lock"))?;
-        let mut state = Self::load()?;
+        let (mut state, converted) = Self::read(&Self::path()?, plain)?;
         let before = state.clone();
         change(&mut state);
-        if state != before {
+        if converted || state != before {
             state.save()?;
         }
         Ok(state)
@@ -481,5 +514,52 @@ mod tests {
         record.note_name(&repo_path(&new), "app");
         let noted = HiveConfig::load(&repo_path(&new)).unwrap().unwrap();
         assert_eq!(noted.name.as_deref(), Some("app"));
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    // Compatibility until 2027-02-23: see `UserState::read`.
+    #[test]
+    fn copies_saved_by_another_spelling_are_read_as_the_plain_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.toml");
+        let entry = |path: &str| Entry {
+            key: "key".to_owned(),
+            hive: Uuid::nil(),
+            config_id: "id".to_owned(),
+            path: PathBuf::from(path),
+        };
+        let saved = UserState {
+            hub: None,
+            copies: vec![entry("verbatim:/alpha"), entry("/beta")],
+        };
+        fs::write(&file, toml::to_string(&saved).unwrap()).unwrap();
+        let strip = |path: &Path| match path.to_str().and_then(|p| p.strip_prefix("verbatim:")) {
+            Some(rest) => PathBuf::from(rest),
+            None => path.to_owned(),
+        };
+        let (state, converted) = UserState::read(&file, strip).unwrap();
+        assert!(converted);
+        assert_eq!(state.copies[0].path, Path::new("/alpha"));
+        assert_eq!(state.copies[1].path, Path::new("/beta"));
+        // Nothing to convert once it is saved so.
+        fs::write(&file, toml::to_string(&state).unwrap()).unwrap();
+        assert!(!UserState::read(&file, strip).unwrap().1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_paths_become_plain_ones() {
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\Users\me\alpha")),
+            Path::new(r"C:\Users\me\alpha")
+        );
+        assert_eq!(plain(Path::new(r"D:\beta")), Path::new(r"D:\beta"));
+        // A network share needs the prefix.
+        let share = Path::new(r"\\?\UNC\server\share\alpha");
+        assert_eq!(plain(share), share);
     }
 }

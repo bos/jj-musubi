@@ -584,7 +584,7 @@ pub fn clone(
     // scopes see its actual path, including symlink ancestors and relative `..` components.
     std::fs::create_dir_all(destination)
         .with_context(|| format!("making {}", destination.display()))?;
-    let workspace = destination.canonicalize()?;
+    let workspace = dunce::canonicalize(destination)?;
     let repo_path = workspace.join(".jj/repo");
     let destination_settings = settings::load(&workspace, &repo_path)?;
     validate_forget_after(destination_settings.config(), lease, &workspace)?;

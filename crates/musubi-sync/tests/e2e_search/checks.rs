@@ -333,9 +333,9 @@ impl World {
     /// (`Reference::beyond_jj`), and never by the same rebase done twice, which the
     /// hub's sequencing exists to prevent: the ledger finds two alike commits of a change
     /// that no two commands explain, and the reference confirms that two merges rewrote one
-    /// commit alike, where jj's own merge of neither's parents does
-    /// (`Reference::same_rebase_twice`). jj's own repeat, after `jj op abandon`, goes in the
-    /// trace instead.
+    /// commit alike, not each for users' commands of its own, where jj's own merge of
+    /// neither's parents does (`Reference::same_rebase_twice`). jj's own repeat, after
+    /// `jj op abandon`, goes in the trace instead.
     fn check_divergence(&mut self, view: &View, reference: &mut Reference, beyond: &[String]) {
         let alike = self.ledger.alike_commits(view, |a, b| {
             let diff = self.raw_jj(

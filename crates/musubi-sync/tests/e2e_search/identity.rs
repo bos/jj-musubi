@@ -37,6 +37,12 @@ impl SourceKey {
     pub fn from_template(encoded: &str) -> Self {
         Self(encoded.to_owned())
     }
+
+    /// The key without the operation id an undo, restore or revert names, which each copy
+    /// writes differently for one operation, as `SourceHeader` takes it.
+    pub fn without_op_ids(&self) -> Self {
+        Self(without_op_ids(&self.0))
+    }
 }
 
 impl fmt::Display for SourceKey {

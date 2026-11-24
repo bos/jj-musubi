@@ -212,6 +212,7 @@ fn jj_moves_a_workspace_whose_commit_the_other_operation_rewrote() {
     let rewrite = write_at(&repo, &base, |m| {
         let commit = m.store().get_commit(&p).unwrap();
         m.rewrite_commit(&commit)
+            .block_on()
             .set_description("p rewritten")
             .write()
             .block_on()

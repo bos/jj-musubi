@@ -270,6 +270,7 @@ async fn snapshot_async(
         let new_commit = if immutable.is_empty().await? {
             tx_repo
                 .rewrite_commit(&commit)
+                .await
                 .set_tree(tree)
                 .write()
                 .await?

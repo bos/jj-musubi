@@ -34,8 +34,8 @@ use jj_lib::revset::RevsetExpression;
 use jj_lib::settings::HumanByteSize;
 use jj_lib::settings::UserSettings;
 use jj_lib::working_copy::SnapshotOptions;
-use jj_lib::working_copy::WorkingCopyFreshness;
 use jj_lib::workspace::DefaultWorkspaceLoaderFactory;
+use jj_lib::workspace::WorkingCopyFreshness;
 use jj_lib::workspace::WorkspaceLoaderFactory as _;
 use pollster::FutureExt as _;
 

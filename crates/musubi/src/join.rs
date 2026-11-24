@@ -321,7 +321,9 @@ pub(crate) async fn ask_preparing(
     hub: &str,
     request: HubWideRequest,
 ) -> anyhow::Result<HubWideReply> {
-    if !hub::is_local(hub) {
+    if crate::tls::is_tls(hub) {
+        hub::prepare_tls(ui, hub).await?;
+    } else if !hub::is_local(hub) {
         ssh::prepare(ui, hub).await?;
     }
     hub::ask(hub, request).await

@@ -9,10 +9,20 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+[package.metadata.cargo-machete]
+# Used by the production codec included from crates/musubi/src/tls/codec.rs.
+ignored = ["anyhow", "base64", "bip39", "ring", "serde_json", "x509-parser"]
+
 # Apart from the main workspace: libFuzzer builds only on nightly, with sanitizers.
 [workspace]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
+bip39 = { version = "2.2", default-features = false, features = ["std"] }
 jj-lib = { version = "=0.47.1", default-features = false, features = ["git"] }
 libfuzzer-sys = "0.4"
 musubi-jj = { path = "../crates/musubi-jj" }
@@ -21,8 +31,18 @@ musubi-sync = { path = "../crates/musubi-sync" }
 musubi-transport = { path = "../crates/musubi-transport" }
 pollster = "1.0.1"
 prost = "0.14"
-serde = "1"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
+x509-parser = { version = "0.16", features = ["verify"] }
+
+[[bin]]
+name = "enrollment"
+path = "fuzz_targets/enrollment.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "bundle"

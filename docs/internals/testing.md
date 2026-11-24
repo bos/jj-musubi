@@ -1133,8 +1133,27 @@ and the test checks that:
   from one commit: the same rebase done twice, which the hub's sequencing exists to prevent. A
   ledger (`e2e_search/ledger.rs`) of which machine's commands rewrote what tells this apart
   from rewrites that commands make alike, and the reference confirms that two of the hive's
-  merges rewrote the commit alike. After `jj op abandon`, jj itself can rebase the original again
-  in a later merge whose inputs already hold the first result ([races.md, "Known jj
+  merges rewrote the commit alike, not each for users' commands of its own. What a merge
+  brought to a commit it rewrote is the history of its parents that don't show the commit,
+  less that of those that do: the operations it rewrote the commit for, such as an abandon of
+  its parent. They go by source key, which one operation keeps however often it is published,
+  without the operation id an undo, restore or revert names. Two merges whose brought
+  operations are all users' commands, none in both, made their rebases for different
+  commands, as when one machine's node merges its abandon of the commit's parent and another
+  machine's jj merges an abandon of the same parent at an older operation, before either has
+  the other's merge; jj's merge of the two lines then makes the same
+  (`regressions::e2e_merges_of_two_abandons_rebase_one_commit_alike`). Every other pair still
+  fails: the same removal merged into two lines that show the commit, two merges of the same
+  parents, a merge that brought a merge or anything musubi wrote itself, such as a forget,
+  and one whose brought operations are unknown, because every parent shows the commit, or
+  none does, or the rest is nothing, or `jj op abandon` gave the merge other parents. What
+  the check can't see is the operation that made the commit merged into two lines, since
+  neither merge brought it; that a node merges only its own is Locality and MergeOwnership
+  ([protocol.md, "Properties"](protocol.md#properties)), proved of the model in
+  `formal/Musubi/Safety.lean` and checked of the code after every step of the protocol
+  property tests (`crates/musubi-core/tests/support/world/properties.rs`).
+  After `jj op abandon`, jj itself can rebase the original again in a later merge whose inputs
+  already hold the first result ([races.md, "Known jj
   limitations"](races.md#known-jj-limitations)). So for each merge it replays, the reference
   records which changes jj's own merge of the same parents left with two alike commits; where
   jj's merge of either merge's parents did the same, the repeat is jj's, and the trace says
@@ -1143,6 +1162,8 @@ and the test checks that:
   repeats the rebase, and
   `reference::rewrites::a_repeated_rebase_is_jjs_only_where_jjs_own_merge_made_it` that only
   such a repeat is exempt: a duplicate jj's merge didn't make fails.
+  `reference::rewrites::merges_rebase_one_commit_twice_only_for_an_operation_both_brought`
+  checks which pairs of merges still fail.
 
 A machine can list a workspace it has no directory for, but only under a name it created: the
 world records each name a copy creates, and `check_workspaces` holds every listed name without a

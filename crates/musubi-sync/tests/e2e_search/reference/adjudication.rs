@@ -5,7 +5,7 @@
 //! unlike jj's merge of the same parents is a deviation, and fails only for what it has beyond
 //! jj's. Structural equality can rejoin the hive only across the full deviation frontier.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use futures::executor::block_on;
 use jj_lib::backend::CommitId;
@@ -15,8 +15,9 @@ use jj_lib::op_store::View;
 use jj_lib::operation::Operation;
 use musubi_jj::op_id::CanonicalOp;
 
-use super::rewrites::MergeRewrite;
+use super::rewrites::{MergeRewrite, Origin, brought_by_merge};
 use super::{Made, Reference, describe, dominates, explained};
+use crate::identity::SourceKey;
 use crate::world::{CommandSnapshot, RetainedOperation, World, merge_key};
 
 /// Source-recorded commands are checked as commands even if an abandon expanded their
@@ -113,6 +114,38 @@ impl<'a> ReplayHistory<'a> {
         }
     }
 
+    /// `id` and every operation of the hive's history it descends from, by source key
+    /// without operation ids, and whether a user's command made each, as `world` recorded
+    /// it (`brought_to`).
+    fn history_of(&self, world: &World, id: &CanonicalOp) -> HashMap<SourceKey, Origin> {
+        let mut seen = HashSet::new();
+        let mut history = HashMap::new();
+        let mut pending = vec![id.clone()];
+        while let Some(op) = pending.pop() {
+            if let Some(operation) = self.operations.get(&op)
+                && seen.insert(op)
+            {
+                let key = merge_key(operation);
+                let origin = if world.evidence.commands.contains_key(&key) {
+                    Origin::Command
+                } else {
+                    Origin::Other
+                };
+                // Two operations with one key: unless both are commands, neither counts as one.
+                history
+                    .entry(key.without_op_ids())
+                    .and_modify(|known| {
+                        if origin != Origin::Command {
+                            *known = Origin::Other;
+                        }
+                    })
+                    .or_insert(origin);
+                pending.extend(CanonicalOp::parents_of(operation));
+            }
+        }
+        history
+    }
+
     fn can_rejoin(&self, id: &CanonicalOp) -> bool {
         dominates(self.operations, &self.children, &self.deviated, id)
     }
@@ -162,12 +195,20 @@ impl Reference {
             expected.head_ids.extend(protected.iter().cloned());
             expected
         };
-        if is_merge {
+        if is_merge && op.commit_predecessors.iter().flatten().next().is_some() {
+            let shown: Vec<_> = parents.iter().map(|p| self.visible(&views[p])).collect();
+            let histories: Vec<_> = parents
+                .iter()
+                .map(|p| history.history_of(world, p))
+                .collect();
             for (new, predecessors) in op.commit_predecessors.iter().flatten() {
+                // A merge `jj op abandon` gave other parents rewrote for its original ones.
+                let brought = brought_by_merge(predecessors, kept.is_some(), &shown, &histories);
                 self.rewrites.push(MergeRewrite {
                     operation: id.0.clone(),
                     new: new.clone(),
                     predecessors: predecessors.clone(),
+                    brought,
                 });
             }
         }

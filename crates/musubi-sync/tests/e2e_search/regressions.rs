@@ -199,6 +199,57 @@ fn e2e_imports_follow_what_jj_makes_of_a_git_move() {
     expect_unexplained(world, "bookmark topic");
 }
 
+/// Two merges can rebase one commit alike, each for a user's command of its own, and that is
+/// no repeat of one rebase. Beta rebases `child` onto `parent` and syncs; alpha, not yet having
+/// that, abandons `parent`, and its node merges that with beta's rebase, which rebases `child`
+/// onto `parent`'s parent. Beta abandons `parent` too, at the operation before its rebase, and
+/// jj's merge of the two on beta rebases `child` there as well, before beta has alpha's merge.
+/// Converging, the two rebased commits diverge, as jj's own merge of the two lines makes
+/// them. The nightly Search workflow's run 45238982632 found it on shard 2, whose
+/// `MUSUBI_SEARCH_SEED` is the run's id, with a squash in place of alpha's abandon. Without
+/// `brought_apart`, the same-rebase-twice check fails it.
+#[test]
+fn e2e_merges_of_two_abandons_rebase_one_commit_alike() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.jj(0, &["new", "root()", "-m", "base"]);
+    world.jj(0, &["new", "-m", "parent"]);
+    let (base, parent) = (head_rev(&world, "@-"), head_rev(&world, "@"));
+    world.jj(0, &["new", &base, "-m", "child"]);
+    let child = head_rev(&world, "@");
+    world.jj(0, &["new", "root()"]);
+    // Converging forgets which machine made `child`, so that beta's rebase alone rewrote it.
+    world.converge();
+    let before = world.latest_op_head(1);
+    world.jj(1, &["rebase", "-s", &child, "-o", &parent]);
+    world.sync(1);
+    world.jj(0, &["abandon", &parent]);
+    world.sync(0);
+    world.jj_at_op(1, &before, &["abandon", &parent]);
+    world.observe(1);
+    world.converge();
+    let children = world.raw_jj(
+        0,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "description(substring:\"child\")",
+            "-T",
+            "parents.map(|p| p.commit_id()) ++ \"\\n\"",
+        ],
+    );
+    assert_eq!(
+        children.lines().collect::<Vec<_>>(),
+        [base.as_str(), base.as_str()],
+        "two alike rebases of child onto base"
+    );
+}
+
 /// Machine 0 with `feature` on a commit `a` and `topic` on its child, synced, and then `a`
 /// described, which rewrites both: the world, `a`, and `topic`'s commit as it was before.
 fn describe_under_bookmarks() -> (World, String, crate::view::Commit) {

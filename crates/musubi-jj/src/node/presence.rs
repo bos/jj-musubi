@@ -136,13 +136,38 @@ impl NodeRepo {
         &mut self,
         keep: &BTreeSet<String>,
     ) -> Result<Vec<String>, NodeError> {
+        self.forget_copies_where(
+            |copy| !keep.contains(copy),
+            "musubi: forget copies of another hive",
+        )
+    }
+
+    /// A jj command opened before a leave can finish after it. Its operation keeps its
+    /// original key in history, so forget any old membership it made present again.
+    pub fn forget_retired_copies(&mut self) -> Result<bool, NodeError> {
+        let retired: BTreeSet<_> = self.identities.retired_keys().map(str::to_owned).collect();
+        if retired.is_empty() {
+            return Ok(false);
+        }
+        let forgotten = self.forget_copies_where(
+            |copy| retired.contains(copy),
+            "musubi: forget copies that left",
+        )?;
+        Ok(!forgotten.is_empty())
+    }
+
+    fn forget_copies_where(
+        &mut self,
+        forget: impl Fn(&str) -> bool,
+        description: &str,
+    ) -> Result<Vec<String>, NodeError> {
         let repo = self.merged_repo()?;
         let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         let own = self.machine.key().to_owned();
         let forgotten: Vec<String> = self
             .presence(&canonical)?
             .copies()
-            .filter(|copy| *copy != own && !keep.contains(*copy))
+            .filter(|copy| *copy != own && forget(copy))
             .map(str::to_owned)
             .collect();
         if forgotten.is_empty() {
@@ -157,12 +182,7 @@ impl NodeRepo {
             })
             .map(|(name, _)| name)
             .collect();
-        forget_workspaces(
-            &repo,
-            &names,
-            &forgotten.join(" "),
-            "musubi: forget copies of another hive",
-        )?;
+        forget_workspaces(&repo, &names, &forgotten.join(" "), description)?;
         Ok(forgotten)
     }
 

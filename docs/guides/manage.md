@@ -145,8 +145,11 @@ forgotten.
 
 ### Rejoin, or stop using jj-musubi
 
-After leaving, run `musubi join` to rejoin. Joining a different hive brings the old shared
-history and working-copy names along.
+After leaving, run `musubi join` in the same repo to join as a new copy. To give the new
+copy a different machine name, run `musubi join --machine work-laptop`; under its old name,
+the other machines show it with part of its new key, as `laptop-1a2b/default`. Your files and
+jj history stay in the checkout. If you join a different hive, the history you already
+shared goes with you.
 
 To stop using jj-musubi on a machine:
 

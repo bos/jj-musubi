@@ -384,6 +384,11 @@ on showing the copy until one of them forgets it, with `musubi forget` or by its
 each workspace whose commit is hidden a new `@` (`give_back_working_copies`), since no later work
 of its will be in the hive to do it.
 
+After restoring the working copies, leave writes a local operation that marks where its old
+key stopped owning new work. It clears the machine key and membership record. A subsequent
+join uses a fresh key. The detach operation and the retired keys preserve the translation of
+native operations from before the detach, including after rebuilding the translation cache.
+
 ## Copies that go unused
 
 Each copy records how long it may go unused before the hive forgets it, its `musubi.forget-after`
@@ -729,12 +734,13 @@ the node syncs the rest of its history.
 
 A repository that previously shared canonical history carries that history when it joins
 again, even into another hive. Replacing it with a join on the root would make its accepted
-base unreachable, falsely indicating lost history ([Lost history](#lost-history)). Joining records
-fresh work if needed to make this copy present again.
+base unreachable, falsely indicating lost history ([Lost history](#lost-history)). Joining
+after a leave records fresh work under a new key on top of that history.
 
 Carrying history does not bring every old member into a different hive. The join forgets copies
 absent from the target hive, except the joining copy itself; copies already present or joining
-there stay present. Joining the same hive, including one remade on another hub, forgets none.
+there stay present. Joining again while still a member of the same hive, including one
+remade on another hub, forgets none.
 [copies.md](copies.md#rules) specifies the membership and duplicate checks.
 
 Merging needs no special machinery. Every jj repository's operation log starts at the same root

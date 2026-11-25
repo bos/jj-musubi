@@ -2599,7 +2599,11 @@ fn commands_in_another_workspace_act_on_the_repository() {
         command.args(args).current_dir(&second);
         command
     };
-    let out = run(&env, &logs, in_second(&["create", "--hub", &hub.url]));
+    let out = run(
+        &env,
+        &logs,
+        in_second(&["create", "--full-history", "--hub", &hub.url]),
+    );
     insta::assert_snapshot!(out, @"Created hive alpha");
 
     // Joining again from the other workspace, as to make a lost hive again.
@@ -2665,6 +2669,9 @@ fn commands_in_another_workspace_act_on_the_repository() {
         fs::rename(&moved, alpha.path()).unwrap();
     }
 
+    // A solo hive has no received operations to reconstruct from. It still resumes the
+    // shared history after detaching and losing the translation cache.
+    fs::remove_file(alpha.repo_path().join("musubi/translation")).unwrap();
     // Joined from the other workspace, which then goes, it syncs on.
     run(&env, &logs, in_second(&["join"]));
     let state = fs::read_to_string(&state_path).unwrap();
@@ -2680,9 +2687,8 @@ fn commands_in_another_workspace_act_on_the_repository() {
     ");
 }
 
-/// A copy that left its hive can join it again, even after jj has run in it since, and
-/// whether it first joined with its whole operation history or not: it carries on from the
-/// history it shared, which the hive has.
+/// Leaving clears membership. The same checkout joins with a new key and keeps the shared
+/// history, including remote bookmark deletions and work started before the leave.
 #[test]
 fn a_copy_can_join_again_after_leaving() {
     let env = TestEnv::with_real_op_times();
@@ -2702,12 +2708,48 @@ fn a_copy_can_join_again_after_leaving() {
         &gamma,
         &["join", "--full-history", "--hub", &hub.url],
     );
-    for (repo, name) in [(&beta, "beta"), (&gamma, "gamma")] {
-        musubi_in(&env, &logs, repo, &["leave"]);
+    for (repo, name, new_name, full_history) in [
+        (&beta, "beta", "work-beta", false),
+        (&gamma, "gamma", "work-gamma", true),
+        (&beta, "work-beta", "travel-beta", false),
+    ] {
+        let bookmark = format!("delete-{name}");
+        alpha.jj(&["bookmark", "create", "-r", "@-", &bookmark]);
+        musubi_in(&env, &logs, &alpha, &["sync"]);
+        musubi_in(&env, &logs, repo, &["sync"]);
+        assert!(repo.jj(&["bookmark", "list"]).contains(&bookmark));
+        let before_leave = repo.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+
+        let out = musubi_in(&env, &logs, repo, &["leave"]);
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(out, @"This repository has left hive alpha.");
+        }
+        assert_detached(repo);
+        alpha.jj(&["bookmark", "delete", &bookmark]);
+        musubi_in(&env, &logs, &alpha, &["sync"]);
+
+        // A command that loaded the old head before leaving can publish its work afterward.
+        let late = format!("late-{name}");
+        repo.jj(&[
+            "--at-op",
+            before_leave.trim(),
+            "bookmark",
+            "create",
+            "-r",
+            "@-",
+            &late,
+        ]);
         let message = format!("made in {name} while out of the hive");
         repo.write_file(name, name);
         repo.jj(&["commit", "-m", &message]);
-        let out = musubi_in(&env, &logs, repo, &["join"]);
+        // The translation cache is disposable. The old history must reconstruct with the
+        // key it had before leaving, even after a join has selected another one.
+        fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+        let mut args = vec!["join", "--machine", new_name];
+        if full_history {
+            args.push("--full-history");
+        }
+        let out = musubi_in(&env, &logs, repo, &args);
         // Each says the same.
         insta::allow_duplicates! {
             insta::assert_snapshot!(out, @"Joined hive alpha (matched commits), 3 machines");
@@ -2717,11 +2759,23 @@ fn a_copy_can_join_again_after_leaving() {
             &format!("alpha's daemon to fetch {name}'s commit"),
             || try_log(&alpha).is_some_and(|log| log.contains(&message)),
         );
+        assert!(!repo.jj(&["bookmark", "list"]).contains(&bookmark));
+        assert!(alpha.jj(&["bookmark", "list"]).contains(&late));
+        assert_eq!(fs::read_to_string(repo.path().join(name)).unwrap(), name);
     }
-    // Every machine's working copy keeps its own name.
+    // A new key names each rejoined copy's original workspace.
     let list = alpha.jj(&["workspace", "list", "-T", NAMES]);
     let listed: Vec<&str> = list.lines().collect();
-    assert_eq!(listed, ["alpha", "beta/beta", "gamma/gamma"], "{list}");
+    assert_eq!(
+        listed,
+        ["alpha", "travel-beta/beta", "work-gamma/gamma"],
+        "{list}"
+    );
+}
+
+fn assert_detached(repo: &TestRepo) {
+    assert!(!repo.repo_path().join("musubi/hive.toml").exists());
+    assert!(!repo.repo_path().join("musubi/machine").exists());
 }
 
 /// A hub that lost its directory knows none of its hives; one `musubi join`, in one copy,
@@ -2829,10 +2883,10 @@ fn copies_leave_a_removed_hive() {
     // It remembers its hive was removed, rather than joining another its history matches.
     let err = musubi_fails(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: this repository's hive, alpha, was removed from its hub; `musubi join --hive <name>` joins another, and `musubi create` starts a new one");
-    // Leaving it records that it left, as any copy that left, with nothing to tell the hive.
+    // Leaving it clears its record and key, as any leave does, with nothing to tell the hive.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
     insta::assert_snapshot!(out, @"This repository has left hive alpha.");
-    assert_eq!(membership(&beta), "left");
+    assert_detached(&beta);
     let (status, _) = status_in(&env, &logs, &beta);
     insta::assert_snapshot!(status, @"
     This repository is not part of a hive: $ROOT/beta
@@ -2935,7 +2989,7 @@ fn a_copy_whose_hub_is_gone_says_so_at_once_and_leaves_only_if_forced() {
     hub.kill();
     let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
     insta::assert_snapshot!(out, @"This repository has left hive alpha.");
-    assert_eq!(membership(&alpha), "left");
+    assert_detached(&alpha);
     // With a new commit to work on, which no next work of its in the hive will make now.
     let at = alpha.jj(&[
         "log",
@@ -4166,9 +4220,12 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["create", "again"]);
     musubi_in(&env, &logs, &beta, &["join", "--hive", "again"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
+    // Each joined as a new copy, under a new key. Its name was the old copy's, which every
+    // machine whose history knew that copy keeps for it, so the new one shows with part of its
+    // key.
     for (repo, expected) in [
-        (&alpha, vec!["alpha", "linked", "beta/beta"]),
-        (&beta, vec!["beta", "alpha/alpha", "alpha/linked"]),
+        (&alpha, vec!["alpha", "linked", "beta-d51d/beta"]),
+        (&beta, vec!["beta", "alpha-4f13/alpha", "alpha-4f13/linked"]),
     ] {
         let names = repo.jj(&["workspace", "list", "-T", NAMES]);
         let actual: std::collections::BTreeSet<_> = names.lines().collect();

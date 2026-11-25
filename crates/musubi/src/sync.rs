@@ -196,8 +196,10 @@ pub fn publication(
 
 /// Syncs once, in this process.
 pub fn sync_directly(ui: &Ui, located: &Located) -> anyhow::Result<Synced> {
-    let hive =
-        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    let _membership = HiveConfig::join_lock(ui, &located.repo_path)?;
+    let hive = HiveConfig::load(&located.repo_path)?
+        .filter(HiveConfig::joined)
+        .context("this repository is not part of a hive")?;
     let progress = Progress::default();
     let sync = daemon::sync_once(located, &hive, &progress);
     block_on(ui.while_waiting(sync, || async { Some(progress.get()) }))

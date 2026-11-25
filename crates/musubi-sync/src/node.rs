@@ -130,6 +130,7 @@ impl NodeAdapter {
     pub fn before_sync(&mut self) -> anyhow::Result<()> {
         self.clock.tick(&mut self.repo);
         self.repo.check_complete()?;
+        self.repo.forget_retired_copies()?;
         self.show_other_workspaces()?;
         self.heads()?;
         Ok(())
@@ -167,8 +168,9 @@ impl NodeAdapter {
         let workspaces = self.show_other_workspaces()?;
         let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
         let recorded = self.repo.record_forget_after()?;
+        let retired = self.repo.forget_retired_copies()?;
         let forgotten = self.repo.expire_idle(self.clock.now(), EXPIRY_STAGGER)?;
-        Ok(workspaces || replaced || recorded || !forgotten.is_empty())
+        Ok(workspaces || replaced || recorded || retired || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it, with its time moved on

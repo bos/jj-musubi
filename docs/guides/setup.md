@@ -320,6 +320,9 @@ to `create`, `join` or `clone`:
 musubi join --machine work-laptop
 ```
 
+To change the name of an existing copy, [leave and join
+again](manage.md#rejoin-or-stop-using-jj-musubi).
+
 If you somehow set up multiple machines with the same name (but why?), they'll be given unique
 suffixes, such as `laptop-1a2b/default@` and `laptop-3c4d/default@`. This also takes care of
 such odd situations as you deciding to name a normal jj workspace `laptop/default`.

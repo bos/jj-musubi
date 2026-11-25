@@ -186,7 +186,11 @@ impl NodeRepo {
         // which musubi takes for an op abandon, whichever hive the repository joins.
         let carried = match self.canonical_of(&head) {
             Some(canonical) => Some(canonical),
-            None if self.descends_from_canonical(&head)? => Some(self.canonicalize(&head)?),
+            None if self.identities.has_retired_keys()
+                || self.descends_from_canonical(&head)? =>
+            {
+                Some(self.canonicalize(&head)?)
+            }
             None => None,
         };
         if carried.is_some() {

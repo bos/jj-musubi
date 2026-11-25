@@ -132,6 +132,15 @@ pub fn join(
             )?;
         }
     }
+    // Compatibility until 2027-02-24: finish detaching repositories left by an earlier
+    // release. Keep this for interrupted leaves until leave can clear membership in one step.
+    let before = match found.record.as_ref() {
+        Some(record) if record.state == Membership::Left => {
+            crate::leave::finish_detaching(&located)?;
+            None
+        }
+        before => before,
+    };
     // Kept only once the hub takes the join: a join refused, or failing, before then leaves
     // `--machine` free to name it next time.
     let machine = joining_machine(&located, machine, &settings)?;
@@ -175,7 +184,7 @@ pub fn join(
         &joined,
         &hub,
         full_history,
-        found.record.as_ref(),
+        before,
         &remotes,
         *lease,
     )?;
@@ -297,7 +306,7 @@ fn joining_machine(
 ) -> anyhow::Result<Machine> {
     let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
         let name = name.unwrap_or_else(|| settings.operation_hostname());
-        return Ok(NodeRepo::new_machine(name, settings));
+        return Ok(NodeRepo::new_machine(&located.repo_path, name, settings)?);
     };
     if let Some(name) = name {
         anyhow::ensure!(

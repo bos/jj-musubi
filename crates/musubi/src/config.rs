@@ -79,16 +79,15 @@ impl HiveConfig {
         crate::lock::lock(&musubi_dir(repo_path)?.join("hive.lock"))
     }
 
-    /// Holds off any other join in the repository until dropped, waiting for one that holds
-    /// it, and saying so: one that finished meanwhile would change what this one found, as two
-    /// `musubi create`s at once would each make a hive, leaving one with no copy.
+    /// Serializes joins, leaves, and direct syncs in the repository. Waits for the current
+    /// command to finish before the caller reads membership.
     pub fn join_lock(ui: &crate::ui::Ui, repo_path: &Path) -> anyhow::Result<crate::lock::Lock> {
         let path = musubi_dir(repo_path)?.join("join.lock");
         if let Some(lock) = crate::lock::try_lock(&path)? {
             return Ok(lock);
         }
         ui.while_blocked(
-            "Waiting for another `musubi join` in this repository to finish",
+            "Waiting for another musubi command in this repository to finish",
             || crate::lock::lock(&path),
         )
     }

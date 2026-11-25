@@ -76,7 +76,10 @@ fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
 }
 
 pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
-    if leave_removed(ui, start)? {
+    let located = Located::find(start)?;
+    copy::check_owner(&located.repo_path)?;
+    let _membership = HiveConfig::join_lock(ui, &located.repo_path)?;
+    if leave_inactive(ui, &located)? {
         return Ok(());
     }
     let (located, hive, entry) = the_copy(ui, start, socket)?;
@@ -141,46 +144,50 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
         )?;
     }
     daemon::leave_hive(&located, &hive, Membership::Left)?;
+    finish_detaching(&located)?;
+    left(ui, &name)
+}
+
+/// Completes a leave that stopped partway through, or detaches from a hive the hub removed.
+fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
+    let found = copy::Found::resolve(located)?;
+    if matches!(copy::standing(&found, None), copy::Standing::Duplicate) {
+        return Ok(false);
+    }
+    let Some(record) = found.record.filter(|record| !record.joined()) else {
+        return Ok(false);
+    };
+    let name = record.display_name();
+    finish_detaching(located)?;
+    left(ui, &name)?;
+    Ok(true)
+}
+
+/// Clears inactive membership. The join lock holds across this and the caller's membership
+/// checks. If interrupted, the record stays until the key and daemon entry are gone.
+pub(crate) fn finish_detaching(located: &Located) -> anyhow::Result<()> {
+    let path = &located.repo_path;
+    let _lock = HiveConfig::lock(path)?;
+    let Some(record) = HiveConfig::load(path)? else {
+        return Ok(());
+    };
+    anyhow::ensure!(!record.joined(), "this repository is still part of a hive");
+    if let Some(machine) = NodeRepo::machine_of(path)? {
+        located.open()?.retire_machine()?;
+        UserState::remove_entry(machine.key())?;
+        NodeRepo::clear_machine(path)?;
+    }
+    std::fs::remove_file(daemon::Status::path(path)).ok();
+    std::fs::remove_file(HiveConfig::path(path))?;
+    Ok(())
+}
+
+fn left(ui: &Ui, name: &str) -> anyhow::Result<()> {
     let mut out = ui.stdout();
     write!(out, "This repository has left hive ")?;
     write!(out.labeled("hive"), "{name}")?;
     writeln!(out, ".")?;
     Ok(())
-}
-
-/// Leaves, if the repository at `start` is a copy whose hive was removed, which syncs no more
-/// already and has nothing to tell its hive: records that it left, as any other that left, so
-/// that a plain `musubi join` may match it with a hive again. Returns whether it was one.
-fn leave_removed(ui: &Ui, start: &Path) -> anyhow::Result<bool> {
-    let located = Located::find(start)?;
-    copy::check_owner(&located.repo_path)?;
-    let found = copy::Found::resolve(&located)?;
-    if copy::standing(&found, None) != copy::Standing::Removed {
-        return Ok(false);
-    }
-    let _lock = HiveConfig::lock(&located.repo_path)?;
-    let Some(record) =
-        HiveConfig::load(&located.repo_path)?.filter(|record| record.state == Membership::Removed)
-    else {
-        return Ok(false);
-    };
-    let name = record.display_name();
-    HiveConfig {
-        state: Membership::Left,
-        ..record
-    }
-    .save(&located.repo_path)?;
-    // As leaving does, should the daemon have stopped before it was done hearing of the
-    // removal.
-    if let Some(key) = &found.key {
-        UserState::remove_entry(key)?;
-    }
-    std::fs::remove_file(daemon::Status::path(&located.repo_path)).ok();
-    let mut out = ui.stdout();
-    write!(out, "This repository has left hive ")?;
-    write!(out.labeled("hive"), "{name}")?;
-    writeln!(out, ".")?;
-    Ok(true)
 }
 
 /// Records what changed in the working copy, as any `jj` command would first, so that it

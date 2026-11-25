@@ -1333,8 +1333,8 @@ links:
      (`right_hive`);
    - while an entry's path holds its copy, no other repository with the key is the copy,
      whatever jj decides when it runs there (`duplicates_refused`);
-   - a duplicate of a copy that left, or whose hive was removed, can't join, since its
-     config-id isn't its record's (`join_refuses_duplicate`);
+   - a duplicate with a record from an interrupted leave, an older release, or a removed hive
+     can't join, since its config-id differs from its record's (`join_refuses_duplicate`);
    - no step but `join` makes a key, though a repository the user puts in place may bring
      its own (`only_join_makes_keys`);
    - if an entry's path holds its copy, and jj last saw the copy's config-id there, then

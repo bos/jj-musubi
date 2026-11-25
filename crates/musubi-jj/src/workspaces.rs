@@ -50,13 +50,15 @@ impl Machine {
     /// The machine whose key is in `path`, if there is one.
     pub(crate) fn load(path: &Path) -> io::Result<Option<Self>> {
         match fs::read_to_string(path) {
-            Ok(key) if !key.trim().is_empty() => Ok(Some(Self {
-                key: key.trim().to_owned(),
-            })),
+            Ok(key) if !key.trim().is_empty() => Ok(Some(Self::from_key(key.trim().to_owned()))),
             Ok(_) => Ok(None),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub(crate) fn from_key(key: String) -> Self {
+        Self { key }
     }
 
     /// A machine named `name`, with a new key, which nothing has stored yet.

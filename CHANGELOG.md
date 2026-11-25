@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `musubi leave` clears the copy's membership and machine name while keeping its jj files
+  and history. The same checkout can join as a new copy with `musubi join --machine <name>`.
+  Repos that left before upgrading clear their old membership the next time they join.
+  No upgrade step is needed. A copy that joins again under the name it had shows on the
+  other machines with part of its new key, as `laptop-1a2b/default`, since they keep the
+  old copy's name for it.
+
 - `musubi hub remove --immediately <hive>` deletes the hive's stored history from the hub
   before reporting success. See [Purge shared history](docs/troubleshooting.md#purge-shared-history)
   for replacing the hive and its copies. Upgrade the hub and its machines together.

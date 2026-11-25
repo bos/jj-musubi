@@ -214,6 +214,83 @@ fn an_operation_from_before_the_join_doesnt_bring_its_history() {
     );
 }
 
+/// The same for a copy that discarded the history it shared before joining afresh
+/// (`--fresh`), whose history from before the join holds realizations of the hive's
+/// operations, one of them on an operation of its own: they are from before the join too,
+/// whether it no longer has the canonical operations they name or, joining the hive it left
+/// again, has them again, rather than leaving every sync to fail. The operation's work
+/// reaches the hive once jj merges it, as any operation's from before the join does.
+#[test]
+fn an_operation_from_before_a_fresh_join_doesnt_bring_its_history() {
+    for same_hive in [false, true] {
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = env.init_repo("beta");
+        for (repo, name) in [(&a, "alpha"), (&b, "beta")] {
+            repo.write_file(name, "x");
+            repo.jj(&["commit", "-m", name]);
+        }
+        let mut a_node = open(&a);
+        a_node.create_join_operation("musubi: alpha joins").unwrap();
+        let mut b_node = open(&b);
+        let old_join = b_node.create_join_operation("musubi: beta joins").unwrap();
+        // Alpha works on beta's join, and beta realizes that.
+        sync(&b_node, &mut a_node, &old_join);
+        a_node.merge_heads().unwrap();
+        drop(a_node);
+        a.jj(&["describe", "-m", "alpha on beta"]);
+        let mut a_node = open(&a);
+        let a_head = a_node.canonical_heads().unwrap().pop().unwrap();
+        sync(&a_node, &mut b_node, &a_head);
+        b_node.merge_heads().unwrap();
+        drop(b_node);
+        let before = b.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+        b.jj(&["describe", "-m", "at the join"]);
+        NodeRepo::discard_shared_history(&b.repo_path(), |_| {}).unwrap();
+        let mut b_node = open(&b);
+        let join = b_node.create_join_operation("musubi: beta joins").unwrap();
+        assert_eq!(canonical_ancestry(&b_node, &join), vec![join.clone()]);
+        // Alpha's workspace, which beta showed, is no member's of the hive it joined.
+        let workspaces = b.jj(&["workspace", "list"]);
+        assert!(!workspaces.contains('/'), "{workspaces}");
+        if same_hive {
+            sync(&a_node, &mut b_node, &a_head);
+        }
+        let heads = b_node.canonical_heads().unwrap();
+        drop(b_node);
+        b.jj(&[
+            "--at-op",
+            before.trim(),
+            "--ignore-working-copy",
+            "bookmark",
+            "create",
+            "concurrent",
+            "-r",
+            "@-",
+        ]);
+
+        let mut b_node = open(&b);
+        let late = b_node.canonical_heads().unwrap();
+        if !same_hive {
+            // Until jj merges it, the operation has no canonical form.
+            assert_eq!(late, heads);
+        }
+        b_node.merge_heads().unwrap();
+        let head = b_node.canonical_heads().unwrap().pop().unwrap();
+        let ancestry = canonical_ancestry(&b_node, &head);
+        assert!(ancestry.contains(&join), "same hive: {same_hive}");
+        // The hive it left has that history anyway.
+        assert_eq!(ancestry.contains(&old_join), same_hive);
+        let view = b_node.canonical_store().read_operation_view(&head).unwrap();
+        assert!(
+            view.local_bookmarks
+                .keys()
+                .any(|name| name.as_str() == "concurrent"),
+            "same hive: {same_hive}"
+        );
+    }
+}
+
 /// The same after `jj op abandon` rewrote the history from before the join, join point and
 /// all: the rewritten history is from before the join too.
 #[test]

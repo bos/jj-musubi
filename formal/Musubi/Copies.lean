@@ -867,25 +867,36 @@ membership. -/
 
 namespace Detach
 
-/-- A single checkout's membership files, and the evidence needed to translate its old
-operations after its active key is removed. -/
+/-- What a checkout keeps of the history it shared with hives: all of it, part of it, as a
+discard stopped partway leaves it, or none. A join carries what is kept; one that carried part
+would send a history with holes. -/
+inductive History where
+  | kept | part | none
+deriving DecidableEq, Repr
+
+/-- A single checkout's membership files, the evidence needed to translate its old
+operations after its active key is removed, its shared history, and the mark of a discard of
+that history under way. -/
 structure Files where
   repo : Repo
   entry : Option Entry
   marker : Bool
   retired : Bool
+  history : History
+  discarding : Bool
 deriving DecidableEq, Repr
 
 def joinedRecord (e : Entry) : Record := ⟨e.hive, e.cid, .joined⟩
 
 def joined (e : Entry) : Files := ⟨⟨some e.key, some (joinedRecord e), some e.cid⟩,
-  some e, false, false⟩
+  some e, false, false, .kept, false⟩
 
-def detached (cid : Nat) : Files := ⟨⟨none, none, some cid⟩, none, true, true⟩
+def detached (cid : Nat) : Files := ⟨⟨none, none, some cid⟩, none, true, true, .kept, false⟩
 
 inductive Write where
   | markLeft | markHistory | retireKey | dropEntry | clearKey | clearRecord
   | keepKey (key : Nat) | putEntry (e : Entry) | joinRecord (e : Entry)
+  | markDiscard | dropSome | dropAll | unmarkDiscard
 deriving DecidableEq, Repr
 
 def write (s : Files) : Write → Files
@@ -899,6 +910,10 @@ def write (s : Files) : Write → Files
   | .keepKey key => { s with repo := { s.repo with key := some key } }
   | .putEntry e => { s with entry := some e }
   | .joinRecord e => { s with repo := { s.repo with record := some (joinedRecord e) } }
+  | .markDiscard => { s with discarding := true }
+  | .dropSome => { s with history := if s.history = .kept then .part else s.history }
+  | .dropAll => { s with history := .none }
+  | .unmarkDiscard => { s with discarding := false }
 
 /-- Writes needed to finish leaving, chosen from the files found on restart. If writing the
 marker finished but retiring its key did not, writing the marker again has the same effect
@@ -912,11 +927,17 @@ def leavePlan (s : Files) : List Write :=
       (if s.retired then [] else [.markHistory, .retireKey]) ++ [.dropEntry, .clearKey]
       else []) ++ [.clearRecord]
 
+/-- Discarding the shared history: marked first, then what is kept removed, the first of it
+before the rest, and the mark removed last. -/
+def discardPlan : List Write := [.markDiscard, .dropSome, .dropAll, .unmarkDiscard]
+
 /-- Once the hub has accepted the proposed key, retry keeps a key already written locally.
-The config-id belongs to the jj repo and survives leaving. -/
-def joinPlan (s : Files) (requested : Entry) : List Write :=
+The config-id belongs to the jj repo and survives leaving. A `fresh` join discards the shared
+history first, and any join finishes a discard it finds marked. -/
+def joinPlan (s : Files) (requested : Entry) (fresh : Bool := false) : List Write :=
   let e := { requested with key := s.repo.key.getD requested.key }
-  [.keepKey e.key, .putEntry e, .joinRecord e]
+  (if (fresh && s.history != .none) || s.discarding then discardPlan else []) ++
+    [.keepKey e.key, .putEntry e, .joinRecord e]
 
 /-- Include the state before the first write and after each completed write. -/
 def trace : Files → List Write → List Files
@@ -924,10 +945,12 @@ def trace : Files → List Write → List Files
   | s, w :: ws => s :: trace (write s w) ws
 
 def leaveTrace (s : Files) : List Files := trace s (leavePlan s)
-def joinTrace (s : Files) (e : Entry) : List Files := trace s (joinPlan s e)
+def joinTrace (s : Files) (e : Entry) (fresh : Bool := false) : List Files :=
+  trace s (joinPlan s e fresh)
 
 def finishLeave (s : Files) : Files := (leavePlan s).foldl write s
-def finishJoin (s : Files) (e : Entry) : Files := (joinPlan s e).foldl write s
+def finishJoin (s : Files) (e : Entry) (fresh : Bool := false) : Files :=
+  (joinPlan s e fresh).foldl write s
 
 /-- Restarting at any completed prefix gives the same detached checkout, with the history
 marker, retired key, and original jj config-id. -/
@@ -981,6 +1004,33 @@ theorem join_prefix_safe {old fresh : Entry} {s : Files}
         s.repo.record = some (joinedRecord fresh)) := by
   simp [joinTrace, detached, joinPlan, trace, write] at h
   rcases h with h | h | h | h <;> subst s <;>
+    cases fresh <;> simp_all [check, joinedRecord]
+
+/-- Once a fresh join has marked its discard, a plain join retried from wherever it stopped
+joins without the shared history, as the fresh join would have. -/
+theorem fresh_retry {old fresh : Entry} {s : Files}
+    (h : s ∈ (joinTrace (detached old.cid) fresh true).drop 1) (hc : fresh.cid = old.cid) :
+    finishJoin s fresh =
+      { joined fresh with marker := true, retired := true, history := .none } := by
+  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at h
+  rcases h with h | h | h | h | h | h | h <;> subst s <;>
+    cases fresh <;> simp_all [finishJoin, joinPlan, discardPlan, write, joined, joinedRecord]
+
+/-- A plain retry that stops again leaves a state the fresh join passed through. -/
+theorem fresh_retry_prefix {old fresh : Entry} {s t : Files}
+    (hs : s ∈ (joinTrace (detached old.cid) fresh true).drop 1) (ht : t ∈ joinTrace s fresh) :
+    t ∈ joinTrace (detached old.cid) fresh true := by
+  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at hs
+  rcases hs with h | h | h | h | h | h | h <;> subst s <;>
+    simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at ht ⊢ <;> grind
+
+/-- Part of the shared history is never left without the mark that makes the next join
+finish discarding it, and the old entry stays disabled throughout. -/
+theorem fresh_prefix_safe {old fresh : Entry} {s : Files}
+    (h : s ∈ joinTrace (detached old.cid) fresh true) (hk : fresh.key ≠ old.key) :
+    (s.history = .part → s.discarding = true) ∧ check old s.repo = false := by
+  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at h
+  rcases h with h | h | h | h | h | h | h | h <;> subst s <;>
     cases fresh <;> simp_all [check, joinedRecord]
 
 end Detach

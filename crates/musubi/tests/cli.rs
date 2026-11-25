@@ -1549,6 +1549,13 @@ fn hub_join_sync_clone_and_list() {
           --full-history
               Replicate the whole operation history, not just the current state
 
+          --fresh
+              Leave out the operation history this repository shared with a hive before, which it
+              otherwise brings with it after `musubi leave` or `musubi hub remove`. It sends its commits
+              and bookmarks as they are now, as a repository that was never part of a hive does, and
+              keeps its own operation log. Not for joining the hive it left again: where its commits
+              changed since, you would have divergent changes to resolve
+
           --lease <DURATION>
               Forget this copy after this long without a local operation, such as `6h`. Sets
               `musubi.forget-after` in repo config, overriding its existing value
@@ -4212,6 +4219,95 @@ fn a_new_hive_doesnt_inherit_members() {
     ");
     let workspaces = beta.jj(&["workspace", "list"]);
     assert!(!workspaces.contains("alpha/"), "{workspaces}");
+}
+
+/// A copy that left its hive brings the history it shared into the next one it starts,
+/// everything that history holds with it, even work the copy has dropped since, and says so;
+/// `--fresh` leaves that history out, so that the new hive gets only what the repository has
+/// now (#178).
+#[test]
+fn a_copy_can_start_a_hive_without_its_old_history() {
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url, "first"]);
+    // Work the hive gets, which the copy drops once it has left.
+    alpha.jj(&["new", "-m", "old work"]);
+    alpha.write_file("old", "old");
+    alpha.jj(&["bookmark", "create", "old", "-r", "@"]);
+    alpha.jj(&["new", "@-"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let old = alpha.jj(&["log", "--no-graph", "-r", "old", "-T", "commit_id"]);
+    musubi_in(&env, &logs, &alpha, &["leave"]);
+    alpha.jj(&["abandon", "old"]);
+    // The hive's store of objects holds `old`.
+    let holds_old = |hive: &str| {
+        let dir = fs::read_dir(&hub.dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|dir| {
+                fs::read_to_string(dir.join("hive.toml"))
+                    .is_ok_and(|toml| toml.contains(&format!("name = \"{hive}\"")))
+            })
+            .unwrap_or_else(|| panic!("no hive {hive} on the hub"));
+        let mut git = alpha.program(Path::new("git"));
+        git.arg("--git-dir")
+            .arg(dir.join("git"))
+            .args(["cat-file", "-e", &old]);
+        git.output().unwrap().status.success()
+    };
+    assert!(holds_old("first"));
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"the \d+ operations", "the N operations");
+    let _count = settings.bind_to_scope();
+    let mut create = alpha.program(musubi());
+    create.args(["create", "carried"]);
+    let (ok, out, err) = try_run(&logs, &env, create);
+    assert!(ok, "{out}{err}");
+    insta::assert_snapshot!(out, @"Created hive carried");
+    insta::assert_snapshot!(err, @"
+    Warning: Sending hive carried the N operations of history this repository shared before.
+    Hint: To start the hive without them, run `musubi leave`, `musubi hub remove --immediately carried` and `musubi create --fresh carried`.
+    ");
+    assert!(holds_old("carried"));
+    // As the hint says, it starts the hive again without that history.
+    musubi_in(&env, &logs, &alpha, &["leave"]);
+    musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "remove", "--immediately", "carried"],
+    );
+    let mut create = alpha.program(musubi());
+    create.args(["create", "--fresh", "carried"]);
+    let (ok, out, err) = try_run(&logs, &env, create);
+    assert!(ok, "{out}{err}");
+    insta::assert_snapshot!(out, @"Created hive carried");
+    insta::assert_snapshot!(err, @"");
+    assert!(!holds_old("carried"));
+    // Its own operation log keeps what it had.
+    let ops = alpha.jj(&["op", "log", "--no-graph", "-T", "description ++ \"\\n\""]);
+    assert!(ops.contains("abandon commit"), "{ops}");
+    // It goes on syncing as any copy does.
+    alpha.write_file("new", "new");
+    alpha.jj(&["commit", "-m", "new work"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      carried  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+      first  no machines yet
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    ");
 }
 
 /// Copies that left a hive can start another together, each keeping its work, a linked

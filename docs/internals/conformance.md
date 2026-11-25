@@ -1401,9 +1401,18 @@ config-id. Local join and leave commands run serially under the membership lock.
   new entry once the joined record is saved, and rejecting the old entry at every prefix.
 - `leave_retry_prefix` and `join_retry_prefix` prove that another interruption during a retry
   leaves a state already covered by the original prefixes.
+- `fresh_prefix_safe` proves that a fresh join (`--fresh`), which discards the checkout's
+  shared history before joining, never leaves part of that history without the mark that
+  makes the next join finish discarding it. `fresh_retry` proves that a plain join retried
+  from any point after the mark joins without that history, as the fresh join would have,
+  and `fresh_retry_prefix` that stopping the retry too leaves a state the fresh join passed
+  through.
 
 The `copy-detach` oracle request takes `old` and `fresh` entries. It returns the states before
-and after each leave and join write, with the outcome of retrying from each state.
+and after each write of a leave, a join and a fresh join, with the outcome of retrying each
+state with a plain join. The test reads the shared history as kept when both the joins file
+and the canonical store have the first join operation, as gone when neither does, and as part
+otherwise.
 `detach_and_rejoin_conform_at_write_boundaries` uses the real local join and leave code on
 disposable jj repos, terminating a process after each membership write. A fresh process reads
 the files and native operation log, checks both daemon identities with `copy::check`, retries,

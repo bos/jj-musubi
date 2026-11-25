@@ -348,7 +348,8 @@ def copiesReply (j : Json) : Except String Json := do
   let cases ← (← j.getObjValAs? (Array Json) "cases").toList.mapM decodeCase
   pure (encodeCopies cases)
 
-/-- The durable prefixes of a leave and the next join, with the files after retrying each. -/
+/-- The durable prefixes of a leave and the next join, plain or fresh, with the files after
+retrying each. -/
 def copyDetachReply (j : Json) : Except String Json := do
   let old ← decodeEntry (← j.getObjVal? "old")
   let fresh ← decodeEntry (← j.getObjVal? "fresh")
@@ -368,17 +369,25 @@ def copyDetachReply (j : Json) : Except String Json := do
       ("record", (s.repo.record.map record).getD .null)]),
     ("entry", (s.entry.map entry).getD .null),
     ("marker", .bool s.marker), ("retired", .bool s.retired),
+    ("history", .str (match s.history with
+      | .kept => "kept"
+      | .part => "part"
+      | .none => "none")),
+    ("discarding", .bool s.discarding),
     ("oldCheck", .bool (Copies.check old s.repo)),
     ("freshCheck", .bool (Copies.check fresh s.repo))]
   let leave := Copies.Detach.leaveTrace (Copies.Detach.joined old)
   let join := Copies.Detach.joinTrace (Copies.Detach.detached old.cid) fresh
+  let freshJoin := Copies.Detach.joinTrace (Copies.Detach.detached old.cid) fresh true
   let withRetry (states : List Copies.Detach.Files)
       (finish : Copies.Detach.Files → Copies.Detach.Files) :=
     Json.arr (states.map (fun s => Json.mkObj [
       ("prefix", encode s), ("retry", encode (finish s))])).toArray
   pure (Json.mkObj [
     ("ok", .bool true), ("leave", withRetry leave Copies.Detach.finishLeave),
-    ("join", withRetry join (Copies.Detach.finishJoin · fresh))])
+    ("join", withRetry join (Copies.Detach.finishJoin · fresh)),
+    -- A join stopped partway through a fresh one is retried as a plain join.
+    ("fresh", withRetry freshJoin (Copies.Detach.finishJoin · fresh))])
 
 /-! ## Chunked blobs (`Chunks.lean`) -/
 

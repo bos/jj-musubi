@@ -68,10 +68,12 @@ pub fn join(
     let Member {
         machine,
         full_history,
+        fresh,
         hub,
         lease,
     } = member;
-    let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
+    let (hub, machine, full_history, fresh) =
+        (hub.as_deref(), machine.as_deref(), *full_history, *fresh);
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
     located.refuse_slashed_workspaces(false)?;
@@ -91,6 +93,16 @@ pub fn join(
         let hub = hub.map_or_else(|| Ok(record.hub.clone()), |hub| UserState::hub(Some(hub)))?;
         Ok((remake, hub))
     };
+    // Its history is the hive's while it is part of one.
+    if fresh
+        && standing == copy::Standing::Copy
+        && let Some(record) = &found.record
+    {
+        anyhow::bail!(
+            "this repository is part of hive {}; `musubi leave` it first",
+            record.display_name()
+        );
+    }
     let (choice, hub) = match (standing, &found.record, choice) {
         (copy::Standing::Outside, _, choice) => (choice, UserState::hub(hub)?),
         (copy::Standing::Removed, Some(record), JoinChoice::Match) => anyhow::bail!(
@@ -145,20 +157,46 @@ pub fn join(
         }
         before => before,
     };
+    // `--fresh` takes a repository whose hive was removed out of it first, as `musubi leave`
+    // would, since its record and key belong to the history it drops.
+    let before = match before {
+        Some(record) if fresh && record.state == Membership::Removed => {
+            crate::leave::finish_detaching(&located)?;
+            None
+        }
+        before => before,
+    };
     // A key `musubi leave` retired, in a repository with no record, but didn't clear before it
-    // stopped: finish clearing it, so that this join takes a new one.
+    // stopped: finish clearing it, so that this join takes a new one. With `--fresh`, retire
+    // too a key kept from a join whose first sync was stopped, as `musubi leave` would.
     if before.is_none() && NodeRepo::machine_of(&located.repo_path)?.is_some() {
         let retired = located.open()?.machine_retired();
-        if retired {
+        if retired || fresh {
+            // Not a key this machine syncs another repository with, as one made from this
+            // one's files; this one's own entry, from a join stopped before its record, goes,
+            // as does one whose repository is gone.
+            let elsewhere = entry.is_some_and(|entry| {
+                Located::find(&entry.path)
+                    .is_ok_and(|other| !copy::same_directory(&other.repo_path, &located.repo_path))
+            });
+            if !retired && found.record.is_none() && elsewhere {
+                anyhow::bail!(
+                    "{}",
+                    copy::not_the_copy(copy::Standing::Duplicate, None, entry)
+                );
+            }
             let _lock = HiveConfig::lock(&located.repo_path)?;
             crate::leave::retire_machine(&located)?;
         }
     }
+    discard_history_if(&located, fresh)?;
     // Kept only once the hub takes the join: a join refused, or failing, before then leaves
     // `--machine` free to name it next time.
     let machine = joining_machine(&located, machine, &settings)?;
     let node = located.open_as(&settings, machine.clone())?;
     let summary = node.join_summary()?;
+    // What the join carries into the hive, unless it is a hive this history came from.
+    let shared = node.shared_history()?;
     let mut remotes = summary.remote_snapshot();
     if let JoinChoice::Remake { id, .. } = &choice {
         node.check_recorded_remote_bindings(id.as_str(), &mut remotes)?;
@@ -233,8 +271,47 @@ pub fn join(
         writeln!(out, " ({}), {machines}", joined.reason)?;
     }
     drop(out);
+    if let Some(shared) = shared.filter(|shared| !shared.hives.contains(joined.hive.id.as_str())) {
+        let count = shared.operations;
+        let operations = if count == 1 {
+            "1 operation".to_owned()
+        } else {
+            format!("{count} operations")
+        };
+        writeln!(
+            ui.warning(),
+            "Sending hive {name} the {operations} of history this repository shared before."
+        )?;
+        if joined.created && !remaking {
+            let name = crate::ui::shell_word(name);
+            writeln!(
+                ui.hint(),
+                "To start the hive without them, run `musubi leave`, `musubi hub remove \
+                 --immediately {name}` and `musubi create --fresh {name}`."
+            )?;
+        } else {
+            writeln!(
+                ui.hint(),
+                "`musubi join --fresh` joins a hive without such history."
+            )?;
+        }
+    }
     start_serving(ui, &located, socket, stoppable)?;
     fetch_join_conflicts(ui, &located, socket)
+}
+
+/// If `fresh`, drops the history the repository at `located`, part of no hive, shared with
+/// hives before, so that it joins as a repository that never was part of one. Either way,
+/// finishes such a discard that stopped partway, which would otherwise leave the join to carry
+/// what was left.
+pub(crate) fn discard_history_if(located: &Located, fresh: bool) -> anyhow::Result<()> {
+    if fresh || NodeRepo::discarding_shared_history(&located.repo_path) {
+        NodeRepo::discard_shared_history(&located.repo_path, |_step| {
+            #[cfg(test)]
+            after(Write::Discard(_step));
+        })?;
+    }
+    Ok(())
 }
 
 /// Independent snapshots may describe different observations of rewritten Git history.

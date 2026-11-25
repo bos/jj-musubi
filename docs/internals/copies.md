@@ -113,7 +113,9 @@ machine, and the entries across machines.
   record, a first sync stopped by interrupting the `create`, `join` or `clone` that asked for it
   drops the record and the entry, but keeps the key, which the hub took: the repository is then
   as a join that stopped once it kept its key leaves it. Joining again takes up that key, and
-  `musubi leave` retires it, so that `musubi join --machine` can name a new one.
+  `musubi leave` retires it, so that `musubi join --machine` can name a new one. `musubi join
+  --fresh` and `musubi create --fresh` first clear a removed record, and retire a kept key, as
+  `musubi leave` would, since both belong to the history they drop.
 
 - **R8. A new hive doesn't inherit members.** When a copy joins or creates a hive whose id
   isn't the one its record holds, its join forgets every key that is present
@@ -210,6 +212,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | `musubi hub remove`, then a plain `musubi join` | Says the hive was removed (R7). | `copies_leave_a_removed_hive` |
 | …then `musubi leave` | Clears the membership and active key. | `copies_leave_a_removed_hive` |
 | A copy that left one hive creates or joins another | Its join forgets the old hive's copies (R8). | `a_new_hive_doesnt_inherit_members` |
+| …with `--fresh` | It drops the history it shared, and joins with its current state, under a new key (R7). | `a_copy_can_start_a_hive_without_its_old_history` |
 | `musubi join` killed partway, when joining a hive again | The daemon keeps syncing the copy: its `add` request restarts the copy's sync in one step, so nothing stops it between. | — |
 
 ## The model

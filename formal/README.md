@@ -14,7 +14,7 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 - Which copies a hive shows, one copy being one machine's repository (`Musubi/Presence.lean`;
   [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)).
 - Which repository on a machine is the copy of a key, which is a duplicate, and how a
-  checkout recovers from an interrupted leave or join
+  checkout recovers from an interrupted leave, join or fresh join
   (`Musubi/Copies.lean`; [copies.md](../docs/internals/copies.md)).
 - The names a machine shows other machines' workspaces under (`Musubi/Names.lean`; [design.md,
   "Which workspaces are this machine's
@@ -110,7 +110,7 @@ deleted with them. Rebuilding one on `Exec` is a separate project.
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
-| `Musubi/Copies.lean` | Copy identity, moves, duplicates, and recovery at the durable write boundaries of leave and join. |
+| `Musubi/Copies.lean` | Copy identity, moves, duplicates, and recovery at the durable write boundaries of leave, join and a fresh join. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Publication.lean` | Cumulative snapshot accounting, exact approval, selected operation cleanup, and checks of the prepared result before installation. |
 | `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as a pure function for the oracle and the code: `same` (`plan::same`); and what it reads of operations. |

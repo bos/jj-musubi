@@ -250,6 +250,9 @@ open Musubi
 #assert_axioms Copies.Detach.join_retry
 #assert_axioms Copies.Detach.join_retry_prefix
 #assert_axioms Copies.Detach.join_prefix_safe
+#assert_axioms Copies.Detach.fresh_retry
+#assert_axioms Copies.Detach.fresh_retry_prefix
+#assert_axioms Copies.Detach.fresh_prefix_safe
 
 -- Names
 #assert_axioms Names.choose_free

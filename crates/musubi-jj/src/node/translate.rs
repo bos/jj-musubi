@@ -268,6 +268,10 @@ impl NodeRepo {
             let late = parents.iter().any(|parent| self.late.contains(parent));
             let canonical_id = if let Some(canonical) = OpAttrs(&op.metadata.attributes).canonical()
             {
+                if self.is_realization_before_join(&id)? {
+                    self.joins.before.insert(id);
+                    continue;
+                }
                 self.realized_canonical(&id, &op, canonical)?
             } else if self.is_before_join(&id, &op)? {
                 self.joins.before.insert(id);
@@ -285,6 +289,19 @@ impl NodeRepo {
             Some(canonical) => Ok(canonical),
             None => Err(NodeError::BeforeJoin(local.0.hex())),
         }
+    }
+
+    /// Whether `id`, a realization this copy hasn't mapped, is from before the join: as in a
+    /// copy that discarded the history it shared before joining afresh
+    /// ([`Self::discard_shared_history`]), which keeps its realizations. They name canonical
+    /// operations it no longer has, or has again from the hive it joined, on history the join
+    /// stands for. Only a copy with no shared history joins on the root, so no other copy has
+    /// a realization below a join point.
+    fn is_realization_before_join(&mut self, id: &LocalOp) -> Result<bool, NodeError> {
+        if self.joins.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.join_ancestors()?.contains(id))
     }
 
     /// Whether a local operation that isn't a join point or a realization, whose parents are

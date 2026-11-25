@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write as _;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,6 +37,35 @@ use crate::presence::Kind;
 use crate::remote_url::{JOIN_HIVE, JoinRemotes, Remote};
 use crate::translation_map::whole_id;
 
+/// Marks a discard of the shared history under way: see [`NodeRepo::discard_shared_history`].
+const DISCARDING: &str = "discarding-history";
+
+/// What a repository keeps of the history it shared with hives, in its `musubi` directory, in
+/// the order [`NodeRepo::discard_shared_history`] removes it.
+const SHARED_HISTORY: [&str; 8] = [
+    "joins",
+    "translation",
+    "canonical",
+    "accepted_base",
+    "pushed",
+    super::ACCEPTED_PUSH,
+    super::publication::OFFERS_FILE,
+    super::APPROVAL_FILE,
+];
+
+/// How far [`NodeRepo::discard_shared_history`] has got, for a test to stop it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discarded {
+    /// The discard is marked under way.
+    Marked,
+    /// The first of what it removes is gone.
+    Some,
+    /// All of it is gone, and the mark is still there.
+    All,
+    /// The mark is gone too.
+    Done,
+}
+
 /// What a hub matches a joining repository against: see [`NodeRepo::join_summary`].
 #[derive(Clone, Debug)]
 pub struct JoinSummary {
@@ -46,6 +76,15 @@ pub struct JoinSummary {
     pub roots: Vec<CommitId>,
     /// The commits remote bookmarks point to.
     pub remote_targets: Vec<CommitId>,
+}
+
+/// The history a repository shared with hives before: see [`NodeRepo::shared_history`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedHistory {
+    /// How many operations it has.
+    pub operations: usize,
+    /// The ids of the hives it joined.
+    pub hives: BTreeSet<String>,
 }
 
 impl JoinSummary {
@@ -133,13 +172,40 @@ impl NodeRepo {
         self.joins.join_of(op.store_operation()).is_some()
     }
 
+    /// Whether this repository has history it shared with a hive: a join point, or a
+    /// canonical operation. The canonical store, unlike the translation cache, is never lost,
+    /// but [`Self::discard_shared_history`] drops both.
+    fn has_shared_history(&self) -> Result<bool, NodeError> {
+        Ok(!self.joins.is_empty() || self.canonical.has_operations()?)
+    }
+
+    /// The history this repository shared with hives before, which a join carries into the
+    /// hive it joins: how many operations it has, and the ids of the hives it joined. `None`
+    /// if it has none.
+    pub fn shared_history(&self) -> Result<Option<SharedHistory>, NodeError> {
+        if !self.has_shared_history()? {
+            return Ok(None);
+        }
+        let ids = self.canonical.operation_ids()?;
+        let mut hives = BTreeSet::new();
+        for id in &ids {
+            let op = self.canonical.read_operation(id)?;
+            if let Some(hive) = op.metadata.attributes.get(JOIN_HIVE) {
+                hives.insert(hive.clone());
+            }
+        }
+        Ok(Some(SharedHistory {
+            operations: ids.len(),
+            hives,
+        }))
+    }
+
     /// Whether `head` descends from history this repository shared with a hive: an operation
     /// canonicalized already, a realization of another machine's, or a join point, as
     /// `canonicalize` knows them.
     fn descends_from_canonical(&self, head: &LocalOp) -> Result<bool, NodeError> {
         // A repository that never shared anything has none, and needn't walk its history.
-        // The canonical store, unlike the translation cache, is never lost.
-        if self.joins.is_empty() && !self.canonical.has_operations()? {
+        if !self.has_shared_history()? {
             return Ok(false);
         }
         let op_store = self.loader.op_store();
@@ -163,6 +229,62 @@ impl NodeRepo {
         Ok(false)
     }
 
+    /// Drops the history the repository whose `.jj/repo` directory is `repo_path` shared with
+    /// hives: its canonical operations, join records and translations, and what it knows of
+    /// what a hub took, so that it next joins as a repository that never shared any does,
+    /// with a join operation on the root. Its own operation log and the keys it retired stay.
+    /// For a repository that is part of no hive, under the join lock.
+    ///
+    /// Marked first, and the mark removed last: some of it gone, the rest would make a join
+    /// carry a history with holes, so a join that finds the mark finishes this first
+    /// ([`Self::discarding_shared_history`]).
+    pub fn discard_shared_history(
+        repo_path: &Path,
+        mut after: impl FnMut(Discarded),
+    ) -> Result<(), NodeError> {
+        let dir = repo_path.join("musubi");
+        let mark = dir.join(DISCARDING);
+        let io = |path: &Path| {
+            let path = path.to_owned();
+            move |source| NodeError::Io { path, source }
+        };
+        let present: Vec<PathBuf> = SHARED_HISTORY
+            .iter()
+            .map(|name| dir.join(name))
+            .filter(|path| path.symlink_metadata().is_ok())
+            .collect();
+        if present.is_empty() && !mark.exists() {
+            return Ok(());
+        }
+        fs::write(&mark, b"").map_err(io(&mark))?;
+        after(Discarded::Marked);
+        for (i, path) in present.iter().enumerate() {
+            let removed = if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            match removed {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(io(path)(err)),
+            }
+            if i == 0 {
+                after(Discarded::Some);
+            }
+        }
+        after(Discarded::All);
+        fs::remove_file(&mark).map_err(io(&mark))?;
+        after(Discarded::Done);
+        Ok(())
+    }
+
+    /// Whether [`Self::discard_shared_history`] stopped partway in the repository whose
+    /// `.jj/repo` directory is `repo_path`.
+    pub fn discarding_shared_history(repo_path: &Path) -> bool {
+        repo_path.join("musubi").join(DISCARDING).exists()
+    }
+
     /// Creates the canonical operation that replicates this repository's current state in
     /// place of its operation history, and records that the current op head canonicalizes
     /// to it. See "Joining" in docs/internals/design.md.
@@ -184,10 +306,13 @@ impl NodeRepo {
         // join operation on the root would hide that history from the head, and the head the
         // old hub last accepted, which this node keeps, would no longer be reachable from it:
         // which musubi takes for an op abandon, whichever hive the repository joins.
+        // A repository that discarded its shared history joins as one that never had any,
+        // though it keeps the keys it retired.
         let carried = match self.canonical_of(&head) {
             Some(canonical) => Some(canonical),
-            None if self.identities.has_retired_keys()
-                || self.descends_from_canonical(&head)? =>
+            None if self.has_shared_history()?
+                && (self.identities.has_retired_keys()
+                    || self.descends_from_canonical(&head)?) =>
             {
                 Some(self.canonicalize(&head)?)
             }
@@ -196,6 +321,7 @@ impl NodeRepo {
         if carried.is_some() {
             return self.mark_joined_with_remotes(description, hive, remotes);
         }
+        let head = self.forget_workspaces_left_behind(head)?;
         let op = self.loader.op_store().read_operation(&head.0).block_on()?;
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
@@ -241,6 +367,43 @@ impl NodeRepo {
         // must not be mistaken for an older sender when its first publication is held.
         self.initialize_publication_offers()?;
         Ok(canonical)
+    }
+
+    /// Removes, before a join on the root, other machines' workspaces that `head` still shows,
+    /// as in a copy that discarded the history it shared ([`Self::discard_shared_history`]),
+    /// which nothing would remove otherwise: the hive it joins shows its own machines' again.
+    /// A name with a `/` is never this machine's own, but for one jj's workspace store records
+    /// a directory for, which joining refuses ([`Self::slashed_workspaces`]) and this keeps.
+    /// Returns the head to join at.
+    fn forget_workspaces_left_behind(&mut self, head: LocalOp) -> Result<LocalOp, NodeError> {
+        let own: BTreeSet<String> = self
+            .slashed_workspaces()?
+            .iter()
+            .flat_map(|slashed| slashed.workspaces().map(|(name, _)| name.to_owned()))
+            .collect();
+        let repo = self.repo_at(&head)?;
+        let left: Vec<_> = repo
+            .view()
+            .wc_commit_ids()
+            .keys()
+            .filter(|name| name.as_str().contains('/') && !own.contains(name.as_str()))
+            .cloned()
+            .collect();
+        if left.is_empty() {
+            return Ok(head);
+        }
+        let mut tx = repo.start_transaction();
+        for name in &left {
+            tx.repo_mut()
+                .remove_workspace(name)
+                .block_on()
+                .map_err(index_err)?;
+        }
+        tx.repo_mut().rebase_descendants().block_on()?;
+        let repo = tx
+            .commit("musubi: forget the workspaces of machines of another hive")
+            .block_on()?;
+        Ok(LocalOp(repo.op_id().clone()))
     }
 
     /// Records an explicit join as this machine's work and its current URL hints, even

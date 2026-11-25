@@ -122,7 +122,7 @@ pub enum Command {
         /// Sync this repository as the copy it was made from, which must be gone: for a copy
         /// moved by copying it and deleting the original, or restored onto a new machine.
         /// musubi otherwise takes it for a duplicate, and syncs nothing.
-        #[arg(long, conflicts_with = "hive")]
+        #[arg(long, conflicts_with_all = ["hive", "fresh"])]
         original: bool,
         #[command(flatten)]
         member: Member,
@@ -385,6 +385,13 @@ pub struct Member {
     /// Replicate the whole operation history, not just the current state.
     #[arg(long)]
     pub full_history: bool,
+    /// Leave out the operation history this repository shared with a hive before, which it
+    /// otherwise brings with it after `musubi leave` or `musubi hub remove`. It sends its
+    /// commits and bookmarks as they are now, as a repository that was never part of a hive
+    /// does, and keeps its own operation log. Not for joining the hive it left again: where
+    /// its commits changed since, you would have divergent changes to resolve.
+    #[arg(long, conflicts_with = "full_history")]
+    pub fresh: bool,
     /// Forget this copy after this long without a local operation, such as `6h`.
     /// Sets `musubi.forget-after` in repo config, overriding its existing value.
     #[arg(long, value_name = "DURATION", value_parser = parse_lease)]

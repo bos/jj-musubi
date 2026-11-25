@@ -735,7 +735,27 @@ the node syncs the rest of its history.
 A repository that previously shared canonical history carries that history when it joins
 again, even into another hive. Replacing it with a join on the root would make its accepted
 base unreachable, falsely indicating lost history ([Lost history](#lost-history)). Joining
-after a leave records fresh work under a new key on top of that history.
+after a leave records fresh work under a new key on top of that history. `create` and `join`
+say so when the hive isn't one the history records a join to, with the number of canonical
+operations the copy holds: a bound on what it sends, cheap to count.
+
+`--fresh` drops that history instead, so that the join is on the root, as a repository's
+that never joined: the canonical store, join records, translations, and the accepted and
+pushed markers and publication offers that name canonical operations, all of which go
+together, so the accepted base goes with them. It keeps the local operation log and the
+retired keys, which still name the earlier operations' machines and keep a new key from
+repeating an old one. A repository whose hive was removed, or that kept a key from a stopped
+first sync, first leaves as `musubi leave` would. The discard is marked before anything is
+removed and unmarked after, and any join that finds the mark finishes it, since a join over
+part of the history would carry a history with holes (`Copies.Detach`,
+[conformance.md](conformance.md#detach-and-join-write-boundaries)). Joining a hive afresh
+merges as any new copy does, against the root: where the hive rewrote commits this copy still
+has, both show, divergent, which is why a plain `join` back into a hive the copy left carries
+its history instead. The local history before such a join holds realizations of canonical
+operations the copy no longer has, or has again from the hive it left: `canonicalize` takes an
+unmapped one below a join point as from before the join, as any other operation there, so that
+a late operation on that history waits for jj's merge rather than failing every sync. Other machines' workspaces the copy still shows,
+`beta/x`, are removed before the join point, since nothing else would remove them.
 
 Carrying history does not bring every old member into a different hive. The join forgets copies
 absent from the target hive, except the joining copy itself; copies already present or joining

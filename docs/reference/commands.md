@@ -34,9 +34,11 @@ explains hubs, hives, and copies.
   operation, such as `--lease 6h`. Sets `musubi.forget-after` in this copy's repo config.
 
 `create` and `join` also take `--full-history`, to share the repo's whole operation
-history rather than its current state, and `join` takes `--hive <name>` to join a hive of your
-choosing. Without `--lease`, all three keep the copy's configured
-[`musubi.forget-after`](configuration.md#settings), or set `never` when none is configured.
+history rather than its current state, and `--fresh`, to leave out the operation history it
+shared with a hive before ([Rejoin](../guides/manage.md#rejoin-or-stop-using-jj-musubi)).
+`join` takes `--hive <name>` to join a hive of your choosing. Without `--lease`, all three
+keep the copy's configured [`musubi.forget-after`](configuration.md#settings), or set `never`
+when none is configured.
 Agent-run commands have the same default. See [Set up a hub and machines](../guides/setup.md).
 
 ## See how syncing goes

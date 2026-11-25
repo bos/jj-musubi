@@ -48,6 +48,7 @@ pub use intent::CHECKPOINT_ATTRIBUTE;
 pub(crate) use intent::INTENT_ATTRIBUTE;
 pub use intent::explicit_git_import;
 pub(crate) use intent::retained_publication_intent;
+pub(in crate::node) use offers::OFFERS_FILE;
 
 use content::ContentGraph;
 use intent::Intent;
@@ -58,8 +59,6 @@ use content::Closure;
 use content::FileVersion;
 #[cfg(test)]
 use intent::view_roots;
-#[cfg(test)]
-use offers::OFFERS_FILE;
 
 /// The projected survivor that cleanup accounts for before publishing its native operation.
 struct Checkpoint {

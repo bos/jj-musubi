@@ -8,9 +8,14 @@ use std::collections::HashSet;
 use std::fs;
 
 use jj_lib::default_backend_factories::default_backend_factories;
+use jj_lib::op_store::OperationId;
 use jj_lib::repo::RepoLoader;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::Joined;
+use musubi_jj::canonical::CanonicalStore;
+use musubi_jj::node::Discarded;
+use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::presence::FORGET_ATTRIBUTE;
 use musubi_jj::remote_url::JoinRemotes;
 use musubi_testutil::TestEnv;
@@ -42,6 +47,7 @@ pub(crate) enum Write {
     KeepKey,
     PutEntry,
     JoinRecord,
+    Discard(Discarded),
 }
 
 const LEAVE: [Write; 6] = [
@@ -53,6 +59,15 @@ const LEAVE: [Write; 6] = [
     Write::ClearRecord,
 ];
 const JOIN: [Write; 3] = [Write::KeepKey, Write::PutEntry, Write::JoinRecord];
+const FRESH: [Write; 7] = [
+    Write::Discard(Discarded::Marked),
+    Write::Discard(Discarded::Some),
+    Write::Discard(Discarded::All),
+    Write::Discard(Discarded::Done),
+    Write::KeepKey,
+    Write::PutEntry,
+    Write::JoinRecord,
+];
 
 thread_local! {
     static INTERRUPT: Cell<Option<Write>> = const { Cell::new(None) };
@@ -76,10 +91,16 @@ fn detach_and_rejoin_conform_at_write_boundaries() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["leave"].as_array().unwrap().len(), LEAVE.len() + 1);
     assert_eq!(reply["join"].as_array().unwrap().len(), JOIN.len() + 1);
+    assert_eq!(reply["fresh"].as_array().unwrap().len(), FRESH.len() + 1);
 
     let env = TestEnv::new();
     let exe = std::env::current_exe().unwrap();
-    for (phase, count) in [("leave", LEAVE.len()), ("join", JOIN.len())] {
+    let phases = [
+        ("leave", LEAVE.len()),
+        ("join", JOIN.len()),
+        ("fresh", FRESH.len()),
+    ];
+    for (phase, count) in phases {
         for cut in 0..count {
             // Each child gets its own jj and musubi state without changing the environment
             // of other tests in this process.
@@ -116,8 +137,10 @@ fn detach_and_rejoin_conform_at_write_boundaries() {
 }
 
 /// The hub has accepted the request. Use the same local key selection and writes as join,
-/// through the actual jj checkout and state directory.
-fn join_locally(located: &Located, accepted: &Joined) -> anyhow::Result<()> {
+/// through the actual jj checkout and state directory, discarding the shared history first if
+/// `fresh`, as join does before it asks the hub.
+fn join_locally(located: &Located, accepted: &Joined, fresh: bool) -> anyhow::Result<()> {
+    join::discard_history_if(located, fresh)?;
     let settings = settings::load(&located.workspace_root, &located.repo_path)?;
     let machine = join::joining_machine(located, Some("laptop"), &settings)?;
     join::keep_join_key(located, &machine)?;
@@ -144,23 +167,32 @@ fn detachment_process() {
     let located = Located::find(&std::env::current_dir().unwrap()).unwrap();
     let saved = state_dir().unwrap().join("test-fixture.json");
     if retry {
-        let (old, fresh, accepted): (Entry, Option<Entry>, Joined) =
+        let (old, fresh, accepted, first): (Entry, Option<Entry>, Joined, String) =
             serde_json::from_slice(&fs::read(saved).unwrap()).unwrap();
         let cut = &expected[phase][index + 1];
-        assert_eq!(snapshot(&located, &old, fresh.as_ref()), cut["prefix"]);
+        assert_eq!(
+            snapshot(&located, &old, fresh.as_ref(), &first),
+            cut["prefix"]
+        );
         if phase == "leave" {
             // Join uses this same path to finish an interrupted leave before selecting a key.
             leave::finish_detaching(&located).unwrap();
-            assert_eq!(snapshot(&located, &old, None), cut["retry"]);
+            assert_eq!(snapshot(&located, &old, None, &first), cut["retry"]);
         }
-        let fresh = fresh.unwrap_or_else(|| candidate(&located, &old));
-        join_locally(&located, &accepted).unwrap();
-        let joined = if phase == "join" {
-            &cut["retry"]
-        } else {
+        // The candidate this process picks, unless the stopped join kept one: each process
+        // draws its keys from a seed of its own.
+        let kept = NodeRepo::machine_of(&located.repo_path).unwrap().is_some();
+        let fresh = fresh
+            .filter(|_| kept)
+            .unwrap_or_else(|| candidate(&located, &old));
+        // A plain join, even after a fresh one stopped.
+        join_locally(&located, &accepted, false).unwrap();
+        let joined = if phase == "leave" {
             &expected["join"][JOIN.len()]["prefix"]
+        } else {
+            &cut["retry"]
         };
-        assert_eq!(snapshot(&located, &old, Some(&fresh)), *joined);
+        assert_eq!(snapshot(&located, &old, Some(&fresh), &first), *joined);
         return;
     }
 
@@ -185,7 +217,7 @@ fn detachment_process() {
         reason: String::new(),
         present: vec![],
     };
-    join_locally(&located, &accepted).unwrap();
+    join_locally(&located, &accepted, false).unwrap();
     let before = Found::read(&located.repo_path).unwrap();
     let old = UserState::load()
         .unwrap()
@@ -193,15 +225,18 @@ fn detachment_process() {
         .unwrap()
         .clone();
     let record = before.record.unwrap();
+    // The join operation of the history shared so far.
+    let joins = fs::read_to_string(located.repo_path.join("musubi/joins")).unwrap();
+    let first = joins.split_whitespace().nth(1).unwrap().to_owned();
     assert_eq!(
-        snapshot(&located, &old, None),
+        snapshot(&located, &old, None, &first),
         expected["leave"][0]["prefix"]
     );
 
     if phase == "leave" {
         fs::write(
             saved,
-            serde_json::to_vec(&(&old, None::<Entry>, &accepted)).unwrap(),
+            serde_json::to_vec(&(&old, None::<Entry>, &accepted, &first)).unwrap(),
         )
         .unwrap();
         INTERRUPT.set(Some(LEAVE[index]));
@@ -210,16 +245,21 @@ fn detachment_process() {
         leave::detach(&located, Some(&record)).unwrap();
         let fresh = candidate(&located, &old);
         assert_eq!(
-            snapshot(&located, &old, Some(&fresh)),
-            expected["join"][0]["prefix"]
+            snapshot(&located, &old, Some(&fresh), &first),
+            expected[phase][0]["prefix"]
         );
         fs::write(
             saved,
-            serde_json::to_vec(&(&old, Some(&fresh), &accepted)).unwrap(),
+            serde_json::to_vec(&(&old, Some(&fresh), &accepted, &first)).unwrap(),
         )
         .unwrap();
-        INTERRUPT.set(Some(JOIN[index]));
-        join_locally(&located, &accepted).unwrap();
+        let (writes, fresh): (&[Write], bool) = if phase == "fresh" {
+            (&FRESH, true)
+        } else {
+            (&JOIN, false)
+        };
+        INTERRUPT.set(Some(writes[index]));
+        join_locally(&located, &accepted, fresh).unwrap();
     }
     panic!("the command did not reach the interruption point");
 }
@@ -234,7 +274,9 @@ fn candidate(located: &Located, old: &Entry) -> Entry {
     }
 }
 
-fn snapshot(located: &Located, old: &Entry, fresh: Option<&Entry>) -> Value {
+/// The files at a boundary, as the model has them. `first` names the join operation of the
+/// history the checkout shared before.
+fn snapshot(located: &Located, old: &Entry, fresh: Option<&Entry>, first: &str) -> Value {
     let found = Found::read(&located.repo_path).unwrap();
     let state = UserState::load().unwrap();
     assert!(state.copies.len() <= 1, "{:?}", state.copies);
@@ -275,9 +317,40 @@ fn snapshot(located: &Located, old: &Entry, fresh: Option<&Entry>) -> Value {
         "entry": entry,
         "marker": has_detach_marker(located, &old.key),
         "retired": retired,
+        "history": history(located, first),
+        "discarding": NodeRepo::discarding_shared_history(&located.repo_path),
         "oldCheck": check(old, &found).is_ok(),
         "freshCheck": fresh.is_some_and(|entry| check(entry, &found).is_ok()),
     })
+}
+
+/// What the checkout keeps of the history whose join operation is `first`: `kept` if both
+/// its join record and its canonical store have it, `none` if neither does, else `part`.
+fn history(located: &Located, first: &str) -> &'static str {
+    let dir = located.repo_path.join("musubi");
+    let recorded = fs::read_to_string(dir.join("joins")).is_ok_and(|joins| joins.contains(first));
+    // Opening a store makes one where there is none: look first.
+    let stored = dir.join("canonical").exists() && {
+        let settings = settings::load(&located.workspace_root, &located.repo_path).unwrap();
+        let loader = RepoLoader::init_from_file_system(
+            &settings,
+            &located.repo_path,
+            &default_backend_factories(),
+        )
+        .unwrap();
+        let store = CanonicalStore::open(
+            &dir.join("canonical"),
+            loader.store().root_commit_id().clone(),
+        )
+        .unwrap();
+        let id = OperationId::try_from_hex(first).unwrap();
+        store.has_operation(&CanonicalOp(id))
+    };
+    match (recorded, stored) {
+        (true, true) => "kept",
+        (false, false) => "none",
+        _ => "part",
+    }
 }
 
 fn has_detach_marker(located: &Located, old: &str) -> bool {

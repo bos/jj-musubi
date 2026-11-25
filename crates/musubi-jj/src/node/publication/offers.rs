@@ -18,7 +18,7 @@ use super::NodeRepo;
 use crate::node::PublicationError;
 use crate::op_id::CanonicalOp;
 
-pub(super) const OFFERS_FILE: &str = "publication-offers.json";
+pub(in crate::node) const OFFERS_FILE: &str = "publication-offers.json";
 
 #[derive(Deserialize, Serialize)]
 struct PublicationOffers {

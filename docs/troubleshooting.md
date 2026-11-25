@@ -219,7 +219,8 @@ to each hub removal, creation or clone command if the hive lives elsewhere.
    wanted files and commit them in the fresh repo. To keep existing commits, use the [transfer
    steps below](#rescue-work-in-a-new-copy) with the fresh repo as the destination. Check the
    entire ancestry of every commit you transfer. When in doubt, copy only the files you want.
-   Joining or creating from an old checkout can send its old operation history again.
+   Joining or creating from an old checkout sends every commit it still has, and its old
+   operation history too, unless you pass `--fresh`.
 
 3. In the fresh repo, run `musubi create app`. On each other machine, run
    `musubi clone app ../app-clean` from the old checkout. Copy any remaining wanted work into

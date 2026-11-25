@@ -56,7 +56,9 @@ unwanted history, see [Purge shared history](../troubleshooting.md#purge-shared-
 
 To share again, start a hive with `musubi create` and run `musubi join --hive <name>` in other
 copies. A plain `musubi join` refuses while the copy records a removed hive; run
-`musubi leave` first, after which `musubi join` matches it as any other repo.
+`musubi leave` first, after which `musubi join` matches it as any other repo. A copy that
+creates or joins another hive sends it the removed hive's operation history, unless you pass
+`--fresh` (see [Rejoin](#rejoin-or-stop-using-jj-musubi)).
 
 ## Pause syncing or leave
 
@@ -148,8 +150,17 @@ forgotten.
 After leaving, run `musubi join` in the same repo to join as a new copy. To give the new
 copy a different machine name, run `musubi join --machine work-laptop`; under its old name,
 the other machines show it with part of its new key, as `laptop-1a2b/default`. Your files and
-jj history stay in the checkout. If you join a different hive, the history you already
-shared goes with you.
+jj history stay in the checkout.
+
+If you join a different hive, or start one with `musubi create`, the operation history you
+already shared goes with you, with everything it holds, even work you have deleted since. The
+command warns, with the number of operations. To leave that history out, pass `--fresh`, as
+in `musubi create --fresh`: the repo sends its commits and bookmarks as they are now, as a
+repo that was never part of a hive does, and keeps its own operation log. If the warning
+comes too late, take the copy out with `musubi leave`, remove the new hive with `musubi hub
+remove --immediately <hive>`, and run `musubi create --fresh <hive>`. Don't use `--fresh` to
+join the hive you left again, which has that history already: where its commits changed
+since, you would get divergent changes to resolve.
 
 To stop using jj-musubi on a machine:
 

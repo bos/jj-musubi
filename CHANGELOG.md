@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `musubi create --fresh` and `musubi join --fresh` leave out the operation history a repo
+  shared with a hive before, which, after `musubi leave` or `musubi hub remove`, they
+  otherwise send to the next hive, with everything it holds, even work deleted since. The repo
+  sends its commits and bookmarks as they are now, and keeps its own operation log. `create`
+  and `join` now warn when they send that history, with the number of operations. Deleting
+  `.jj/repo/musubi` is no longer the only way to start over (#178). Nothing to do on
+  upgrading.
+
 - Interrupting `musubi create`, `musubi join` or `musubi clone` with Ctrl-C while it waits for
   the first sync now stops the sync, and the repo leaves the hive with none of the hive's
   history in it. The command exits with status 130 and says so, with the `musubi join --hive

@@ -4,72 +4,13 @@ use std::io;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use process_wrap::tokio::ChildWrapper;
 use process_wrap::tokio::CommandWrap;
 use process_wrap::tokio::KillOnDrop;
-use tokio::sync::Notify;
 
-type Active = Arc<Mutex<Option<Arc<Notify>>>>;
-static INTERRUPTS: OnceLock<Result<Active, ctrlc::Error>> = OnceLock::new();
-
-/// Tokio leaves its signal handler installed after a short-lived runtime ends. Keep a
-/// process-wide handler for this command instead: cancel and reap the active fetch, then
-/// retain ordinary interruption behavior during the rest of the join (notably its sync).
-struct Cancellation {
-    active: Active,
-    notify: Arc<Notify>,
-}
-
-impl Cancellation {
-    fn register() -> io::Result<Self> {
-        let active = INTERRUPTS
-            .get_or_init(|| {
-                let active: Active = Arc::default();
-                let signal = active.clone();
-                ctrlc::set_handler(move || {
-                    let active = signal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(notify) = &*active {
-                        // Repeated interrupts must not exit before the first one's cleanup.
-                        notify.notify_one();
-                    } else {
-                        std::process::exit(130);
-                    }
-                })?;
-                Ok(active)
-            })
-            .as_ref()
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .clone();
-        let notify = Arc::new(Notify::new());
-        let mut slot = active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if slot.is_some() {
-            return Err(io::Error::other(
-                "an automatic upstream fetch is already running",
-            ));
-        }
-        *slot = Some(notify.clone());
-        drop(slot);
-        Ok(Self { active, notify })
-    }
-}
-
-impl Drop for Cancellation {
-    fn drop(&mut self) {
-        self.active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-    }
-}
+use crate::interrupt::Interrupts;
 
 /// Keep jj and its Git/SSH descendants together, including when a wait is interrupted.
 struct FetchChild {
@@ -101,14 +42,15 @@ pub(super) async fn run(mut command: Command, limit: Duration) -> io::Result<Exi
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
     // Declared first so unwinding stops the child before clearing its cancellation state.
-    let cancellation = Cancellation::register()?;
+    // Caught for the fetch alone: an interrupt during the rest of the join ends it as usual.
+    let interrupts = Interrupts::catch()?;
     let mut child = FetchChild {
         child: command.spawn()?,
         running: true,
     };
     let waited = tokio::select! {
         status = tokio::time::timeout(limit, child.child.wait()) => Some(status),
-        _ = cancellation.notify.notified() => None,
+        () = interrupts.next() => None,
     };
     match waited {
         Some(Ok(status)) => {

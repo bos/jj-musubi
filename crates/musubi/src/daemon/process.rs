@@ -851,7 +851,7 @@ mod tests {
             let stopped = Arc::new(AtomicBool::new(false));
             let answer = {
                 let stopped = stopped.clone();
-                move |request: control::Request| {
+                move |request: control::Request, _| {
                     let stopped = stopped.clone();
                     async move {
                         if request == control::Request::Stop {
@@ -949,7 +949,7 @@ mod tests {
             let stopped = Arc::new(AtomicBool::new(false));
             let answer = {
                 let stopped = stopped.clone();
-                move |request: control::Request| {
+                move |request: control::Request, _| {
                     let stopped = stopped.clone();
                     async move {
                         if request == control::Request::Stop {

@@ -19,7 +19,7 @@ explains hubs, hives, and copies.
 | `create [<name>]` | Start a hive from the repo you're in, for other copies to join. |
 | `join` | Join this copy to its matching hive, or recreate a lost hive on this hub or another named by `--hub`. A filesystem duplicate can take over the original's identity with `--original` once that copy is gone. |
 | `clone <hive> [<dir>]` | Create a copy in a new or empty `<dir>`, making missing parents, and check out `trunk()` using local jj config. Without `<dir>`, use the hive name's last component (`dotfiles` for `bos/dotfiles`) in the current directory, even with an abbreviated hive name. The hive's creation defaults fill missing settings (name and email by default); existing settings win. Git remotes aren't copied. Objects use the hive's SHA-1 or SHA-256 hash, regardless of `git.object-hash`. |
-| `leave` | Attempt a final sync, then leave the hive, keeping the repo and files. `--force` still attempts this sync but leaves even if it fails. `leave <path>` stops looking for a copy that is gone. See [Pause syncing or leave](../guides/manage.md#pause-syncing-or-leave). |
+| `leave` | Attempt a final sync, then leave the hive, keeping the repo and files. `--force` still attempts this sync but leaves even if it fails. `leave <path>` stops looking for a copy that is gone. In a repo whose first sync an interrupted `create`, `join` or `clone` stopped, `leave` clears the machine name it kept, so that `join --machine` can give another. See [Pause syncing or leave](../guides/manage.md#pause-syncing-or-leave). |
 | `forget <machine>` | Forget another machine's missing copy, or an old deleted copy here, even without workspaces. `musubi status` lists copies. Use the machine part of its workspace name: `laptop` for `laptop/default@`, `laptop-1a2b` for `laptop-1a2b/default@`, or its full id if prefixes collide (`laptop-1a2b3c4d/default@`). The name from `musubi list` also works if unambiguous. |
 
 `create`, `join`, and `clone` take:
@@ -148,6 +148,17 @@ a minute. Reports expire after a day without contact.
 
 `create`, `join`, and `clone` start a missing daemon and wait for the first sync. `sync` uses
 the daemon if running, or syncs directly with a warning. Each shows progress on a terminal.
+
+Interrupting `create`, `join` or `clone` with Ctrl-C while it waits stops the first sync, and
+the repo leaves the hive with none of the hive's history in it; the command exits with status
+130 and names the `musubi join --hive <name>` that joins it again. Closing its terminal or
+killing it stops the sync too. If the hive's history is already going into the repo, it's too
+late: the sync goes on, the command says so, and `musubi leave` takes the repo out of the hive
+once it has synced. Interrupting `join` in a repo that was part of a hive already, as one that
+already syncs in the hive, one whose hive was removed or one `--original` joins again, just ends
+the command, and the repo goes on syncing. A repo whose first sync was stopped keeps its
+machine name, which joining again takes up; to join under another name, run `musubi leave`
+first, which clears it.
 
 ## Run a hub
 

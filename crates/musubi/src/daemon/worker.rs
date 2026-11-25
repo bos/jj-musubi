@@ -44,11 +44,13 @@ use super::status::publication_held;
 use super::sync::known;
 use super::sync::leave_hive;
 use super::sync::open_driver;
+use super::sync::unjoin;
 use crate::backoff::Backoff;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::Membership;
 use crate::config::UserState;
+use crate::control::Cancelled;
 use crate::control::Synced;
 use crate::copy;
 use crate::hub::Connection;
@@ -60,10 +62,191 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a repository that syncs is checked for whether gc is due.
 const GC_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How often a sync that takes long logs what it is doing, as a first sync of much does.
+const LONG_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(super) enum Command {
     /// Sync now, and say how it went.
     Sync(oneshot::Sender<Result<Synced, String>>),
+}
+
+/// Whether the command waiting on a copy's first sync, which `musubi join`, `create` and
+/// `clone` ask for ([`crate::control::Request::Join`]), can still stop it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Not known yet: the copy's worker is starting over for the sync.
+    Starting,
+    /// None can: none waits on it, or it has answered the one that did.
+    Closed,
+    /// One can: the copy has applied nothing of the hive's history since it joined, and
+    /// applies nothing while this lasts.
+    Open,
+    /// Too late: the copy has begun applying the hive's history, which goes on.
+    Applying,
+    /// Stopped: the copy is leaving its hive.
+    Stopping,
+    /// Stopped, and the copy left its hive. Its worker ends serving once it next waits, if it
+    /// hasn't.
+    Stopped,
+}
+
+/// A copy's first sync, as far as stopping it goes, shared by the server, the copy's worker,
+/// its thread and its sync's gate ([`NodeDriver::before_applying`]). Each change of stage is
+/// made under the channel's lock, so that the gate and a command stopping the sync never
+/// both win.
+#[derive(Clone)]
+pub(super) struct FirstSync(Arc<Shared>);
+
+struct Shared {
+    /// The copy's machine key.
+    key: String,
+    stage: watch::Sender<Stage>,
+    /// Whether the gate has let the copy apply any of the hive's history, whatever the stage.
+    applied: AtomicBool,
+}
+
+impl FirstSync {
+    fn new(key: &str, stage: Stage) -> Self {
+        Self(Arc::new(Shared {
+            key: key.to_owned(),
+            stage: watch::Sender::new(stage),
+            applied: AtomicBool::new(false),
+        }))
+    }
+
+    /// A sync of `key`'s copy no command can stop.
+    pub(super) fn closed(key: &str) -> Self {
+        Self::new(key, Stage::Closed)
+    }
+
+    /// A sync of `key`'s copy that a command waits on, whose worker is about to start over.
+    pub(super) fn starting(key: &str) -> Self {
+        Self::new(key, Stage::Starting)
+    }
+
+    /// The worker has started over: the sync can be stopped, unless the copy has applied
+    /// some of the hive's history since it joined, as the worker it replaced may have, if
+    /// `applied`.
+    pub(super) fn started(&self, applied: bool) {
+        self.0.stage.send_if_modified(|stage| {
+            let starting = *stage == Stage::Starting;
+            if starting {
+                *stage = if applied {
+                    Stage::Applying
+                } else {
+                    Stage::Open
+                };
+            }
+            starting
+        });
+    }
+
+    /// Whether the copy has applied any of the hive's history in this sync, stoppable or not.
+    pub(super) fn applied(&self) -> bool {
+        self.0.applied.load(Ordering::Acquire)
+    }
+
+    /// The gate for the copy's sync: fails while the sync is stopped, and otherwise lets it
+    /// apply the hive's history, from when on it can't be stopped.
+    fn may_apply(&self) -> anyhow::Result<()> {
+        let mut stopped = false;
+        self.0.stage.send_if_modified(|stage| match stage {
+            Stage::Stopping | Stage::Stopped => {
+                stopped = true;
+                false
+            }
+            Stage::Starting | Stage::Open => {
+                *stage = Stage::Applying;
+                true
+            }
+            Stage::Closed | Stage::Applying => false,
+        });
+        anyhow::ensure!(!stopped, "the first sync was stopped");
+        // Under no lock of the stage's, but before anything is applied, which is all that
+        // reading it after the worker's thread has finished needs.
+        self.0.applied.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// No command can stop the sync any more, unless one has.
+    pub(super) fn close(&self) {
+        self.0.stage.send_if_modified(|stage| {
+            let open = matches!(stage, Stage::Starting | Stage::Open | Stage::Applying);
+            if open {
+                *stage = Stage::Closed;
+            }
+            open
+        });
+    }
+
+    /// Stops the sync, if it can be, because of `why`, taking the copy out of its hive with
+    /// `leave`. Says how that went, once the copy has left, or why it couldn't leave, in which
+    /// case the sync goes on.
+    pub(super) async fn stop(
+        &self,
+        why: &str,
+        leave: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> Result<Cancelled, String> {
+        let gone = |_| "the repository's thread stopped".to_owned();
+        let mut stage = self.0.stage.subscribe();
+        stage
+            .wait_for(|stage| *stage != Stage::Starting)
+            .await
+            .map_err(gone)?;
+        let stopping = self.0.stage.send_if_modified(|stage| {
+            let open = *stage == Stage::Open;
+            if open {
+                *stage = Stage::Stopping;
+            }
+            open
+        });
+        // At once, and not once the worker has ended, which may be after a long import, by
+        // when the user may have joined again. Safe, as the copy has applied none of the
+        // hive's history, and the gate lets its sync apply none now, wherever it is. Open, the
+        // stage is its worker's, the one serving the copy (`Supervisor::start`); one another
+        // command starts in its place, once it has gone, finds the copy left before it syncs,
+        // since this leaves without waiting for anything.
+        if stopping {
+            let key = &self.0.key;
+            tracing::info!(copy = %key, "stopping the first sync, as {why}; the copy leaves its hive");
+            match leave(key) {
+                Ok(()) => {
+                    self.0.stage.send_replace(Stage::Stopped);
+                }
+                // Not stopped after all: the sync goes on, as the copy is still in its hive.
+                // Its gate may have refused it meanwhile, which a retry gets past.
+                Err(err) => {
+                    let err = format!("{err:#}");
+                    tracing::error!(copy = %key, "the copy couldn't leave its hive: {err}");
+                    self.0.stage.send_replace(Stage::Closed);
+                    return Err(err);
+                }
+            }
+        }
+        let settled = stage
+            .wait_for(|stage| *stage != Stage::Stopping)
+            .await
+            .map_err(gone)?;
+        Ok(match &*settled {
+            Stage::Stopped => Cancelled::Stopped,
+            Stage::Applying => Cancelled::TooLate,
+            _ => Cancelled::Answered,
+        })
+    }
+
+    /// Whether the sync is stopped, so that nothing more of it is to be recorded.
+    fn is_stopped(&self) -> bool {
+        matches!(*self.0.stage.borrow(), Stage::Stopping | Stage::Stopped)
+    }
+
+    /// Resolves once the sync is stopped.
+    async fn stopped(&self) {
+        let mut stage = self.0.stage.subscribe();
+        stage
+            .wait_for(|stage| matches!(stage, Stage::Stopping | Stage::Stopped))
+            .await
+            .ok();
+    }
 }
 
 /// The server's handle to one copy. Its channel, state and thread stay together until stopped.
@@ -73,11 +256,13 @@ pub(super) struct Worker {
     stop: watch::Sender<bool>,
     status: SharedStatus,
     progress: Progress,
+    first: FirstSync,
     thread: std::thread::JoinHandle<()>,
 }
 
 impl Worker {
-    pub(super) fn start(key: String, hubs: Arc<Hubs>) -> Self {
+    /// Serves `key`'s copy, its first sync stoppable as `first` says.
+    pub(super) fn start(key: String, hubs: Arc<Hubs>, first: FirstSync) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (stop, stopped) = watch::channel(false);
         let initial = held_copy(&key)
@@ -88,9 +273,10 @@ impl Worker {
         let thread = {
             let status = status.clone();
             let progress = progress.clone();
+            let first = first.clone();
             std::thread::Builder::new()
                 .name(format!("serve {key}"))
-                .spawn(move || serve(&key, receiver, stopped, &status, &progress, &hubs))
+                .spawn(move || serve(&key, receiver, stopped, &status, &progress, &hubs, &first))
                 .expect("spawning a thread")
         };
         Self {
@@ -98,8 +284,13 @@ impl Worker {
             stop,
             status,
             progress,
+            first,
             thread,
         }
+    }
+
+    pub(super) fn first_sync(&self) -> FirstSync {
+        self.first.clone()
     }
 
     pub(super) fn is_finished(&self) -> bool {
@@ -144,6 +335,7 @@ fn serve(
     status: &SharedStatus,
     progress: &Progress,
     hubs: &Hubs,
+    first: &FirstSync,
 ) {
     // Everything this thread logs is about this copy. At error level, the span stays on
     // under any filter that shows anything.
@@ -161,13 +353,31 @@ fn serve(
     runtime.block_on(async {
         let mut stop = stop;
         tokio::select! {
-            () = serve_retrying(key, commands, status, progress, hubs) => {}
+            () = serve_retrying(key, commands, status, progress, hubs, first) => {}
             () = snapshots::serve(key, status) => {}
             () = stopped(&mut stop) => {}
+            // Ending the sync wherever it waits, as a crash would. Safe, as nothing of the
+            // hive's history has been applied, and the gate lets none be applied now.
+            () = first.stopped() => {}
         }
     });
     // Dropping the runtime joins blocking work, including a snapshot already in flight.
     // `Worker::stop` joins this thread before letting another worker take its place.
+}
+
+/// Takes `key`'s copy, whose first sync was stopped, out of its hive, without telling the
+/// hive, which would take the sync that was stopped. It keeps its key, which joining again
+/// takes up ([`super::sync::unjoin`]).
+pub(super) fn leave_unsynced(key: &str) -> anyhow::Result<()> {
+    let Some(located) = held_copy(key) else {
+        anyhow::bail!("the copy is no longer where it joined");
+    };
+    let Some(hive) = HiveConfig::load(&located.repo_path)? else {
+        return Ok(());
+    };
+    // False if it isn't part of that hive any more, as after `musubi leave` meanwhile.
+    unjoin(&located, &hive)?;
+    Ok(())
 }
 
 /// Waits until told to stop, or until nothing can tell it anything any more.
@@ -184,12 +394,23 @@ async fn serve_retrying(
     status: &SharedStatus,
     progress: &Progress,
     hubs: &Hubs,
+    first: &FirstSync,
 ) {
     let mut waiting = vec![];
     let mut backoff = Backoff::new(Duration::from_secs(1), MAX_BACKOFF);
     loop {
         let started = now();
-        match serve_async(key, &mut commands, status, progress, &mut waiting, hubs).await {
+        match serve_async(
+            key,
+            &mut commands,
+            status,
+            progress,
+            &mut waiting,
+            hubs,
+            first,
+        )
+        .await
+        {
             Ok(()) => return,
             Err(err) => {
                 let message = format!("{err:#}");
@@ -317,9 +538,11 @@ async fn serve_async(
     progress: &Progress,
     waiting: &mut Vec<oneshot::Sender<Result<Synced, String>>>,
     hubs: &Hubs,
+    first: &FirstSync,
 ) -> anyhow::Result<()> {
     // No entry: the copy left, or its hive was removed.
-    let Some(mut session) = Session::open(key, commands, status, progress, waiting, hubs).await?
+    let Some(mut session) =
+        Session::open(key, commands, status, progress, waiting, hubs, first).await?
     else {
         return Ok(());
     };
@@ -389,6 +612,9 @@ struct Session<'a> {
     reconnections: musubi_transport::Reconnections,
     notices: musubi_transport::Subscription,
     driver: NodeDriver,
+    /// What the sync is doing, for its log while it takes long.
+    progress: Progress,
+    first: FirstSync,
     machine: String,
     connection: Arc<Connection>,
     /// The identity of the repository's directory when it was last opened.
@@ -408,6 +634,7 @@ impl<'a> Session<'a> {
         progress: &Progress,
         waiting: &'a mut Vec<oneshot::Sender<Result<Synced, String>>>,
         hubs: &Hubs,
+        first: &FirstSync,
     ) -> anyhow::Result<Option<Self>> {
         let Some((entry, located)) = find_copy(key)? else {
             return Ok(None);
@@ -417,7 +644,9 @@ impl<'a> Session<'a> {
         let opened = identity(&located.repo_path);
         let connection = hubs.connect(&hive.hub).await?;
         let own = hubs.own_connections(&hive.hub);
-        let (driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
+        let (mut driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
+        let gate = first.clone();
+        driver.before_applying(move || gate.may_apply());
         let transport = &connection.transport;
         let notices = transport.subscribe(&hive.head_subject()).await?;
         let reconnections = transport.reconnections();
@@ -444,6 +673,8 @@ impl<'a> Session<'a> {
             reconnections,
             notices,
             driver,
+            progress: progress.clone(),
+            first: first.clone(),
             machine,
             connection,
             opened,
@@ -576,7 +807,26 @@ impl<'a> Session<'a> {
         self.reconnections.seen();
         let held_before = self.status.publication_held();
         let error_before = self.status.snapshot().error;
-        let result = self.driver.sync().await;
+        // Saying what it does every so often, so that a long one, as a first sync of much is,
+        // shows in the log as going on.
+        let result = {
+            let sync = self.driver.sync();
+            tokio::pin!(sync);
+            let mut every = tokio::time::interval_at(
+                tokio::time::Instant::now() + LONG_SYNC_LOG_INTERVAL,
+                LONG_SYNC_LOG_INTERVAL,
+            );
+            loop {
+                tokio::select! {
+                    result = &mut sync => break result,
+                    _ = every.tick() => tracing::info!(
+                        "syncing for {}s so far: {}",
+                        started.elapsed().as_secs(),
+                        doing(self.progress.get())
+                    ),
+                }
+            }
+        };
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&self.driver);
         // Why the hub is out of reach, if the connector knows, says more than a timeout.
@@ -601,6 +851,11 @@ impl<'a> Session<'a> {
             held_before,
             error_before,
         } = attempt;
+        // The copy has left its hive: nothing of this sync is its to record, nor the hub's to
+        // hear. Serving ends as soon as this waits.
+        if self.first.is_stopped() {
+            return Ok(Flow::Done);
+        }
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
             && HiveGone::of(err) == Some(HiveGone::Removed)
@@ -715,6 +970,19 @@ impl<'a> Session<'a> {
     }
 }
 
+/// What a sync is doing, as its log says it.
+fn doing(activity: Activity) -> String {
+    match activity {
+        Activity::Asking => "waiting for the hub".to_owned(),
+        Activity::Sending { done, total } => format!("sending {}", crate::ui::bytes(done, total)),
+        Activity::Receiving { done, total } => {
+            format!("receiving {}", crate::ui::bytes(done, total))
+        }
+        Activity::Importing => "importing commits".to_owned(),
+        Activity::Applying { done } => format!("applying operations, {done} so far"),
+    }
+}
+
 /// Whether a gc runs, in any repository the daemon serves: one at a time is enough.
 static COLLECTING: AtomicBool = AtomicBool::new(false);
 
@@ -802,4 +1070,67 @@ fn report(
             Err(err) => tracing::debug!("could not report to the hub: {err}"),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn left(_: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// A `Cancel` that comes before its `Join` waits for the worker to start over, and then
+    /// stops the sync; once stopped, nothing more of the hive's is applied.
+    #[tokio::test]
+    async fn a_cancel_before_its_join_waits_and_stops_it() {
+        let first = FirstSync::starting("k");
+        let stopping = tokio::spawn({
+            let first = first.clone();
+            async move { first.stop("asked", left).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!stopping.is_finished());
+        first.started(false);
+        assert_eq!(stopping.await.unwrap(), Ok(Cancelled::Stopped));
+        assert!(first.may_apply().is_err());
+        assert!(!first.applied());
+        // Stopping again says the same, and leaves again nothing.
+        let never = |_: &str| -> anyhow::Result<()> { panic!("left twice") };
+        assert_eq!(first.stop("asked", never).await, Ok(Cancelled::Stopped));
+    }
+
+    /// Once the sync has applied some of the hive's history, here or in the worker it
+    /// replaced, it can't be stopped; nor once it has answered.
+    #[tokio::test]
+    async fn applying_or_answered_is_too_late_to_stop() {
+        let never = |_: &str| -> anyhow::Result<()> { panic!("left") };
+        let first = FirstSync::starting("k");
+        first.started(false);
+        first.may_apply().unwrap();
+        assert!(first.applied());
+        assert_eq!(first.stop("asked", never).await, Ok(Cancelled::TooLate));
+        let carried = FirstSync::starting("k");
+        carried.started(true);
+        assert_eq!(carried.stop("asked", never).await, Ok(Cancelled::TooLate));
+        let answered = FirstSync::starting("k");
+        answered.started(false);
+        answered.close();
+        assert_eq!(answered.stop("asked", never).await, Ok(Cancelled::Answered));
+        // Closed before the worker started over: it never opens.
+        let closed = FirstSync::starting("k");
+        closed.close();
+        closed.started(false);
+        assert_eq!(closed.stop("asked", never).await, Ok(Cancelled::Answered));
+    }
+
+    /// A copy that can't leave its hive goes on syncing, and the stop says why.
+    #[tokio::test]
+    async fn a_copy_that_cant_leave_goes_on() {
+        let first = FirstSync::starting("k");
+        first.started(false);
+        let stuck = |_: &str| -> anyhow::Result<()> { anyhow::bail!("stuck") };
+        assert_eq!(first.stop("asked", stuck).await, Err("stuck".to_owned()));
+        assert!(first.may_apply().is_ok());
+    }
 }

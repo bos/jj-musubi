@@ -157,6 +157,12 @@ impl NodeRepo {
         Ok(Some(PendingRetirement { path, keys }))
     }
 
+    /// Whether this repository's active key is the one it retired last: a retirement that
+    /// stopped before the key was cleared.
+    pub fn machine_retired(&self) -> bool {
+        self.identities.retired.last() == Some(&self.machine)
+    }
+
     /// Removes the active key after retiring it. A later join chooses a new one.
     pub fn clear_machine(repo_path: &Path) -> Result<(), NodeError> {
         let path = super::machine_path(repo_path);

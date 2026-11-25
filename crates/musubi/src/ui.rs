@@ -40,12 +40,17 @@ const DEFAULTS: &str = include_str!("defaults.toml");
 /// The status musubi exits with when whoever reads its output stopped, as jj's does.
 const UNREAD_STATUS: u8 = 3;
 
+/// The status musubi exits with when interrupted, as a shell gives a command ^C ended.
+const INTERRUPTED_STATUS: u8 = 130;
+
 pub struct Ui {
     ui: jj_cli::ui::Ui,
     config: StackedConfig,
     /// Whether whoever reads what it prints has stopped, as `head` does in `musubi list |
     /// head`. The command carries on all the same, printing nothing more there.
     unread: AtomicBool,
+    /// Whether the command was interrupted, and stopped what it could of what it was doing.
+    interrupted: AtomicBool,
 }
 
 impl Ui {
@@ -75,6 +80,7 @@ impl Ui {
             ui,
             config,
             unread: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         })
     }
 
@@ -128,6 +134,22 @@ impl Ui {
                 }
             }
         }
+    }
+
+    /// Awaits `work`, showing `what` on a terminal meanwhile, cleared once it's done.
+    pub async fn while_doing<T>(&self, what: &str, work: impl Future<Output = T>) -> T {
+        let Some(mut output) = self.ui.progress_output() else {
+            return work.await;
+        };
+        let _clear = output.output_guard(format!("\r{}", Clear(ClearType::CurrentLine)));
+        write!(output, "\r{}{what}", Clear(ClearType::CurrentLine)).ok();
+        output.flush().ok();
+        work.await
+    }
+
+    /// Notes that the command was interrupted, so that it fails with the status that says so.
+    pub fn interrupted(&self) {
+        self.interrupted.store(true, Ordering::Relaxed);
     }
 
     /// Runs `wait`, which may block a while, showing `what` on a terminal meanwhile, cleared
@@ -240,6 +262,9 @@ impl Ui {
             .and_then(|()| jj_cli::command_error::print_error_sources(&self.ui, err.source()))
             .and_then(|()| self.print_hints(hints))
             .ok();
+        if self.interrupted.load(Ordering::Relaxed) {
+            return self.status(ExitCode::from(INTERRUPTED_STATUS));
+        }
         ExitCode::FAILURE
     }
 
@@ -406,7 +431,7 @@ fn clip(line: String, width: usize) -> String {
 }
 
 /// `done` of `total` bytes, in the unit that suits `total`, as jj shows sizes.
-fn bytes(done: u64, total: u64) -> String {
+pub(crate) fn bytes(done: u64, total: u64) -> String {
     let (unit, scale) = match total {
         ..0x10_0000 => ("KiB", 1u64 << 10),
         0x10_0000..0x4000_0000 => ("MiB", 1 << 20),

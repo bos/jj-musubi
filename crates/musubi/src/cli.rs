@@ -74,7 +74,9 @@ pub enum Command {
     ///
     /// Without a name, it is refused if the repository belongs in a hive the hub already
     /// has: `musubi join` joins that one. It starts the daemon if it isn't running, and
-    /// returns once the repository has synced.
+    /// returns once the repository has synced. Interrupted before then, it stops the sync,
+    /// and the repository leaves the hive, which stays on the hub, unless the hive's history
+    /// is already going into the repository.
     /// If remote bookmarks are conflicted, it tries fetching their remotes once and syncs
     /// the result. An unavailable remote leaves a warning and the conflict intact.
     /// Automatic fetches select only conflicted bookmarks, with a 30-second limit per remote.
@@ -93,7 +95,9 @@ pub enum Command {
     /// remotes' URLs. It refuses a repository that matches no hive or several, and a fork,
     /// which shares history but not a remote: choose a hive yourself with `--hive`, or start
     /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
-    /// once the repository has synced. Git remotes and jj config stay local.
+    /// once the repository has synced. Interrupted before then, it stops the sync, and the
+    /// repository leaves the hive, unless the hive's history is already going into it. Git
+    /// remotes and jj config stay local.
     /// A newer descendant of `main` can come from either copy. If remote bookmarks remain
     /// conflicted, it tries fetching their remotes once and syncs the result. An unavailable
     /// remote leaves a warning; local bookmark differences still merge as jj merges them.
@@ -126,7 +130,9 @@ pub enum Command {
     /// Create a new colocated repository from a hive.
     ///
     /// It makes the repository, joins it to the hive, and returns once it has synced, with
-    /// the daemon keeping it in sync from then on. It checks out `trunk()` using this
+    /// the daemon keeping it in sync from then on. Interrupted before then, it stops the sync,
+    /// and the repository leaves the hive, unless the hive's history is already going into
+    /// it. It checks out `trunk()` using this
     /// machine's jj config. It fills missing settings once from the defaults recorded when
     /// the hive was created: `user.name` and `user.email`, unless `musubi.clone-config` chose
     /// other keys there. Existing destination settings take precedence; sync never copies config.

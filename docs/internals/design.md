@@ -1041,7 +1041,17 @@ within its deadline. ssh's errors remain available in the copy's sync status.
 Each user runs one daemon, with an independent worker for each repository in its state file.
 `musubi create`, `join` and `clone` record membership and ask the daemon to serve the copy,
 starting it if necessary, then wait for its first sync. The local control connection exposes
-status and sync progress while that work runs.
+status and sync progress while that work runs. Until the first sync answers, the command can
+stop it: by asking, when interrupted, or by going away, as when it is killed, which closes
+its connection. The daemon stops the sync only while the copy has applied none of the hive's
+history: a gate the sync passes before each realization or advance of the op heads either
+refuses, once the sync is stopped, or ends the time it can be stopped. Until then the sync has
+written none of the hive's history where jj shows it, only objects jj doesn't reach and
+operations of this machine's own, such as a merge of its op heads, so ending it wherever it
+waits leaves the repository with none of the hive's history. Only a repository that had no
+record of a hive can stop it: stopping drops the record. The copy then leaves its hive without
+telling it, which would take the sync that was stopped, keeping the key the hub took for a join
+again, or for `musubi leave` to retire; a copy whose sync has begun applying finishes it.
 
 Only the owner may reach the control socket. musubi refuses unsafe socket directories or a
 named pipe another user has claimed, and a lock prevents a second daemon from taking over the
@@ -1052,7 +1062,7 @@ the installing environment needed to find programs, jj configuration and musubi 
 
 Commands reach the daemon over the [hub's stream transport](#transport), on its local socket:
 the daemon greets, a command sends a JSON request, and the daemon answers with a JSON
-response, for each of seven operations (`Request` and `Response` in
+response, for each of nine operations (`Request` and `Response` in
 `crates/musubi/src/control.rs`). Every message names first the build that sent it, and a
 build reads no further into another's. A daemon writes its build as a fourth line of
 `daemon.pid`, so a command refuses one of another build, and says to restart it, without

@@ -11,6 +11,7 @@ mod copy;
 mod daemon;
 mod debug;
 mod hub;
+mod interrupt;
 mod join;
 mod leave;
 mod list;

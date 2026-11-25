@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Interrupting `musubi create`, `musubi join` or `musubi clone` with Ctrl-C while it waits for
+  the first sync now stops the sync, and the repo leaves the hive with none of the hive's
+  history in it. The command exits with status 130 and says so, with the `musubi join --hive
+  <name>` that joins the repo again. Closing its terminal or killing it stops the sync too.
+  If the hive's history is already going into the repo, the sync goes on, and the command
+  says that instead. Before, the command ended and the daemon carried on, fetching everything
+  and merging the hive's history into the repo. A repo that was part of a hive already, as
+  one whose hive was removed or one `musubi join --original` joins again, goes on syncing as
+  before. A stopped repo keeps its machine name for joining again; `musubi leave` clears it,
+  so that `musubi join --machine` can name it anew. A sync that takes long now logs what it is
+  doing every 30 seconds. Commands and the daemon now speak a new version of their local
+  protocol: after upgrading, run `musubi daemon restart`, as commands say when they find the
+  old daemon.
+
 - `musubi leave` clears the copy's membership and machine name while keeping its jj files
   and history. The same checkout can join as a new copy with `musubi join --machine <name>`.
   Repos that left before upgrading clear their old membership the next time they join.

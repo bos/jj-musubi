@@ -38,12 +38,14 @@ use crate::config::HiveConfig;
 use crate::config::Membership;
 use crate::config::UserState;
 use crate::control;
+use crate::control::Cancelled;
 use crate::copy;
 #[cfg(test)]
 use crate::copy::conformance::detach::{Write, after};
 use crate::daemon;
 use crate::daemon::Status;
 use crate::hub;
+use crate::interrupt::Interrupts;
 use crate::repo::Located;
 use crate::settings;
 use crate::socket::Socket;
@@ -143,6 +145,15 @@ pub fn join(
         }
         before => before,
     };
+    // A key `musubi leave` retired, in a repository with no record, but didn't clear before it
+    // stopped: finish clearing it, so that this join takes a new one.
+    if before.is_none() && NodeRepo::machine_of(&located.repo_path)?.is_some() {
+        let retired = located.open()?.machine_retired();
+        if retired {
+            let _lock = HiveConfig::lock(&located.repo_path)?;
+            crate::leave::retire_machine(&located)?;
+        }
+    }
     // Kept only once the hub takes the join: a join refused, or failing, before then leaves
     // `--machine` free to name it next time.
     let machine = joining_machine(&located, machine, &settings)?;
@@ -179,6 +190,10 @@ pub fn join(
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
+    // An interrupt from here on stops the first sync, and takes the repository back out of
+    // the hive. Only for one that had no record of a hive: stopping drops the record, which
+    // for one that had a record, joined or removed, would lose what it said.
+    let stoppable = before.is_none().then(Stoppable::catch);
     // The hub took this machine's key: it is the repository's from now on.
     keep_join_key(&located, &machine)?;
     become_node(
@@ -218,7 +233,7 @@ pub fn join(
         writeln!(out, " ({}), {machines}", joined.reason)?;
     }
     drop(out);
-    start_serving(ui, &located, socket)?;
+    start_serving(ui, &located, socket, stoppable)?;
     fetch_join_conflicts(ui, &located, socket)
 }
 
@@ -310,12 +325,16 @@ pub(crate) fn joining_machine(
         let name = name.unwrap_or_else(|| settings.operation_hostname());
         return Ok(NodeRepo::new_machine(&located.repo_path, name, settings)?);
     };
-    if let Some(name) = name {
-        anyhow::ensure!(
-            machine.name() == musubi_jj::workspaces::sanitize(name),
-            "this repository's machine is already named {}",
-            machine.name()
-        );
+    if let Some(name) = name
+        && machine.name() != musubi_jj::workspaces::sanitize(name)
+    {
+        return Err(crate::ui::with_hint(
+            anyhow::anyhow!(
+                "this repository's machine is already named {}",
+                machine.name()
+            ),
+            "`musubi leave`, then `musubi join --machine <name>`, joins again under a new name",
+        ));
     }
     Ok(machine)
 }
@@ -482,9 +501,28 @@ fn configured_forget_after(
         })?;
     Ok(Some((source, after)))
 }
+/// That a repository's first sync is to be stoppable: by an interrupt from now on, if they
+/// can be caught, and by the command going away, however it ends.
+pub(crate) struct Stoppable(Option<Interrupts>);
+
+impl Stoppable {
+    /// Catches interrupts from now on: one before the daemon is asked to sync stops the sync
+    /// as soon as it is asked.
+    pub(crate) fn catch() -> Self {
+        Self(Interrupts::catch().ok())
+    }
+}
+
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
-/// Without a daemon, syncs once.
-fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
+/// Without a daemon, syncs once. If `stoppable`, stopping the command while the daemon syncs
+/// stops the sync, unless the copy has begun applying the hive's history, and the copy leaves
+/// its hive.
+fn start_serving(
+    ui: &Ui,
+    located: &Located,
+    socket: &Socket,
+    stoppable: Option<Stoppable>,
+) -> anyhow::Result<()> {
     /// How asking the daemon to serve the repository went.
     enum Served {
         /// There was no daemon to ask, nor could one be started.
@@ -492,28 +530,113 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
         Synced,
         /// The daemon serves it, but its first sync failed, saying this.
         Failed(String),
+        /// Interrupted before the daemon was asked to serve the copy; with why no running
+        /// daemon could be asked, if one couldn't.
+        Unasked(Option<anyhow::Error>),
+        /// Interrupted: how stopping the sync went.
+        Interrupted(anyhow::Result<Cancelled>),
     }
     let key = copy::Found::read(&located.repo_path)?
         .key
         .context("this repository has no machine key")?;
+    // Read now, as stopping the first sync drops it.
+    let hive =
+        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
     // The client lives on the runtime that made it, so one runtime does it all.
     let served = block_on(async {
-        let client = match daemon::ensure(socket).await {
-            Ok(client) => client,
-            Err(err) => return Ok(Served::NoDaemon(err)),
+        // Interrupted already, as while this command recorded the join. No daemon was asked to
+        // serve the copy; but one running may serve it all the same, as one that took up its
+        // entry: that one is asked, and stopped at once, so that it says whether it has
+        // applied any of the hive's history. With none running, nothing syncs it.
+        let early = pending(stoppable.as_ref());
+        let client = if early {
+            match daemon::running(socket).await {
+                Ok(Some(client)) => client,
+                Ok(None) => return Ok(Served::Unasked(None)),
+                Err(err) => return Ok(Served::Unasked(Some(err))),
+            }
+        } else {
+            match daemon::ensure(socket).await {
+                Ok(client) => client,
+                Err(err) => return Ok(Served::NoDaemon(err)),
+            }
         };
-        let add = client.add(key.clone(), control::SYNC_LIMIT);
-        let first = ui
-            .while_waiting(add, daemon_progress(&client, &key))
-            .await
-            .context("asking the daemon to serve this repository")?;
-        Ok::<_, anyhow::Error>(match first {
-            Ok(_) => Served::Synced,
-            Err(message) => Served::Failed(message),
-        })
+        let progress = daemon_progress(&client, &key);
+        let Some(Stoppable(interrupts)) = &stoppable else {
+            let add = client.add(key.clone(), control::SYNC_LIMIT);
+            let first = ui.while_waiting(add, progress).await;
+            return Ok(
+                match first.context("asking the daemon to serve this repository")? {
+                    Ok(_) => Served::Synced,
+                    Err(message) => Served::Failed(message),
+                },
+            );
+        };
+        // Names this `Join` to the `Cancel` that may follow it.
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        // On a task of its own, so that it is sent even if an interrupt comes first, as the
+        // `Cancel` waits for it. Longer than the connection waits for a request, so that the
+        // daemon, not this command, gives up first: this command ending would stop the sync.
+        let join = tokio::spawn({
+            let (client, key, token) = (client.clone(), key.clone(), token.clone());
+            let limit = control::SYNC_LIMIT + Duration::from_secs(60);
+            async move { client.join(key, token, limit).await }
+        });
+        let mut join = std::pin::pin!(async { join.await? });
+        let first = tokio::select! {
+            biased;
+            first = ui.while_waiting(&mut join, progress) => first,
+            () = interrupted_or(early, interrupts.as_ref()) => {
+                // As long as the daemon takes to get to where it can stop: the end of what it
+                // is importing, say. Another interrupt stops this command waiting, as does the
+                // `Join` failing, which the `Cancel` would wait for.
+                let cancel = client.cancel(key.clone(), token, control::SYNC_LIMIT);
+                let cancel = ui.while_doing("Stopping the first sync", cancel);
+                let mut cancel = std::pin::pin!(cancel);
+                let mut answered = None;
+                let stopped = loop {
+                    tokio::select! {
+                        stopped = &mut cancel => {
+                            break stopped.and_then(|stopped| stopped.map_err(anyhow::Error::msg));
+                        }
+                        first = &mut join, if answered.is_none() => match first {
+                            Ok(first) => answered = Some(first),
+                            Err(err) => break Err(err),
+                        },
+                        () = interrupted(interrupts.as_ref()) => {
+                            break Err(anyhow::anyhow!("interrupted again before it had stopped"));
+                        }
+                    }
+                };
+                match (stopped, answered) {
+                    // The sync had answered: as if not interrupted.
+                    (Ok(Cancelled::Answered), Some(first)) => Ok(first),
+                    (Ok(Cancelled::Answered), None) => join.await,
+                    (stopped, _) => return Ok(Served::Interrupted(stopped)),
+                }
+            }
+        };
+        Ok::<_, anyhow::Error>(
+            match first.context("asking the daemon to serve this repository")? {
+                Ok(_) => Served::Synced,
+                Err(message) => Served::Failed(message),
+            },
+        )
     })?;
     match served {
+        // Interrupted while the daemon wouldn't start: as before it was asked.
+        Served::Unasked(err) => {
+            if let Some(err) = err {
+                writeln!(ui.warning(), "Couldn't reach the daemon ({err:#}).")?;
+            }
+            Err(stopped_before_asking(ui, located, &hive)?)
+        }
+        Served::NoDaemon(_) if pending(stoppable.as_ref()) => {
+            Err(stopped_before_asking(ui, located, &hive)?)
+        }
         Served::NoDaemon(err) => {
+            // An interrupt stops this sync, here, as it stops the command.
+            drop(stoppable);
             writeln!(
                 ui.warning(),
                 "Could not start the daemon ({err:#}); syncing once instead."
@@ -523,6 +646,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             Ok(())
         }
         Served::Synced => Ok(()),
+        Served::Interrupted(stopped) => Err(interrupted_error(ui, located, &hive, stopped)?),
         // Unless it's a failure no retry gets past, as the daemon recorded before it answered.
         Served::Failed(message)
             if Status::load(&located.repo_path).is_some_and(|status| status.paused) =>
@@ -533,6 +657,85 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             "the first sync failed: {message}\nThe daemon keeps trying; `musubi status` shows how \
              it goes."
         ),
+    }
+}
+
+/// Takes the repository at `located` out of its hive, which no daemon was asked to sync it
+/// in, as the command was interrupted first, and says so.
+fn stopped_before_asking(
+    ui: &Ui,
+    located: &Located,
+    hive: &HiveConfig,
+) -> anyhow::Result<anyhow::Error> {
+    daemon::unjoin(located, hive)?;
+    interrupted_error(ui, located, hive, Ok(Cancelled::Stopped))
+}
+
+/// What a command interrupted during the first sync of the repository at `located` in `hive`
+/// fails with, as stopping it went.
+fn interrupted_error(
+    ui: &Ui,
+    located: &Located,
+    hive: &HiveConfig,
+    stopped: anyhow::Result<Cancelled>,
+) -> anyhow::Result<anyhow::Error> {
+    ui.interrupted();
+    let name = hive.display_name();
+    // Where to run what the hint says, as after `musubi clone`, if not here.
+    let here = std::env::current_dir()
+        .and_then(dunce::canonicalize)
+        .is_ok_and(|cwd| cwd.starts_with(&located.workspace_root));
+    let there = |hint: String| {
+        if here {
+            hint
+        } else {
+            format!("In {}, {hint}", located.workspace_root.display())
+        }
+    };
+    Ok(match stopped {
+        Ok(Cancelled::Stopped) => crate::ui::with_hint(
+            anyhow::anyhow!(
+                "stopped the first sync; this repository is no longer part of hive {name}"
+            ),
+            there(format!(
+                "`musubi join --hive {}` joins it again.",
+                crate::ui::shell_word(&name)
+            )),
+        ),
+        Ok(Cancelled::TooLate | Cancelled::Answered) => crate::ui::with_hint(
+            anyhow::anyhow!(
+                "too late to stop the first sync: hive {name}'s history is already going \
+                         into this repository"
+            ),
+            there("`musubi leave` takes it out of the hive once it has synced.".to_owned()),
+        ),
+        Err(err) => crate::ui::with_hint(
+            anyhow::anyhow!("couldn't stop the first sync: {err:#}"),
+            there("`musubi status` shows whether it is still part of the hive.".to_owned()),
+        ),
+    })
+}
+
+/// Whether an interrupt came, and hasn't been acted on.
+fn pending(stoppable: Option<&Stoppable>) -> bool {
+    use futures::FutureExt as _;
+    stoppable
+        .and_then(|Stoppable(interrupts)| interrupts.as_ref())
+        .is_some_and(|interrupts| interrupts.next().now_or_never().is_some())
+}
+
+/// Resolves at once if `already` interrupted, else as [`interrupted`].
+async fn interrupted_or(already: bool, interrupts: Option<&Interrupts>) {
+    if !already {
+        interrupted(interrupts).await;
+    }
+}
+
+/// Resolves at the next interrupt, if they're caught; else never, as one ends the command.
+async fn interrupted(interrupts: Option<&Interrupts>) {
+    match interrupts {
+        Some(interrupts) => interrupts.next().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -631,9 +834,10 @@ pub fn clone(
         reason: String::new(),
         present: vec![],
     };
+    let stoppable = Stoppable::catch();
     keep_join_key(&located, &machine)?;
     become_node(&located, &joined, &hub, false, None, &remotes, lease)?;
-    start_serving(ui, &located, socket)
+    start_serving(ui, &located, socket, Some(stoppable))
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;
     let mut out = ui.stdout();
     write!(out, "Cloned hive ")?;

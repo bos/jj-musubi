@@ -126,6 +126,9 @@ and others). Other commands log only warnings.
 - A background daemon logs to `daemon.log` in the state directory, under systemd to
   `journalctl --user -u musubi`, or under SMF to `/var/svc/log/site-musubi-daemon:<you>.log`.
 
+A sync that takes long, as the first sync of a large repo can, logs what it is doing every 30
+seconds.
+
 The file logs start afresh on startup if larger than 10 MiB.
 
 Terminal logs follow the [colour settings](#colours). The hub and daemon write their logs and

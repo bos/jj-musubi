@@ -1511,11 +1511,12 @@ fn hub_join_sync_clone_and_list() {
     The hub chooses the hive that has some of the repository's history and one of its remotes' URLs. It
     refuses a repository that matches no hive or several, and a fork, which shares history but not a
     remote: choose a hive yourself with `--hive`, or start a new one with `musubi create`. It starts the
-    daemon if it isn't running, and returns once the repository has synced. Git remotes and jj config
-    stay local. A newer descendant of `main` can come from either copy. If remote bookmarks remain
-    conflicted, it tries fetching their remotes once and syncs the result. An unavailable remote leaves
-    a warning; local bookmark differences still merge as jj merges them. Automatic fetches select only
-    conflicted bookmarks, with a 30-second limit per remote.
+    daemon if it isn't running, and returns once the repository has synced. Interrupted before then, it
+    stops the sync, and the repository leaves the hive, unless the hive's history is already going into
+    it. Git remotes and jj config stay local. A newer descendant of `main` can come from either copy. If
+    remote bookmarks remain conflicted, it tries fetching their remotes once and syncs the result. An
+    unavailable remote leaves a warning; local bookmark differences still merge as jj merges them.
+    Automatic fetches select only conflicted bookmarks, with a 30-second limit per remote.
 
     Remote URLs recorded by explicit joins help match later copies; run `musubi join` again after
     changing them to register equivalent URLs. A name is bound to its fetch and push destinations for
@@ -1579,10 +1580,11 @@ fn hub_join_sync_clone_and_list() {
     Create a new colocated repository from a hive.
 
     It makes the repository, joins it to the hive, and returns once it has synced, with the daemon
-    keeping it in sync from then on. It checks out `trunk()` using this machine's jj config. It fills
-    missing settings once from the defaults recorded when the hive was created: `user.name` and
-    `user.email`, unless `musubi.clone-config` chose other keys there. Existing destination settings
-    take precedence; sync never copies config.
+    keeping it in sync from then on. Interrupted before then, it stops the sync, and the repository
+    leaves the hive, unless the hive's history is already going into it. It checks out `trunk()` using
+    this machine's jj config. It fills missing settings once from the defaults recorded when the hive
+    was created: `user.name` and `user.email`, unless `musubi.clone-config` chose other keys there.
+    Existing destination settings take precedence; sync never copies config.
 
     Before creating the destination, it checks inherited Git remotes and the hive's recorded names for
     conflicting destinations. It adds no Git remotes; configure one here when you want to fetch or push
@@ -2776,6 +2778,124 @@ fn a_copy_can_join_again_after_leaving() {
 fn assert_detached(repo: &TestRepo) {
     assert!(!repo.repo_path().join("musubi/hive.toml").exists());
     assert!(!repo.repo_path().join("musubi/machine").exists());
+}
+
+/// Stopping `musubi join` during the first sync, by ^C or by killing it, stops the sync before
+/// anything of the hive's reaches the repository, which leaves the hive; and `musubi join`
+/// again, as the error's hint says, joins it again. Without stopping, the daemon carried on
+/// and merged the hive's history in. The test holds beta's publication lock, which every step
+/// of a sync takes, so that the daemon can't apply anything before the command is stopped, nor
+/// stop before it reaches the lock; it lets go once the daemon has taken the stop.
+#[cfg(unix)]
+#[test]
+fn stopping_a_join_during_its_first_sync_leaves_the_hive() {
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    logs.daemon_of(&env, &alpha);
+    logs.daemon_of(&env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    fetch_history(&alpha, &beta);
+    // Running before beta joins, so that it serves beta only when `musubi join` asks.
+    musubi_in(&env, &logs, &beta, &["daemon", "start"]);
+    let lock_path = beta.repo_path().join("musubi/publication.lock");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let hold = || {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        file.lock().unwrap();
+        file
+    };
+    let daemon_log = || fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();
+    let stop = |signal: rustix::process::Signal, joins: usize, why: &str| {
+        let held = hold();
+        let err = env.root().join(format!("join-{joins}.err"));
+        let mut join = beta.program(musubi());
+        join.args(["join", "--hub", &hub.url])
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(&err).unwrap());
+        let mut join = join.spawn().unwrap();
+        wait_for(&logs, "beta's daemon to start its first sync", || {
+            daemon_log().matches("from now on").count() == joins
+        });
+        let pid = rustix::process::Pid::from_raw(i32::try_from(join.id()).unwrap()).unwrap();
+        rustix::process::kill_process(pid, signal).unwrap();
+        wait_for(&logs, "beta's daemon to stop the sync", || {
+            daemon_log().matches(why).count() == 1
+        });
+        drop(held);
+        let mut status = None;
+        wait_for(&logs, "musubi join to end", || {
+            status = join.try_wait().unwrap();
+            status.is_some()
+        });
+        // It keeps its key, which joining again takes up.
+        wait_for(&logs, "beta to leave the hive", || {
+            !beta.repo_path().join("musubi/hive.toml").exists()
+        });
+        assert!(beta.repo_path().join("musubi/machine").exists());
+        // Nothing of the hive's: its operations would bring alpha's working copy.
+        let workspaces = beta.jj(&["workspace", "list", "-T", NAMES]);
+        assert!(!workspaces.contains("alpha"), "{workspaces}");
+        (status.unwrap(), fs::read_to_string(&err).unwrap())
+    };
+    let (killed, _) = stop(
+        rustix::process::Signal::KILL,
+        1,
+        "stopping the first sync, as the command waiting on it went away",
+    );
+    assert_eq!(killed.code(), None);
+    // The key it kept names it: another name takes a `musubi leave` first, which retires it.
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &beta,
+        &["join", "--hive", "alpha", "--machine", "b2"],
+    );
+    insta::assert_snapshot!(err, @"
+    Error: this repository's machine is already named beta
+    Hint: `musubi leave`, then `musubi join --machine <name>`, joins again under a new name
+    ");
+    let machine_path = beta.repo_path().join("musubi/machine");
+    let kept = fs::read(&machine_path).unwrap();
+    let out = musubi_in(&env, &logs, &beta, &["leave"]);
+    insta::assert_snapshot!(out, @"This repository isn't part of a hive; it no longer has a machine name (it was beta).");
+    assert!(!machine_path.exists());
+    // As a leave that stopped after retiring the key, before clearing it, leaves it: the next
+    // join finishes clearing it, rather than joining under a key the repository retired.
+    fs::write(&machine_path, &kept).unwrap();
+    let (interrupted, err) = stop(
+        rustix::process::Signal::INT,
+        2,
+        "stopping the first sync, as the command waiting on it was interrupted",
+    );
+    assert_eq!(interrupted.code(), Some(130));
+    assert_ne!(fs::read(&machine_path).unwrap(), kept);
+    insta::assert_snapshot!(err, @"
+    Error: stopped the first sync; this repository is no longer part of hive alpha
+    Hint: `musubi join --hive alpha` joins it again.
+    ");
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hive", "alpha"]);
+    // Not by how many machines it counts: until it lapses, unpushed, the hub counts the join of
+    // the key that leaving retired.
+    assert!(out.starts_with("Joined hive alpha (as asked), "), "{out}");
+    wait_for(&logs, "beta to have alpha's working copy", || {
+        beta.jj(&["workspace", "list", "-T", NAMES])
+            .contains("alpha")
+    });
 }
 
 /// A hub that lost its directory knows none of its hives; one `musubi join`, in one copy,

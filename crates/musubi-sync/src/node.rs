@@ -55,8 +55,13 @@ impl Clock for SystemClock {
     fn tick(&self, _: &mut NodeRepo) {}
 }
 
+/// Asked before this node applies any of the hive's history to its repository: whether it
+/// may. See [`crate::driver::NodeDriver::before_applying`].
+pub type Gate = std::sync::Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
+
 pub struct NodeAdapter {
     repo: NodeRepo,
+    gate: Option<Gate>,
     clock: Box<dyn Clock>,
     tmp: PathBuf,
     base_path: PathBuf,
@@ -93,6 +98,7 @@ impl NodeAdapter {
             pushed_path: musubi_dir.join("pushed"),
             accepted_push_path: musubi_dir.join(musubi_jj::node::ACCEPTED_PUSH),
             repo,
+            gate: None,
             clock: Box::new(SystemClock),
             tmp,
             base_ancestry: RefCell::new(None),
@@ -101,6 +107,16 @@ impl NodeAdapter {
             staged_commits: None,
             publication: RefCell::default(),
         })
+    }
+
+    /// Asks `gate` before applying any of the hive's history, failing if it fails.
+    pub fn set_gate(&mut self, gate: Option<Gate>) {
+        self.gate = gate;
+    }
+
+    /// Fails if the gate does: before anything of the hive's is written to the repository.
+    fn may_apply(&self) -> anyhow::Result<()> {
+        self.gate.as_ref().map_or(Ok(()), |gate| gate())
     }
 
     /// Takes the time from `clock`, for tests.
@@ -583,6 +599,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn realize(&mut self, op: &OpId) -> anyhow::Result<()> {
+        self.may_apply()?;
         // The operations likely realized after it, whose views can be made local with its:
         // each the only staged child of the one before.
         let mut next = vec![];
@@ -607,6 +624,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn advance(&mut self, op: &OpId) -> anyhow::Result<()> {
+        self.may_apply()?;
         self.repo.advance(&canonical(op))?;
         Ok(())
     }

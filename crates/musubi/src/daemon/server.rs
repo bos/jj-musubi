@@ -14,10 +14,13 @@ use std::time::Duration;
 use musubi_sync::progress::Activity;
 
 use super::connections::Hubs;
+use super::worker::FirstSync;
 use super::worker::Worker;
+use super::worker::leave_unsynced;
 use crate::config::Settings;
 use crate::config::UserState;
 use crate::control;
+use crate::control::Abandoned;
 use crate::control::RepoStatus;
 use crate::control::Request;
 use crate::control::Response;
@@ -28,6 +31,9 @@ use crate::watch::Watcher;
 /// The copies being served, by machine key, and the connections to hubs they share.
 struct Supervisor {
     repos: Mutex<HashMap<String, Worker>>,
+    /// The first syncs commands asked for, by the token each `Join` names, which its `Cancel`
+    /// names too. Kept, closed, once answered: a `Cancel` that comes late finds it so.
+    first_syncs: Mutex<HashMap<String, FirstSync>>,
     hubs: Arc<Hubs>,
 }
 
@@ -35,6 +41,7 @@ impl Supervisor {
     fn new(hubs: Hubs) -> Self {
         Self {
             repos: Mutex::default(),
+            first_syncs: Mutex::default(),
             hubs: Arc::new(hubs),
         }
     }
@@ -43,14 +50,34 @@ impl Supervisor {
         self.repos.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Starts serving `key`'s copy, unless it already is.
-    fn start(&self, key: String) {
+    /// Starts serving `key`'s copy, unless it already is, its first sync stoppable as `first`
+    /// says, unless the copy has `applied` some of the hive's history. Returns whether it
+    /// started.
+    ///
+    /// Under the lock of the workers, as `remove` closes the first sync of the one it takes
+    /// away: so a first sync is open, and stopping it leaves the hive, only while the worker
+    /// serving the copy is the one its gate holds back. No other applies anything meanwhile.
+    fn start(&self, key: String, first: FirstSync, applied: bool) -> bool {
         let mut repos = self.lock();
         // A thread that finished, as after its hive was removed, serves nothing.
         if repos.get(&key).is_some_and(|served| !served.is_finished()) {
-            return;
+            first.close();
+            return false;
         }
-        repos.insert(key.clone(), Worker::start(key, self.hubs.clone()));
+        first.started(applied);
+        repos.insert(key.clone(), Worker::start(key, self.hubs.clone(), first));
+        true
+    }
+
+    /// The first sync of `key`'s copy that the `Join` of `token` asks for, whichever of it and
+    /// its `Cancel` comes first.
+    fn first_sync(&self, key: &str, token: String) -> FirstSync {
+        self.first_syncs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(token)
+            .or_insert_with(|| FirstSync::starting(key))
+            .clone()
     }
 
     async fn sync(&self, key: &str) -> Result<Synced, String> {
@@ -69,6 +96,9 @@ impl Supervisor {
         let Some(served) = self.lock().remove(key) else {
             return false;
         };
+        // No command can stop the sync of a worker no longer serving the copy: the one that
+        // takes its place isn't held back by its gate.
+        served.first_sync().close();
         served.stop().await;
         true
     }
@@ -108,11 +138,19 @@ struct Daemon {
 }
 
 impl Daemon {
-    /// Does what a command asks. (Each [`Request`] is documented where it is defined.)
-    async fn answer(self, request: Request) -> Response {
+    /// Does what a command asks, given when it has gone away. (Each [`Request`] is
+    /// documented where it is defined.)
+    async fn answer(self, request: Request, abandoned: Abandoned) -> Response {
         match request {
             Request::Version => Response::Version(control::VERSION.to_owned()),
             Request::Add { key } => Response::Add(self.add(key).await),
+            Request::Join { key, token } => Response::Join(self.join(key, token, abandoned).await),
+            Request::Cancel { key, token } => Response::Cancel(
+                self.supervisor
+                    .first_sync(&key, token)
+                    .stop("the command waiting on it was interrupted", leave_unsynced)
+                    .await,
+            ),
             Request::Remove { key } => {
                 if self.supervisor.remove(&key).await {
                     tracing::info!("stopped serving {key}");
@@ -130,17 +168,69 @@ impl Daemon {
         }
     }
 
+    /// [`Request::Join`]: as `add`, stopping the first sync if its command goes away first.
+    async fn join(
+        &self,
+        key: String,
+        token: String,
+        abandoned: Abandoned,
+    ) -> Result<Synced, String> {
+        /// Lets no command stop the first sync once this ends: answered, or dropped, as when
+        /// the request's deadline passes. One that has stopped it already, has.
+        struct Closing(Option<FirstSync>);
+        impl Drop for Closing {
+            fn drop(&mut self) {
+                if let Some(first) = &self.0 {
+                    first.close();
+                }
+            }
+        }
+        // Known before the restart, so that a `Cancel` meanwhile waits for it.
+        let first = self.supervisor.first_sync(&key, token);
+        let _closing = Closing(Some(first.clone()));
+        let synced = async {
+            self.restart(&key, first.clone()).await;
+            self.supervisor.sync(&key).await
+        };
+        tokio::select! {
+            synced = synced => synced,
+            () = abandoned => {
+                first
+                    .stop("the command waiting on it went away", leave_unsynced)
+                    .await
+                    .ok();
+                Err("the command went away".to_owned())
+            }
+        }
+    }
+
     async fn add(&self, key: String) -> Result<Synced, String> {
+        self.restart(&key, FirstSync::closed(&key)).await;
+        self.supervisor.sync(&key).await
+    }
+
+    /// Starts serving `key`'s copy, starting over if it serves it already, with its entry as
+    /// it is now, as after joining again; its first sync stoppable as `first` says.
+    async fn restart(&self, key: &str, first: FirstSync) {
         tracing::info!("serving {key} from now on");
-        // Starting over if it serves it already, with its entry as it is now, as after
-        // joining again. On a task of its own, which finishes even if this request is
-        // cancelled, as when the command asking gives up: else the copy could be left
-        // unserved between stopping and starting.
+        // On a task of its own, which finishes even if this request is cancelled, as when the
+        // command asking gives up: else the copy could be left unserved between stopping and
+        // starting.
         let supervisor = self.supervisor.clone();
-        let restart = key.clone();
+        let restart = key.to_owned();
         tokio::spawn(async move {
+            // A worker serving it already, as one a daemon starting just now does, may have
+            // applied some of the hive's history to it: then the sync can't be stopped. Not one
+            // that has finished, which served the copy before it last left its hive.
+            let before = supervisor
+                .lock()
+                .get(&restart)
+                .filter(|served| !served.is_finished())
+                .map(Worker::first_sync);
             supervisor.remove(&restart).await;
-            supervisor.start(restart.clone());
+            // Started by another command meanwhile, no worker ever has this first sync.
+            let applied = before.is_some_and(|before| before.applied());
+            supervisor.start(restart.clone(), first, applied);
             // An entry it took the place of, at the same path, is no longer served. Looked
             // up afresh for each, so that one another command has just added is kept.
             let served: Vec<String> = supervisor.lock().keys().cloned().collect();
@@ -155,7 +245,6 @@ impl Daemon {
         })
         .await
         .ok();
-        self.supervisor.sync(&key).await
     }
 }
 
@@ -242,11 +331,12 @@ pub(super) async fn listen(
     };
     let requests = control::service({
         let daemon = daemon.clone();
-        move |request| daemon.clone().answer(request)
+        move |request, abandoned| daemon.clone().answer(request, abandoned)
     })
     .await?;
     for entry in copies {
-        daemon.supervisor.start(entry.key);
+        let first = FirstSync::closed(&entry.key);
+        daemon.supervisor.start(entry.key, first, false);
     }
     tracing::info!("listening on {socket}");
     // A daemon whose lock file was deleted, as by cleaning up its directory, has nothing to

@@ -109,7 +109,11 @@ machine, and the entries across machines.
   removed, which a hub that lost its state never says, the daemon marks the record removed and
   drops the entry. A plain `musubi join` in a repository whose hive was removed says so, rather
   than matching another hive by history; `musubi join --hive` and `musubi create` work as in a
-  repository that left, and `musubi leave` clears that record too.
+  repository that left, and `musubi leave` clears that record too. In a repository that had no
+  record, a first sync stopped by interrupting the `create`, `join` or `clone` that asked for it
+  drops the record and the entry, but keeps the key, which the hub took: the repository is then
+  as a join that stopped once it kept its key leaves it. Joining again takes up that key, and
+  `musubi leave` retires it, so that `musubi join --machine` can name a new one.
 
 - **R8. A new hive doesn't inherit members.** When a copy joins or creates a hive whose id
   isn't the one its record holds, its join forgets every key that is present

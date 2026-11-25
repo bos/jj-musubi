@@ -52,7 +52,11 @@
 //! has no timeout of its own, and one that is idle stays open. The daemon drops a request only
 //! when its deadline passes, as tarpc's server did. A command that gives up sooner, or goes
 //! away, leaves its request running to the end: it is the same work that the next command
-//! would ask for, and `add` finishes what it started whatever happens to its caller.
+//! would ask for, and `add` finishes what it started whatever happens to its caller. The
+//! exception is [`Request::Join`]: a command that goes away before it is answered, however it
+//! ends, even killed, stops the first sync it asked for, as [`Request::Cancel`] would. The
+//! daemon tells that it went away from its request's replies having no one left to go to,
+//! as when the connection the request came over closes, before the request's deadline.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -98,7 +102,7 @@ use crate::socket::uid;
 /// Changes whenever the control protocol does, or how commands find the daemon (its lock and
 /// the file beside it), so that a command and a daemon from different builds notice each
 /// other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-7");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-8");
 
 /// The subject of every request to the daemon.
 const SUBJECT: &str = "musubi.daemon.rpc";
@@ -145,6 +149,22 @@ pub enum Request {
     Add {
         key: String,
     },
+    /// As `Add`, for a copy that has just joined its hive, whose command waits on its first
+    /// sync. Until it is answered, the command can stop that sync with a `Cancel` of the same
+    /// `token`, which it makes up, or by going away.
+    Join {
+        key: String,
+        token: String,
+    },
+    /// Stops the first sync the `Join` of `token` asked for, unless the copy has begun to
+    /// apply the hive's history: then nothing can be stopped safely, and it goes on. A copy
+    /// whose sync is stopped leaves its hive, which it never told of its leaving. Answers once
+    /// that is done, whether this or the command going away stopped it. It may arrive before
+    /// its `Join`, which it waits for.
+    Cancel {
+        key: String,
+        token: String,
+    },
     /// Stops serving a copy, by its machine key.
     Remove {
         key: String,
@@ -167,6 +187,10 @@ pub enum Request {
 pub enum Response {
     Version(String),
     Add(Result<Synced, String>),
+    Join(Result<Synced, String>),
+    /// How stopping the first sync went, or why the copy couldn't leave its hive, which
+    /// leaves it syncing.
+    Cancel(Result<Cancelled, String>),
     Remove(Result<(), String>),
     Sync(Result<Synced, String>),
     Progress(Option<Activity>),
@@ -174,6 +198,17 @@ pub enum Response {
     Stop,
     /// The daemon couldn't take the request at all, as for one it couldn't read.
     Error(String),
+}
+
+/// How a [`Request::Cancel`] went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cancelled {
+    /// The sync stopped, and the copy left its hive.
+    Stopped,
+    /// Too late: the copy had begun applying the hive's history, and the sync goes on.
+    TooLate,
+    /// The sync had answered its command already, or never started.
+    Answered,
 }
 
 /// The daemon of another build, or something else that doesn't speak this protocol: told
@@ -303,11 +338,16 @@ fn read_request(bytes: &[u8]) -> Result<Request, Response> {
     }))
 }
 
+/// Resolves once the command that sent a request has gone away before its deadline,
+/// without waiting for the answer: [`Request::Join`]'s caller can stop its sync that way.
+pub type Abandoned = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// Answers the requests that arrive on the control socket's connections, each with what
-/// `answer` makes of it, and returns what [`serve`] relays the connections to.
+/// `answer` makes of it, given when its command has gone away, and returns what [`serve`]
+/// relays the connections to.
 pub async fn service<A, F>(answer: A) -> anyhow::Result<Arc<dyn Transport>>
 where
-    A: Fn(Request) -> F + Send + Sync + 'static,
+    A: Fn(Request, Abandoned) -> F + Send + Sync + 'static,
     F: Future<Output = Response> + Send + 'static,
 {
     let network = MemoryNetwork::new(0, MAX_PAYLOAD);
@@ -327,26 +367,27 @@ where
 /// Answers one request, unless whoever sent it has given up waiting by the time it is done.
 async fn respond<A, F>(service: &MemoryTransport, answer: &A, request: Message)
 where
-    A: Fn(Request) -> F,
+    A: Fn(Request, Abandoned) -> F,
     F: Future<Output = Response>,
 {
     let Some(inbox) = request.reply.clone() else {
         return;
     };
+    // On Tokio's clock, which the connection relaying the request times it out on.
+    let deadline = request.deadline.map(|deadline| {
+        tokio::time::Instant::now() + deadline.saturating_duration_since(Instant::now())
+    });
     let answered = async {
         match read_request(&request.payload) {
-            Ok(asked) => answer(asked).await,
+            Ok(asked) => answer(asked, abandoned(service, &inbox, deadline)).await,
             Err(refusal) => refusal,
         }
     };
-    let response = match request.deadline {
-        Some(deadline) => {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(left, answered).await {
-                Ok(response) => response,
-                Err(_) => return,
-            }
-        }
+    let response = match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, answered).await {
+            Ok(response) => response,
+            Err(_) => return,
+        },
         None => answered.await,
     };
     let failed = |why: String| seal(&Response::Error(why)).unwrap_or_default();
@@ -361,6 +402,25 @@ where
     if let Err(err) = service.publish(&inbox, payload).await {
         tracing::debug!("answering a command: {err}");
     }
+}
+
+/// Resolves once nothing waits for the replies to `inbox`, before `deadline`. The connection
+/// that relays a request waits for its reply until the request's deadline, or until the
+/// connection closes, however the command at the other end ended: only the second is its
+/// command going away. The relay times the request out at the deadline or after it, never
+/// before, as it starts its timer once the deadline is set.
+fn abandoned(
+    service: &MemoryTransport,
+    inbox: &str,
+    deadline: Option<tokio::time::Instant>,
+) -> Abandoned {
+    let unsubscribed = service.unsubscribed(inbox);
+    Box::pin(async move {
+        unsubscribed.await;
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            std::future::pending::<()>().await;
+        }
+    })
 }
 
 /// Serves one connection to the control socket, through the transport [`service`] returned,
@@ -463,6 +523,33 @@ impl ControlClient {
     ) -> anyhow::Result<Result<Synced, String>> {
         match self.call(Request::Add { key }, limit).await? {
             Response::Add(result) => Ok(result),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// [`Request::Join`], waiting `limit` for it. Dropping the call leaves the request running:
+    /// only the connection closing, or [`ControlClient::cancel`], stops the sync.
+    pub async fn join(
+        &self,
+        key: String,
+        token: String,
+        limit: Duration,
+    ) -> anyhow::Result<Result<Synced, String>> {
+        match self.call(Request::Join { key, token }, limit).await? {
+            Response::Join(result) => Ok(result),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// [`Request::Cancel`].
+    pub async fn cancel(
+        &self,
+        key: String,
+        token: String,
+        limit: Duration,
+    ) -> anyhow::Result<Result<Cancelled, String>> {
+        match self.call(Request::Cancel { key, token }, limit).await? {
+            Response::Cancel(result) => Ok(result),
             other => Err(unexpected(&other)),
         }
     }
@@ -743,7 +830,7 @@ mod tests {
         A: Fn(Request) -> F + Send + Sync + 'static,
         F: Future<Output = Response> + Send + 'static,
     {
-        let transport = service(answer).await.unwrap();
+        let transport = service(move |request, _| answer(request)).await.unwrap();
         ControlClient::over(connect_to(transport))
             .await
             .unwrap()
@@ -776,6 +863,14 @@ mod tests {
             match request {
                 Request::Version => Response::Version(VERSION.to_owned()),
                 Request::Add { key } => Response::Add(Ok(Synced { seq: 7, head: key })),
+                Request::Join { key, token } => Response::Join(Ok(Synced {
+                    seq: 8,
+                    head: key + &token,
+                })),
+                Request::Cancel { key, token } => {
+                    assert_eq!((key.as_str(), token.as_str()), ("c", "t"));
+                    Response::Cancel(Ok(Cancelled::Stopped))
+                }
                 Request::Remove { key } => Response::Remove(Err(key)),
                 Request::Sync { key } => Response::Sync(Err(key)),
                 Request::Progress { .. } => Response::Progress(Some(Activity::default())),
@@ -794,6 +889,19 @@ mod tests {
         client.check(SECOND).await.unwrap();
         let added = client.add("a".to_owned(), SECOND).await.unwrap().unwrap();
         assert_eq!((added.seq, added.head.as_str()), (7, "a"));
+        let joined = client
+            .join("j".to_owned(), "t".to_owned(), SECOND)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((joined.seq, joined.head.as_str()), (8, "jt"));
+        assert_eq!(
+            client
+                .cancel("c".to_owned(), "t".to_owned(), SECOND)
+                .await
+                .unwrap(),
+            Ok(Cancelled::Stopped)
+        );
         assert_eq!(
             client.remove("r".to_owned(), SECOND).await.unwrap(),
             Err("r".to_owned())
@@ -963,7 +1071,7 @@ mod tests {
     /// daemon's build, as the build that sent it reads it as the daemon of another.
     #[tokio::test]
     async fn a_refusal_of_another_build_says_to_restart() {
-        let transport = service(|_| async { Response::Stop }).await.unwrap();
+        let transport = service(|_, _| async { Response::Stop }).await.unwrap();
         let request = seal_as(ELSEWHERE, &Request::Status).unwrap();
         let reply = transport.request(SUBJECT, request, SECOND).await.unwrap();
         assert_eq!(
@@ -1019,6 +1127,50 @@ mod tests {
                 String::from_utf8_lossy(garbage)
             );
         }
+    }
+
+    /// The daemon hears that a command went away while its request was in flight, as when it
+    /// was killed, by its connection closing; but not when the request only timed out, which
+    /// the command's next request goes on from.
+    #[tokio::test(start_paused = true)]
+    async fn a_command_going_away_abandons_its_request() {
+        let (went, mut gone) = tokio::sync::mpsc::unbounded_channel();
+        let transport = service(move |request, abandoned| {
+            let went = went.clone();
+            async move {
+                abandoned.await;
+                went.send(request).ok();
+                Response::Stop
+            }
+        })
+        .await
+        .unwrap();
+        let client = ControlClient::over(connect_to(transport))
+            .await
+            .unwrap()
+            .unwrap();
+        let err = client.status(Duration::from_secs(10)).await.unwrap_err();
+        assert!(err.is::<Unresponsive>());
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert!(
+            gone.try_recv().is_err(),
+            "a request timing out abandoned it"
+        );
+        let waiting = tokio::spawn({
+            let client = client.clone();
+            async move { client.sync("k".to_owned(), SYNC_LIMIT).await }
+        });
+        tokio::time::sleep(SECOND).await;
+        assert!(gone.try_recv().is_err());
+        // Its connection closes, as the command's process ends.
+        waiting.abort();
+        drop(client);
+        assert_eq!(
+            gone.recv().await,
+            Some(Request::Sync {
+                key: "k".to_owned()
+            })
+        );
     }
 
     /// An answer too large for the transport is an error to the command, not a wait for it

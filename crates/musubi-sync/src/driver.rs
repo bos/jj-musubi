@@ -10,6 +10,7 @@ use musubi_core::node::Step;
 use musubi_jj::node::NodeRepo;
 
 use crate::OpId;
+use crate::node::Gate;
 use crate::node::NodeAdapter;
 use crate::progress::Activity;
 use crate::remote::RemoteHub;
@@ -18,6 +19,8 @@ use crate::wire::HeadNotice;
 
 pub struct NodeDriver {
     adapter: NodeAdapter,
+    /// Kept to give each adapter that reopening makes.
+    gate: Option<Gate>,
     core: NodeCore<OpId>,
     remote: RemoteHub,
     /// What the current `sync` has done, for its log line.
@@ -36,9 +39,28 @@ impl NodeDriver {
         Ok(Self {
             core: NodeCore::new(adapter.root().clone()),
             adapter,
+            gate: None,
             remote,
             tally: Tally::default(),
         })
+    }
+
+    /// Calls `gate` before each step that would write any of the hive's history to the
+    /// repository: realizing its operations, or advancing the op heads to one. A step it
+    /// fails, fails, having written nothing, and so does the sync.
+    ///
+    /// Until the first such step, a sync writes none of the hive's history where jj shows it:
+    /// what a fetch stages is objects jj doesn't reach, and what it writes before syncing, as
+    /// a merge of the op heads, is operations of this machine's own. So a caller that ends a
+    /// sync while `gate` fails, as at any await, or as a crash would, has applied none of the
+    /// hive's history to the repository.
+    pub fn before_applying(
+        &mut self,
+        gate: impl Fn() -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        let gate: Gate = std::sync::Arc::new(gate);
+        self.adapter.set_gate(Some(gate.clone()));
+        self.gate = Some(gate);
     }
 
     pub fn known(&self) -> &Head<OpId> {
@@ -177,6 +199,7 @@ impl NodeDriver {
     pub fn reopen(&mut self, mut repo: NodeRepo) -> anyhow::Result<()> {
         repo.keep_found(self.adapter.repo());
         self.adapter = NodeAdapter::new(repo)?;
+        self.adapter.set_gate(self.gate.clone());
         self.restart();
         Ok(())
     }

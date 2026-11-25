@@ -121,6 +121,8 @@ point. To share earlier undo history too, see [Bring the operation
 history](#sharing-complete-operation-history).
 
 `create` starts the daemon if it isn't running, and returns once the repo has synced.
+Interrupting `create`, `join` or `clone` before then [takes the repo back out of the
+hive](../reference/commands.md#run-the-daemon).
 
 ## Add other machines
 

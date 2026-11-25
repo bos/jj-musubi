@@ -28,6 +28,7 @@ pub use status::Status;
 pub use status::now;
 pub use sync::leave_hive;
 pub use sync::sync_once;
+pub use sync::unjoin;
 
 /// Why the daemon syncs nothing for an entry: its path doesn't hold the copy it names, and
 /// jj hasn't seen the copy anywhere else.

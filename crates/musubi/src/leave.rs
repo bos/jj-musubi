@@ -81,7 +81,7 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
     let _membership = HiveConfig::join_lock(ui, &located.repo_path)?;
-    if leave_inactive(ui, &located)? {
+    if leave_inactive(ui, &located)? || retire_kept_key(ui, &located)? {
         return Ok(());
     }
     let (located, hive, entry) = the_copy(ui, start, socket)?;
@@ -164,6 +164,31 @@ fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Retires the machine key of a repository that is part of no hive but kept the key a hub
+/// took, as a join whose first sync was stopped leaves it, so that `musubi join --machine` can
+/// name a new one. Returns whether it was one.
+fn retire_kept_key(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
+    let _lock = HiveConfig::lock(&located.repo_path)?;
+    if HiveConfig::load(&located.repo_path)?.is_some() {
+        return Ok(false);
+    }
+    let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
+        return Ok(false);
+    };
+    // Not one whose key this machine syncs a copy of, as another repository made from this
+    // one's files that joined since.
+    if UserState::load()?.entry(machine.key()).is_some() {
+        return Ok(false);
+    }
+    retire_machine(located)?;
+    writeln!(
+        ui.stdout(),
+        "This repository isn't part of a hive; it no longer has a machine name (it was {}).",
+        machine.name()
+    )?;
+    Ok(true)
+}
+
 /// Clears inactive membership. The join lock holds across this and the caller's membership
 /// checks. If interrupted, the record stays until the key and daemon entry are gone.
 pub(crate) fn finish_detaching(located: &Located) -> anyhow::Result<()> {
@@ -194,6 +219,18 @@ pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow:
         #[cfg(test)]
         after(Write::MarkLeft);
     }
+    retire_machine(located)?;
+    std::fs::remove_file(daemon::Status::path(path)).ok();
+    std::fs::remove_file(HiveConfig::path(path))?;
+    #[cfg(test)]
+    after(Write::ClearRecord);
+    Ok(())
+}
+
+/// Retires the repository's machine key, if it has one, and drops its entry, in the order
+/// [`detach`] needs: the key recorded retired before it is cleared.
+pub(crate) fn retire_machine(located: &Located) -> anyhow::Result<()> {
+    let path = &located.repo_path;
     if let Some(machine) = NodeRepo::machine_of(path)? {
         if let Some(retirement) = located.open()?.begin_retiring_machine()? {
             #[cfg(test)]
@@ -209,10 +246,6 @@ pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow:
         #[cfg(test)]
         after(Write::ClearKey);
     }
-    std::fs::remove_file(daemon::Status::path(path)).ok();
-    std::fs::remove_file(HiveConfig::path(path))?;
-    #[cfg(test)]
-    after(Write::ClearRecord);
     Ok(())
 }
 

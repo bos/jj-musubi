@@ -146,6 +146,29 @@ pub struct MemoryTransport {
     client: u64,
 }
 
+impl MemoryTransport {
+    /// Resolves once nothing that subscribes to `subject` now does any more: as when whoever
+    /// sent a request, whose replies go to `subject`, has given up on it, or gone away with
+    /// the connection it came over. At once, if nothing subscribes to it.
+    pub fn unsubscribed(&self, subject: &str) -> impl Future<Output = ()> + Send + 'static {
+        let senders: Vec<mpsc::UnboundedSender<Message>> = self
+            .network
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .subscriptions
+            .iter()
+            .filter(|(pattern, _)| subject_matches(pattern, subject))
+            .flat_map(|(_, subs)| subs.iter().map(|sub| sub.sender.clone()))
+            .collect();
+        async move {
+            for sender in senders {
+                sender.closed().await;
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Transport for MemoryTransport {
     fn max_payload(&self) -> usize {

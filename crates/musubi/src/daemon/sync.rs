@@ -22,9 +22,8 @@ use crate::copy;
 use crate::hub::Connection;
 use crate::repo::Located;
 
-/// Makes the repository at `located` no longer part of `hive`, keeping everything it has:
-/// marks its record `membership`, left as `musubi leave` leaves or removed as the hub said,
-/// and stops this machine's daemon serving it. Returns false, doing nothing, if it isn't part
+/// Records inactive `membership` for the repository at `located` and drops its daemon entry,
+/// as when the hub says its hive was removed. Returns false, doing nothing, if it isn't part
 /// of `hive` through the same hub (any more), as when it left it, joined another, or moved
 /// to another hub, meanwhile.
 pub fn leave_hive(

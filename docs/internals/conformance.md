@@ -1385,6 +1385,31 @@ The test takes under a second. Dropping, from the oracle's check, the comparison
 record's config-id with the entry's fails 32 of the 4212 cases, and ignoring `sameDirectory`
 in its `refine` fails 8.
 
+### Detach and join write boundaries
+
+`Copies.Detach` models one checkout's local writes after the worker has stopped and leave has
+finished talking to the hive. It takes a completed write as a boundary and resumes from the
+files at that boundary. The next join starts after the hub accepts a new key for the same jj
+config-id. Local join and leave commands run serially under the membership lock.
+
+- `leave_prefix_safe` proves that saving the inactive record blocks a stale daemon entry,
+  even while that entry is still on disk. Removing the old key requires the native detach
+  operation and retired-key record to be present.
+- `leave_retry` proves that finishing leave from every prefix yields the same detached
+  checkout with its history marker and config-id.
+- `join_retry` and `join_prefix_safe` cover reusing the accepted key on retry, enabling the
+  new entry once the joined record is saved, and rejecting the old entry at every prefix.
+- `leave_retry_prefix` and `join_retry_prefix` prove that another interruption during a retry
+  leaves a state already covered by the original prefixes.
+
+The `copy-detach` oracle request takes `old` and `fresh` entries. It returns the states before
+and after each leave and join write, with the outcome of retrying from each state.
+`detach_and_rejoin_conform_at_write_boundaries` uses the real local join and leave code on
+disposable jj repos, terminating a process after each membership write. A fresh process reads
+the files and native operation log, checks both daemon identities with `copy::check`, retries,
+and compares both observations with the oracle. The model assumes completed atomic file
+writes. Hub behavior and translation of earlier operations have separate tests.
+
 ## Workspace names
 
 `formal/Musubi/Names.lean` proves that the names under which a machine shows a view's

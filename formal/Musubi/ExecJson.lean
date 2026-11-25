@@ -348,6 +348,38 @@ def copiesReply (j : Json) : Except String Json := do
   let cases ← (← j.getObjValAs? (Array Json) "cases").toList.mapM decodeCase
   pure (encodeCopies cases)
 
+/-- The durable prefixes of a leave and the next join, with the files after retrying each. -/
+def copyDetachReply (j : Json) : Except String Json := do
+  let old ← decodeEntry (← j.getObjVal? "old")
+  let fresh ← decodeEntry (← j.getObjVal? "fresh")
+  unless old.key != fresh.key && old.cid == fresh.cid do
+    throw "copy-detach requires a fresh key and the original config-id"
+  let entry (e : Copies.Entry) := Json.mkObj [
+    ("key", toJson e.key), ("hive", toJson e.hive), ("cid", toJson e.cid)]
+  let record (r : Copies.Record) := Json.mkObj [
+    ("hive", toJson r.hive), ("cid", toJson r.cid),
+    ("state", .str (match r.state with
+      | .joined => "joined"
+      | .left => "left"
+      | .removed => "removed"))]
+  let encode (s : Copies.Detach.Files) := Json.mkObj [
+    ("repo", Json.mkObj [
+      ("key", toJson s.repo.key), ("cid", toJson s.repo.cid),
+      ("record", (s.repo.record.map record).getD .null)]),
+    ("entry", (s.entry.map entry).getD .null),
+    ("marker", .bool s.marker), ("retired", .bool s.retired),
+    ("oldCheck", .bool (Copies.check old s.repo)),
+    ("freshCheck", .bool (Copies.check fresh s.repo))]
+  let leave := Copies.Detach.leaveTrace (Copies.Detach.joined old)
+  let join := Copies.Detach.joinTrace (Copies.Detach.detached old.cid) fresh
+  let withRetry (states : List Copies.Detach.Files)
+      (finish : Copies.Detach.Files → Copies.Detach.Files) :=
+    Json.arr (states.map (fun s => Json.mkObj [
+      ("prefix", encode s), ("retry", encode (finish s))])).toArray
+  pure (Json.mkObj [
+    ("ok", .bool true), ("leave", withRetry leave Copies.Detach.finishLeave),
+    ("join", withRetry join (Copies.Detach.finishJoin · fresh))])
+
 /-! ## Chunked blobs (`Chunks.lean`) -/
 
 /-- A step of the prefix receiver: a chunk delivered with the length it claims (`recv`), or a
@@ -673,6 +705,7 @@ or the model refusing what was decoded. -/
 def badRequestOps : List (String × (Json → Except String Json)) :=
   [("publication", publicationReply), ("chunks", chunksReply), ("refresh", refreshReply),
     ("attempts", attemptsReply), ("names", namesReply), ("copies", copiesReply),
+    ("copy-detach", copyDetachReply),
     ("expected", expectedReply), ("refs", refsReply), ("opHeads", OpHeads.Json.reply),
     ("realization", Realize.Json.reply)]
 

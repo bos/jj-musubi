@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 
 use jj_lib::op_store::OpStore;
 use jj_lib::op_store::Operation;
@@ -18,6 +19,22 @@ use crate::workspaces::Machine;
 
 const HISTORY: &str = "retired-keys.json";
 const DETACH: &str = "musubi: detach this copy";
+
+/// The retired-key record to publish after the native operation marking the detach.
+#[must_use]
+pub struct PendingRetirement {
+    path: PathBuf,
+    keys: Vec<u8>,
+}
+
+impl PendingRetirement {
+    pub fn record(self) -> Result<(), NodeError> {
+        crate::files::replace(&self.path, &self.keys).map_err(|source| NodeError::Io {
+            path: self.path,
+            source,
+        })
+    }
+}
 
 #[derive(Default)]
 pub(super) struct History {
@@ -111,12 +128,12 @@ impl History {
 }
 
 impl NodeRepo {
-    /// Ends this key's part in the checkout's history. The local operation keeps the working
-    /// copies, and its shared view forgets the key. Commands from then on can use a fresh key
-    /// without changing the shared form of any earlier operation.
-    pub fn retire_machine(&mut self) -> Result<(), NodeError> {
+    /// Writes the native operation that ends this key's part in the checkout's history.
+    /// The caller records the retired key before clearing the active one. Returns `None`
+    /// if an earlier attempt already recorded the retirement.
+    pub fn begin_retiring_machine(&mut self) -> Result<Option<PendingRetirement>, NodeError> {
         if self.identities.retired.last() == Some(&self.machine) {
-            return Ok(());
+            return Ok(None);
         }
         let repo = self.merged_repo()?;
         let mut tx = repo.start_transaction();
@@ -134,10 +151,10 @@ impl NodeRepo {
             path: path.clone(),
             source,
         };
-        let bytes = serde_json::to_vec(&keys)
+        let keys = serde_json::to_vec(&keys)
             .map_err(io::Error::other)
             .map_err(error)?;
-        crate::files::replace(&path, &bytes).map_err(error)
+        Ok(Some(PendingRetirement { path, keys }))
     }
 
     /// Removes the active key after retiring it. A later join chooses a new one.

@@ -17,6 +17,8 @@ use crate::config::HiveConfig;
 use crate::config::Membership;
 use crate::config::UserState;
 use crate::copy;
+#[cfg(test)]
+use crate::copy::conformance::detach::{Write, after};
 use crate::daemon;
 use crate::repo::Located;
 use crate::repo::the_copy;
@@ -143,8 +145,7 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
             "Couldn't give this repository's working copies new commits ({err:#})."
         )?;
     }
-    daemon::leave_hive(&located, &hive, Membership::Left)?;
-    finish_detaching(&located)?;
+    detach(&located, Some(&hive))?;
     left(ui, &name)
 }
 
@@ -166,19 +167,52 @@ fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
 /// Clears inactive membership. The join lock holds across this and the caller's membership
 /// checks. If interrupted, the record stays until the key and daemon entry are gone.
 pub(crate) fn finish_detaching(located: &Located) -> anyhow::Result<()> {
+    detach(located, None)
+}
+
+/// Commits a leave locally once the caller has stopped the worker and completed the final
+/// sync, or finishes clearing an already inactive membership.
+pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow::Result<()> {
     let path = &located.repo_path;
     let _lock = HiveConfig::lock(path)?;
     let Some(record) = HiveConfig::load(path)? else {
         return Ok(());
     };
-    anyhow::ensure!(!record.joined(), "this repository is still part of a hive");
+    if let Some(expected) = leaving {
+        anyhow::ensure!(
+            record.hive == expected.hive && record.hub == expected.hub,
+            "this repository's hive changed during leave"
+        );
+    }
+    if record.joined() {
+        anyhow::ensure!(leaving.is_some(), "this repository is still part of a hive");
+        HiveConfig {
+            state: Membership::Left,
+            ..record
+        }
+        .save(path)?;
+        #[cfg(test)]
+        after(Write::MarkLeft);
+    }
     if let Some(machine) = NodeRepo::machine_of(path)? {
-        located.open()?.retire_machine()?;
+        if let Some(retirement) = located.open()?.begin_retiring_machine()? {
+            #[cfg(test)]
+            after(Write::MarkHistory);
+            retirement.record()?;
+            #[cfg(test)]
+            after(Write::RetireKey);
+        }
         UserState::remove_entry(machine.key())?;
+        #[cfg(test)]
+        after(Write::DropEntry);
         NodeRepo::clear_machine(path)?;
+        #[cfg(test)]
+        after(Write::ClearKey);
     }
     std::fs::remove_file(daemon::Status::path(path)).ok();
     std::fs::remove_file(HiveConfig::path(path))?;
+    #[cfg(test)]
+    after(Write::ClearRecord);
     Ok(())
 }
 

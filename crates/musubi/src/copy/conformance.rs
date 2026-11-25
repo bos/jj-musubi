@@ -24,6 +24,8 @@ use crate::config::Membership;
 #[allow(dead_code, clippy::unwrap_used)]
 mod oracle;
 
+pub(crate) mod detach;
+
 use oracle::Oracle;
 
 /// Each id, hive, key and config-id alike, is 0 or 1.

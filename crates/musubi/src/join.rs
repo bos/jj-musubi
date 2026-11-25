@@ -39,6 +39,8 @@ use crate::config::Membership;
 use crate::config::UserState;
 use crate::control;
 use crate::copy;
+#[cfg(test)]
+use crate::copy::conformance::detach::{Write, after};
 use crate::daemon;
 use crate::daemon::Status;
 use crate::hub;
@@ -178,7 +180,7 @@ pub fn join(
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
     // The hub took this machine's key: it is the repository's from now on.
-    NodeRepo::keep_machine(&located.repo_path, &machine)?;
+    keep_join_key(&located, &machine)?;
     become_node(
         &located,
         &joined,
@@ -298,8 +300,8 @@ async fn ask_preparing(
 
 /// The machine the repository at `located` joins a hive as: the one its key names, which
 /// `name`, if given, must name, since its key has been part of a hive; else a new one, named
-/// `name` or after the host, whose key [`become_node`] keeps.
-fn joining_machine(
+/// `name` or after the host, whose key [`keep_join_key`] keeps once the hub accepts the join.
+pub(crate) fn joining_machine(
     located: &Located,
     name: Option<&str>,
     settings: &UserSettings,
@@ -318,11 +320,19 @@ fn joining_machine(
     Ok(machine)
 }
 
+/// Keeps the machine key accepted by the hub, so retry uses it until membership is saved.
+pub(crate) fn keep_join_key(located: &Located, machine: &Machine) -> anyhow::Result<()> {
+    NodeRepo::keep_machine(&located.repo_path, machine)?;
+    #[cfg(test)]
+    after(Write::KeepKey);
+    Ok(())
+}
+
 /// Records that the repository, with its machine key, is part of the hive it `joined`: the
 /// join operation (unless replicating full history), its record, and its entry, for the
 /// daemon to serve it. A copy whose record named another hive, `before`, forgets the copies its
 /// history brings that the hive doesn't have. The first hub joined becomes the user's default.
-fn become_node(
+pub(crate) fn become_node(
     located: &Located,
     joined: &Joined,
     hub: &str,
@@ -369,6 +379,8 @@ fn become_node(
         config_id: config_id.clone(),
         path,
     })?;
+    #[cfg(test)]
+    after(Write::PutEntry);
     let config = HiveConfig {
         hive: hive_id,
         name: Some(joined.hive.name.clone()),
@@ -381,6 +393,8 @@ fn become_node(
         let _lock = HiveConfig::lock(&located.repo_path)?;
         config.save(&located.repo_path)?;
     }
+    #[cfg(test)]
+    after(Write::JoinRecord);
     set_forget_after(located, lease)?;
     UserState::save_default_hub(hub)?;
     Ok(())
@@ -617,7 +631,7 @@ pub fn clone(
         reason: String::new(),
         present: vec![],
     };
-    NodeRepo::keep_machine(&located.repo_path, &machine)?;
+    keep_join_key(&located, &machine)?;
     become_node(&located, &joined, &hub, false, None, &remotes, lease)?;
     start_serving(ui, &located, socket)
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;

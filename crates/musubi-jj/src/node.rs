@@ -64,6 +64,7 @@ pub use expiry::Activity;
 pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
+pub use identity::PendingRetirement;
 pub use join::JoinSummary;
 use join::Joins;
 pub use publication::APPROVAL_FILE;

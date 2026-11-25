@@ -244,6 +244,12 @@ open Musubi
 #assert_axioms Copies.join_refuses_duplicate
 #assert_axioms Copies.duplicate_taken_for_moved
 #assert_axioms Copies.move_taken_for_duplicate
+#assert_axioms Copies.Detach.leave_retry
+#assert_axioms Copies.Detach.leave_retry_prefix
+#assert_axioms Copies.Detach.leave_prefix_safe
+#assert_axioms Copies.Detach.join_retry
+#assert_axioms Copies.Detach.join_retry_prefix
+#assert_axioms Copies.Detach.join_prefix_safe
 
 -- Names
 #assert_axioms Names.choose_free

@@ -392,4 +392,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod conformance;
+pub(crate) mod conformance;

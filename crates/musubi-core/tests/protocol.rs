@@ -458,12 +458,54 @@ fn protocol_invariants(tc: TestCase) {
 /// Nodes that take false replies, as a buggy hub might send, made of what it stores, stay
 /// sound: a node realizes nothing without its parents and objects, its heads are local
 /// operations, an antichain, and it has only its own operations and those the hub accepted
-/// or offered it. A node never misled keeps every property. And once the hub is honest
-/// again, the hive converges, every operation accepted. The Lean model, which has no such
-/// hub, isn't consulted.
+/// or offered it. A node never misled keeps every property, MergeOwnership counting as
+/// unaccepted its operations a misled node published. And once the hub is honest again, the
+/// hive converges, every operation accepted. The Lean model, which has no such hub, isn't
+/// consulted.
 #[hegel::test(test_cases = 300)]
 fn nodes_recover_from_false_replies(tc: TestCase) {
     run(tc, None, Environment::FalseReplies);
+}
+
+/// A false reply can hand a node another node's operation that the hub stores but never
+/// accepted, and the node's push can then publish it without its creator knowing. Here node
+/// 0, told that node 1's rejected operation 1 is the hub's head, merges it with its own 2,
+/// and the hub accepts the merge; node 1, which knows the hub only at 2, then merges 1 and 2
+/// as well. MergeOwnership counts such an operation as unaccepted for its creator, and the
+/// hive still converges. Found by `nodes_recover_from_false_replies`.
+#[test]
+fn a_false_reply_can_publish_another_nodes_operation() {
+    let mut world = World::new(2, None);
+    world.user_op(1, 0, 0);
+    world.user_op(0, 0, 0);
+    world.exchange(0, 0);
+    world.exchange(1, 0);
+    world.exchange(1, 0);
+    assert_eq!(world.hub_head(), 2);
+    let reply = Reply::Fetched {
+        seq: world.known(0).0,
+        head: 1,
+        ops: vec![OpEntry {
+            id: 1,
+            parents: world.parents(1),
+        }],
+        ops_attachment: vec![],
+        objects: vec![],
+    };
+    world.false_reply(0, reply, true);
+    // Each node realizes what it has and advances: heads {1, 2}.
+    for node in [0, 0, 1, 1] {
+        world.node_step(node, 0);
+    }
+    // Node 0 merges, pushes expecting 1 and is turned away, then pushes expecting 2.
+    for _ in 0..3 {
+        world.exchange(0, 0);
+    }
+    assert_eq!(world.hub_head(), 3);
+    assert_eq!(world.known(1).1, 2);
+    world.node_step(1, 0);
+    world.quiesce();
+    world.check_invariants();
 }
 
 // This and the other two conformance tests below make hegel.toml's default number of cases.

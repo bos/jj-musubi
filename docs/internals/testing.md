@@ -305,13 +305,16 @@ MergeOwnership, KnownIsHubHistory, and that a node stages only operations the hu
 (staged-is-accepted). Once the hub has gone back, Locality, staged-is-accepted and
 KnownIsHubHistory are checked against its history together with the heads it lost, and
 MergeOwnership no longer is: two nodes can then merge the same heads
-(`formal/Musubi/RegressScenario.lean`). Once a node has taken a false reply, those four no
-longer hold of it: it may have operations the hub offered it but never accepted, and nothing
-else of other nodes', and its `known` may be anything. NodeClosed is still checked, with the
-fake repository refusing to realize an operation without its parents or objects. In these
-generated tests, a law that fails prints the case's model actions, one line each, as a step the
-Lean model rejects and a `quiesce` that never converges do; the deterministic tests check the
-laws directly and print no trace.
+(`formal/Musubi/RegressScenario.lean`). Once a node has taken a false reply, those four no longer
+hold of it: it may have operations the hub offered it but never accepted, and nothing else of
+other nodes', and its `known` may be anything. Its push can then publish another node's operation
+that the hub never accepted, and that node can then merge the same heads; so MergeOwnership counts
+as unaccepted, for its creator, an operation the hub first accepted from a misled node
+(`a_false_reply_can_publish_another_nodes_operation`). NodeClosed is still checked, with the fake
+repository refusing to realize an operation without its parents or objects. In these generated
+tests, a law that fails prints the case's model actions, one line each, as a step the Lean model
+rejects and a `quiesce` that never converges do; the deterministic tests check the laws directly
+and print no trace.
 
 A final `quiesce` step stops environment actions, makes the network reliable, and runs every
 node's policy until nothing changes. The test then checks liveness: every node's heads are

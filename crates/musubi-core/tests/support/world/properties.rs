@@ -3,7 +3,8 @@
 //!
 //! These checks only observe the stores and the history recorded by the harness. Their
 //! exceptions are local to the assumptions a fault invalidates: a false reply relaxes the
-//! misled node's provenance and known-head checks; rollback relaxes merge ownership.
+//! misled node's provenance and known-head checks, and merge ownership of the operations a
+//! misled node published for others; rollback relaxes merge ownership.
 
 use std::collections::BTreeSet;
 
@@ -16,6 +17,8 @@ use super::World;
 impl World {
     /// A merge includes some unaccepted work of its own node. Rollback or a false reply
     /// can leave the node believing otherwise, so the law applies only before those faults.
+    /// So can a false reply to another node: that node may publish this one's operation,
+    /// and this one may then merge the same heads, so such an operation counts as unaccepted.
     pub(super) fn check_merge_ownership(&self, node: usize, merge: Op, parents: &[Op]) {
         if self.went_back || self.misled[node] {
             return;
@@ -25,7 +28,8 @@ impl World {
         assert!(
             parents
                 .iter()
-                .any(|p| univ.creator[*p as usize] == Some(node) && !accepted.contains(p)),
+                .any(|p| univ.creator[*p as usize] == Some(node)
+                    && (!accepted.contains(p) || self.published_by_misled.contains(p))),
             "MergeOwnership: merge {merge} on node {node} has no unaccepted parent of its own: {parents:?}"
         );
     }

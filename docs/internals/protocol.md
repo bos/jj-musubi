@@ -209,6 +209,11 @@ the same heads. The others still hold. So does liveness: nodes that knew the los
 follow the hub back, by the rule in `Learn`, and once it stops going back they converge on
 it, with every operation any node created in `anc*(hub.head)`.
 
+A hub that lies can break MergeOwnership too: a node it tells of another node's operation that
+it stores but never accepted can merge that operation and push, and its creator can then merge
+the same heads. The model has no such hub; `nodes_recover_from_false_replies` checks that the
+hive still converges.
+
 ## Properties
 
 Safety. These hold in every reachable state:

@@ -80,6 +80,10 @@ pub struct World {
     /// The operations false replies and a lying hub's replies have carried, which a node
     /// misled may have, though the hub never accepted them.
     offered: BTreeSet<Op>,
+    /// Other nodes' operations that the hub first accepted in a misled node's push. A false
+    /// reply can hand a node another's operation that the hub stores but never accepted, and
+    /// its push can then publish that operation without its creator knowing.
+    published_by_misled: BTreeSet<Op>,
 }
 
 /// What of a node `World::quiesce` watches across an exchange.
@@ -156,6 +160,7 @@ impl World {
             lost: vec![],
             misled: vec![false; nodes],
             offered: BTreeSet::new(),
+            published_by_misled: BTreeSet::new(),
         };
         if let Some(oracle) = &mut world.oracle {
             world.oracle_state = oracle.reset(nodes);
@@ -464,6 +469,7 @@ impl World {
                 expected,
                 new,
             } => {
+                let head_before = self.hub.head;
                 let push = hub::Push {
                     ops,
                     ops_attachment,
@@ -478,6 +484,19 @@ impl World {
                         return;
                     }
                 };
+                if outcome == CasOutcome::Accepted && self.misled[node] {
+                    let univ = self.univ.borrow();
+                    let before = univ.ancestors(head_before);
+                    let published: Vec<Op> = univ
+                        .ancestors(self.hub.head)
+                        .into_iter()
+                        .filter(|op| {
+                            !before.contains(op) && univ.creator[*op as usize] != Some(node)
+                        })
+                        .collect();
+                    drop(univ);
+                    self.published_by_misled.extend(published);
+                }
                 let kind = match outcome {
                     CasOutcome::Idempotent => "hubPushIdem",
                     CasOutcome::Accepted => "hubPushAccept",

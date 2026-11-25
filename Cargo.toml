@@ -37,7 +37,7 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 jj-cli = { version = "=0.47.1", default-features = false, features = ["git"] }
 jj-frontend = { version = "=0.47.1", default-features = false, features = ["git"] }
 jj-lib = { version = "=0.47.1", default-features = false, features = ["git"] }
-notify = "8"
+notify = "9"
 pollster = "1.0.1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }

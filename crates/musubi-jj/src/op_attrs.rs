@@ -123,9 +123,14 @@ impl<M: BorrowMut<BTreeMap<String, String>>> OpAttrs<M> {
         Ok(())
     }
 
-    /// Drops the workspace names only this copy knows, which no canonical operation carries.
+    /// Drops the workspace names earlier releases recorded for this copy alone, which no
+    /// canonical operation carries.
     pub fn remove_private_workspaces(&mut self) {
         let attributes = self.0.borrow_mut();
+        // Compatibility until 2027-02-25: remove `LOCAL_WORKSPACES` and this line. An
+        // operation an earlier release recorded it on, canonicalized again where the
+        // translation map was lost, must get the canonical form that release published.
+        // `canonicalizing_drops_workspace_names_earlier_releases_recorded` tests it.
         attributes.remove(LOCAL_WORKSPACES);
         attributes.remove(RESERVED_WORKSPACES);
     }

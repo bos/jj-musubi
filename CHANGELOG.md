@@ -10,6 +10,22 @@
   `.jj/repo/musubi` is no longer the only way to start over (#178). Nothing to do on
   upgrading.
 
+- After `musubi create --fresh` or `musubi join --fresh`, `jj undo` or `jj op restore` back to
+  a view from the hive the repo left no longer leaves that hive's workspaces, as
+  `laptop/default`, in the repo for good, nor shows a machine of the new hive named `laptop` as
+  `laptop-1a2b`: the next sync drops them. musubi now takes a workspace whose name has a `/` for
+  yours only if jj knows its directory, as it does for every workspace you add, and drops any
+  other as another machine's.
+
+- A workspace with a `/` in its name that an older jj added, before jj kept track of
+  workspaces' directories, now stops the first sync after upgrading, or `musubi join` in a repo
+  that has never been part of a hive, with a hint: run `jj workspace rename <new name>` in its
+  directory, with no `/` in the new name, or `jj workspace forget <name>` if you didn't make it
+  or no longer need it. After the first sync that finds none, musubi doesn't check again.
+  Nothing to do if no workspace of yours has a `/` in its name. The check goes after
+  2027-02-25: a repo that hasn't synced by then forgets such a workspace on its next sync, with
+  no hint, leaving its directory and files on disk.
+
 - Interrupting `musubi create`, `musubi join` or `musubi clone` with Ctrl-C while it waits for
   the first sync now stops the sync, and the repo leaves the hive with none of the hive's
   history in it. The command exits with status 130 and says so, with the `musubi join --hive

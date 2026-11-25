@@ -94,15 +94,15 @@ pub fn merge_key(op: &jj_lib::op_store::Operation) -> SourceKey {
     SourceKey::of(op)
 }
 
-/// Reparenting preserves the source body; local identity and ownership annotations may
-/// be added afterward. In particular its view and workspace identity are never stripped.
+/// Reparenting preserves the source body; its canonical identity may be added afterward, and
+/// an earlier release added a workspace context. In particular its view and workspace
+/// identity are never stripped.
 pub fn same_source_body(a: &jj_lib::op_store::Operation, b: &jj_lib::op_store::Operation) -> bool {
     let strip = |mut op: jj_lib::op_store::Operation| {
         op.parents.clear();
         for key in [
             musubi_jj::node::CANONICAL_ATTRIBUTE,
             "musubi.workspace-context",
-            "musubi.local-workspaces",
         ] {
             op.metadata.attributes.remove(key);
         }

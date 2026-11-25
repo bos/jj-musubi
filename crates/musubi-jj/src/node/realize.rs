@@ -9,18 +9,15 @@ mod merge;
 mod workspaces;
 mod writes;
 
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
-use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
-use jj_lib::ref_name::WorkspaceNameBuf;
 
 use super::NodeError;
 use super::NodeRepo;
@@ -144,7 +141,7 @@ impl NodeRepo {
             };
             let view = self.with_own_workspaces(id, op, &parents, view)?;
             let own = self.own_of(&view);
-            let realization = self.realize_one(id, op, parents, view, &own, per_machine)?;
+            let realization = self.realize_one(id, op, parents, view, per_machine)?;
             self.realizing.remember_own(realization.id.clone(), own);
             self.write_later(realization, id.clone())?;
         }
@@ -251,21 +248,19 @@ impl NodeRepo {
     }
 
     /// Realizes one canonical operation whose parents are realized, as `parents`, without
-    /// writing it, from its local view, in which `own` are this machine's own workspaces.
+    /// writing it, from its local view.
     fn realize_one(
         &self,
         canonical_id: &CanonicalOp,
         op: &StoreOperation,
         parents: Vec<LocalOp>,
         local: LocalView,
-        own: &BTreeMap<WorkspaceNameBuf, CommitId>,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
         let LocalView {
             view, id, prefixes, ..
         } = local;
         let mut metadata = op.metadata.clone();
-        self.record_private_workspaces(&mut metadata, own.keys().cloned(), canonical_id)?;
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let target = CanonicalOp(target)
             && self

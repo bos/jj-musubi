@@ -836,6 +836,27 @@ pub fn slashed_hint(slashed: &SlashedWorkspaces, leaving: bool) -> String {
             listed(several)
         )),
     }
+    // Compatibility until 2027-02-25: remove with `NodeRepo::unrecorded_workspaces`.
+    let unrecorded: Vec<&str> = slashed.unrecorded().collect();
+    match unrecorded.as_slice() {
+        [] => {}
+        [name] => hint.push(format!(
+            "musubi checks for this once: jj doesn't know where {name}'s \
+             directory is, as for a workspace an older jj added. If you made it, run `jj \
+             workspace rename <new name>` in its directory, with no \"/\" in the new name. If \
+             you didn't, or no longer need it, run `jj workspace forget {}`, which leaves its \
+             directory and files on disk.",
+            word(name)
+        )),
+        several => hint.push(format!(
+            "musubi checks for this once: jj doesn't know where the \
+             directories of {} are, as for workspaces an older jj added. Run `jj workspace \
+             rename <new name>` in the directory of each you made, with no \"/\" in the new \
+             name, and `jj workspace forget <name>` for each you didn't, or no longer need, \
+             which leaves its directory and files on disk.",
+            and_list(several.to_vec())
+        )),
+    }
     if leaving {
         hint.push(
             "Or run `musubi leave --force` to leave without sending this copy's last work."

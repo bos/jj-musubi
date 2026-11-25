@@ -240,7 +240,7 @@ impl NodeRepo {
             let view = self.local_view(id, op, &fields)?;
             let view = self.with_own_workspaces(id, op, &parents, view)?;
             let own = self.own_of(&view);
-            let expected = self.realize_one(id, op, parents, view, &own, fields.clone())?;
+            let expected = self.realize_one(id, op, parents, view, fields.clone())?;
             self.realizing.remember_own(expected.id.clone(), own);
             if old.as_ref() == Some(&expected.id) {
                 self.realizing.remember_last(expected.id, fields);
@@ -392,7 +392,7 @@ impl NodeRepo {
             .read_operation(&realized.0)
             .block_on()?;
         let view = self.loader.op_store().read_view(&raw.view_id).block_on()?;
-        let target_own = self.own_of_view(view.wc_commit_ids, canonical, &raw)?;
+        let target_own = self.own_of_view(view.wc_commit_ids, canonical);
         if !own.keys().any(|name| target_own.contains_key(name)) {
             return Ok(false);
         }

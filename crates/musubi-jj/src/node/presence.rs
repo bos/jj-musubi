@@ -245,52 +245,39 @@ impl NodeRepo {
         repo: &ReadonlyRepo,
         canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        self.own_of_view(
-            repo.view().wc_commit_ids().clone(),
-            canonical,
-            repo.operation().store_operation(),
-        )
+        Ok(self.own_of_view(repo.view().wc_commit_ids().clone(), canonical))
     }
 
     /// This machine's of `workspaces`, a local view's, whose canonical form is `canonical`:
-    /// every one but those the canonical view gives other machines, and other machines' under
-    /// names the hive no longer gives them, as `jj undo` brings back (`names_other_machine`),
-    /// unless this machine records the name as its own here (`private_workspace_names`).
-    /// Those with a `/` in their names are this machine's to keep but not to publish
-    /// (`view::is_publishable`).
+    /// every one whose name has no `/`, and of those with one, those jj's workspace store
+    /// records a directory for, as it does for no other machine's (`slashed_workspaces`),
+    /// read as the store is now. Those are this machine's to keep but not to publish
+    /// (`view::is_publishable`), and the copy doesn't sync while its op heads have one. Any
+    /// other name with a `/` is one another machine's workspace is shown by, here or in a
+    /// view `jj undo` or `jj op restore` brings back, and realizations show other machines'
+    /// workspaces again as the canonical view has them. Before the join, every workspace is
+    /// this machine's.
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
         canonical: &CanonicalOp,
-        op: &jj_lib::op_store::Operation,
-    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+    ) -> BTreeMap<WorkspaceNameBuf, CommitId> {
         if canonical == self.canonical.root_operation_id()
             || workspaces
                 .keys()
                 .all(|name| super::view::is_publishable(name))
         {
-            return Ok(workspaces);
+            return workspaces;
         }
-        let canonical_op = self.canonical.read_operation(canonical)?;
-        let private = self.private_workspace_names(op, &workspaces)?;
-        let canonical_view = self.canonical.read_view(&canonical_op.view_id)?;
-        let prefixes =
-            self.prefixes_with_own(&canonical_view, &*self.presence(canonical)?, &private)?;
-        let others: BTreeSet<_> = self
-            .names_of(&canonical_view, &prefixes)
-            .into_iter()
-            .filter(|(key, _)| !self.is_own_key(key))
-            .map(|(_, name)| name)
-            .collect();
-        let machines = self.known_machines(canonical)?;
-        Ok(workspaces
+        let stamp = self.store_stamp();
+        workspaces
             .into_iter()
             .filter(|(name, _)| {
                 super::view::is_publishable(name)
-                    || private.contains(name)
-                    || !others.contains(name) && !self.names_other_machine(name, &machines)
+                    // One whose record can't be read now is kept, as this machine's.
+                    || !matches!(self.recorded_directory(name, &stamp), Ok(None))
             })
-            .collect())
+            .collect()
     }
 
     /// This machine's own workspaces in `heads`, merged as jj merges them.
@@ -325,11 +312,7 @@ impl NodeRepo {
                 .canonical_of(&LocalOp(op.id().clone()))
                 .unwrap_or_else(|| self.canonical.root_operation_id().clone());
             let view = op.view().block_on()?;
-            self.own_of_view(
-                view.wc_commit_ids().clone(),
-                &canonical,
-                op.store_operation(),
-            )
+            Ok::<_, NodeError>(self.own_of_view(view.wc_commit_ids().clone(), &canonical))
         };
         let Some((first, rest)) = ops.split_first() else {
             return Ok(BTreeMap::new());
@@ -421,18 +404,6 @@ impl NodeRepo {
         Ok(names)
     }
 
-    /// Every machine a canonical operation's history has known (`machines_of`).
-    pub(super) fn known_machines(
-        &self,
-        canonical: &CanonicalOp,
-    ) -> Result<BTreeSet<String>, NodeError> {
-        if canonical == self.canonical.root_operation_id() {
-            return Ok(BTreeSet::new());
-        }
-        let view = self.canonical.read_operation_view(canonical)?;
-        Ok(self.machines_of(&view, self.presence(canonical)?.known()))
-    }
-
     /// The local names of other machines' workspaces in a canonical operation's view, with
     /// their keys.
     pub(super) fn other_names(
@@ -454,27 +425,16 @@ impl NodeRepo {
 
     /// Machine prefixes reserve local workspace names even when a copy currently has no
     /// workspace. Membership, rather than workspace existence, determines who can be named.
-    /// They keep clear of this machine's names in the local operation standing for
-    /// `canonical`, as the local view names other machines: those it records
-    /// (`private_workspace_names`) or keeps (`own_of_view`).
+    /// They come from the canonical operation alone, as a realization of it chooses them
+    /// (`local_view`). A realization keeps clear of a workspace of this machine's with a `/`
+    /// in its name too (`with_own_workspaces`), but musubi shows other machines' workspaces
+    /// only once there is none (`refuse_slashed_workspaces`).
     pub(super) fn machine_prefixes(
         &self,
         canonical: &CanonicalOp,
         view: &View,
     ) -> Result<BTreeMap<String, String>, NodeError> {
-        let private = if let Some(local) = self.local_of(canonical) {
-            let op = self.loader.op_store().read_operation(&local.0).block_on()?;
-            let local_view = self.loader.op_store().read_view(&op.view_id).block_on()?;
-            let mut names = self.private_workspace_names(&op, &local_view.wc_commit_ids)?;
-            names.extend(
-                self.own_of_view(local_view.wc_commit_ids, canonical, &op)?
-                    .into_keys(),
-            );
-            names
-        } else {
-            BTreeSet::new()
-        };
-        self.prefixes_with_own(view, &*self.presence(canonical)?, &private)
+        self.prefixes_with_own(view, &*self.presence(canonical)?, &BTreeSet::new())
     }
 }
 

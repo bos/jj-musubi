@@ -1212,3 +1212,36 @@ fn realizing_ahead_changes_nothing() {
         realize(&copy.join(".jj/repo"), false)
     );
 }
+
+/// Canonicalizing drops the workspace names an earlier release recorded on a local operation
+/// for this copy alone, so that the operation's canonical form is the one that release gave it.
+#[test]
+fn canonicalizing_drops_workspace_names_earlier_releases_recorded() {
+    use pollster::FutureExt as _;
+
+    const RECORDS: [&str; 2] = ["musubi.local-workspaces", "musubi.reserved-workspaces"];
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = open(&repo);
+    node.create_join_operation("musubi: alpha joins").unwrap();
+    let mut tx = node
+        .loader()
+        .load_at_head(None)
+        .block_on()
+        .unwrap()
+        .start_transaction();
+    for key in RECORDS {
+        tx.set_attribute(key.to_owned(), "{}".to_owned());
+    }
+    let op = tx.commit("an earlier release's").block_on().unwrap();
+    let canonical = node.canonicalize(&LocalOp(op.op_id().clone())).unwrap();
+    let attributes = node
+        .canonical_store()
+        .read_operation(&canonical)
+        .unwrap()
+        .metadata
+        .attributes;
+    for key in RECORDS {
+        assert!(!attributes.contains_key(key), "{key}: {attributes:?}");
+    }
+}

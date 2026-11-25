@@ -27,10 +27,11 @@ impl NodeRepo {
     /// operations, a removal winning. They are the other machines' own, so this machine's
     /// changes to them never count (see `canonical_view`), and the canonical view still has
     /// them. Drops other machines' workspaces under names the hive no longer gives them, as
-    /// `jj undo` brings back: those this machine's view doesn't keep as its own
-    /// (`own_of_view`). None is a workspace of this machine's with a `/` in its name: it
-    /// refuses to go on while there is one ([`Self::refuse_slashed_workspaces`]). Returns
-    /// whether it wrote an operation, which then needs uploading.
+    /// `jj undo` or `jj op restore` brings back, even from a hive this copy left: every name
+    /// with a `/` it doesn't show (`own_of_view`). None is a workspace of this machine's,
+    /// which jj records a directory for: it refuses to go on while there is one
+    /// ([`Self::refuse_slashed_workspaces`]). Returns whether it wrote an operation, which then
+    /// needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
         self.refuse_slashed_workspaces()?;
         let repo = self.merged_repo()?;
@@ -67,11 +68,7 @@ impl NodeRepo {
             shown = true;
         }
         let shown_names: BTreeSet<&WorkspaceNameBuf> = names.values().collect();
-        let own = self.own_of_view(
-            repo.view().wc_commit_ids().clone(),
-            &canonical,
-            repo.operation().store_operation(),
-        )?;
+        let own = self.own_of_view(repo.view().wc_commit_ids().clone(), &canonical);
         let stale: Vec<WorkspaceNameBuf> = repo
             .view()
             .wc_commit_ids()

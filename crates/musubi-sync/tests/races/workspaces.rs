@@ -1097,3 +1097,63 @@ fn abandoning_a_restore_of_a_forgotten_machines_workspace_keeps_it_theirs() {
         );
     }
 }
+
+/// A workspace with a `/` in its name that a jj from before it recorded directories added has
+/// no record in jj's workspace store, so musubi takes it for another machine's. On a copy's
+/// first sync after upgrading, before anything forgets it, the copy refuses, and the hint says
+/// to rename it, or forget it if it isn't this machine's. Renamed, it syncs, and the copy
+/// records that it checked. A name with a `/` and no record that `jj op restore` brings back,
+/// as beta's workspace shown by its old name, which the operation restored showed, is dropped,
+/// with no refusal. (`going_back_to_a_view_from_a_hive_left_keeps_none_of_its_workspaces`
+/// shows the check not running once recorded.)
+#[test]
+fn a_workspace_an_older_jj_added_with_a_slash_stops_the_first_sync_after_upgrading() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.sync();
+    let marker = hive
+        .repo(0)
+        .repo_path()
+        .join("musubi/unrecorded_workspaces_checked");
+    assert!(marker.exists(), "a copy that joins writes it");
+    let feat = add_workspace(&hive, 0, "feat/x", "alpha-feat");
+    let own = hive.workspaces(0)["feat/x"].clone();
+    hive.node(0)
+        .loader()
+        .workspace_store()
+        .forget(&[jj_lib::ref_name::WorkspaceName::new("feat/x")])
+        .unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    assert_refused(
+        &mut hive,
+        0,
+        "this repository can't sync while its workspace feat/x has a \"/\" in its name",
+    );
+    assert_eq!(hive.workspaces(0).get("feat/x"), Some(&own));
+    assert!(!marker.exists());
+
+    feat.jj(&["workspace", "rename", "feat-x"]);
+    hive.sync();
+    hive.sync();
+    assert!(marker.exists());
+    assert_eq!(hive.workspaces(1).get("alpha/feat-x"), Some(&own));
+
+    let before = hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "--no-integrate-operation",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    hive.repo(1).jj(&["workspace", "rename", "b2"]);
+    hive.sync();
+    hive.sync();
+    hive.repo(0).jj(&["op", "restore", before.trim()]);
+    assert!(names(&hive, 0).contains(&"beta/beta".to_owned()));
+    hive.hive.sync(0).unwrap();
+    let shown = names(&hive, 0);
+    assert!(!shown.contains(&"beta/beta".to_owned()), "{shown:?}");
+    assert!(shown.contains(&"beta/b2".to_owned()), "{shown:?}");
+}

@@ -334,3 +334,57 @@ fn an_operation_on_rewritten_history_from_before_the_join_doesnt_bring_it() {
     let head = a_node.canonical_heads().unwrap().pop().unwrap();
     assert_eq!(canonical_ancestry(&a_node, &head), vec![head.clone(), join]);
 }
+
+/// The names of `repo`'s workspaces.
+fn workspace_names(repo: &TestRepo) -> Vec<String> {
+    repo.jj(&["workspace", "list", "-T", r#"name ++ "\n""#])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A copy that joined a hive afresh goes back, with `jj op restore`, to a view from the hive it
+/// left, which brings back that hive's machines' workspaces under names the hive it joined
+/// gives no one, as `alpha/alpha`. jj records no directory for them, so none is the copy's
+/// own: it drops them as it shows the hive's workspaces again, rather than keep them,
+/// unpublished, for good, and a machine of the new hive by that name, which joins and works on
+/// top of the restore, shows under its plain name, not a longer one clear of them.
+#[test]
+fn going_back_to_a_view_from_a_hive_left_keeps_none_of_its_workspaces() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    let mut a_node = open(&a);
+    let a_join = a_node.create_join_operation("musubi: alpha joins").unwrap();
+    let mut b_node = open(&b);
+    b_node.create_join_operation("musubi: beta joins").unwrap();
+    sync(&a_node, &mut b_node, &a_join);
+    b_node.merge_heads().unwrap();
+    drop(b_node);
+    assert_eq!(workspace_names(&b), ["alpha/alpha", "beta"]);
+    let old = b.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    NodeRepo::discard_shared_history(&b.repo_path(), |_| {}).unwrap();
+    let mut b_node = open(&b);
+    b_node.create_join_operation("musubi: beta joins").unwrap();
+    drop(b_node);
+    b.jj(&["op", "restore", old.trim()]);
+    assert_eq!(workspace_names(&b), ["alpha/alpha", "beta"]);
+
+    // A second machine named alpha joins, and works on the restore.
+    let c = env.init_repo_with_hostname("alpha-two", "alpha");
+    let mut c_node = open(&c);
+    c_node
+        .create_join_operation("musubi: a second alpha joins")
+        .unwrap();
+    let mut b_node = open(&b);
+    b_node.merge_heads().unwrap();
+    let b_head = b_node.canonical_heads().unwrap().pop().unwrap();
+    sync(&b_node, &mut c_node, &b_head);
+    c_node.merge_heads().unwrap();
+    let c_head = c_node.canonical_heads().unwrap().pop().unwrap();
+    sync(&c_node, &mut b_node, &c_head);
+    b_node.merge_heads().unwrap();
+    b_node.show_other_workspaces().unwrap();
+    drop(b_node);
+    assert_eq!(workspace_names(&b), ["alpha/default", "beta"]);
+}

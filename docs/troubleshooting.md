@@ -34,6 +34,11 @@ Follow the symptom:
   forget` on it earlier and then lost the directory, `jj workspace remove` can't open it:
   run `jj workspace add --name restore <the directory>` to make one, then `jj workspace remove
   <name>`, then `jj workspace forget restore`.
+- **… has a "/" in its name, and the hint says jj doesn't know where its directory is:** an
+  older jj added the workspace. If you made it, run `jj workspace rename <new name>` in its
+  directory, with no "/" in the new name; if you didn't, or no longer need it, run `jj
+  workspace forget <name>`, which leaves its directory and files on disk. musubi checks for
+  such workspaces once, on the first sync after upgrading, until 2027-02-25.
 - **Another sync error:** follow the command's hint, fix the cause, then run `musubi sync`.
   If it persists, [collect the logs](#report-a-problem).
 

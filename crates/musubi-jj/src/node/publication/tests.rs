@@ -758,7 +758,7 @@ fn cleanup_refuses_unavailable_or_reassigned_workspace_paths() {
         "workspace",
         "add",
         "--name",
-        "feat/x",
+        "feat-x",
         second.to_str().unwrap(),
     ]);
     repo.write_file("accident", "unwanted history");
@@ -778,12 +778,12 @@ fn cleanup_refuses_unavailable_or_reassigned_workspace_paths() {
         .apply_publication_cleanup(&selected, &plan.token, &mut cache)
         .unwrap_err();
     assert!(
-        err.to_string().contains("cannot read workspace feat/x"),
+        err.to_string().contains("cannot read workspace feat-x"),
         "{err}"
     );
     assert_eq!(node.local_heads().unwrap(), heads);
 
-    let foreign = env.init_repo_with_workspace("second", "feat/x");
+    let foreign = env.init_repo_with_workspace("second", "feat-x");
     foreign.write_file("private", "another repo's pending work");
     let foreign_head = || {
         foreign.jj(&[
@@ -813,15 +813,16 @@ fn cleanup_refuses_unavailable_or_reassigned_workspace_paths() {
     );
     fs::rename(&second, env.root().join("foreign-repo")).unwrap();
     fs::rename(&saved, &second).unwrap();
-    let name = jj_lib::ref_name::WorkspaceName::new("feat/x");
+    let name = jj_lib::ref_name::WorkspaceName::new("feat-x");
     // A workspace can predate jj's path registry. Exercise that supported store state
-    // through the public store API, without inventing any checked-out file state.
+    // through the public store API, without inventing any checked-out file state. (One
+    // with a `/` in its name and no record is taken for another machine's: `own_of_view`.)
     node.loader.workspace_store().forget(&[name]).unwrap();
     let err = node
         .apply_publication_cleanup(&selected, &plan.token, &mut cache)
         .unwrap_err();
     assert!(
-        err.to_string().contains("cannot locate workspace feat/x"),
+        err.to_string().contains("cannot locate workspace feat-x"),
         "{err}"
     );
     assert_eq!(node.local_heads().unwrap(), heads);

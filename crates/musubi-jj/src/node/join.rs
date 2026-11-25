@@ -161,8 +161,16 @@ impl NodeRepo {
         );
         // In one write, not writeln!'s several, so that a kill seldom tears it.
         file.write_all(line.as_bytes()).map_err(io_err)?;
+        let first = self.joins.is_empty();
         self.joins
             .record(local.clone(), canonical.clone(), fingerprint);
+        // Compatibility until 2027-02-25: remove with `unrecorded_workspaces`. A repository
+        // that joins for the first time with this release has no workspace an earlier one
+        // kept as its own, having refused to join with one (`slashed_workspaces`). One that
+        // joins again checks on its first sync.
+        if first {
+            self.mark_unrecorded_checked();
+        }
         self.insert_map(local, canonical)
     }
 

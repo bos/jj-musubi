@@ -30,9 +30,10 @@ impl NodeRepo {
     /// wrote for it, as an earlier release's fix-up, maybe where it had forgotten this machine
     /// and so without its workspaces; only this machine's own operations remove them. A view
     /// that has this machine's workspaces, or where it is otherwise present without any, is
-    /// left as it is, but for this machine's workspaces with a `/` in their names, which no
-    /// canonical view has (`view::is_publishable`): those it keeps as the parent has them, as
-    /// it keeps the others while forgotten.
+    /// left as it is, but for this machine's workspaces with a `/` in their names, those jj
+    /// records a directory for (`own_of_view`), which no canonical view has
+    /// (`view::is_publishable`): those it keeps as the parent has them, as it keeps the others
+    /// while forgotten.
     pub(super) fn with_own_workspaces(
         &mut self,
         canonical_id: &CanonicalOp,
@@ -53,11 +54,7 @@ impl NodeRepo {
                 let parent_op = op_store.read_operation(&parent.0).block_on()?;
                 let parent_view = op_store.read_view(&parent_op.view_id).block_on()?;
                 // `parents` are the realizations of `canonical_parents`, in the same order.
-                self.own_of_view(
-                    parent_view.wc_commit_ids,
-                    &canonical_parents[source],
-                    &parent_op,
-                )?
+                self.own_of_view(parent_view.wc_commit_ids, &canonical_parents[source])
             }
         };
         if own.is_empty() {

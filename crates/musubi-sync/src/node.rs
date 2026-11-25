@@ -142,10 +142,12 @@ impl NodeAdapter {
     /// arrives to merge with: `jj workspace forget` abandoned an empty working-copy commit
     /// here, which the hive keeps, and a merge with the abandon would rebase off it what its
     /// machine built on it meanwhile. Op heads may have changed since the last step: a
-    /// fetch's haves should say so.
+    /// fetch's haves should say so. A copy that lost history the hive has stops before it
+    /// writes anything (`read_heads`).
     pub fn before_sync(&mut self) -> anyhow::Result<()> {
         self.clock.tick(&mut self.repo);
         self.repo.check_complete()?;
+        self.read_heads()?;
         self.repo.forget_retired_copies()?;
         self.show_other_workspaces()?;
         self.heads()?;

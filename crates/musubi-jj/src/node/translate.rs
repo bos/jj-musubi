@@ -121,11 +121,6 @@ impl NodeRepo {
             {
                 local.clone()
             } else {
-                // A marker ends the native walk for private ownership. Capture that evidence
-                // before replacing the parents, so that this marked copy is self-contained.
-                let view = op_store.read_view(&op.view_id).block_on()?;
-                let own = self.own_of_view(view.wc_commit_ids, &canonical, &op)?;
-                self.record_private_workspaces(&mut op.metadata, own.into_keys(), &canonical)?;
                 op.parents = local_parents;
                 OpAttrs(&mut op.metadata.attributes).set_canonical(&canonical);
                 let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);

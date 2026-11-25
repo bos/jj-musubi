@@ -4377,6 +4377,38 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["sync"]);
     let (_, warnings) = status_in(&env, &logs, &alpha);
     assert_eq!(warnings, "");
+    // A workspace with a `/` that a jj from before it recorded directories added stops the
+    // first sync after upgrading, which ends once it is renamed or forgotten.
+    let old = env.root().join("alpha-old");
+    alpha.jj(&["workspace", "add", "--name", "old/w", old.to_str().unwrap()]);
+    jj_lib::repo::RepoLoader::init_from_file_system(
+        &alpha.settings(),
+        &alpha.repo_path(),
+        &jj_lib::default_backend_factories::default_backend_factories(),
+    )
+    .unwrap()
+    .workspace_store()
+    .forget(&[jj_lib::ref_name::WorkspaceName::new("old/w")])
+    .unwrap();
+    fs::remove_file(
+        alpha
+            .repo_path()
+            .join("musubi/unrecorded_workspaces_checked"),
+    )
+    .unwrap();
+    let refused = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    insta::assert_snapshot!(refused, @r#"
+    Error: this repository can't sync while its workspace old/w has a "/" in its name
+    Hint: musubi checks for this once: jj doesn't know where old/w's directory is, as for a workspace an older jj added. If you made it, run `jj workspace rename <new name>` in its directory, with no "/" in the new name. If you didn't, or no longer need it, run `jj workspace forget old/w`, which leaves its directory and files on disk.
+    "#);
+    alpha.jj(&["workspace", "forget", "old/w"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert!(
+        alpha
+            .repo_path()
+            .join("musubi/unrecorded_workspaces_checked")
+            .exists()
+    );
     // A workspace forgotten with `jj workspace forget` leaves jj's record of its directory;
     // once another machine's workspace shows by its name, the hint offers how to drop it.
     let stale = env.root().join("alpha-stale");
@@ -4440,8 +4472,8 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     // machine whose history knew that copy keeps for it, so the new one shows with part of its
     // key.
     for (repo, expected) in [
-        (&alpha, vec!["alpha", "linked", "beta-d51d/beta"]),
-        (&beta, vec!["beta", "alpha-4f13/alpha", "alpha-4f13/linked"]),
+        (&alpha, vec!["alpha", "linked", "beta-50bc/beta"]),
+        (&beta, vec!["beta", "alpha-320d/alpha", "alpha-320d/linked"]),
     ] {
         let names = repo.jj(&["workspace", "list", "-T", NAMES]);
         let actual: std::collections::BTreeSet<_> = names.lines().collect();

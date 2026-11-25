@@ -272,6 +272,23 @@ or showed it by before, can become this machine's own, whatever `jj undo`, `jj o
 `jj op revert` or `jj op abandon` bring back (#167). Canonicalizing needs no history to decide it,
 and stays deterministic.
 
+Nor does musubi keep such a name here, unpublished, unless jj's workspace store records a
+directory for it, as it does for every workspace of this machine's and for none of another's
+(`own_of_view`), and then the copy doesn't sync (below). Any other name with a `/` is a name
+another machine's workspace is shown by, as this machine shows it or showed it in a view `jj undo`
+or `jj op restore` brings back, under a name the hive no longer gives it, even from a hive the
+copy left before joining afresh. musubi takes it for no workspace of this machine's: realizations
+show other machines' workspaces as the canonical view has them, and the sync that shows them again
+drops the rest (`show_other_workspaces`). The store is read as it is now, not as it was when an
+operation ran, so a workspace with a `/` that a jj made before it recorded directories counts as
+another machine's, and is dropped. Compatibility until 2027-02-25: an earlier release kept such a
+workspace, so until a copy first finds none, it refuses to sync while its op heads have one that
+no other machine's workspace is shown by, as of its nearest translated operations, saying to
+rename it or forget it (`unrecorded_workspaces`), and then records that it checked, in
+`.jj/repo/musubi/unrecorded_workspaces_checked`. A repository that has never been part of a hive
+refuses to join with one, since joining on the root forgets it, and so records the check at its
+first join.
+
 Another machine is shown under its name, or, where two machines share a name, this one included,
 or the name would clash with a workspace of this machine's, under its name and the start of its
 key's random suffix (`laptop-1a2b`; `local_names`). Where that clashes too, with another
@@ -301,8 +318,8 @@ workspaces again, and at each step, before it reads the op heads or publishes a 
 and `musubi leave` (unless forced) say so first, with the command to run.
 The daemon waits for the next local operation, as for a publication hold, so the rename's
 operation wakes it. So whenever musubi canonicalizes, realizes or shows other machines'
-workspaces, every `/` name in this machine's op heads is another machine's workspace, or one
-`jj undo` brings back under a name the hive no longer gives it (`names_other_machine`).
+workspaces, every `/` name in this machine's op heads is a name another machine's workspace
+is shown by, now or in a view brought back.
 
 A record `jj workspace forget` left counts once this machine shows another machine's workspace by
 its name, or the copy adds a workspace of its own by it, and the copy stops syncing. musubi
@@ -326,21 +343,22 @@ into the laptop's working copy. musubi once kept such names apart by whether thi
 working copy for them, asking jj's workspace store as it is now rather than as it was when an
 operation ran, which a directory away during a sync got wrong.
 
-Which of another machine's workspaces a name is comes from the operation's local parents: each
-canonical parent's workspaces are named as the local parent standing for it named them. A name in
-a `jj` command's view stands for the laptop's workspace only where a view the command started from
-had it at the commit the canonical parents give that workspace, as a realization shows it and as
-an earlier command that moved it left it (`move_others_here`). So a workspace this machine adds
-under the name, as after `jj workspace forget laptop/default` here, never moves the laptop's,
-though `jj workspace add` moves the new workspace to its commit in a second operation that starts
-from a view with the name, and though commands run in it are canonicalized only after it is
-renamed: adding changes nothing of another machine's. An operation that goes back to an older one
-(`jj undo`, `jj op restore`, `jj op revert`) starts from the view it brings back, and a name there
-stands for the laptop's workspace only at the commit that view's canonical form gives it; a
-revert starts from its parents' views too, and each view that has the name must agree. So a
-workspace of this machine's by the name, brought back over the laptop's or beside it, moves
-nothing of the laptop's. musubi's own operations add no names: they show other machines'
-workspaces again under the names the hive gives them.
+Which of another machine's workspaces a name is comes from the operation's parents: each canonical
+parent's workspaces are named as a realization of it names them, from its canonical view alone
+(`inherited_from_parents`), and not from jj's workspace store, which changes after an operation
+runs. A name in a `jj` command's view stands for the laptop's workspace only where a view the
+command started from had it at the commit the canonical parents give that workspace, as a
+realization shows it and as an earlier command that moved it left it (`move_others_here`). So a
+workspace this machine adds under the name, as after `jj workspace forget laptop/default` here,
+never moves the laptop's, though `jj workspace add` moves the new workspace to its commit in a
+second operation that starts from a view with the name, and though commands run in it are
+canonicalized only after it is renamed: adding changes nothing of another machine's. An operation
+that goes back to an older one (`jj undo`, `jj op restore`, `jj op revert`) starts from the view
+it brings back, and a name there stands for the laptop's workspace only at the commit that view's
+canonical form gives it; a revert starts from its parents' views too, and each view that has the
+name must agree. So a workspace of this machine's by the name, brought back over the laptop's or
+beside it, moves nothing of the laptop's. musubi's own operations add no names: they show other
+machines' workspaces again under the names the hive gives them.
 
 [races.md](races.md#workspaces) says where a `jj` command racing a sync can still put the two
 under one name.

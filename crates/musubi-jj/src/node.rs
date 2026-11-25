@@ -8,7 +8,6 @@
 //! (`error`). What a node does only when its backend is git is in `git`.
 
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,9 +115,6 @@ struct NameMemos {
     /// The workspaces, with their commits, in the view of the operation `canonical_view` last
     /// canonicalized, usually the next one's parent.
     last_view: Mutex<Option<(jj_lib::op_store::OperationId, Arc<LocalWorkspaces>)>>,
-    /// Private ownership reconstructed from immutable native operation views.
-    private:
-        Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked: Mutex<presence::WorkedNames>,

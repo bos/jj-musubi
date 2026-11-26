@@ -2644,7 +2644,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
     This machine: alpha, synced N ago; the hub has all its work
     Working copies:
     alpha@: zsuskuln 95c553be (no description set)
-    alpha-second@: zxsnswpr 0b2c4657 (no description set)
+    alpha-second@: zxsnswpr 6e8a7cc6 (no description set)
     Copies:
     alpha (this machine): used N ago, never forgotten
     Daemon: running (pid N), serving this repository; doesn't start at login

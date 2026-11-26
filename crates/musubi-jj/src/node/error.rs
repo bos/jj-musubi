@@ -241,6 +241,18 @@ pub enum NodeError {
     /// as after `jj op abandon`. Which, the log says.
     #[error("{HISTORY_GONE}")]
     RewrittenRealization,
+    /// A development build after 0.47 left a hive here, and may have joined one again under
+    /// another key (`NodeRepo::refuse_retired_keys`).
+    ///
+    /// Compatibility until 2027-02-25: see `NodeRepo::refuse_retired_keys`.
+    #[error(
+        "this repository left a hive under a development build of musubi, which this build \
+         can't sync\nHint: start it over: `musubi leave --force` if it is part of a hive, then \
+         `musubi join --fresh`, and `musubi forget` the old copy `musubi status` lists; or \
+         recreate its hive: `musubi hub remove <hive>`, then `musubi create --fresh <hive>` here \
+         and `musubi join --hive <hive>` in its other repos"
+    )]
+    RetiredKeys,
     /// This copy has an own workspace with a `/` in its name, which it doesn't sync while it
     /// does: other machines' workspaces show by names of that form.
     #[error("{0}")]

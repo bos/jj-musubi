@@ -1401,33 +1401,36 @@ in its `refine` fails 8.
 
 `Copies.Detach` models one checkout's local writes after the worker has stopped and leave has
 finished talking to the hive. It takes a completed write as a boundary and resumes from the
-files at that boundary. The next join starts after the hub accepts a new key for the same jj
-config-id. Local join and leave commands run serially under the membership lock.
+files at that boundary. The checkout keeps its key: a leave marks its record left and drops the
+daemon's entry, and the next join, once the hub accepts it for the same jj config-id, takes up
+that key. Only a fresh join (`--fresh`) takes a new one. Local join and leave commands run
+serially under the membership lock.
 
-- `leave_prefix_safe` proves that saving the inactive record blocks a stale daemon entry,
-  even while that entry is still on disk. Removing the old key requires the native detach
-  operation and retired-key record to be present.
-- `leave_retry` proves that finishing leave from every prefix yields the same detached
-  checkout with its history marker and config-id.
-- `join_retry` and `join_prefix_safe` cover reusing the accepted key on retry, enabling the
-  new entry once the joined record is saved, and rejecting the old entry at every prefix.
+- `leave_prefix_safe` proves that saving the left record blocks a stale daemon entry, even
+  while that entry is still on disk, and that the key stays throughout.
+- `leave_retry` proves that finishing leave from every prefix yields the same left checkout,
+  with its key, record and config-id.
+- `join_retry` and `join_prefix_safe` cover joining again under the key the checkout left
+  with, from any prefix, and enabling the entry exactly once the joined record is saved.
 - `leave_retry_prefix` and `join_retry_prefix` prove that another interruption during a retry
   leaves a state already covered by the original prefixes.
-- `fresh_prefix_safe` proves that a fresh join (`--fresh`), which discards the checkout's
-  shared history before joining, never leaves part of that history without the mark that
-  makes the next join finish discarding it. `fresh_retry` proves that a plain join retried
-  from any point after the mark joins without that history, as the fresh join would have,
-  and `fresh_retry_prefix` that stopping the retry too leaves a state the fresh join passed
-  through.
+- `fresh_prefix_safe` proves that a fresh join, which discards the checkout's shared history
+  and its key before joining, never leaves the old key with part of that history, nor part
+  of it without the mark that makes the next join finish discarding it, and enables no entry
+  before the joined record is saved. `fresh_retry` proves that a plain join retried from any
+  point after the mark joins under a new key without that history, as the fresh join would
+  have, and `fresh_retry_again` that stopping that retry too, and retrying again, does the
+  same.
 
-The `copy-detach` oracle request takes `old` and `fresh` entries. It returns the states before
-and after each write of a leave, a join and a fresh join, with the outcome of retrying each
-state with a plain join. The test reads the shared history as kept when both the joins file
+The `copy-detach` oracle request takes `old` and `fresh` entries, the second the key a fresh
+join takes. It returns the states before and after each write of a leave, a join from where the
+leave ended and a fresh join from there, with the outcome of retrying each state with a plain
+join. The test reads the shared history as kept when both the joins file
 and the canonical store have the first join operation, as gone when neither does, and as part
 otherwise.
 `detach_and_rejoin_conform_at_write_boundaries` uses the real local join and leave code on
 disposable jj repos, terminating a process after each membership write. A fresh process reads
-the files and native operation log, checks both daemon identities with `copy::check`, retries,
+the files, checks both daemon identities with `copy::check`, retries,
 and compares both observations with the oracle. The model assumes completed atomic file
 writes. Hub behavior and translation of earlier operations have separate tests.
 

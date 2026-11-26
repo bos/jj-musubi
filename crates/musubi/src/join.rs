@@ -151,51 +151,26 @@ pub fn join(
             )?;
         }
     }
-    // Compatibility until 2027-02-24: finish detaching repositories left by an earlier
-    // release. Keep this for interrupted leaves until leave can clear membership in one step.
-    let before = match found.record.as_ref() {
-        Some(record) if record.state == Membership::Left => {
-            crate::leave::finish_detaching(&located)?;
-            None
-        }
-        before => before,
-    };
-    // `--fresh` takes a repository whose hive was removed out of it first, as `musubi leave`
-    // would, since its record and key belong to the history it drops.
-    let before = match before {
-        Some(record) if fresh && record.state == Membership::Removed => {
-            crate::leave::finish_detaching(&located)?;
-            None
-        }
-        before => before,
-    };
-    // A key `musubi leave` retired, in a repository with no record, but didn't clear before it
-    // stopped: finish clearing it, so that this join takes a new one. With `--fresh`, retire
-    // too a key kept from a join whose first sync was stopped, as `musubi leave` would.
-    if before.is_none() && NodeRepo::machine_of(&located.repo_path)?.is_some() {
-        let retired = located.open()?.machine_retired();
-        if retired || fresh {
-            // Not a key this machine syncs another repository with, as one made from this
-            // one's files; this one's own entry, from a join stopped before its record, goes,
-            // as does one whose repository is gone.
-            let elsewhere = entry.is_some_and(|entry| {
-                Located::find(&entry.path)
-                    .is_ok_and(|other| !copy::same_directory(&other.repo_path, &located.repo_path))
-            });
-            if !retired && found.record.is_none() && elsewhere {
-                anyhow::bail!(
-                    "{}",
-                    copy::not_the_copy(copy::Standing::Duplicate, None, entry)
-                );
-            }
-            let _lock = HiveConfig::lock(&located.repo_path)?;
-            crate::leave::retire_machine(&located)?;
-        }
+    // A record that says the repository left is as none: it joins as a repository part of no
+    // hive does, taking up its key again (docs/internals/copies.md, R6).
+    let before = found
+        .record
+        .as_ref()
+        .filter(|record| record.state != Membership::Left);
+    // Compatibility until 2027-02-25: see `NodeRepo::refuse_retired_keys`. `--fresh` removes
+    // what it refuses for, with the history it drops.
+    if !fresh {
+        NodeRepo::refuse_retired_keys(&located.repo_path)?;
     }
+    let (before, dropped) = if fresh {
+        start_over(&located, before, found.record.is_none(), entry)?
+    } else {
+        (before, None)
+    };
     discard_history_if(&located, fresh)?;
     // Kept only once the hub takes the join: a join refused, or failing, before then leaves
     // `--machine` free to name it next time.
-    let machine = joining_machine(&located, machine, &settings)?;
+    let machine = joining_machine(&located, machine, &settings, dropped.as_ref())?;
     let node = located.open_as(&settings, machine.clone())?;
     let summary = node.join_summary()?;
     // What the join carries into the hive, unless it is a hive this history came from.
@@ -232,8 +207,8 @@ pub fn join(
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
     // An interrupt from here on stops the first sync, and takes the repository back out of
-    // the hive. Only for one that had no record of a hive: stopping drops the record, which
-    // for one that had a record, joined or removed, would lose what it said.
+    // the hive. Only for one that had no record of a hive, or one that says it left: stopping
+    // marks the record left, which for one joined or removed would lose what it said.
     let stoppable = before.is_none().then(Stoppable::catch);
     // The hub took this machine's key: it is the repository's from now on.
     keep_join_key(&located, &machine)?;
@@ -304,10 +279,54 @@ pub fn join(
     fetch_join_conflicts(ui, &located, socket)
 }
 
+/// Readies the repository at `located` for a `--fresh` join, which drops the history its key
+/// worked in, and the key with it ([`discard_history_if`]), so that the hub takes a new one, as
+/// for a repository that never joined a hive: takes it out of a hive the hub removed,
+/// `before`, as `musubi leave` would, and drops this machine's entry for its key. Returns the
+/// record that is left of `before`, and the key, which the new one mustn't be. `unrecorded` is
+/// whether the repository had no record, and `entry` this machine's entry for its key.
+pub(crate) fn start_over<'a>(
+    located: &Located,
+    before: Option<&'a HiveConfig>,
+    unrecorded: bool,
+    entry: Option<&Entry>,
+) -> anyhow::Result<(Option<&'a HiveConfig>, Option<Machine>)> {
+    let before = match before {
+        Some(record) if record.state == Membership::Removed => {
+            crate::leave::detach(located, None)?;
+            None
+        }
+        before => before,
+    };
+    let Some(old) = NodeRepo::machine_of(&located.repo_path)? else {
+        return Ok((before, None));
+    };
+    // Not a key this machine syncs another repository with, as one made from this one's
+    // files; this one's own entry, from a join stopped before its record, goes, as does one
+    // whose repository is gone.
+    let elsewhere = entry.is_some_and(|entry| {
+        Located::find(&entry.path)
+            .is_ok_and(|other| !copy::same_directory(&other.repo_path, &located.repo_path))
+    });
+    if unrecorded && elsewhere {
+        anyhow::bail!(
+            "{}",
+            copy::not_the_copy(copy::Standing::Duplicate, None, entry)
+        );
+    }
+    let _lock = HiveConfig::lock(&located.repo_path)?;
+    if UserState::load()?.entry(old.key()).is_some() {
+        UserState::remove_entry(old.key())?;
+        #[cfg(test)]
+        after(Write::DropEntry);
+    }
+    Ok((before, Some(old)))
+}
+
 /// If `fresh`, drops the history the repository at `located`, part of no hive, shared with
-/// hives before, so that it joins as a repository that never was part of one. Either way,
-/// finishes such a discard that stopped partway, which would otherwise leave the join to carry
-/// what was left.
+/// hives before, and its key, so that it joins as a repository that never was part of one.
+/// Either way, finishes such a discard that stopped partway, which would otherwise leave the
+/// join to carry what was left.
 pub(crate) fn discard_history_if(located: &Located, fresh: bool) -> anyhow::Result<()> {
     if fresh || NodeRepo::discarding_shared_history(&located.repo_path) {
         NodeRepo::discard_shared_history(&located.repo_path, |_step| {
@@ -396,20 +415,25 @@ async fn ask_preparing(
 
 /// The machine the repository at `located` joins a hive as: the one its key names, which
 /// `name`, if given, must name, since its key has been part of a hive; else a new one, named
-/// `name`, or as `musubi.machine-name` sets, or after the host, whose key [`keep_join_key`]
-/// keeps once the hub accepts the join. `name` must be `musubi.machine-name`, where that is
+/// `name`, or as `musubi.machine-name` sets, or after the host, with a key other than
+/// `avoiding`'s, which [`keep_join_key`] keeps once the hub accepts the join. `name` must be `musubi.machine-name`, where that is
 /// set: the setting names the machine in every repository on it.
 pub(crate) fn joining_machine(
     located: &Located,
     name: Option<&str>,
     settings: &UserSettings,
+    avoiding: Option<&Machine>,
 ) -> anyhow::Result<Machine> {
     let configured = configured_machine_name(name)?;
     let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
         let name = name
             .or(configured.as_deref())
             .unwrap_or_else(|| settings.operation_hostname());
-        return Ok(NodeRepo::new_machine(&located.repo_path, name, settings)?);
+        return Ok(NodeRepo::new_machine(
+            name,
+            settings,
+            avoiding.map(Machine::key),
+        ));
     };
     // Its key names it, until the setting renames it.
     let current = configured.unwrap_or_else(|| machine.name().to_owned());
@@ -966,7 +990,7 @@ pub fn clone(
     let located = Located::find(destination)?;
     clone_config::seed(&located.workspace_root, &info.clone_config)?;
     let machine_flag = machine;
-    let machine = joining_machine(&located, machine, &settings)?;
+    let machine = joining_machine(&located, machine, &settings, None)?;
     let joined = Joined {
         hive: info.clone(),
         created: false,

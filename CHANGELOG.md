@@ -15,9 +15,8 @@
 - Where two machines present in a hive share a name, the one that has had it longer keeps it,
   and the other is shown with part of its id, as `laptop-1a2b/default@`; before, both were.
   Machines a hive has forgotten no longer count: a copy deleted without `musubi leave`, once
-  forgotten, no longer makes a new copy of its machine show as `laptop-1a2b` for good, nor does
-  a copy that left and joined again under the same name. `jj op log` shows older operations of
-  a renamed machine under its old name.
+  forgotten, no longer makes a new copy of its machine show as `laptop-1a2b` for good. `jj op
+  log` shows older operations of a renamed machine under its old name.
 
 - Every machine and hub must upgrade together: a machine and a hub of releases either side of
   this one refuse each other, saying so, since they disagree on what machines are named. A
@@ -56,18 +55,15 @@
   says that instead. Before, the command ended and the daemon carried on, fetching everything
   and merging the hive's history into the repo. A repo that was part of a hive already, as
   one whose hive was removed or one `musubi join --original` joins again, goes on syncing as
-  before. A stopped repo keeps its machine name for joining again; `musubi leave` clears it.
-  A sync that takes long now logs what it is
-  doing every 30 seconds. Commands and the daemon now speak a new version of their local
-  protocol: after upgrading, run `musubi daemon restart`, as commands say when they find the
-  old daemon.
+  before. A sync that takes long now logs what it is doing every 30 seconds. Commands and the
+  daemon now speak a new version of their local protocol: after upgrading, run `musubi daemon
+  restart`, as commands say when they find the old daemon.
 
-- `musubi leave` clears the copy's membership and machine name while keeping its jj files
-  and history. The same checkout can join as a new copy with `musubi join --machine <name>`.
-  Repos that left before upgrading clear their old membership the next time they join.
-  No upgrade step is needed. A copy that joins again under the name it had shows on the
-  other machines with part of its new key, as `laptop-1a2b/default`, since they keep the
-  old copy's name for it.
+- `musubi leave` keeps the repo's machine: `musubi join` in it later, in the same hive or
+  another, brings it back under the name it had, with the work done while it was out, even
+  after `musubi leave --force` with the hub out of reach. `musubi create --fresh` and `musubi
+  join --fresh` make it a new machine, with the history they leave out. Nothing to do on
+  upgrading.
 
 - `musubi hub remove --immediately <hive>` deletes the hive's stored history from the hub
   before reporting success. See [Purge shared history](docs/troubleshooting.md#purge-shared-history)

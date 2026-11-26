@@ -360,8 +360,8 @@ retrying each. -/
 def copyDetachReply (j : Json) : Except String Json := do
   let old ← decodeEntry (← j.getObjVal? "old")
   let fresh ← decodeEntry (← j.getObjVal? "fresh")
-  unless old.key != fresh.key && old.cid == fresh.cid do
-    throw "copy-detach requires a fresh key and the original config-id"
+  unless old.cid == fresh.cid && old.key != fresh.key do
+    throw "copy-detach requires the original config-id, and a key of its own for --fresh"
   let entry (e : Copies.Entry) := Json.mkObj [
     ("key", toJson e.key), ("hive", toJson e.hive), ("cid", toJson e.cid)]
   let record (r : Copies.Record) := Json.mkObj [
@@ -375,7 +375,6 @@ def copyDetachReply (j : Json) : Except String Json := do
       ("key", toJson s.repo.key), ("cid", toJson s.repo.cid),
       ("record", (s.repo.record.map record).getD .null)]),
     ("entry", (s.entry.map entry).getD .null),
-    ("marker", .bool s.marker), ("retired", .bool s.retired),
     ("history", .str (match s.history with
       | .kept => "kept"
       | .part => "part"
@@ -384,8 +383,9 @@ def copyDetachReply (j : Json) : Except String Json := do
     ("oldCheck", .bool (Copies.check old s.repo)),
     ("freshCheck", .bool (Copies.check fresh s.repo))]
   let leave := Copies.Detach.leaveTrace (Copies.Detach.joined old)
-  let join := Copies.Detach.joinTrace (Copies.Detach.detached old.cid) fresh
-  let freshJoin := Copies.Detach.joinTrace (Copies.Detach.detached old.cid) fresh true
+  -- A plain join takes up the key the copy left with; `fresh` is the key a `--fresh` one takes.
+  let join := Copies.Detach.joinTrace (Copies.Detach.left old) fresh
+  let freshJoin := Copies.Detach.joinTrace (Copies.Detach.left old) fresh true
   let withRetry (states : List Copies.Detach.Files)
       (finish : Copies.Detach.Files → Copies.Detach.Files) :=
     Json.arr (states.map (fun s => Json.mkObj [

@@ -229,8 +229,9 @@ Each canonical operation is work by a copy, a forget of copies, or neither:
 
 - **Work** by a copy is an operation the copy chose to make: one of its own `jj` commands, which
   the canonical workspace name says it made, or an operation musubi makes for it, marked
-  `musubi.work = <machine key>`: its join, joining again after leaving, or recording its
-  `musubi.forget-after` ([Copies that go unused](#copies-that-go-unused)).
+  `musubi.work = <machine key>`: its join, joining again after leaving, under the same key, or
+  recording its `musubi.forget-after` ([Copies that go unused](#copies-that-go-unused)) or its
+  name ([Machine names](#machine-names)).
 - A **forget** is marked `musubi.forget = <machine keys>`. `musubi forget` and `musubi leave`
   write one, which removes the copies' workspaces from the view as `jj workspace forget` would,
   abandoning each working-copy commit that is empty.
@@ -433,10 +434,15 @@ on showing the copy until one of them forgets it, with `musubi forget` or by its
 each workspace whose commit is hidden a new `@` (`give_back_working_copies`), since no later work
 of its will be in the hive to do it.
 
-After restoring the working copies, leave writes a local operation that marks where its old
-key stopped owning new work. It clears the machine key and membership record. A subsequent
-join uses a fresh key. The detach operation and the retired keys preserve the translation of
-native operations from before the detach, including after rebuilding the translation cache.
+Leaving marks the membership record left and drops the daemon's entry, but keeps the machine
+key: the copy's identity in the hive is for good ([copies.md](copies.md), R7). Joining again is
+work by that key, which brings the copy back under the name it had, the leave's forget
+notwithstanding; a `jj` command that loaded the repository before the leave and wrote its
+operation after it is that copy's work too, which the copy sends once it has joined again
+(`Identity.Rejoin`: `leave_sticks_until_rejoin`, `rejoin_returns`, `late_work_same_key`). Every
+native operation is translated under the one key, so rebuilding the translation cache gives
+the canonical forms the hive has. Only `--fresh` gives the copy a new key, with the history the
+old one worked in gone ([Joining](#joining)).
 
 ## Copies that go unused
 
@@ -782,21 +788,22 @@ out the parents from before the join, whose work its view has merged (`canonical
 the node syncs the rest of its history.
 
 A repository that previously shared canonical history carries that history when it joins
-again, even into another hive. Replacing it with a join on the root would make its accepted
-base unreachable, falsely indicating lost history ([Lost history](#lost-history)). Joining
-after a leave records fresh work under a new key on top of that history. `create` and `join`
+again, even into another hive, wherever a hub took some of it or its head descends from it.
+Replacing it with a join on the root would make its accepted base unreachable, falsely
+indicating lost history ([Lost history](#lost-history)). Joining after a leave records fresh
+work under the same key on top of that history. `create` and `join`
 say so when the hive isn't one the history records a join to, with the number of canonical
 operations the copy holds: a bound on what it sends, cheap to count.
 
 `--fresh` drops that history instead, so that the join is on the root, as a repository's
-that never joined: the canonical store, join records, translations, and the accepted and
-pushed markers and publication offers that name canonical operations, all of which go
-together, so the accepted base goes with them. It keeps the local operation log and the
-retired keys, which still name the earlier operations' machines and keep a new key from
-repeating an old one. A repository whose hive was removed, or that kept a key from a stopped
-first sync, first leaves as `musubi leave` would. The discard is marked before anything is
-removed and unmarked after, and any join that finds the mark finishes it, since a join over
-part of the history would carry a history with holes (`Copies.Detach`,
+that never joined: the machine key, whose work that history holds, the canonical store, join
+records, translations, and the accepted and pushed markers and publication offers that name
+canonical operations, all of which go together, so the accepted base goes with them, and the
+hub takes a new key, other than the old one. It keeps the local operation log. A repository
+whose hive was removed first leaves as `musubi leave` would. The discard is marked before
+anything is removed and unmarked after, the key going first, so that the key is never left with
+part of the history, and any join that finds the mark finishes it, since a join over part of
+the history would carry a history with holes (`Copies.Detach`,
 [conformance.md](conformance.md#detach-and-join-write-boundaries)). Joining a hive afresh
 merges as any new copy does, against the root: where the hive rewrote commits this copy still
 has, both show, divergent, which is why a plain `join` back into a hive the copy left carries
@@ -1130,9 +1137,10 @@ refuses, once the sync is stopped, or ends the time it can be stopped. Until the
 written none of the hive's history where jj shows it, only objects jj doesn't reach and
 operations of this machine's own, such as a merge of its op heads, so ending it wherever it
 waits leaves the repository with none of the hive's history. Only a repository that had no
-record of a hive can stop it: stopping drops the record. The copy then leaves its hive without
-telling it, which would take the sync that was stopped, keeping the key the hub took for a join
-again, or for `musubi leave` to retire; a copy whose sync has begun applying finishes it.
+record of a hive, or one that says it left, can stop it: stopping marks the record left. The
+copy then leaves its hive without telling it, which would take the sync that was stopped,
+keeping the key the hub took for a join again; a copy whose sync has begun applying finishes
+it.
 
 Only the owner may reach the control socket. musubi refuses unsafe socket directories or a
 named pipe another user has claimed, and a lock prevents a second daemon from taking over the

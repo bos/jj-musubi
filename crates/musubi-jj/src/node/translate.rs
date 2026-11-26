@@ -444,27 +444,8 @@ impl NodeRepo {
         op: &StoreOperation,
         parents: Vec<CanonicalOp>,
     ) -> Result<CanonicalOp, NodeError> {
-        let historical = self
-            .identities
-            .machine_for(self.loader.op_store().as_ref(), op)?
-            .cloned();
-        let form = |node: &Self| {
-            node.canonical_form(id, op, parents, |view| node.canonical.write_view(view))
-        };
-        let (canonical_op, presence, kind) = if let Some(machine) = historical {
-            let key = machine.key().to_owned();
-            let historical_names = self.identities.names.remove(&key).unwrap_or_default();
-            let current = std::mem::replace(&mut self.machine, machine);
-            let names = std::mem::replace(&mut self.names, historical_names);
-            let result = form(self);
-            self.machine = current;
-            self.identities
-                .names
-                .insert(key, std::mem::replace(&mut self.names, names));
-            result?
-        } else {
-            form(self)?
-        };
+        let (canonical_op, presence, kind) =
+            self.canonical_form(id, op, parents, |view| self.canonical.write_view(view))?;
         let canonical = self.canonical.write_operation(&canonical_op)?;
         let work = Work::of(&self.canonical, &canonical)?;
         let generation = self.canonical.generation(&canonical)?;

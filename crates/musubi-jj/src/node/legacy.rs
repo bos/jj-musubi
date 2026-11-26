@@ -82,3 +82,27 @@ impl super::NodeRepo {
         }
     }
 }
+
+/// What development builds after 0.47 called the file of the machine keys a repository had
+/// left hives under, which no release reads.
+pub(super) const RETIRED_KEYS: &str = "retired-keys.json";
+
+impl super::NodeRepo {
+    /// Fails if a development build after 0.47 took this repository out of a hive, and maybe
+    /// joined one again under another key: what it recorded to tell its operations under each
+    /// key apart this build doesn't read, so this repository can't sync, join or leave until it starts
+    /// over without the history it shared (`musubi join --fresh`), which removes the file
+    /// (`SHARED_HISTORY`).
+    ///
+    /// Compatibility until 2027-02-25: remove this, `NodeError::RetiredKeys`, their calls,
+    /// `RETIRED_KEYS` in `SHARED_HISTORY`, and the test
+    /// `a_repository_a_development_build_rejoined_under_a_new_key_starts_over`. No release
+    /// wrote the file, so no guide or changelog mentions it.
+    pub fn refuse_retired_keys(repo_path: &Path) -> Result<(), NodeError> {
+        if repo_path.join("musubi").join(RETIRED_KEYS).exists() {
+            Err(NodeError::RetiredKeys)
+        } else {
+            Ok(())
+        }
+    }
+}

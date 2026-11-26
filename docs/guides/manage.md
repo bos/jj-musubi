@@ -148,9 +148,10 @@ forgotten.
 
 ### Rejoin, or stop using jj-musubi
 
-After leaving, run `musubi join` in the same repo to join as a new copy, under the machine's
-name. Your files and jj history stay in the checkout. To rename the machine, change its
-setting rather than leaving and joining again: see [Naming machines](setup.md#naming-machines).
+After leaving, run `musubi join` in the same repo to join again. It comes back as the same
+machine, under the name it had, and sends the work you did while it was out; your files and jj
+history stay in the checkout. To rename the machine, change its setting rather than leaving and
+joining again: see [Naming machines](setup.md#naming-machines).
 
 If you join a different hive, or start one with `musubi create`, the operation history you
 already shared goes with you, with everything it holds, even work you have deleted since. The

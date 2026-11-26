@@ -144,20 +144,6 @@ impl NodeRepo {
         )
     }
 
-    /// A jj command opened before a leave can finish after it. Its operation keeps its
-    /// original key in history, so forget any old membership it made present again.
-    pub fn forget_retired_copies(&mut self) -> Result<bool, NodeError> {
-        let retired: BTreeSet<_> = self.identities.retired_keys().map(str::to_owned).collect();
-        if retired.is_empty() {
-            return Ok(false);
-        }
-        let forgotten = self.forget_copies_where(
-            |copy| retired.contains(copy),
-            "musubi: forget copies that left",
-        )?;
-        Ok(!forgotten.is_empty())
-    }
-
     fn forget_copies_where(
         &mut self,
         forget: impl Fn(&str) -> bool,

@@ -148,7 +148,6 @@ impl NodeAdapter {
         self.clock.tick(&mut self.repo);
         self.repo.check_complete()?;
         self.read_heads()?;
-        self.repo.forget_retired_copies()?;
         self.show_other_workspaces()?;
         self.heads()?;
         Ok(())
@@ -187,9 +186,8 @@ impl NodeAdapter {
         let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
         let named = self.repo.record_name()?;
         let recorded = self.repo.record_forget_after()?;
-        let retired = self.repo.forget_retired_copies()?;
         let forgotten = self.repo.expire_idle(self.clock.now(), EXPIRY_STAGGER)?;
-        Ok(workspaces || replaced || named || recorded || retired || !forgotten.is_empty())
+        Ok(workspaces || replaced || named || recorded || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it, with its time moved on
@@ -238,6 +236,8 @@ impl NodeAdapter {
     fn read_heads(&mut self) -> anyhow::Result<Vec<OpId>> {
         // Compatibility until 2027-02-21: remove with `NodeRepo::refuse_legacy_drops`.
         self.repo.refuse_legacy_drops()?;
+        // Compatibility until 2027-02-25: remove with `NodeRepo::refuse_retired_keys`.
+        NodeRepo::refuse_retired_keys(self.repo.repo_path())?;
         // Before canonicalizing them, which takes no name with a `/` for this machine's own.
         self.repo.refuse_slashed_workspaces()?;
         self.repo.settle()?;
@@ -398,12 +398,17 @@ fn op_ids(ops: Vec<CanonicalOp>) -> Vec<OpId> {
 }
 
 /// Whether `err` is that this repository lost history the hive has, as after `jj op abandon`,
-/// which no retry gets past.
+/// or one no retry gets past otherwise.
 pub fn history_lost(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<NodeError>(),
-            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization)
+            Some(
+                NodeError::UnreachableHistory
+                    | NodeError::RewrittenRealization
+                    // Compatibility until 2027-02-25: see `NodeRepo::refuse_retired_keys`.
+                    | NodeError::RetiredKeys
+            )
         )
     })
 }

@@ -81,8 +81,13 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
     let _membership = HiveConfig::join_lock(ui, &located.repo_path)?;
-    if leave_inactive(ui, &located)? || retire_kept_key(ui, &located)? {
+    if leave_inactive(ui, &located)? {
         return Ok(());
+    }
+    // Compatibility until 2027-02-25: see `NodeRepo::refuse_retired_keys`. `--force` leaves
+    // without the sync it refuses.
+    if !force {
+        NodeRepo::refuse_retired_keys(&located.repo_path)?;
     }
     let (located, hive, entry) = the_copy(ui, start, socket)?;
     // Telling the hive that this copy leaves takes a sync, which a workspace name with a `/`
@@ -149,7 +154,7 @@ pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Res
     left(ui, &name)
 }
 
-/// Completes a leave that stopped partway through, or detaches from a hive the hub removed.
+/// Completes a leave that stopped partway through, or leaves a hive the hub removed.
 fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
     let found = copy::Found::resolve(located)?;
     if matches!(copy::standing(&found, None), copy::Standing::Duplicate) {
@@ -159,44 +164,16 @@ fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
         return Ok(false);
     };
     let name = record.display_name();
-    finish_detaching(located)?;
+    detach(located, None)?;
     left(ui, &name)?;
     Ok(true)
 }
 
-/// Retires the machine key of a repository that is part of no hive but kept the key a hub
-/// took, as a join whose first sync was stopped leaves it, so that the next join makes a new
-/// one. Returns whether it was one.
-fn retire_kept_key(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
-    let _lock = HiveConfig::lock(&located.repo_path)?;
-    if HiveConfig::load(&located.repo_path)?.is_some() {
-        return Ok(false);
-    }
-    let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
-        return Ok(false);
-    };
-    // Not one whose key this machine syncs a copy of, as another repository made from this
-    // one's files that joined since.
-    if UserState::load()?.entry(machine.key()).is_some() {
-        return Ok(false);
-    }
-    retire_machine(located)?;
-    writeln!(
-        ui.stdout(),
-        "This repository isn't part of a hive; it no longer has a machine name (it was {}).",
-        machine.name()
-    )?;
-    Ok(true)
-}
-
-/// Clears inactive membership. The join lock holds across this and the caller's membership
-/// checks. If interrupted, the record stays until the key and daemon entry are gone.
-pub(crate) fn finish_detaching(located: &Located) -> anyhow::Result<()> {
-    detach(located, None)
-}
-
 /// Commits a leave locally once the caller has stopped the worker and completed the final
-/// sync, or finishes clearing an already inactive membership.
+/// sync (`leaving`), or finishes one that stopped partway, or leaves a hive the hub removed:
+/// marks the record left and drops the daemon's entry. The repository keeps its machine key,
+/// and its record, so that joining again takes up the key, and a duplicate made of it is told
+/// from it (docs/internals/copies.md, R6 and R7).
 pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow::Result<()> {
     let path = &located.repo_path;
     let _lock = HiveConfig::lock(path)?;
@@ -209,8 +186,11 @@ pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow:
             "this repository's hive changed during leave"
         );
     }
-    if record.joined() {
-        anyhow::ensure!(leaving.is_some(), "this repository is still part of a hive");
+    if record.state != Membership::Left {
+        anyhow::ensure!(
+            leaving.is_some() || !record.joined(),
+            "this repository is still part of a hive"
+        );
         HiveConfig {
             state: Membership::Left,
             ..record
@@ -219,33 +199,14 @@ pub(crate) fn detach(located: &Located, leaving: Option<&HiveConfig>) -> anyhow:
         #[cfg(test)]
         after(Write::MarkLeft);
     }
-    retire_machine(located)?;
-    std::fs::remove_file(daemon::Status::path(path)).ok();
-    std::fs::remove_file(HiveConfig::path(path))?;
-    #[cfg(test)]
-    after(Write::ClearRecord);
-    Ok(())
-}
-
-/// Retires the repository's machine key, if it has one, and drops its entry, in the order
-/// [`detach`] needs: the key recorded retired before it is cleared.
-pub(crate) fn retire_machine(located: &Located) -> anyhow::Result<()> {
-    let path = &located.repo_path;
-    if let Some(machine) = NodeRepo::machine_of(path)? {
-        if let Some(retirement) = located.open()?.begin_retiring_machine()? {
-            #[cfg(test)]
-            after(Write::MarkHistory);
-            retirement.record()?;
-            #[cfg(test)]
-            after(Write::RetireKey);
-        }
+    if let Some(machine) = NodeRepo::machine_of(path)?
+        && UserState::load()?.entry(machine.key()).is_some()
+    {
         UserState::remove_entry(machine.key())?;
         #[cfg(test)]
         after(Write::DropEntry);
-        NodeRepo::clear_machine(path)?;
-        #[cfg(test)]
-        after(Write::ClearKey);
     }
+    std::fs::remove_file(daemon::Status::path(path)).ok();
     Ok(())
 }
 

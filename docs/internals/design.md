@@ -962,6 +962,18 @@ selection. Before contracting native parents, freeze each survivor's source inte
 predecessor-record keys. Changed operations receive new physical identities, and preparation
 refuses coalescing identities.
 
+A selected operation that records the copy's name (`musubi.name`, "Machine names") stays, so
+that the copy keeps its name, and the mark that decides which of the copies sharing it keeps it
+plain stays where it was: a record in the checkpoint would mark the copy anew, at the head, and
+in a clash it could lose its plain name. It changes nothing else, so it takes its new parents'
+view, merged as jj merges operations where it has several, and retains nothing they don't.
+Its since, a generation, can still fall, as removing operations below it shortens the longest
+path there, so a claim to the name that lost to a concurrent one by no more than that can win
+instead, alike on every machine (races.md). No cleanup can avoid that while since is a
+generation: keeping each removed operation's place in the history would keep the operations
+the user chose to drop. A pruned operation that brought the copy back after a forget isn't
+kept: the next work that is, or the checkpoint, brings it back instead, later.
+
 A fresh checkpoint retains the exact current view and every intentional commit version, with
 intentional predecessor links connected across removed automatic versions. It records genuine
 new local work, the local lease and expected Git-ref values. It does not invent activity for other

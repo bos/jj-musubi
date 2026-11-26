@@ -33,6 +33,7 @@ use crate::node::PublicationError;
 use crate::op_attrs::OpAttrs;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
+use crate::presence::Kind;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PublicationCleanup {
@@ -660,11 +661,33 @@ impl NodeRepo {
         let mut created = HashSet::new();
         for (id, mut operation) in order {
             let parents = contracted_parents(&images, &operation.parents);
-            let now = if selected.contains(&id) {
+            let records_name = Kind::of(&operation.metadata).name.is_some();
+            let now = if selected.contains(&id) && !records_name {
                 parents
-            } else if parents == operation.parents {
+            } else if parents == operation.parents && !selected.contains(&id) {
                 vec![id.clone()]
             } else {
+                if selected.contains(&id) {
+                    // A record of this copy's name is kept, where it was, so that the copy
+                    // keeps its name, and the mark that decides who keeps it plain where
+                    // copies share it. It changes nothing else: its view becomes its new
+                    // parent's, or theirs merged as jj merges operations, which retains
+                    // nothing they don't but where the merge rebases commits.
+                    operation.view_id = match parents.as_slice() {
+                        [parent] => store.read_operation(parent).block_on()?.view_id,
+                        _ => {
+                            let operations = parents
+                                .iter()
+                                .map(|id| self.loader.load_operation(id).block_on())
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let (merged, _) = self
+                                .loader
+                                .merge_operations(operations, None, None, [])
+                                .block_on()?;
+                            merged.operation().view_id().clone()
+                        }
+                    };
+                }
                 operation.parents = parents;
                 let facts = source
                     .facts

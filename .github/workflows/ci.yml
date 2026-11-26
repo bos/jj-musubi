@@ -199,11 +199,11 @@ jobs:
             git --version
             cargo nextest --version
             cargo clippy --workspace --all-targets --locked -- -D warnings
-            # `decisions_conformance` needs the Lean oracle. `moved_copies_sync_again` fails on
-            # illumos: the daemon doesn't notice a copy moved to another directory.
+            # The tests in `copy::conformance` need the Lean oracle. `moved_copies_sync_again`
+            # fails on illumos: the daemon doesn't notice a copy moved to another directory.
             # The VM is thrown away, so tests may install SMF services for real.
             MUSUBI_TEST_LOGIN_SERVICE=1 cargo nextest run --locked --profile ci -p jj-musubi \
-              -E 'not test(=copy::conformance::decisions_conformance) and not test(=moved_copies_sync_again)'
+              -E 'not test(/^copy::conformance::/) and not test(=moved_copies_sync_again)'
 
   lean:
     name: Lean model and conformance

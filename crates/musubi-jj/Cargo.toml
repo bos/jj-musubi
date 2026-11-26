@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+antithesis_sdk = { workspace = true, optional = true }
 async-trait.workspace = true
 blake3.workspace = true
 futures.workspace = true
@@ -22,6 +23,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 zstd.workspace = true
+
+[features]
+# An Antithesis assertion that jj panics only as musubi expects (antithesis/README.md).
+antithesis = ["dep:antithesis_sdk"]
 
 [dev-dependencies]
 pollster.workspace = true

@@ -388,6 +388,10 @@ fn spawn_worker(
                     && !HubService::worth_handling_unheard(&message.payload)
                 {
                     tracing::debug!("let go of a request its sender stopped waiting for");
+                    #[cfg(feature = "antithesis")]
+                    antithesis_sdk::assert_reachable!(
+                        "the hub lets go of a request its sender stopped waiting for"
+                    );
                     continue;
                 }
                 let limit = transport.max_payload();
@@ -411,6 +415,14 @@ fn spawn_worker(
                     // it. The hive's service may be left half-changed: the next request opens
                     // it afresh.
                     slot.let_go();
+                    #[cfg(feature = "antithesis")]
+                    {
+                        let panic = panic_message(panic.as_ref());
+                        antithesis_sdk::assert_unreachable!(
+                            "the hub panics answering a request",
+                            &antithesis_sdk::serde_json::json!({ "panic": panic })
+                        );
+                    }
                     Err(anyhow::anyhow!(
                         "the hub failed: {}",
                         panic_message(panic.as_ref())

@@ -1,0 +1,11 @@
+# The build context is the repository's root; send only what the images build from.
+**
+!Cargo.toml
+!Cargo.lock
+!.cargo
+!crates
+!antithesis/musubi/driver/Cargo.toml
+!antithesis/musubi/driver/Cargo.lock
+!antithesis/musubi/driver/src
+!antithesis/musubi/image
+**/target

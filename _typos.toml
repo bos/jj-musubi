@@ -2,8 +2,13 @@
 extend-exclude = ["formal/.lake", "target", "Cargo.lock"]
 
 [default]
-# The 32-column terminal snapshot clips ISSUES at the right edge.
-extend-ignore-re = ['" HEAD IN/ OUT/ OPS COMM MAC ISSU"']
+extend-ignore-re = [
+    # The 32-column terminal snapshot clips ISSUES at the right edge.
+    '" HEAD IN/ OUT/ OPS COMM MAC ISSU"',
+    # Commit and operation ids, as antithesis/FINDINGS.md quotes them: hex that can read as a
+    # word.
+    '`[0-9a-f]{7,40}`',
+]
 
 [default.extend-identifiers]
 # The core Lean fold homomorphism theorem.

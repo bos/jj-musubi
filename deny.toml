@@ -1,5 +1,6 @@
 [graph]
-all-features = false
+# The `antithesis` features' dependencies ship in the Antithesis build (antithesis/README.md).
+all-features = true
 
 [advisories]
 yanked = "deny"

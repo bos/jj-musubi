@@ -1,0 +1,8 @@
+[user]
+name = "Antithesis"
+email = "antithesis@example.com"
+
+[ui]
+paginate = "never"
+color = "never"
+editor = "false"

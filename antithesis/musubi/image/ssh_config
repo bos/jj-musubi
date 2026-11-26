@@ -1,0 +1,5 @@
+# Every container has the same host keys, and names change between runs: don't check them.
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR

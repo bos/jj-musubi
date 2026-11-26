@@ -1,6 +1,8 @@
 //! `musubi`: replicate jj repositories between machines.
 
 mod agent;
+#[cfg(feature = "antithesis")]
+mod antithesis;
 mod backoff;
 mod cli;
 mod clone_config;
@@ -118,6 +120,8 @@ fn parse_filter(filter: &str) -> anyhow::Result<tracing_subscriber::EnvFilter> {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "antithesis")]
+    antithesis::init();
     completion::complete_if_asked();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,

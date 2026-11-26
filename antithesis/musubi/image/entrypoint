@@ -1,0 +1,25 @@
+#!/bin/sh
+# Runs a container's role: `hub`, `machine` or `driver`. The hub and the machines run sshd
+# beside musubi, which is the container's main process, so that it gets the signals.
+set -e
+role=${1:-machine}
+# The local loop (scripts/local-run.sh) sets where coverage profiles and SDK output go. musubi
+# also runs in ssh sessions (`musubi hub connect`, and the driver's commands), which don't
+# inherit the container's environment: sshd's PAM reads /etc/environment for them.
+for var in LLVM_PROFILE_FILE ANTITHESIS_SDK_LOCAL_OUTPUT; do
+    eval "value=\${$var:-}"
+    if [ -n "$value" ]; then
+        mkdir -p "$(dirname "$value")"
+        grep -q "^$var=" /etc/environment 2>/dev/null || echo "$var=$value" >> /etc/environment
+    fi
+done
+if [ "$role" = driver ]; then
+    exec /usr/local/bin/driver
+fi
+/usr/sbin/sshd
+cd /root
+case "$role" in
+    hub) exec musubi hub ;;
+    machine) exec musubi daemon ;;
+    *) echo "unknown role: $role" >&2; exit 2 ;;
+esac

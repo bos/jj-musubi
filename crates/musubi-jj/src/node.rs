@@ -615,10 +615,21 @@ fn catch_jj_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String>
     CATCHING_JJ_PANIC.with(|catching| catching.set(outer));
     match caught {
         Ok(result) => result,
-        Err(panic) => Err(panic
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_owned())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "jj panicked".to_owned())),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "jj panicked".to_owned());
+            // Any other panic is a bug, which the quiet hook would otherwise hide.
+            #[cfg(feature = "antithesis")]
+            if !message.contains("graph has cycle") {
+                antithesis_sdk::assert_unreachable!(
+                    "a panic caught from jj is its known graph cycle",
+                    &antithesis_sdk::serde_json::json!({ "panic": message })
+                );
+            }
+            Err(message)
+        }
     }
 }

@@ -525,8 +525,8 @@ again after the socket is deleted.
 
 Two CLI tests install real login services, and so run only with `MUSUBI_TEST_LOGIN_SERVICE=1`,
 which CI sets on its throwaway runners and illumos VM: never set it where musubi is installed for
-real. CI's illumos job, in an OmniOS VM, runs only the musubi crate's tests, less
-`decisions_conformance`, which needs the Lean oracle, and `moved_copies_sync_again`, which fails
+real. CI's illumos job, in an OmniOS VM, runs only the musubi crate's tests, less those in
+`copy::conformance`, which need the Lean oracle, and `moved_copies_sync_again`, which fails
 there: the daemon doesn't notice a copy moved to another directory (see [copies.md](copies.md)).
 It runs as root, so the tests that use the real SMF never check real pfexec rights, a missing
 authorization, or SMF running musubi as another user; the stand-ins check what musubi does about a

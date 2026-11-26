@@ -252,7 +252,7 @@ open Musubi
 #assert_axioms Copies.Detach.join_retry_prefix
 #assert_axioms Copies.Detach.join_prefix_safe
 #assert_axioms Copies.Detach.fresh_retry
-#assert_axioms Copies.Detach.fresh_retry_prefix
+#assert_axioms Copies.Detach.fresh_retry_again
 #assert_axioms Copies.Detach.fresh_prefix_safe
 
 -- Names
@@ -271,6 +271,9 @@ open Musubi
 #assert_axioms Identity.Naming.resolve_at_origin
 #assert_axioms Identity.Naming.unique_label
 #assert_axioms Identity.Naming.shared_qualified
+#assert_axioms Identity.Rejoin.leave_sticks_until_rejoin
+#assert_axioms Identity.Rejoin.rejoin_returns
+#assert_axioms Identity.Rejoin.late_work_same_key
 #assert_axioms Presence.EHist.nameB_some
 #assert_axioms Presence.EHist.nameB_none
 

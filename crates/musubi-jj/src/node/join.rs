@@ -41,8 +41,11 @@ use crate::translation_map::whole_id;
 const DISCARDING: &str = "discarding-history";
 
 /// What a repository keeps of the history it shared with hives, in its `musubi` directory, in
-/// the order [`NodeRepo::discard_shared_history`] removes it.
-const SHARED_HISTORY: [&str; 8] = [
+/// the order [`NodeRepo::discard_shared_history`] removes it: first the machine key, whose work
+/// the history holds, so that the repository is never left with the key and part of the
+/// history, which a join would carry into a hive as that key's (docs/internals/copies.md, R6).
+const SHARED_HISTORY: [&str; 10] = [
+    "machine",
     "joins",
     "translation",
     "canonical",
@@ -51,6 +54,8 @@ const SHARED_HISTORY: [&str; 8] = [
     super::ACCEPTED_PUSH,
     super::publication::OFFERS_FILE,
     super::APPROVAL_FILE,
+    // Compatibility until 2027-02-25: see `NodeRepo::refuse_retired_keys`.
+    super::legacy::RETIRED_KEYS,
 ];
 
 /// How far [`NodeRepo::discard_shared_history`] has got, for a test to stop it there.
@@ -238,9 +243,10 @@ impl NodeRepo {
     }
 
     /// Drops the history the repository whose `.jj/repo` directory is `repo_path` shared with
-    /// hives: its canonical operations, join records and translations, and what it knows of
-    /// what a hub took, so that it next joins as a repository that never shared any does,
-    /// with a join operation on the root. Its own operation log and the keys it retired stay.
+    /// hives: its machine key, its canonical operations, join records and translations, and
+    /// what it knows of what a hub took, so that it next joins as a repository that never
+    /// shared any does, under a new key, with a join operation on the root. Its own operation
+    /// log stays.
     /// For a repository that is part of no hive, under the join lock.
     ///
     /// Marked first, and the mark removed last: some of it gone, the rest would make a join
@@ -314,13 +320,13 @@ impl NodeRepo {
         // join operation on the root would hide that history from the head, and the head the
         // old hub last accepted, which this node keeps, would no longer be reachable from it:
         // which musubi takes for an op abandon, whichever hive the repository joins.
-        // A repository that discarded its shared history joins as one that never had any,
-        // though it keeps the keys it retired.
+        // A repository that discarded its shared history joins as one that never had any. One
+        // a hub took history from carries it on, though no operation of the hub's is below its
+        // head, as in a hive it alone was part of.
         let carried = match self.canonical_of(&head) {
             Some(canonical) => Some(canonical),
             None if self.has_shared_history()?
-                && (self.identities.has_retired_keys()
-                    || self.descends_from_canonical(&head)?) =>
+                && (self.stored_base().is_some() || self.descends_from_canonical(&head)?) =>
             {
                 Some(self.canonicalize(&head)?)
             }

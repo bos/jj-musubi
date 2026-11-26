@@ -103,19 +103,20 @@ machine, and the entries across machines.
   give a duplicate a new config-id, as every jj command does. A missing key or record suspends
   the entry.
 
-- **R7. Leaving clears the membership record.** `musubi leave` first marks it left, then
-  retires the key and clears the record. A left record from an interrupted leave or an earlier
-  release is cleared when the repo next leaves or joins. When the hub replies that the hive was
+- **R7. Leaving keeps the key.** `musubi leave` marks the record left, then drops the entry.
+  The repository keeps its key, so that joining again, in the same hive or another, takes it
+  up, and the copy comes back as itself, under the name it had; and it keeps its record, so
+  that a duplicate made after leaving is still told from it by its config-id (R1). `musubi
+  leave` run again finishes a leave that stopped partway. When the hub replies that the hive was
   removed, which a hub that lost its state never says, the daemon marks the record removed and
   drops the entry. A plain `musubi join` in a repository whose hive was removed says so, rather
   than matching another hive by history; `musubi join --hive` and `musubi create` work as in a
-  repository that left, and `musubi leave` clears that record too. In a repository that had no
-  record, a first sync stopped by interrupting the `create`, `join` or `clone` that asked for it
-  drops the record and the entry, but keeps the key, which the hub took: the repository is then
-  as a join that stopped once it kept its key leaves it. Joining again takes up that key, and
-  `musubi leave` retires it, so that the next join makes a new one. `musubi join
-  --fresh` and `musubi create --fresh` first clear a removed record, and retire a kept key, as
-  `musubi leave` would, since both belong to the history they drop.
+  repository that left, and `musubi leave` marks that record left too. In a repository that had
+  no record, or one that says it left, a first sync stopped by interrupting the `create`, `join`
+  or `clone` that asked for it marks the record left and drops the entry, keeping the key, which
+  the hub took, as `musubi leave` does. Only `musubi join --fresh` and `musubi create --fresh` give a repository a new key: they
+  first mark a removed record left, as `musubi leave` would, and drop this machine's entry for
+  the key, then drop the key with the history it worked in, the key first.
 
 - **R8. A new hive doesn't inherit members.** When a copy joins or creates a hive whose id
   isn't the one its record holds, its join forgets every key that is present
@@ -161,6 +162,12 @@ it's worth. Each says what happens if it occurs anyway.
   (R2). What the daemon does after a sync, as recording the hive's name when the hub answers
   its report, never makes `.jj/repo` again: that would leave the same for any move just
   after a sync.
+- **A duplicate on another machine of a copy that left.** Its record says it left, and no
+  machine keeps an entry for a copy that left, so on a machine whose jj has never seen its
+  config-id nothing tells it from the copy: `musubi join` there takes up the copy's key, as
+  joining again in the copy does. Joining in both makes two repositories sync under one key.
+  Join in one of them only, or give the other a new key with `musubi join --fresh`, or make it
+  with `musubi clone`.
 - **A VM, disk image or home directory cloned with musubi's state directory, while the
   original still runs** (a VM snapshot, Migration Assistant, a full restore onto a new
   machine). Both machines have the same entries and config-ids, so both sync under one key.
@@ -197,8 +204,8 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | Deleted, then `musubi clone` again at the same path | The clone's entry takes the path, and the old entry is dropped (R5). The hive shows both copies, of one name, told apart by part of their keys; `musubi list` and `musubi status` name the clone so, and `musubi forget` in it takes that name as this machine's and the plain name as the other's. | `deleted_copies_stop_syncing` |
 | `cp -a` a copy, or restore a backup beside it | `musubi status` there says it is a duplicate, and names the original (R1). | `duplicates_are_never_synced` |
 | …then `musubi join`, `sync`, `leave` or `join --original` there | Refused (R1, R2). | `duplicates_are_never_synced` |
-| A duplicate with a left record from an interrupted leave or an older release, then `musubi join` there | Refused (R1). | `copy::tests`, and `join_refuses_duplicate` in the model |
-| A duplicate on another machine (`rsync`, a backup restored there, a container image), or a move made by copying and deleting | Refused, until `musubi join --original` once the original is gone (R1, R2). | `a_copy_restored_elsewhere_syncs_as_the_original` |
+| A duplicate of a copy that left, then `musubi join` there | Refused (R1, R7). | `copy::tests`, and `join_refuses_duplicate` in the model |
+| A duplicate on another machine (`rsync`, a backup restored there, a container image) of a copy part of a hive, or a move made by copying and deleting | Refused, until `musubi join --original` once the original is gone (R1, R2). | `a_copy_restored_elsewhere_syncs_as_the_original` |
 | A backup restored in place | The copy: it syncs as before, fetching its own later work (R3). | `a_copy_restored_in_place_syncs_as_before` |
 | A copy's directory replaced by a repository in no hive, or reinitialised | Suspended, with nothing written there (R3). | `a_replaced_copy_is_never_synced_into_its_hive` |
 | …replaced by a copy of another hive | Synced into its own hive, never the first (R3, R4). | `a_replaced_copy_is_never_synced_into_its_hive` |

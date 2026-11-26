@@ -31,29 +31,6 @@ pub fn leave_hive(
     hive: &HiveConfig,
     membership: Membership,
 ) -> anyhow::Result<bool> {
-    leave_as(located, hive, |now| {
-        Some(HiveConfig {
-            state: membership,
-            ..now
-        })
-    })
-}
-
-/// Takes the repository at `located` out of `hive`, whose first sync was stopped before it
-/// applied any of the hive's history: drops its record and its entry, keeping the machine key
-/// the hub took, as a join that stopped once it had kept the key does, so that joining again
-/// takes up that key. Returns false, doing nothing, as [`leave_hive`] does.
-pub fn unjoin(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> {
-    leave_as(located, hive, |_| None)
-}
-
-/// [`leave_hive`], recording the copy's record as `record` makes it of the record now, or
-/// dropping it if that makes none.
-fn leave_as(
-    located: &Located,
-    hive: &HiveConfig,
-    record: impl FnOnce(HiveConfig) -> Option<HiveConfig>,
-) -> anyhow::Result<bool> {
     let _lock = HiveConfig::lock(&located.repo_path)?;
     let Some(now) = HiveConfig::load(&located.repo_path)?
         .filter(|now| now.joined() && now.hive == hive.hive && now.hub == hive.hub)
@@ -64,15 +41,25 @@ fn leave_as(
     // The record first: an entry for a record that says it left, or for none, is suspended,
     // where a record that says joined with no entry here would look like a duplicate, if this
     // failed between.
-    match record(now) {
-        Some(record) => record.save(&located.repo_path)?,
-        None => fs::remove_file(HiveConfig::path(&located.repo_path))?,
+    HiveConfig {
+        state: membership,
+        ..now
     }
+    .save(&located.repo_path)?;
     if let Some(key) = key {
         UserState::remove_entry(&key)?;
     }
     fs::remove_file(Status::path(&located.repo_path)).ok();
     Ok(true)
+}
+
+/// Takes the repository at `located` out of `hive`, whose first sync was stopped before it
+/// applied any of the hive's history: marks its record left and drops its entry, keeping the
+/// machine key the hub took, as `musubi leave` does, so that joining again takes up that key,
+/// and a duplicate made meanwhile is told from it (docs/internals/copies.md, R7). Returns
+/// false, doing nothing, as [`leave_hive`] does.
+pub fn unjoin(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> {
+    leave_hive(located, hive, Membership::Left)
 }
 
 /// Connects to the hive's hub, and opens the repository to sync with it there.

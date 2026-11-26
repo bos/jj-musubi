@@ -857,13 +857,20 @@ theorem move_taken_for_duplicate :
     run_reachable Reachable.init (as := moveRun) rfl,
     by decide, by decide, by decide, by decide, rfl, by decide⟩
 
-/-! ## Detaching and joining again
+/-! ## Leaving and joining again
 
 At this boundary the worker has stopped and the leave has finished talking to the hive. This
 model is for one checkout and the entry serving it. Other copies and work on the hub are
-covered separately by presence. A process can stop between durable writes. A restart reads
-the files and runs the appropriate command again. Status and cache files do not determine
-membership. -/
+covered separately by presence (`Identity.Rejoin`). A process can stop between durable writes.
+A restart reads the files and runs the appropriate command again. Status and cache files do
+not determine membership.
+
+The checkout keeps its key for good: a leave marks its record left and drops the daemon's
+entry, and joining again writes the entry and record back under the same key. The record
+stays, marked left, with the config-id it had, so that a duplicate made after leaving is still
+told from the copy (`standing`). `--fresh` alone gives the copy a new key: it drops the entry for
+the key, then discards the history the key worked in, the key first, so that the key the hive
+knows that history by is never left with part of it. -/
 
 namespace Detach
 
@@ -874,27 +881,27 @@ inductive History where
   | kept | part | none
 deriving DecidableEq, Repr
 
-/-- A single checkout's membership files, the evidence needed to translate its old
-operations after its active key is removed, its shared history, and the mark of a discard of
+/-- A single checkout's membership files, its shared history, and the mark of a discard of
 that history under way. -/
 structure Files where
   repo : Repo
   entry : Option Entry
-  marker : Bool
-  retired : Bool
   history : History
   discarding : Bool
 deriving DecidableEq, Repr
 
 def joinedRecord (e : Entry) : Record := ⟨e.hive, e.cid, .joined⟩
+def leftRecord (e : Entry) : Record := ⟨e.hive, e.cid, .left⟩
 
-def joined (e : Entry) : Files := ⟨⟨some e.key, some (joinedRecord e), some e.cid⟩,
-  some e, false, false, .kept, false⟩
+def joined (e : Entry) : Files :=
+  ⟨⟨some e.key, some (joinedRecord e), some e.cid⟩, some e, .kept, false⟩
 
-def detached (cid : Nat) : Files := ⟨⟨none, none, some cid⟩, none, true, true, .kept, false⟩
+/-- Where a leave ends: the key and config-id kept, the record marked left, no entry. -/
+def left (e : Entry) : Files :=
+  ⟨⟨some e.key, some (leftRecord e), some e.cid⟩, none, .kept, false⟩
 
 inductive Write where
-  | markLeft | markHistory | retireKey | dropEntry | clearKey | clearRecord
+  | markLeft | dropEntry
   | keepKey (key : Nat) | putEntry (e : Entry) | joinRecord (e : Entry)
   | markDiscard | dropSome | dropAll | unmarkDiscard
 deriving DecidableEq, Repr
@@ -902,42 +909,43 @@ deriving DecidableEq, Repr
 def write (s : Files) : Write → Files
   | .markLeft => { s with repo := { s.repo with
       record := s.repo.record.map fun r => { r with state := .left } } }
-  | .markHistory => { s with marker := true }
-  | .retireKey => { s with retired := true }
   | .dropEntry => { s with entry := none }
-  | .clearKey => { s with repo := { s.repo with key := none } }
-  | .clearRecord => { s with repo := { s.repo with record := none } }
   | .keepKey key => { s with repo := { s.repo with key := some key } }
   | .putEntry e => { s with entry := some e }
   | .joinRecord e => { s with repo := { s.repo with record := some (joinedRecord e) } }
   | .markDiscard => { s with discarding := true }
-  | .dropSome => { s with history := if s.history = .kept then .part else s.history }
+  | .dropSome =>
+    if s.repo.key.isSome then { s with repo := { s.repo with key := none } }
+    else { s with history := if s.history = .kept then .part else s.history }
   | .dropAll => { s with history := .none }
   | .unmarkDiscard => { s with discarding := false }
 
-/-- Writes needed to finish leaving, chosen from the files found on restart. If writing the
-marker finished but retiring its key did not, writing the marker again has the same effect
-on the presence of this history boundary. -/
+/-- Leaving, or finishing a leave from the files found on restart: mark the record left, which
+stops the daemon's next check, then drop the entry. -/
 def leavePlan (s : Files) : List Write :=
   match s.repo.record with
   | none => []
   | some r =>
-    (if r.state = .joined then [.markLeft] else []) ++
-    (if s.repo.key.isSome then
-      (if s.retired then [] else [.markHistory, .retireKey]) ++ [.dropEntry, .clearKey]
-      else []) ++ [.clearRecord]
+    (if r.state = .left then [] else [.markLeft]) ++
+      (if s.entry.isSome then [.dropEntry] else [])
 
-/-- Discarding the shared history: marked first, then what is kept removed, the first of it
-before the rest, and the mark removed last. -/
+/-- Discarding the shared history: marked first, then what is kept removed, the first of it,
+the key if there is one, before the rest, and the mark removed last. -/
 def discardPlan : List Write := [.markDiscard, .dropSome, .dropAll, .unmarkDiscard]
 
-/-- Once the hub has accepted the proposed key, retry keeps a key already written locally.
-The config-id belongs to the jj repo and survives leaving. A `fresh` join discards the shared
-history first, and any join finishes a discard it finds marked. -/
+/-- Joining, once the hub has accepted the request: the key the checkout has, or the one
+requested where it has none, then the entry and record. A `fresh` join first drops the entry,
+then discards the shared history and the key, and joins under the requested key; any join first
+finishes a discard it finds marked, and so takes the requested key too. -/
 def joinPlan (s : Files) (requested : Entry) (fresh : Bool := false) : List Write :=
-  let e := { requested with key := s.repo.key.getD requested.key }
-  (if (fresh && s.history != .none) || s.discarding then discardPlan else []) ++
-    [.keepKey e.key, .putEntry e, .joinRecord e]
+  if fresh then
+    (if s.entry.isSome then [.dropEntry] else []) ++
+      (if s.history != .none || s.discarding || s.repo.key.isSome then discardPlan else []) ++
+      [.keepKey requested.key, .putEntry requested, .joinRecord requested]
+  else
+    let key := if s.discarding then requested.key else s.repo.key.getD requested.key
+    let e := { requested with key := key }
+    (if s.discarding then discardPlan else []) ++ [.keepKey e.key, .putEntry e, .joinRecord e]
 
 /-- Include the state before the first write and after each completed write. -/
 def trace : Files → List Write → List Files
@@ -952,86 +960,90 @@ def finishLeave (s : Files) : Files := (leavePlan s).foldl write s
 def finishJoin (s : Files) (e : Entry) (fresh : Bool := false) : Files :=
   (joinPlan s e fresh).foldl write s
 
-/-- Restarting at any completed prefix gives the same detached checkout, with the history
-marker, retired key, and original jj config-id. -/
+/-- Restarting a leave at any completed prefix ends left, under the same key. -/
 theorem leave_retry {old : Entry} {s : Files} (h : s ∈ leaveTrace (joined old)) :
-    finishLeave s = detached old.cid := by
+    finishLeave s = left old := by
   simp [leaveTrace, joined, joinedRecord, leavePlan, trace, write] at h
-  rcases h with h | h | h | h | h | h | h <;> subst s <;> rfl
+  rcases h with h | h | h <;> subst s <;> rfl
 
 /-- A retry can itself stop after any write. Its state is still a prefix of the original
-leave, including writing the same history marker again. -/
+leave. -/
 theorem leave_retry_prefix {old : Entry} {s t : Files}
     (hs : s ∈ leaveTrace (joined old)) (ht : t ∈ leaveTrace s) :
     t ∈ leaveTrace (joined old) := by
   simp [leaveTrace, joined, joinedRecord, leavePlan, trace, write] at hs
-  rcases hs with h | h | h | h | h | h | h <;> subst s <;>
+  rcases hs with h | h | h <;> subst s <;>
     simp [leaveTrace, joined, joinedRecord, leavePlan, trace, write] at ht ⊢ <;> grind
 
-/-- After the inactive record is saved, even a daemon still holding the old entry cannot
-start a sync from this checkout. Clearing the key occurs after preserving its history. -/
+/-- Once the record is marked left, even a daemon still holding the old entry cannot start a
+sync from this checkout, and the key stays. -/
 theorem leave_prefix_safe {old : Entry} {s : Files}
     (h : s ∈ (leaveTrace (joined old)).drop 1) :
-    check old s.repo = false ∧ (s.repo.key = none → s.marker = true ∧ s.retired = true) := by
+    check old s.repo = false ∧ s.repo.key = some old.key := by
   simp [leaveTrace, joined, joinedRecord, leavePlan, trace, write] at h
-  rcases h with h | h | h | h | h | h <;> subst s <;> simp [check]
+  rcases h with h | h <;> subst s <;> simp [check]
 
-/-- With the fresh key accepted by the hub and the checkout's original config-id, retrying
-any prefix preserves the candidate once it is written, and enables the new entry. -/
-theorem join_retry {old fresh : Entry} {s : Files}
-    (h : s ∈ joinTrace (detached old.cid) fresh) (hc : fresh.cid = old.cid) :
-    finishJoin s fresh = { joined fresh with marker := true, retired := true } := by
-  simp [joinTrace, detached, joinPlan, trace, write] at h
-  rcases h with h | h | h | h <;> subst s <;>
-    cases fresh <;> simp_all [finishJoin, joinPlan, write, joined, joinedRecord]
+/-- Joining again, from wherever a join stopped, ends joined under the key the copy left
+with. -/
+theorem join_retry {old req : Entry} {s : Files} (h : s ∈ joinTrace (left old) req)
+    (hc : req.cid = old.cid) :
+    finishJoin s req = joined { req with key := old.key } := by
+  simp [joinTrace, left, leftRecord, joinPlan, trace, write] at h
+  rcases h with rfl | rfl | rfl | rfl <;> cases req <;>
+    simp_all [finishJoin, joinPlan, write, joined, joinedRecord]
 
-/-- Keeping the candidate again or replacing its entry with the same entry creates no
-additional states if the next attempt is interrupted too. -/
-theorem join_retry_prefix {old fresh : Entry} {s t : Files}
-    (hs : s ∈ joinTrace (detached old.cid) fresh) (ht : t ∈ joinTrace s fresh) :
-    t ∈ joinTrace (detached old.cid) fresh := by
-  simp [joinTrace, detached, joinPlan, trace, write] at hs
-  rcases hs with h | h | h | h <;> subst s <;>
-    simp [joinTrace, detached, joinPlan, trace, write] at ht ⊢ <;> grind
+/-- Keeping the key again, or writing the same entry again, makes no other states if the next
+attempt is interrupted too. -/
+theorem join_retry_prefix {old req : Entry} {s t : Files}
+    (hs : s ∈ joinTrace (left old) req) (ht : t ∈ joinTrace s req) :
+    t ∈ joinTrace (left old) req := by
+  simp [joinTrace, left, leftRecord, joinPlan, trace, write] at hs
+  rcases hs with rfl | rfl | rfl | rfl <;>
+    simp [joinTrace, left, leftRecord, joinPlan, trace, write] at ht ⊢ <;> grind
 
-/-- The old entry stays disabled at every join prefix, even for the same hive and config-id.
-The new entry can sync once its matching joined record is on disk. -/
-theorem join_prefix_safe {old fresh : Entry} {s : Files}
-    (h : s ∈ joinTrace (detached old.cid) fresh) (hk : fresh.key ≠ old.key)
-    (hc : fresh.cid = old.cid) :
-    check old s.repo = false ∧
-      ((s.entry = some fresh ∧ check fresh s.repo = true) ↔
-        s.repo.record = some (joinedRecord fresh)) := by
-  simp [joinTrace, detached, joinPlan, trace, write] at h
-  rcases h with h | h | h | h <;> subst s <;>
-    cases fresh <;> simp_all [check, joinedRecord]
+/-- Throughout a join the key is the one the copy left with, and an entry checks exactly once
+the joined record is written. -/
+theorem join_prefix_safe {old req : Entry} {s : Files} (h : s ∈ joinTrace (left old) req)
+    (hc : req.cid = old.cid) :
+    s.repo.key = some old.key ∧
+      ((∃ e, s.entry = some e ∧ check e s.repo = true) ↔
+        s.repo.record = some (joinedRecord { req with key := old.key })) := by
+  simp [joinTrace, left, leftRecord, joinPlan, trace, write] at h
+  rcases h with rfl | rfl | rfl | rfl <;> cases req <;>
+    simp_all [check, joinedRecord]
 
 /-- Once a fresh join has marked its discard, a plain join retried from wherever it stopped
-joins without the shared history, as the fresh join would have. -/
-theorem fresh_retry {old fresh : Entry} {s : Files}
-    (h : s ∈ (joinTrace (detached old.cid) fresh true).drop 1) (hc : fresh.cid = old.cid) :
-    finishJoin s fresh =
-      { joined fresh with marker := true, retired := true, history := .none } := by
-  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at h
+ends joined under the new key without the shared history, as the fresh join does. -/
+theorem fresh_retry {old req : Entry} {s : Files}
+    (h : s ∈ (joinTrace (left old) req true).drop 1) (hc : req.cid = old.cid) :
+    finishJoin s req = { joined req with history := .none } := by
+  simp [joinTrace, left, leftRecord, joinPlan, discardPlan, trace, write] at h
   rcases h with h | h | h | h | h | h | h <;> subst s <;>
-    cases fresh <;> simp_all [finishJoin, joinPlan, discardPlan, write, joined, joinedRecord]
+    cases req <;> simp_all [finishJoin, joinPlan, discardPlan, write, joined, joinedRecord]
 
-/-- A plain retry that stops again leaves a state the fresh join passed through. -/
-theorem fresh_retry_prefix {old fresh : Entry} {s t : Files}
-    (hs : s ∈ (joinTrace (detached old.cid) fresh true).drop 1) (ht : t ∈ joinTrace s fresh) :
-    t ∈ joinTrace (detached old.cid) fresh true := by
-  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at hs
-  rcases hs with h | h | h | h | h | h | h <;> subst s <;>
-    simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at ht ⊢ <;> grind
+/-- A plain retry that stops again can be retried again, and ends as the fresh join does. -/
+theorem fresh_retry_again {old req : Entry} {s t : Files}
+    (hs : s ∈ (joinTrace (left old) req true).drop 1) (ht : t ∈ joinTrace s req)
+    (hc : req.cid = old.cid) :
+    finishJoin t req = { joined req with history := .none } := by
+  simp [joinTrace, left, leftRecord, joinPlan, discardPlan, trace, write] at hs
+  rcases hs with h | h | h | h | h | h | h <;> subst s <;> cases req <;>
+    simp [joinTrace, joinPlan, discardPlan, trace, write] at ht <;>
+    rcases ht with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
+    simp_all [finishJoin, joinPlan, discardPlan, write, joined, joinedRecord]
 
-/-- Part of the shared history is never left without the mark that makes the next join
-finish discarding it, and the old entry stays disabled throughout. -/
-theorem fresh_prefix_safe {old fresh : Entry} {s : Files}
-    (h : s ∈ joinTrace (detached old.cid) fresh true) (hk : fresh.key ≠ old.key) :
-    (s.history = .part → s.discarding = true) ∧ check old s.repo = false := by
-  simp [joinTrace, detached, joinPlan, discardPlan, trace, write] at h
-  rcases h with h | h | h | h | h | h | h | h <;> subst s <;>
-    cases fresh <;> simp_all [check, joinedRecord]
+/-- The old key is never left with part of the history it shared: while the checkout holds it,
+the history is whole. Part of the history is never left unmarked, the old entry never checks,
+and no entry checks before the joined record is written. -/
+theorem fresh_prefix_safe {old req : Entry} {s : Files}
+    (h : s ∈ joinTrace (left old) req true) (hk : req.key ≠ old.key) :
+    (s.repo.key = some old.key → s.history = .kept) ∧
+      (s.history = .part → s.discarding = true) ∧ check old s.repo = false ∧
+      (s.repo.record ≠ some (joinedRecord req) →
+        ∀ e, s.entry = some e → check e s.repo = false) := by
+  simp [joinTrace, left, leftRecord, joinPlan, discardPlan, trace, write] at h
+  rcases h with h | h | h | h | h | h | h | h <;> subst s <;> cases req <;> cases old <;>
+    simp_all [check, joinedRecord]
 
 end Detach
 

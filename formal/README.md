@@ -477,6 +477,10 @@ defines work and forgets). For any operation graph:
   `musubi leave` sticks however its forget is merged, given that the forget follows all of the
   copy's work and nothing made later is pushed.
 - `unseen_work_survives`: work concurrent with a forget survives it.
+- `Identity.Rejoin.leave_sticks_until_rejoin`, `rejoin_returns`, `late_work_same_key`: a copy
+  keeps its key when it leaves, so a leave sticks until the copy joins again, which is work by
+  that key and brings it back; a `jj` command that loaded the repository before the leave and
+  wrote after it is that copy's work too, and needs no forget of its own.
 - `forgets_need_fresh_work`, `no_forget_after_complete`, `forget_chain_bounded`: forgetting
   can't loop along a line of history.
 - `redundant_forget_noop`, `concurrent_forget_noop`: duplicate forgets are harmless.

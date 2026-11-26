@@ -4,7 +4,6 @@
 #![allow(clippy::unwrap_used)]
 
 use std::cell::Cell;
-use std::collections::HashSet;
 use std::fs;
 
 use jj_lib::default_backend_factories::default_backend_factories;
@@ -16,17 +15,15 @@ use musubi_jj::canonical::CanonicalStore;
 use musubi_jj::node::Discarded;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::op_id::CanonicalOp;
-use musubi_jj::presence::FORGET_ATTRIBUTE;
 use musubi_jj::remote_url::JoinRemotes;
 use musubi_testutil::TestEnv;
-use pollster::FutureExt as _;
 use serde_json::Value;
 use serde_json::json;
 
 use super::Oracle;
 use super::hive;
 use crate::config::Entry;
-use crate::config::HiveConfig;
+use crate::config::Membership;
 use crate::config::UserState;
 use crate::config::state_dir;
 use crate::copy::Found;
@@ -39,25 +36,14 @@ use crate::settings;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Write {
     MarkLeft,
-    MarkHistory,
-    RetireKey,
     DropEntry,
-    ClearKey,
-    ClearRecord,
     KeepKey,
     PutEntry,
     JoinRecord,
     Discard(Discarded),
 }
 
-const LEAVE: [Write; 6] = [
-    Write::MarkLeft,
-    Write::MarkHistory,
-    Write::RetireKey,
-    Write::DropEntry,
-    Write::ClearKey,
-    Write::ClearRecord,
-];
+const LEAVE: [Write; 2] = [Write::MarkLeft, Write::DropEntry];
 const JOIN: [Write; 3] = [Write::KeepKey, Write::PutEntry, Write::JoinRecord];
 const FRESH: [Write; 7] = [
     Write::Discard(Discarded::Marked),
@@ -137,14 +123,33 @@ fn detach_and_rejoin_conform_at_write_boundaries() {
 }
 
 /// The hub has accepted the request. Use the same local key selection and writes as join,
-/// through the actual jj checkout and state directory, discarding the shared history first if
-/// `fresh`, as join does before it asks the hub.
+/// through the actual jj checkout and state directory, first dropping the key and discarding
+/// the shared history if `fresh`, as join does before it asks the hub.
 fn join_locally(located: &Located, accepted: &Joined, fresh: bool) -> anyhow::Result<()> {
+    let found = Found::read(&located.repo_path)?;
+    let before = found
+        .record
+        .clone()
+        .filter(|record| record.state != Membership::Left);
+    let entry = found
+        .key
+        .as_deref()
+        .and_then(|key| UserState::load().ok()?.entry(key).cloned());
+    let dropped = if fresh {
+        join::start_over(
+            located,
+            before.as_ref(),
+            found.record.is_none(),
+            entry.as_ref(),
+        )?
+        .1
+    } else {
+        None
+    };
     join::discard_history_if(located, fresh)?;
     let settings = settings::load(&located.workspace_root, &located.repo_path)?;
-    let machine = join::joining_machine(located, Some("laptop"), &settings)?;
+    let machine = join::joining_machine(located, Some("laptop"), &settings, dropped.as_ref())?;
     join::keep_join_key(located, &machine)?;
-    let before = HiveConfig::load(&located.repo_path)?;
     join::become_node(
         located,
         accepted,
@@ -175,16 +180,17 @@ fn detachment_process() {
             cut["prefix"]
         );
         if phase == "leave" {
-            // Join uses this same path to finish an interrupted leave before selecting a key.
-            leave::finish_detaching(&located).unwrap();
+            // `musubi leave` run again finishes an interrupted leave.
+            leave::detach(&located, None).unwrap();
             assert_eq!(snapshot(&located, &old, None, &first), cut["retry"]);
         }
-        // The candidate this process picks, unless the stopped join kept one: each process
-        // draws its keys from a seed of its own.
-        let kept = NodeRepo::machine_of(&located.repo_path).unwrap().is_some();
-        let fresh = fresh
-            .filter(|_| kept)
-            .unwrap_or_else(|| candidate(&located, &old));
+        // The new key a fresh join stopped before keeping it takes now, as it drops the old
+        // one: each process draws its keys from a seed of its own.
+        let fresh = match NodeRepo::machine_of(&located.repo_path).unwrap() {
+            Some(kept) if kept.key() != old.key => fresh,
+            _ if phase == "fresh" => Some(candidate(&located, &old)),
+            _ => None,
+        };
         // A plain join, even after a fresh one stopped.
         join_locally(&located, &accepted, false).unwrap();
         let joined = if phase == "leave" {
@@ -192,12 +198,12 @@ fn detachment_process() {
         } else {
             &cut["retry"]
         };
-        assert_eq!(snapshot(&located, &old, Some(&fresh), &first), *joined);
+        assert_eq!(snapshot(&located, &old, fresh.as_ref(), &first), *joined);
         return;
     }
 
     let settings = settings::load(&located.workspace_root, &located.repo_path).unwrap();
-    let initial = join::joining_machine(&located, Some("laptop"), &settings).unwrap();
+    let initial = join::joining_machine(&located, Some("laptop"), &settings, None).unwrap();
     let backend = located
         .open_as(&settings, initial)
         .unwrap()
@@ -244,30 +250,33 @@ fn detachment_process() {
         leave::detach(&located, Some(&record)).unwrap();
     } else {
         leave::detach(&located, Some(&record)).unwrap();
-        let fresh = candidate(&located, &old);
         assert_eq!(
-            snapshot(&located, &old, Some(&fresh), &first),
+            snapshot(&located, &old, None, &first),
             expected[phase][0]["prefix"]
         );
-        fs::write(
-            saved,
-            serde_json::to_vec(&(&old, Some(&fresh), &accepted, &first)).unwrap(),
-        )
-        .unwrap();
         let (writes, fresh): (&[Write], bool) = if phase == "fresh" {
             (&FRESH, true)
         } else {
             (&JOIN, false)
         };
+        // The key the fresh join takes, which isn't the one it drops.
+        let candidate = fresh.then(|| candidate(&located, &old));
+        fs::write(
+            saved,
+            serde_json::to_vec(&(&old, candidate.as_ref(), &accepted, &first)).unwrap(),
+        )
+        .unwrap();
         INTERRUPT.set(Some(writes[index]));
         join_locally(&located, &accepted, fresh).unwrap();
     }
     panic!("the command did not reach the interruption point");
 }
 
+/// The entry for the new key a join takes in the repository at `located`, which has none or
+/// `old`'s, as `joining_machine` draws it there.
 fn candidate(located: &Located, old: &Entry) -> Entry {
     let settings = settings::load(&located.workspace_root, &located.repo_path).unwrap();
-    let machine = join::joining_machine(located, Some("laptop"), &settings).unwrap();
+    let machine = NodeRepo::new_machine("laptop", &settings, Some(&old.key));
     assert_ne!(machine.key(), old.key);
     Entry {
         key: machine.key().to_owned(),
@@ -304,20 +313,9 @@ fn snapshot(located: &Located, old: &Entry, fresh: Option<&Entry>, first: &str) 
         assert_eq!(entry.config_id, old.config_id);
         json!({"key": key_id(&entry.key), "hive": 0, "cid": 0})
     });
-    let retired = match fs::read(located.repo_path.join("musubi/retired-keys.json")) {
-        Ok(bytes) => {
-            let keys: Vec<String> = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(keys, [old.key.as_str()]);
-            true
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => panic!("reading retired keys: {err}"),
-    };
     json!({
         "repo": {"key": found.key.as_deref().map(key_id), "cid": cid, "record": record},
         "entry": entry,
-        "marker": has_detach_marker(located, &old.key),
-        "retired": retired,
         "history": history(located, first),
         "discarding": NodeRepo::discarding_shared_history(&located.repo_path),
         "oldCheck": check(old, &found).is_ok(),
@@ -352,35 +350,4 @@ fn history(located: &Located, first: &str) -> &'static str {
         (false, false) => "none",
         _ => "part",
     }
-}
-
-fn has_detach_marker(located: &Located, old: &str) -> bool {
-    let settings = settings::load(&located.workspace_root, &located.repo_path).unwrap();
-    let loader = RepoLoader::init_from_file_system(
-        &settings,
-        &located.repo_path,
-        &default_backend_factories(),
-    )
-    .unwrap();
-    let store = loader.op_store();
-    let mut heads = loader.op_heads_store().get_op_heads().block_on().unwrap();
-    let mut seen = HashSet::new();
-    while let Some(id) = heads.pop() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let op = store.read_operation(&id).block_on().unwrap();
-        if op.metadata.description == "musubi: detach this copy"
-            && op
-                .metadata
-                .attributes
-                .get(FORGET_ATTRIBUTE)
-                .map(String::as_str)
-                == Some(old)
-        {
-            return true;
-        }
-        heads.extend(op.parents);
-    }
-    false
 }

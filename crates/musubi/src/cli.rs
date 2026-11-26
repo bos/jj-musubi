@@ -264,7 +264,7 @@ pub enum Command {
     /// It records what changed in the working copy, then tells the hive, with this copy's
     /// last work, so that the other machines stop showing its working copies. The repository
     /// keeps everything it has, its working copy included, and the hive keeps everything it
-    /// sent. The next join makes a new copy, under this machine's name.
+    /// sent. `musubi join` takes it back in as the same machine, under the name it had.
     /// If the hive can't be told, `leave` fails and the repository stays part of the hive. A
     /// `/` in a workspace name stops it the same way, before it changes anything.
     Leave {

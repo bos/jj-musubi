@@ -2,9 +2,9 @@
 A copy's display name apart from its key (design.md, "Which workspaces are this machine's own";
 `workspaces.rs`).
 
-A copy's key is `name#suffix`, and stays so for as long as the copy is part of a hive: leaving
-and joining again still takes a new key. The name inside the key is only the copy's initial
-name. A daemon records the copy's name as `musubi.name` on an operation that is the copy's
+A copy's key is `name#suffix`, and stays the copy's for good: leaving and joining again keeps
+it, and only `--fresh`, which drops the history the key worked in, takes a new one. The name
+inside the key is only the copy's initial name. A daemon records the copy's name as `musubi.name` on an operation that is the copy's
 work (`musubi.work = <key>`), whenever the machine's `musubi.machine-name` differs from the
 name the copy has; and an operation names only the copies present there, by their names as of
 that operation.
@@ -30,6 +30,13 @@ that operation.
    a name a copy had before. The examples at the end show a name freed by a rename and taken
    by another copy, and why a name in a view `jj undo` brings back must be read by the naming
    of the operation that view came from (`resolve_at_origin`), not by today's.
+
+3. **Leaving and joining again under one key** (`Rejoin`). `Presence.leave_sticks` assumes
+   that the key does no later work. With one key for good it becomes
+   `leave_sticks_until_rejoin`: the copy is absent from the leave's forget on until work it
+   pushes after joining again, which brings it back (`rejoin_returns`). A command that started
+   before the leave and ended after it is that copy's work too, and needs no forgetting
+   (`late_work_same_key`). `Copies.Detach` models the files leaving and joining again write.
 
 `PresenceExec.lean` computes names on a finite history, for the oracle, and
 `crates/musubi-jj/src/presence.rs` keeps them as presence does. Names in part 1 are numbers
@@ -684,5 +691,37 @@ def namesOf (cs : List (String × String)) (own : List String) : List String :=
   ["beta/x", "beta-1a2b/default", "beta-1a2b3c4d/default"]
 
 end Naming
+
+/-! ## 3. Leaving and joining again under one key -/
+
+namespace Rejoin
+
+variable (h : Hist)
+
+/-- `Presence.leave_sticks`, for a key used again after leaving. `R` holds the operations the copy
+pushes after joining again. The copy pushes none of its work between leaving and joining again
+(the daemon syncs only a copy whose record says it joined: `Copies.right_hive`), and the
+leave's forget follows all the work it pushed before (design.md, "Leaving"). Then the copy is
+absent at every operation that has the forget, until one that has work it pushed after joining
+again. -/
+theorem leave_sticks_until_rejoin {f x k : Nat} {R : Nat → Prop} (hF : h.forget f k)
+    (hbefore : ∀ w, h.work w k → ¬ R w → Anc h.par w f) (hfx : Anc h.par f x)
+    (hnoR : ∀ w, Anc h.par w x → h.work w k → ¬ R w) : ¬ h.Present x k :=
+  h.absence_persists (h.forget_absent hF) hfx (fun w hw hW => hbefore w hW (hnoR w hw hW))
+
+/-- Joining again is work, which brings the copy back wherever no forget saw it: a forget the
+leave wrote included, and a daemon's that hadn't seen it. -/
+theorem rejoin_returns {j x k : Nat} (hJ : h.work j k) (hjx : Anc h.par j x)
+    (hunseen : ∀ f, Anc h.par f x → h.forget f k → ¬ Anc h.par j f) : h.Present x k :=
+  h.unseen_work_survives hJ hjx hunseen
+
+/-- A `jj` command that loaded the repository before the leave and wrote its operation `l` after
+it, which the copy pushes once it has joined again, is work by the same key: it keeps the copy
+present, as the copy is anyway, and needs no forget. -/
+theorem late_work_same_key {l x k : Nat} (hL : h.work l k) (hlx : Anc h.par l x)
+    (hunseen : ∀ f, Anc h.par f x → h.forget f k → ¬ Anc h.par l f) : h.Present x k :=
+  h.unseen_work_survives hL hlx hunseen
+
+end Rejoin
 
 end Musubi.Identity

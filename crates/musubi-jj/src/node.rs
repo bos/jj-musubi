@@ -43,7 +43,6 @@ mod heads;
 mod heads_conformance;
 #[cfg(test)]
 mod heads_laws;
-mod identity;
 mod join;
 mod legacy;
 mod naming;
@@ -64,7 +63,6 @@ pub use expiry::Activity;
 pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
-pub use identity::PendingRetirement;
 pub use join::Discarded;
 pub use join::JoinSummary;
 use join::Joins;
@@ -150,7 +148,6 @@ pub struct NodeRepo {
     /// Whether every operation reachable from the op heads has been mapped since opening.
     heads_mapped: bool,
     machine: Machine,
-    identities: identity::History,
     /// The join points, what they stand for, and the history from before them.
     joins: Joins,
     /// jj's repo config file for this repository, used to read this copy's expiry policy.
@@ -257,7 +254,6 @@ impl NodeRepo {
             joins: Joins::default(),
             repo_config: None,
             machine,
-            identities: identity::History::load(&musubi_dir)?,
             late: vec![],
             legacy_drops,
             heads_locked: Arc::default(),
@@ -292,19 +288,15 @@ impl NodeRepo {
         Machine::load(&path).map_err(|source| NodeError::Io { path, source })
     }
 
-    /// A new key named `name`, distinct from the checkout's retired keys even when
-    /// `debug.randomness-seed` makes `settings`' randomness repeatable.
-    pub fn new_machine(
-        repo_path: &Path,
-        name: &str,
-        settings: &UserSettings,
-    ) -> Result<Machine, NodeError> {
-        let history = identity::History::load(&repo_path.join("musubi"))?;
+    /// A new key named `name`, other than `avoiding`, the key the repository had, which a
+    /// `--fresh` join drops, even where `debug.randomness-seed` makes `settings`' randomness
+    /// repeatable.
+    pub fn new_machine(name: &str, settings: &UserSettings, avoiding: Option<&str>) -> Machine {
         let rng = settings.get_rng();
         loop {
             let machine = Machine::new(name, &rng);
-            if !history.retired(&machine) {
-                return Ok(machine);
+            if Some(machine.key()) != avoiding {
+                return machine;
             }
         }
     }

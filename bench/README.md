@@ -17,7 +17,7 @@ They need `/usr/bin/python3`, `git`, `jj`, `ssh-keygen` and a release build of `
 | `tracestats.py`, `tracelist.py` | Summaries of the git processes in `GIT_TRACE2_EVENT` files. |
 
 `proxy.py` is the byte-counting proxy the scripts start, and `env/` holds the jj and git
-config they run with.
+config they run with; each machine runs with a copy of the jj config.
 
 ## Running
 
@@ -52,10 +52,10 @@ scripts keep up with the CLI. It measures nothing.
 
 ## What a measurement includes
 
-Each machine has a state directory of its own, with its key already made. `musubi create`,
-`join` and `clone` start a daemon to do their first sync, so their times include that; the
-scripts then stop it, and only `musubi sync` moves anything until a script starts daemons
-itself.
+Each machine has a state directory of its own, with its key already made, and a jj config of its
+own, where `--machine` records its name. `musubi create`, `join` and `clone` start a daemon to do
+their first sync, so their times include that; the scripts then stop it, and only `musubi sync`
+moves anything until a script starts daemons itself.
 
 Machines reach the hub as they would over ssh, through one proxy route each, but without ssh
 itself. `ssh.py` stands in for ssh, as `$MUSUBI_SSH`: given a `--hub` of `127.0.0.1:PORT`, it

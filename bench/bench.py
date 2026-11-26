@@ -284,13 +284,15 @@ def hub_route(route):
 
 def machine(name, **extra):
     """The environment of musubi machine `name`: a state directory of its own, holding the
-    key it reaches hubs by, as one that has joined a hub before has."""
+    key it reaches hubs by, as one that has joined a hub before has, and a jj config of its
+    own, where `--machine` records the machine's name."""
     cfg = f"{RUN}/cfg{name}"
     if not os.path.exists(f"{cfg}/hub_key"):
         # Private, or musubi won't put the daemon's socket in it.
         os.makedirs(cfg, mode=0o700, exist_ok=True)
         sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", f"{cfg}/hub_key"])
-    return env(MUSUBI_STATE_DIR=cfg, **extra)
+        shutil.copyfile(BASE_ENV["JJ_CONFIG"], f"{cfg}/jjconfig.toml")
+    return env(MUSUBI_STATE_DIR=cfg, JJ_CONFIG=f"{cfg}/jjconfig.toml", **extra)
 
 
 def member(args, cwd, e):

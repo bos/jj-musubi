@@ -71,14 +71,14 @@ impl NodeRepo {
 
     /// The key of the other machine shown here as `name`, as of this machine's op head: the
     /// machine whose workspaces are `name/...`, as in `name/default@`. Any other name it could
-    /// be shown under (`workspaces::could_be_shown_as`), as the hub, which names machines
-    /// among every machine, may list it, or its plain name (`laptop` for one shown as
-    /// `laptop-1a2b`), or a whole machine key (`laptop#1a2b3c4d`), names it too, if no other
-    /// machine shown here has it.
+    /// be shown under (`workspaces::could_be_shown_as`) by its name now, as the hub may list
+    /// it, or its plain name (`laptop` for one shown as `laptop-1a2b`), or a whole machine key
+    /// (`laptop#1a2b3c4d`), names it too, if no other machine shown here has it.
     pub fn machine_named(&mut self, name: &str) -> Result<Option<String>, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
         let shown = self.shown_names(&canonical)?;
+        let presence = self.presence(&canonical)?;
         let only = |matches: Vec<&String>| match matches.as_slice() {
             [one] => Some((*one).clone()),
             _ => None,
@@ -94,7 +94,9 @@ impl NodeRepo {
             only(
                 shown
                     .keys()
-                    .filter(|machine| workspaces::could_be_shown_as(machine, name))
+                    .filter(|machine| {
+                        workspaces::could_be_shown_as(presence.name(machine), machine, name)
+                    })
                     .collect(),
             )
         })
@@ -102,7 +104,7 @@ impl NodeRepo {
             only(
                 shown
                     .keys()
-                    .filter(|machine| workspaces::machine_name(machine) == name)
+                    .filter(|machine| presence.name(machine) == name)
                     .collect(),
             )
         }))

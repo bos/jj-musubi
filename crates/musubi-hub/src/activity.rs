@@ -13,6 +13,7 @@ use std::time::Instant;
 use jj_lib::op_store::OperationId;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::workspaces;
+use musubi_jj::workspaces::Named;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -254,11 +255,11 @@ impl Activity {
         self.hives.remove(id);
     }
 
-    /// The activity of `hives`, each with the keys of the machines its head has workspaces
-    /// of, as at `now`.
+    /// The activity of `hives`, each with the machines named at its head, by key, as at
+    /// `now`. A machine only reporting is named as its key says, after those.
     pub fn snapshot(
         &self,
-        hives: Vec<(HiveInfo, BTreeSet<String>)>,
+        hives: Vec<(HiveInfo, BTreeMap<String, Named>)>,
         version: &str,
         now: Instant,
     ) -> HubActivity {
@@ -273,12 +274,14 @@ impl Activity {
                     .iter()
                     .filter(|(_, (at, _))| now.saturating_duration_since(*at) < REPORTS_KEPT)
                     .collect();
-                let keys: BTreeSet<String> = in_view
-                    .iter()
-                    .chain(reports.keys().copied())
-                    .cloned()
-                    .collect();
-                let names = workspaces::display_names(&keys, |_| false);
+                let mut named = in_view.clone();
+                for key in reports.keys() {
+                    named
+                        .entry((*key).clone())
+                        .or_insert_with(|| Named::joining(key));
+                }
+                let keys: BTreeSet<String> = named.keys().cloned().collect();
+                let names = workspaces::display_names(&named, |_| false);
                 let machines = keys
                     .iter()
                     .map(|key| {
@@ -292,7 +295,7 @@ impl Activity {
                         MachineActivity {
                             key: key.clone(),
                             name: names.get(key).cloned().unwrap_or_else(|| key.clone()),
-                            in_view: in_view.contains(key),
+                            in_view: in_view.contains_key(key),
                             heard: reported.map(|(at, _)| age(*at)),
                             report: reported.map(|(_, report)| report.clone()),
                             behind,
@@ -415,6 +418,7 @@ mod tests {
             clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
+            qualified: Default::default(),
         }
     }
 
@@ -459,7 +463,10 @@ mod tests {
         activity.served(&h(), 5, 5, 2, Outcome::Rejected, at(20));
         activity.report(&h(), report("alpha#1", 2), at(21));
         activity.report(&h(), report("beta#2", 0), at(25));
-        let keys = BTreeSet::from(["alpha#1".to_owned(), "gamma#3".to_owned()]);
+        let keys = BTreeMap::from([
+            ("alpha#1".to_owned(), Named::by_key("alpha#1")),
+            ("gamma#3".to_owned(), Named::by_key("gamma#3")),
+        ]);
         let snapshot = activity.snapshot(vec![(info("h"), keys)], "0.1.0", at(30));
         assert_eq!(snapshot.uptime, 30);
         let hive = &snapshot.hives[0];
@@ -503,7 +510,7 @@ mod tests {
         let at = |secs| start + Duration::from_secs(secs);
         activity.served(&h(), 0, 0, 7, Outcome::Other, at(0));
         activity.report(&h(), report("alpha#1", 3), at(1));
-        let keys = BTreeSet::new();
+        let keys = BTreeMap::new();
         let behind = |activity: &Activity| {
             activity
                 .snapshot(vec![(info("h"), keys.clone())], "", at(100))
@@ -528,7 +535,7 @@ mod tests {
         accept(&mut activity, 1, at(1));
         activity.served(&h(), 0, 0, 2, Outcome::Accepted, at(50));
         activity.report(&h(), report("alpha#1", 1), at(51));
-        let snapshot = activity.snapshot(vec![(info("h"), BTreeSet::new())], "", at(60));
+        let snapshot = activity.snapshot(vec![(info("h"), BTreeMap::new())], "", at(60));
         let hive = &snapshot.hives[0];
         assert_eq!((hive.traffic.accepted, hive.recent.len()), (2, 1));
         assert_eq!(hive.machines[0].behind, Some(10));
@@ -540,7 +547,7 @@ mod tests {
         let mut activity = Activity::new();
         let start = activity.started;
         activity.report(&h(), report("alpha#1", 0), start);
-        let keys = BTreeSet::new();
+        let keys = BTreeMap::new();
         let later = |activity: &Activity, after: Duration| {
             activity
                 .snapshot(vec![(info("h"), keys.clone())], "", start + after)
@@ -565,7 +572,7 @@ mod tests {
         let mut failing = report("alpha#1", 0);
         failing.error = Some("broken".to_owned());
         activity.report(&h(), failing, start);
-        let mut snapshot = activity.snapshot(vec![(info("h"), BTreeSet::new())], "", start);
+        let mut snapshot = activity.snapshot(vec![(info("h"), BTreeMap::new())], "", start);
         let mut recent = vec![];
         while snapshot.shrink() {
             recent.push(snapshot.hives[0].recent.len());

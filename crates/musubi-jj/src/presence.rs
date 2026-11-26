@@ -13,7 +13,10 @@
 //! it, too ([`Presence::worked`]), and the `musubi.forget-after` the copy last recorded
 //! ([`Presence::forget_after`]), which the model leaves out: they decide nothing about
 //! presence, only what a forgotten copy's own workspaces are, and when a daemon forgets a
-//! copy that has gone unused.
+//! copy that has gone unused. It keeps, too, each copy's latest records of its name
+//! ([`Presence::name`]) and the generation since which it has been present under that name
+//! ([`Presence::since`]): `NameIs` and `SinceIs` in formal/Musubi/Identity.lean, which decide
+//! the names its workspaces are shown under (`crate::workspaces::display_names`).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -42,6 +45,11 @@ pub const WORK_ATTRIBUTE: &str = "musubi.work";
 /// [`format_forget_after`] writes it: how long the copy may go unused before a daemon forgets
 /// it. The operation is the copy's work, and changes nothing else.
 pub const FORGET_AFTER_ATTRIBUTE: &str = "musubi.forget-after";
+
+/// The attribute of an operation recording its copy's name, as `workspaces::sanitize` makes
+/// it: what the copy's workspaces are shown under from there on, until it records another.
+/// The operation is the copy's work, and changes nothing else.
+pub const NAME_ATTRIBUTE: &str = "musubi.name";
 
 /// A month and a year in seconds, as `humantime` took them (30.44 and 365.25 days), which
 /// earlier builds recorded in hives' operation metadata.
@@ -124,12 +132,13 @@ pub fn format_forget_after(after: Option<Duration>) -> String {
 }
 
 /// What an operation is to presence: whose work it is, which copies it forgets, and the
-/// `musubi.forget-after` it records for the copy whose work it is.
+/// `musubi.forget-after` and name it records for the copy whose work it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kind {
     pub work: Option<String>,
     pub forgets: BTreeSet<String>,
     pub forget_after: Option<Option<Duration>>,
+    pub name: Option<String>,
 }
 
 impl Kind {
@@ -155,10 +164,19 @@ impl Kind {
             .attributes
             .get(FORGET_AFTER_ATTRIBUTE)
             .and_then(|text| parse_forget_after(text).ok());
+        // Only a name `sanitize` leaves as it is: one with a `/` or a space, from a buggy or
+        // hostile peer, would make names that aren't one workspace's, or stamps that don't
+        // read.
+        let name = metadata
+            .attributes
+            .get(NAME_ATTRIBUTE)
+            .filter(|name| workspaces::sanitize(name) == **name)
+            .cloned();
         Self {
             work,
             forgets,
             forget_after,
+            name,
         }
     }
 }
@@ -175,6 +193,11 @@ pub struct Presence<Op> {
     /// Each copy's latest operations recording its `musubi.forget-after`, with what they
     /// record.
     forget_after: Arc<BTreeMap<String, BTreeMap<Op, Option<Duration>>>>,
+    /// Each copy's latest operations recording its name, with the name they record.
+    names: Arc<BTreeMap<String, BTreeMap<Op, String>>>,
+    /// The generation of each copy's latest mark: a record of its name, or a return, work
+    /// made where it was absent just before.
+    since: Arc<BTreeMap<String, u64>>,
 }
 
 impl<Op> Default for Presence<Op> {
@@ -184,6 +207,8 @@ impl<Op> Default for Presence<Op> {
             known: Arc::default(),
             worked: Arc::default(),
             forget_after: Arc::default(),
+            names: Arc::default(),
+            since: Arc::default(),
         }
     }
 }
@@ -235,6 +260,59 @@ impl<Op: Clone + Ord> Presence<Op> {
         self.forget_after.contains_key(copy)
     }
 
+    /// The name a copy last recorded: the greatest of its latest records, where it recorded
+    /// different names on two lines of history that a merge joined; none if it has recorded
+    /// none. Forgets leave it, so a copy that comes back keeps its name.
+    pub fn recorded_name(&self, copy: &str) -> Option<&str> {
+        self.names.get(copy)?.values().map(String::as_str).max()
+    }
+
+    /// A copy's name (`NameIs`): the one it last recorded, else the one its key embeds.
+    pub fn name<'a>(&'a self, copy: &'a str) -> &'a str {
+        self.recorded_name(copy)
+            .unwrap_or_else(|| workspaces::machine_name(copy))
+    }
+
+    /// The generation since which a copy has been present under its name (`SinceIs`): that
+    /// of its latest mark, a record of its name or a return. 0 for one with none, as one
+    /// present only by an earlier release's stamp.
+    pub fn since(&self, copy: &str) -> u64 {
+        self.since.get(copy).copied().unwrap_or(0)
+    }
+
+    /// The copies present, each with its name and since, as `workspaces::display_names`
+    /// names them.
+    pub fn named(&self) -> BTreeMap<String, workspaces::Named> {
+        self.copies()
+            .map(|copy| (copy.to_owned(), self.named_one(copy)))
+            .collect()
+    }
+
+    /// The machines named at an operation with this presence: the copies present, and any
+    /// other with workspaces in its view, `in_view`, as one that joined before joining was
+    /// recorded as work, each with its name and since there. Nodes and hubs name the same
+    /// machines so.
+    pub fn named_with<'a>(
+        &self,
+        in_view: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeMap<String, workspaces::Named> {
+        let mut machines = self.named();
+        for machine in in_view {
+            machines
+                .entry(machine.to_owned())
+                .or_insert_with(|| self.named_one(machine));
+        }
+        machines
+    }
+
+    /// One copy's name and since, as `workspaces::display_names` takes them.
+    pub fn named_one(&self, copy: &str) -> workspaces::Named {
+        workspaces::Named {
+            name: self.name(copy).to_owned(),
+            since: self.since(copy),
+        }
+    }
+
     /// Presence before an operation's own effect, from its parents' (`umax_merge`): the
     /// latest work of each copy that the parents keep, each kept unless a parent whose
     /// history has it doesn't keep it, as when a forget there saw it, or later work there
@@ -253,7 +331,26 @@ impl<Op: Clone + Ord> Presence<Op> {
         let mut known = parents[0].1.known.clone();
         let mut worked = parents[0].1.worked.clone();
         let mut forget_after = parents[0].1.forget_after.clone();
+        let mut names = parents[0].1.names.clone();
+        let mut since = parents[0].1.since.clone();
         for (_, presence) in &parents[1..] {
+            if !Arc::ptr_eq(&since, &presence.since) {
+                for (copy, generation) in presence.since.iter() {
+                    if since.get(copy).is_none_or(|have| have < generation) {
+                        Arc::make_mut(&mut since).insert(copy.clone(), *generation);
+                    }
+                }
+            }
+            if !Arc::ptr_eq(&names, &presence.names) {
+                for (copy, records) in presence.names.iter() {
+                    let merged = match names.get(copy) {
+                        None => records.clone(),
+                        Some(have) if records.keys().all(|op| have.contains_key(op)) => continue,
+                        Some(have) => latest_records(have, records, &mut is_ancestor)?,
+                    };
+                    Arc::make_mut(&mut names).insert(copy.clone(), merged);
+                }
+            }
             if !Arc::ptr_eq(&known, &presence.known) && !known.is_superset(&presence.known) {
                 Arc::make_mut(&mut known).extend(presence.known.iter().cloned());
             }
@@ -272,20 +369,7 @@ impl<Op: Clone + Ord> Presence<Op> {
                     let merged = match forget_after.get(copy) {
                         None => records.clone(),
                         Some(have) if records.keys().all(|op| have.contains_key(op)) => continue,
-                        Some(have) => {
-                            let ops = latest_of(
-                                &have.keys().cloned().collect(),
-                                &records.keys().cloned().collect(),
-                                &mut is_ancestor,
-                            )?;
-                            ops.into_iter()
-                                .map(|op| {
-                                    let after = have.get(&op).or_else(|| records.get(&op));
-                                    let after = *after.expect("an operation from either side");
-                                    (op, after)
-                                })
-                                .collect()
-                        }
+                        Some(have) => latest_records(have, records, &mut is_ancestor)?,
                     };
                     Arc::make_mut(&mut forget_after).insert(copy.clone(), merged);
                 }
@@ -324,13 +408,17 @@ impl<Op: Clone + Ord> Presence<Op> {
             known,
             worked,
             forget_after,
+            names,
+            since,
         })
     }
 
     /// This presence as an earlier release's contraction stamped an operation with it, and as a
     /// cleanup compares presences, each operation as `name` writes it: a line for each
     /// copy known, each copy's latest work that no forget saw, its latest work whether or not
-    /// one did, and the `musubi.forget-after` it last recorded, in order.
+    /// one did, the `musubi.forget-after` it last recorded, its latest records of its name,
+    /// and the generation since which it has had it, in order. Earlier releases wrote
+    /// neither of the last two.
     pub fn to_stamp(&self, name: impl Fn(&Op) -> String) -> String {
         let mut lines = vec![];
         for copy in self.known.iter() {
@@ -351,6 +439,14 @@ impl<Op: Clone + Ord> Presence<Op> {
                 lines.push(format!("forget-after {copy} {} {after}", name(op)));
             }
         }
+        for (copy, records) in self.names.iter() {
+            for (op, recorded) in records {
+                lines.push(format!("name {copy} {} {recorded}", name(op)));
+            }
+        }
+        for (copy, generation) in self.since.iter() {
+            lines.push(format!("since {copy} {generation}"));
+        }
         lines.join("\n")
     }
 
@@ -365,6 +461,8 @@ impl<Op: Clone + Ord> Presence<Op> {
         let mut known = BTreeSet::new();
         let mut worked: BTreeMap<String, BTreeSet<Op>> = BTreeMap::new();
         let mut forget_after: BTreeMap<String, BTreeMap<Op, Option<Duration>>> = BTreeMap::new();
+        let mut names: BTreeMap<String, BTreeMap<Op, String>> = BTreeMap::new();
+        let mut since: BTreeMap<String, u64> = BTreeMap::new();
         for line in text.split('\n') {
             let words: Vec<&str> = line.split(' ').collect();
             if words.iter().any(|word| word.is_empty()) {
@@ -403,12 +501,23 @@ impl<Op: Clone + Ord> Presence<Op> {
                         .or_default()
                         .insert(parse(op)?, after);
                 }
+                ["name", copy, op, recorded] => {
+                    names
+                        .entry((*copy).to_owned())
+                        .or_default()
+                        .insert(parse(op)?, (*recorded).to_owned());
+                }
+                ["since", copy, generation] => {
+                    since.insert((*copy).to_owned(), generation.parse().ok()?);
+                }
                 _ => return None,
             }
         }
         presence.known = Arc::new(known);
         presence.worked = Arc::new(worked);
         presence.forget_after = Arc::new(forget_after);
+        presence.names = Arc::new(names);
+        presence.since = Arc::new(since);
         // One encoding for each presence, so that equal presences stamp equal operations.
         (presence.to_stamp(name) == text).then_some(presence)
     }
@@ -426,6 +535,7 @@ impl<Op: Clone + Ord> Presence<Op> {
                     .into_iter()
                     .flat_map(BTreeMap::keys),
             )
+            .chain(self.names.get(copy).into_iter().flat_map(BTreeMap::keys))
     }
 
     /// Every operation this presence names.
@@ -435,17 +545,27 @@ impl<Op: Clone + Ord> Presence<Op> {
             .flatten()
             .chain(self.worked.values().flatten())
             .chain(self.forget_after.values().flat_map(BTreeMap::keys))
+            .chain(self.names.values().flat_map(BTreeMap::keys))
     }
 
-    /// Presence at operation `op` of `kind`, from [`Self::merge`] of its parents': its work is
-    /// its copy's latest (`umax_work`), and the copies it forgets are absent (`umax_forget`).
-    pub fn apply(mut self, op: &Op, kind: &Kind) -> Self {
+    /// Presence at operation `op` of `kind`, whose generation is `generation`, from
+    /// [`Self::merge`] of its parents': its work is its copy's latest (`umax_work`), and the
+    /// copies it forgets are absent (`umax_forget`). Work that records its copy's name, or
+    /// brings it back, marks when the copy came to be present under its name (`Mark`).
+    pub fn apply(mut self, op: &Op, kind: &Kind, generation: u64) -> Self {
         for copy in kind.work.iter().chain(&kind.forgets) {
             if !self.known.contains(copy) {
                 Arc::make_mut(&mut self.known).insert(copy.clone());
             }
         }
         if let Some(copy) = &kind.work {
+            if kind.name.is_some() || !self.is_present(copy) {
+                Arc::make_mut(&mut self.since).insert(copy.clone(), generation);
+            }
+            if let Some(name) = &kind.name {
+                Arc::make_mut(&mut self.names)
+                    .insert(copy.clone(), BTreeMap::from([(op.clone(), name.clone())]));
+            }
             self.latest
                 .insert(copy.clone(), BTreeSet::from([op.clone()]));
             Arc::make_mut(&mut self.worked).insert(copy.clone(), BTreeSet::from([op.clone()]));
@@ -459,6 +579,28 @@ impl<Op: Clone + Ord> Presence<Op> {
         }
         self
     }
+}
+
+/// The latest of two sets of records, each its own latest already, with what each records
+/// (`latest_of`).
+fn latest_records<Op: Clone + Ord, T: Clone, E>(
+    have: &BTreeMap<Op, T>,
+    theirs: &BTreeMap<Op, T>,
+    is_ancestor: &mut impl FnMut(&Op, &Op) -> Result<bool, E>,
+) -> Result<BTreeMap<Op, T>, E> {
+    let ops = latest_of(
+        &have.keys().cloned().collect(),
+        &theirs.keys().cloned().collect(),
+        is_ancestor,
+    )?;
+    Ok(ops
+        .into_iter()
+        .map(|op| {
+            let value = have.get(&op).or_else(|| theirs.get(&op));
+            let value = value.expect("an operation from either side").clone();
+            (op, value)
+        })
+        .collect())
 }
 
 /// The latest of two sets of operations, each its own latest already: their union, but for
@@ -507,20 +649,22 @@ mod tests {
             forgets: BTreeSet::from([copy.to_owned()]),
             ..Kind::default()
         };
-        let mut presence = Presence::<usize>::default().apply(&1, &work("a"));
+        let mut presence = Presence::<usize>::default().apply(&1, &work("a"), 1);
         let mut recorded = work("b");
         recorded.forget_after = Some(Some(Duration::new(3600, 5)));
-        presence = presence.apply(&2, &recorded).apply(&3, &forget("a"));
+        recorded.name = Some("desk".to_owned());
+        presence = presence.apply(&2, &recorded, 2).apply(&3, &forget("a"), 3);
         let mut never = work("c");
         never.forget_after = Some(None);
-        presence = presence.apply(&4, &never);
+        presence = presence.apply(&4, &never, 4);
         let name = |op: &usize| op.to_string();
         let parse = |text: &str| text.parse().ok();
         let stamp = presence.to_stamp(name);
         assert_eq!(
             stamp,
             "known a\nknown b\nknown c\nlatest b 2\nlatest c 4\nworked a 1\nworked b 2\n\
-             worked c 4\nforget-after b 2 3600.000000005\nforget-after c 4 never"
+             worked c 4\nforget-after b 2 3600.000000005\nforget-after c 4 never\n\
+             name b 2 desk\nsince a 1\nsince b 2\nsince c 4"
         );
         assert_eq!(Presence::from_stamp(&stamp, name, parse), Some(presence));
         for other in [
@@ -531,6 +675,8 @@ mod tests {
             "latest a x",
             "forget-after a 1 3600",
             "forget-after a 1 3600.5",
+            "since a x",
+            "name a 1",
             "present a",
         ] {
             assert_eq!(
@@ -557,12 +703,19 @@ mod tests {
 
     fn presences(parents: &[Vec<usize>], kinds: &[Kind]) -> Vec<Presence<usize>> {
         let mut out: Vec<Presence<usize>> = vec![];
+        let mut generations: Vec<u64> = vec![];
         for (x, kind) in kinds.iter().enumerate() {
             let ps: Vec<(usize, &Presence<usize>)> =
                 parents[x].iter().map(|&p| (p, &out[p])).collect();
+            let generation = 1 + parents[x]
+                .iter()
+                .map(|&p| generations[p])
+                .max()
+                .unwrap_or(0);
             let merged = Presence::merge(&ps, ancestor(parents)).unwrap();
-            let next = merged.apply(&x, kind);
+            let next = merged.apply(&x, kind, generation);
             out.push(next);
+            generations.push(generation);
         }
         out
     }
@@ -735,6 +888,45 @@ mod tests {
         assert_eq!(p[2].forget_after("k"), hours(6));
         assert_eq!(p[5].forget_after("k"), hours(2));
         assert_eq!(p[6].forget_after("k"), hours(1));
+    }
+
+    /// A copy's name is the last it recorded, which forgets leave; where it recorded two on
+    /// lines a merge joins, the greater; the one its key embeds, if it recorded none. It has
+    /// had its name since its latest record or return, whichever is later, which a merge
+    /// takes from the line where that is latest.
+    #[test]
+    fn names_and_since_are_the_latest_marks() {
+        let name = |copy: &str, name: &str| Kind {
+            name: Some(name.to_owned()),
+            ..work(copy)
+        };
+        let parents = vec![
+            vec![],     // 0: k#1 joins
+            vec![0],    // 1: k#1 records `desk`
+            vec![1],    // 2: a daemon forgets k#1
+            vec![2],    // 3: k#1 works again, returning
+            vec![0],    // 4: k#1, on another line, records `alpha`
+            vec![3, 4], // 5: merge
+            vec![5],    // 6: k#1 works
+        ];
+        let kinds = vec![
+            work("k#1"),
+            name("k#1", "desk"),
+            forget("k#1"),
+            work("k#1"),
+            name("k#1", "alpha"),
+            Kind::default(),
+            work("k#1"),
+        ];
+        let p = presences(&parents, &kinds);
+        assert_eq!((p[0].name("k#1"), p[0].since("k#1")), ("k", 1));
+        assert_eq!(p[0].recorded_name("k#1"), None);
+        assert_eq!((p[1].name("k#1"), p[1].since("k#1")), ("desk", 2));
+        assert_eq!((p[2].name("k#1"), p[2].since("k#1")), ("desk", 2));
+        assert_eq!((p[3].name("k#1"), p[3].since("k#1")), ("desk", 4));
+        assert_eq!((p[4].name("k#1"), p[4].since("k#1")), ("alpha", 2));
+        assert_eq!((p[5].name("k#1"), p[5].since("k#1")), ("desk", 4));
+        assert_eq!((p[6].name("k#1"), p[6].since("k#1")), ("desk", 4));
     }
 
     /// A forget concurrent with work it didn't see leaves the copy present; one that saw all

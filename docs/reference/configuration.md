@@ -34,6 +34,7 @@ with `--user`.
 | `musubi.daemon.connections` | `as-needed` (default): share one connection per hub across repos, adding a connection for each transfer of 16 MiB or more until it finishes. `one`: use one connection per hub even for large transfers, useful when each ssh connection is costly or asks you to log in. |
 | `musubi.upgrade-command` | Installs the jj-musubi release named by `$MUSUBI_UPGRADE_TO`. The daemon runs it on finding a newer hub, then restarts from the installed version. Unset by default: no automatic upgrades. See [Upgrade jj-musubi](../guides/upgrading.md) for installer requirements. |
 | `musubi.templates.list` | The jj template for hubs, hives and copies in `musubi list`, unless overridden by `-T`. `musubi list --help` lists keywords. |
+| `musubi.machine-name` | This machine's name in all its repos, which other machines show its working copies under, as in `laptop/default@`: lowercased, with characters other than letters, digits, `-` and `_` turned into `-`. The first `--machine` given to `create`, `join` or `clone` sets it, which renames the machine's other repos too; a `--machine` that differs from it is refused. Changing it renames the machine in each of its repos at that repo's next sync. Unset, each repo keeps the name it has. See [Naming machines](../guides/setup.md#naming-machines). |
 
 The daemon reads `musubi.daemon.*` when it starts, so run `musubi daemon restart` after
 changing them.
@@ -53,7 +54,7 @@ Any jj config level can set these for the repo.
 | `musubi.publication.max-files` | Maximum distinct extra file paths across all outgoing snapshots: `1000` by default, including current uncommitted work and older snapshots. Explicit change history and already shared content are exempt. `0` disables this limit. Sending pauses above either publication limit; receiving continues. See [snapshot cleanup](../guides/snapshots.md). |
 | `musubi.publication.max-bytes` | Maximum extra content bytes retained by outgoing snapshots: `64 MiB` by default. Accepts jj byte sizes such as `128 MiB`, or a number of bytes. Identical content is counted once across paths and snapshots. `0` disables this limit. |
 | `musubi.clone-config` | Keys whose effective values are recorded at hive creation or recreation after hub loss as defaults for future clones. Default: `["user.name", "user.email"]`; `[]` records none. Clone writes those values to its repo config only if absent from the destination's explicit config; built-in jj defaults do not count. Existing values win. Later edits and joins do not update the recorded defaults. `musubi.forget-after` cannot be selected. |
-| `operation.hostname` | This machine's name in a hive, unless `--machine` gives another. |
+| `operation.hostname` | The machine name a new copy takes where neither `--machine` nor `musubi.machine-name` gives one. Changing it renames no copy. |
 | `git.executable-path` | The `git` jj-musubi runs, as jj does. |
 | `snapshot.auto-update-stale` | jj's own: `true` makes every `jj` command update a working copy that another machine made stale. |
 

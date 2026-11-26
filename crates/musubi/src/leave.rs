@@ -165,8 +165,8 @@ fn leave_inactive(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
 }
 
 /// Retires the machine key of a repository that is part of no hive but kept the key a hub
-/// took, as a join whose first sync was stopped leaves it, so that `musubi join --machine` can
-/// name a new one. Returns whether it was one.
+/// took, as a join whose first sync was stopped leaves it, so that the next join makes a new
+/// one. Returns whether it was one.
 fn retire_kept_key(ui: &Ui, located: &Located) -> anyhow::Result<bool> {
     let _lock = HiveConfig::lock(&located.repo_path)?;
     if HiveConfig::load(&located.repo_path)?.is_some() {
@@ -332,9 +332,10 @@ fn leave_once(
     removed: &mut BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
 ) -> anyhow::Result<bool> {
     let mut node = located.open()?;
-    // A change to this copy's `musubi.forget-after` the daemon hasn't recorded yet goes up
-    // before the forget, not after it, as the sync would otherwise record it, bringing the
-    // copy back.
+    // A change to this copy's name or `musubi.forget-after` the daemon hasn't recorded yet
+    // goes up before the forget, not after it, as the sync would otherwise record it,
+    // bringing the copy back.
+    node.record_name()?;
     node.record_forget_after()?;
     // Gone already, as after a leave that couldn't tell the hive, it syncs what it has.
     for (name, commit) in node.forget_self()?.unwrap_or_default() {
@@ -370,7 +371,12 @@ pub fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::
     let key = match node.machine_named(machine)? {
         Some(key) => key,
         // Any other name it could be shown under, where no other machine could have it.
-        None if musubi_jj::workspaces::could_be_shown_as(&own, machine) => {
+        None if musubi_jj::workspaces::could_be_shown_as(
+            &node.name_in_history()?,
+            &own,
+            machine,
+        ) =>
+        {
             return Err(this_machine());
         }
         None => {

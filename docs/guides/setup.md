@@ -322,12 +322,33 @@ to `create`, `join` or `clone`:
 musubi join --machine work-laptop
 ```
 
-To change the name of an existing copy, [leave and join
-again](manage.md#rejoin-or-stop-using-jj-musubi).
+The first `--machine` on a machine sets
+[`musubi.machine-name`](../reference/configuration.md#this-machines) in your jj user config,
+which names the machine in all its repos: repos you add later get the name too, and repos the
+machine has already joined under another name take this one at their next sync. Once that's
+set, `--machine` with a different name is refused, with the command that renames the machine
+instead. A machine has one name in all its repos.
 
-If you somehow set up multiple machines with the same name (but why?), they'll be given unique
-suffixes, such as `laptop-1a2b/default@` and `laptop-3c4d/default@`. This also takes care of
-such odd situations as you deciding to name a normal jj workspace `laptop/default`.
+To rename a machine, change the setting there:
+
+```sh
+jj config set --user musubi.machine-name work-laptop
+musubi sync
+```
+
+Each repo on the machine takes the new name when the daemon next syncs it, usually within a minute
+while the machine is online; `musubi sync` does it at once for the repo you run it in. Other
+machines show the new name after their own next sync, and `musubi status` there lists it under
+Copies. Revsets, aliases and agent instructions that use the old name, such as
+`laptop/default@`, stop finding the machine's working copy, so update them too. Unsetting the
+setting keeps the name a machine has: it doesn't go back to the hostname. musubi lowercases the
+name, and turns any character other than a letter, digit, `-` or `_` into `-`.
+
+If two machines have the same name, the one that has had it longer keeps it, and the other is
+shown with part of its id, such as `laptop-1a2b/default@`, whether it joined later, came back
+after being forgotten, or renamed itself to that name. Once the first one leaves, or is
+forgotten, the other goes back to the plain name. Part of an id also keeps a machine's name
+clear of a workspace you named like another machine's, such as `laptop/default`.
 
 ## Sharing complete operation history
 

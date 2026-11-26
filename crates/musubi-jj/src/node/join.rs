@@ -369,7 +369,8 @@ impl NodeRepo {
         };
         let canonical = self.canonical.write_operation(&join)?;
         let work = crate::canonical::Work::of(&self.canonical, &canonical)?;
-        self.remember_presence(canonical.clone(), presence.apply(&work, &kind));
+        let generation = self.canonical.generation(&canonical)?;
+        self.remember_presence(canonical.clone(), presence.apply(&work, &kind, generation));
         self.record_join(head, &op, canonical.clone())?;
         // Start provenance before a first fetch can write accepted_base. A fresh member
         // must not be mistaken for an older sender when its first publication is held.

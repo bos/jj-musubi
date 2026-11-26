@@ -57,7 +57,8 @@ The promises, in the user's words, and their theorems:
 Left out: `jj op abandon` and `jj op integrate`, which take no lock (`OpHeadsRace.lean` has them
 against musubi's check); a crash of a `jj` command, which leaves only an operation nothing names;
 this machine's record of `.git` in a view, which `Refs.lean` models; and translation, which
-decides what a realization's view is and which `Names.lean` and the protocol model cover in part.
+decides what a realization's view is and which `Identity.lean` and the protocol model cover in
+part.
 `settledE` is what the oracle's `realization` request answers, the operations whose merge jj must
 show once a realization is published (`settled_sound`).
 -/

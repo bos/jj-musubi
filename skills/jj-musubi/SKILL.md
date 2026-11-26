@@ -10,6 +10,9 @@ description: >
 
 musubi syncs jj's operation log through a hub. Copies in one **hive** behave like workspaces:
 other machines appear as `laptop/default@`, and their operations appear in `jj op log`.
+The name a machine shows under can change, so read other machines' names from `jj workspace
+list`, and this one's from `musubi status`, rather than reusing names from earlier in a session
+or from instructions.
 
 ## Check hive membership once
 

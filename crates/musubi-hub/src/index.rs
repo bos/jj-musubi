@@ -1,7 +1,9 @@
 //! What a hub remembers about each hive for matching repositories to it: every remote URL
-//! a copy has recorded when joining, and every root commit it has stored. Both only grow. The
-//! index is a cache, updated as heads are accepted and rebuilt from the store's operations
-//! and objects when it is missing.
+//! a copy has recorded when joining, and every root commit it has stored. Both only grow.
+//! With them, the machines at the accepted head, with their names there, for `musubi list`.
+//! The index is a cache, updated as heads are accepted and rebuilt from the store's
+//! operations and objects when it is missing or can't be read, as one an earlier release
+//! wrote.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -14,6 +16,7 @@ use musubi_jj::files;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::remote_url::{JOIN_HIVE, JOIN_URL_PREFIX, JoinRemotes, RemoteBinding};
 use musubi_jj::workspaces;
+use musubi_jj::workspaces::Named;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -30,8 +33,9 @@ pub struct HiveIndex {
     pub remote_bindings: BTreeMap<String, BTreeSet<RemoteBinding>>,
     /// Hex ids of stored commits whose only parent is the root commit.
     pub roots: BTreeSet<String>,
-    /// Machine keys with workspaces in the accepted head's view.
-    pub machines: BTreeSet<String>,
+    /// The machines named at the accepted head, by key, each with its name and since there,
+    /// as every copy names them (`Presence::named_with`).
+    pub machines: BTreeMap<String, Named>,
 }
 
 impl HiveIndex {
@@ -116,19 +120,21 @@ impl HiveIndex {
     }
 }
 
-fn head_machines(store: &HubStore) -> Result<BTreeSet<String>, StoreError> {
+/// The machines named at the accepted head: those present, and any with workspaces in its
+/// view, by their names there.
+fn head_machines(store: &HubStore) -> Result<BTreeMap<String, Named>, StoreError> {
     let head = CanonicalOp(store.head().1.clone());
     if head == *store.canonical().root_operation_id() {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     }
     let operation = store.canonical().read_operation(&head)?;
     let view = store.canonical().read_view(&operation.view_id)?;
-    Ok(view
-        .wc_commit_ids
-        .keys()
-        .filter_map(|key| workspaces::split_key(key.as_str()))
-        .map(|(machine, _)| machine.to_owned())
-        .collect())
+    Ok(store.presence()?.named_with(
+        view.wc_commit_ids
+            .keys()
+            .filter_map(|key| workspaces::split_key(key.as_str()))
+            .map(|(machine, _)| machine),
+    ))
 }
 
 #[cfg(test)]

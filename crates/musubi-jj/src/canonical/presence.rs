@@ -257,10 +257,13 @@ fn at(
         if let ([(_, only)], true) = (parents, kind.forgets.is_empty()) {
             return Ok(only.clone());
         }
-        // Neither work nor stamped: a forget or a merge, which names no work.
-        return Ok(Arc::new(
-            merge(store, parents)?.apply(&Work::unnamed(), kind),
-        ));
+        // Neither work nor stamped: a forget or a merge, which names no work, and marks no
+        // copy, so its generation doesn't matter.
+        return Ok(Arc::new(merge(store, parents)?.apply(
+            &Work::unnamed(),
+            kind,
+            0,
+        )));
     };
     let merged = merge(store, parents)?;
     let original = origin::identity(op)?;
@@ -271,7 +274,7 @@ fn at(
         original,
         op: Some(id.clone()),
     };
-    Ok(Arc::new(merged.apply(&work, kind)))
+    Ok(Arc::new(merged.apply(&work, kind, store.generation(id)?)))
 }
 
 /// Compatibility until 2027-02-21: see `origin::PRESENCE`.

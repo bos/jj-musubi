@@ -335,7 +335,7 @@ async fn one_hub_many_hives() {
         "{index:?}"
     );
     assert!(
-        index.machines.iter().any(|m| m.starts_with("alpha#")),
+        index.machines.iter().any(|(m, _)| m.starts_with("alpha#")),
         "{index:?}"
     );
 }

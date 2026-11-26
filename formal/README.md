@@ -16,8 +16,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 - Which repository on a machine is the copy of a key, which is a duplicate, and how a
   checkout recovers from an interrupted leave, join or fresh join
   (`Musubi/Copies.lean`; [copies.md](../docs/internals/copies.md)).
-- The names a machine shows other machines' workspaces under (`Musubi/Names.lean`; [design.md,
-  "Which workspaces are this machine's
+- The names copies record for themselves, and the names a machine shows other machines'
+  workspaces under, among the copies present at an operation (`Musubi/Identity.lean`,
+  `Musubi/Names.lean`; [design.md, "Which workspaces are this machine's
   own"](../docs/internals/design.md#which-workspaces-are-this-machines-own)).
 - How musubi moves the jj operation heads it read earlier while jj commands and the lockless
   `jj op abandon` race it (`Musubi/OpHeads.lean`, `Musubi/OpHeadsRace.lean`; [design.md, "Moving
@@ -108,10 +109,11 @@ deleted with them. Rebuilding one on `Exec` is a separate project.
 | `Musubi/Expected.lean` | The conflicted-ref history walk, agreement under operation renaming, termination and the import-agreement boundary. |
 | `Musubi/ExpectedExec.lean` | Finite operation DAGs and commit-side selection for the history oracle. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
-| `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
+| `Musubi/PresenceExec.lean` | The presence rule, copies' names, and how long each has held its name, on a finite history, executable, for the oracle. |
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Copy identity, moves, duplicates, and recovery at the durable write boundaries of leave, join and a fresh join. |
-| `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
+| `Musubi/Names.lean` | The candidate prefixes a machine's workspaces can be shown under, and the first one free. |
+| `Musubi/Identity.lean` | Names copies record (`musubi.name`), how long each has held its name, and the names a machine shows the copies present under, with `#guard` tests of them. |
 | `Musubi/Publication.lean` | Cumulative snapshot accounting, exact approval, selected operation cleanup, and checks of the prepared result before installation. |
 | `Musubi/OpHeads.lean` | What musubi decides about op heads it moves, as a pure function for the oracle and the code: `same` (`plan::same`); and what it reads of operations. |
 | `Musubi/OpHeadsJson.lean` | The oracle's `opHeads` request. |
@@ -483,21 +485,44 @@ defines work and forgets). For any operation graph:
   copy, its latest work that no forget saw (`UMax`), follows from an operation's parents'
   alone, and says whether the copy is present.
 
-### Workspace names (`Names.lean`)
+### Workspace names (`Identity.lean`, `Names.lean`)
 
-Each machine, this one among them, takes the first of its candidate prefixes that no machine
-before it took and that starts no name of this machine's own and `/`: its name, if no other
-machine has it, then its name and the start of its key's suffix, its name and the whole suffix,
-and that with ever more dashes ([conformance.md, "Workspace
-names"](../docs/internals/conformance.md#workspace-names)). This machine shows the others under
-theirs, as the hub, which names every machine, lists them.
+A copy's key is `name#suffix`; the name in it is only the copy's first. Its daemon records the
+name it has now as `musubi.name` on an operation that is its work. A copy's name at an operation
+is the greatest its latest records there give, or the name in its key where it has recorded
+none; forgets leave names as they are.
 
-- `choose_free`: one candidate is always free, one longer than every prefix taken and every
-  name of this machine's own.
-- `localName_injective`: the names of a view's workspaces, this machine's under their own
-  names and the others' as `<prefix>/<workspace>`, are distinct, whatever the machines and the
-  names of this machine's own, given machine names and suffixes without `/`, as musubi makes
-  them; only a machine key edited by hand could have one.
+At an operation, only the copies present are named, by their names there ([conformance.md,
+"Workspace names"](../docs/internals/conformance.md#workspace-names)). Where several share a
+name, the one that has held it longest keeps it plain: the smallest generation of its latest
+mark, the later of its latest name record and its latest return (work where it was absent just
+before), then the smallest key. Those copies are named first, then the rest, each taking the first
+of its candidate prefixes (`Names.lean`) that no copy before it took and that starts no name of
+this machine's own and `/`: its name plain, if it keeps it so, then its name and the start of its
+key's suffix, its name and the whole suffix, and that with ever more dashes. This machine shows
+the others under theirs, as the hub lists them.
+
+- `nameIs_unique`, `nameIs_exists`, `nameIs_local`, `nameIs_congr`: every machine that has an
+  operation gives each copy one name there, however the same records merge.
+- `rename_sticks`, `rename_present`: a record names its copy so until a later one; recording a
+  name is work, so it brings a forgotten copy back.
+- `sinceIs_local`, `since_stable`, `later_mark`: how long a copy has held its name depends only
+  on the operation's history, stays while the copy neither renames nor returns, and is shorter
+  for a copy that came to its name after another's mark.
+- `Names.choose_free`: one candidate is always free, one longer than every prefix taken and
+  every name of this machine's own.
+- `Naming.localName_injective`: the names of a view's workspaces, this machine's under their own
+  names and the others' as `<prefix>/<workspace>`, are distinct, whatever the copies, their names
+  and priorities, and the names of this machine's own, given copy names and suffixes without
+  `/`, as musubi makes them; only a machine key edited by hand could have one. Two copies may
+  share both a name and a suffix and still be told apart.
+- `Naming.naming_local`, `Naming.assign_congr`: the labels at an operation are a function of its
+  history alone: of the copies present, their names and how long each has held it, not of any
+  copy forgotten nor any name a copy had before.
+- `Naming.winner_label`, `Naming.keeps_label`: a copy that stays present under an unchanged name
+  keeps its label when another copy renames into its name, leaves, or returns.
+- `Naming.resolve_at_origin`: a name in a view `jj undo` brings back stands for one workspace,
+  read by the naming of the operation that view came from.
 
 ### Moving op heads (`OpHeads.lean`, `OpHeadsRace.lean`)
 
@@ -599,14 +624,14 @@ and its view but for this machine's record of `.git`.
   descends from the realization's parents, and a realization that records no change to your
   workspace nor a rewrite of its commit, no step but a command of yours moves the workspace; and
   a workspace the realization records, which the op head left alone, appears as it records it, as
-  another machine's workspace does under the name `Names.lean` gives it. A realization that moves
-  your workspace or rewrites its commit, as when another machine rewrote it, moves it as jj moves
-  a workspace whose commit a command in another workspace rewrote. Read strictly, "realization
-  never moves your workspace" has one exception: where two op heads of yours moved it apart, jj
-  keeps the move of the one that ended first, and a realization published on that one carries
-  the other machine's later end time, so jj's merge with it keeps the other move. That is jj's
-  own tie-break, what `publish_shows_merge` says jj shows, and `own_workspace_kept` excludes it,
-  since one op head doesn't descend from the realization's parents.
+  another machine's workspace does under the name `Identity.lean` gives it. A realization that
+  moves your workspace or rewrites its commit, as when another machine rewrote it, moves it as jj
+  moves a workspace whose commit a command in another workspace rewrote. Read strictly,
+  "realization never moves your workspace" has one exception: where two op heads of yours moved
+  it apart, jj keeps the move of the one that ended first, and a realization published on that
+  one carries the other machine's later end time, so jj's merge with it keeps the other move.
+  That is jj's own tie-break, what `publish_shows_merge` says jj shows, and `own_workspace_kept`
+  excludes it, since one op head doesn't descend from the realization's parents.
   `a_workspace_moved_two_ways_follows_jjs_tie_break_after_realization`, in
   `node/realize/concurrent_tests.rs`, pins it.
 
@@ -619,7 +644,7 @@ The model leaves out `jj op abandon` and `jj op integrate`, which take no lock a
 `OpHeadsRace.lean` has against musubi's check; a `jj` command's crash, which leaves only an
 operation nothing names; this machine's record of `.git` in a view, which `Refs.lean` models;
 and translation, which makes a realization's view, its parents and its mark, and which
-`Names.lean` and the protocol model cover in part. Its theorems about workspaces assume what a
+`Identity.lean` and the protocol model cover in part. Its theorems about workspaces assume what a
 realization records of them; the tests of [races.md](../docs/internals/races.md#workspaces)
 check that.
 
@@ -753,8 +778,11 @@ Theorems (`Musubi/ExecSound.lean`):
   answers `measure` and `upload` requests with them.
 
 `PresenceExec.lean` does the same for presence: `presentB` and `latestB` are proved to compute
-`Present` and `UMax` (`presentB_iff`, `mem_latestB`), and the oracle answers presence requests
-with them, as [conformance.md, "Presence"](../docs/internals/conformance.md#presence) describes.
+`Present` and `UMax` (`presentB_iff`, `mem_latestB`); `nameB` a copy's name, `NameIs`
+(`nameB_some`, `nameB_none`); and `sinceB`, with the generations `genB` (`genB_mono`), how long
+it has held it, `SinceIs` (`sinceB_some`, `sinceB_present`). The oracle answers presence
+requests with them, as [conformance.md, "Presence"](../docs/internals/conformance.md#presence)
+describes.
 
 Where the executable model differs from the relational one, or its JSON needs a note
 ([conformance.md](../docs/internals/conformance.md) gives the [wire
@@ -780,9 +808,10 @@ match, such as staging never being cleared):
   `SyncStep.hubForget` does.
 
 The oracle also answers with the prefix receiver of `Chunks.lean`, its senders' attempts and the
-naming rule of `Names.lean`, whose definitions run as they are, so they need no executable form of
-their own ([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
-["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean`'s functions are
+naming rule of `Identity.lean`, whose definitions run as they are, so they need no executable
+form of their own ([conformance.md, "Chunked
+blobs"](../docs/internals/conformance.md#chunked-blobs) and ["Workspace
+names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean`'s functions are
 executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered targets, with
 jj's merges as a table each request carries, and the oracle answers refs requests with them
 ([conformance.md, "Per-machine refs"](../docs/internals/conformance.md#per-machine-refs)).

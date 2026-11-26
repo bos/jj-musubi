@@ -48,15 +48,27 @@ impl NodeRepo {
             let Some(name) = names.get(key) else {
                 continue;
             };
-            if self.is_own_key(key) || repo.view().get_wc_commit_id(name).is_some() {
+            // A name here at another commit than the hive gives the workspace it names now
+            // is one a view brought back gave another workspace, as before a machine renamed
+            // or one named alike came or went: the hive didn't take it as a move of this one
+            // (`canonical_view`), so show this one there instead.
+            let here = repo.view().get_wc_commit_id(name);
+            if self.is_own_key(key) || here == Some(commit) {
                 continue;
             }
             if !is_visible(&repo, commit)? {
                 // Forgetting the workspace here hid its commit here, if it was empty, but
                 // the hive kept it. Never show a commit the hive hides, though: that would
                 // bring back a commit something rewrote. Such a workspace waits for its
-                // machine's next operation.
+                // machine's next operation, and nothing here stands for it meanwhile.
                 if !is_ancestor_of_any(&repo, commit, &hive_heads)? {
+                    if here.is_some() {
+                        tx.repo_mut()
+                            .remove_workspace(name)
+                            .block_on()
+                            .map_err(index_err)?;
+                        shown = true;
+                    }
                     continue;
                 }
                 let commit = repo.store().get_commit_async(commit).block_on()?;

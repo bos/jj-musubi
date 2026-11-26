@@ -1,6 +1,8 @@
 //! Workspaces are per-machine, and each machine shows the others' as workspaces named
 //! after the machine (`beta/default`).
 
+use std::collections::BTreeSet;
+
 use musubi_testutil::TestEnv;
 
 use crate::fixture::Fixture;
@@ -884,7 +886,8 @@ fn a_workspace_named_like_one_forgotten_here_moves_nothing_of_that_one() {
 }
 
 /// Three machines with the same hostname: musubi tells them apart by a random suffix, and
-/// shows the two others on each machine as `mac-xxxx/default` and `mac-yyyy/default`.
+/// every machine shows each other one alike: one as `mac/default`, the others as
+/// `mac-xxxx/default` and `mac-yyyy/default`.
 #[test]
 fn machines_sharing_a_hostname_are_told_apart() {
     let env = TestEnv::new();
@@ -892,6 +895,7 @@ fn machines_sharing_a_hostname_are_told_apart() {
     let mut hive = Fixture::join(env, repos.into());
     hive.sync();
     hive.assert_converged();
+    let mut shown = BTreeSet::new();
     for index in 0..3 {
         let others: Vec<String> = names(&hive, index)
             .into_iter()
@@ -901,38 +905,53 @@ fn machines_sharing_a_hostname_are_told_apart() {
         assert!(
             others
                 .iter()
-                .all(|name| name.starts_with("mac-") && name.ends_with("/default")),
+                .all(|name| name.starts_with("mac") && name.ends_with("/default")),
             "{others:?}"
         );
+        shown.extend(others);
     }
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    assert!(shown.contains("mac/default"), "{shown:?}");
 }
 
-/// Two machines that share a hostname show each other as the hub lists them, by name and part
-/// of the id, not by the plain name, which the other has too, and each names itself so for
-/// `musubi status`.
+/// Two machines that share a hostname show each other as the hub lists them: the one present
+/// under the name longer, by since and then by key, plainly, and the other by the name and part
+/// of its id, and each names itself so for `musubi status`.
 #[test]
-fn two_machines_sharing_a_hostname_show_each_other_qualified() {
+fn two_machines_sharing_a_hostname_are_told_apart() {
     let env = TestEnv::new();
     let repos = ["one", "two"].map(|dir| env.init_repo_with_hostname(dir, "mac"));
     let mut hive = Fixture::join(env, repos.into());
     hive.sync();
     hive.assert_converged();
+    let keys = [hive.machine_key(0), hive.machine_key(1)];
+    let presence = hive.node(0).present_copies().unwrap().1;
+    let first = keys
+        .iter()
+        .min_by_key(|key| (presence.since(key), key.as_str()))
+        .unwrap()
+        .clone();
+    let label = |key: &str| {
+        if key == first {
+            "mac".to_owned()
+        } else {
+            musubi_jj::workspaces::qualified_name("mac", key)
+        }
+    };
     for (index, other) in [(0, 1), (1, 0)] {
-        let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(other));
         let others: Vec<String> = names(&hive, index)
             .into_iter()
             .filter(|name| name.contains('/'))
             .collect();
-        assert_eq!(others, vec![format!("{qualified}/default")]);
-        let own = hive.machine_key(index);
-        let own_name = musubi_jj::workspaces::qualified_name(&own);
+        assert_eq!(others, vec![format!("{}/default", label(&keys[other]))]);
+        let own = &keys[index];
         let activity = hive.node(index).activity().unwrap();
         let named: Vec<(&str, &str)> = activity
             .iter()
             .map(|copy| (copy.key.as_str(), copy.name.as_str()))
             .collect();
         assert!(
-            named.contains(&(own.as_str(), own_name.as_str())),
+            named.contains(&(own.as_str(), label(own).as_str())),
             "{named:?}"
         );
     }

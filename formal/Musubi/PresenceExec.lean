@@ -7,6 +7,7 @@ for the small histories the conformance test makes.
 -/
 import Musubi.Presence
 import Musubi.ParentsBefore
+import Musubi.Identity
 
 namespace Musubi.Presence
 
@@ -15,6 +16,8 @@ structure EOp where
   parents : List Nat := []
   work : Option Nat := none
   forgets : List Nat := []
+  /-- A record of the name of the copy whose work this is (`musubi.name`), as a number. -/
+  name : Option Nat := none
 deriving Inhabited
 
 namespace EHist
@@ -138,6 +141,227 @@ theorem mem_latestB (ho : orderedB ops = true) (x k c : Nat) :
       · rfl
       · exact absurd ((ancB_iff ops ho c c').1 e) hcc'
 
+/-! ## Names and how long each copy has held its name (`Identity.lean`) -/
+
+/-- The name operation `x` records for copy `k`: only its work's. -/
+def namedB (x k : Nat) : Option Nat := if workB ops x k then (opAt ops x).name else none
+
+/-- The history `ops` stands for, with its name records. -/
+def nhist : Identity.NHist := { toHist := hist ops, named := namedB ops }
+
+/-- The largest of a list. -/
+def maxList : List Nat → Option Nat
+  | [] => none
+  | n :: ns => some ((maxList ns).elim n (max n))
+
+theorem maxList_spec : ∀ {ns : List Nat} {m : Nat}, maxList ns = some m →
+    m ∈ ns ∧ ∀ n ∈ ns, n ≤ m
+  | [], _, h => by simp [maxList] at h
+  | n :: ns, m, h => by
+    simp only [maxList, Option.some.injEq] at h
+    cases e : maxList ns with
+    | none =>
+      rw [e] at h
+      simp only [Option.elim_none] at h
+      subst h
+      have : ns = [] := by
+        cases ns with
+        | nil => rfl
+        | cons _ _ => simp [maxList] at e
+      subst this
+      simp
+    | some m' =>
+      rw [e] at h
+      simp only [Option.elim_some] at h
+      subst h
+      obtain ⟨hm', hle⟩ := maxList_spec e
+      refine ⟨?_, ?_⟩
+      · rcases Nat.le_total n m' with hl | hl
+        · rw [Nat.max_eq_right hl]; exact List.mem_cons_of_mem _ hm'
+        · rw [Nat.max_eq_left hl]; exact List.mem_cons_self
+      · intro a ha
+        rcases List.mem_cons.mp ha with rfl | ha
+        · exact Nat.le_max_left _ _
+        · exact Nat.le_trans (hle a ha) (Nat.le_max_right _ _)
+
+theorem maxList_none : ∀ {ns : List Nat}, maxList ns = none → ns = []
+  | [], _ => rfl
+  | _ :: _, h => by simp [maxList] at h
+
+/-- `k`'s latest name records in `anc*(x)`. -/
+def latestRecsB (x k : Nat) : List Nat :=
+  let r := (List.range (x + 1)).filter fun m => ancB ops m x && (namedB ops m k).isSome
+  r.filter fun m => r.all fun m' => !ancB ops m m' || m' == m
+
+theorem mem_latestRecsB (ho : orderedB ops = true) (x k m : Nat) :
+    m ∈ latestRecsB ops x k ↔ (nhist ops).LatestRec x k m := by
+  have bound : ∀ m, Anc (par ops) m x → m < x + 1 :=
+    fun m hm => Nat.lt_succ_of_le (hm.le (parLt ops ho))
+  simp only [latestRecsB, List.mem_filter, List.mem_range, List.all_eq_true, Bool.or_eq_true,
+    Bool.not_eq_true', beq_iff_eq, Bool.and_eq_true, ancB_iff ops ho]
+  show _ ↔ Anc (par ops) m x ∧ (namedB ops m k).isSome ∧ _
+  constructor
+  · rintro ⟨⟨-, hm, hr⟩, hall⟩
+    refine ⟨hm, hr, fun m' hm' hr' hmm' => ?_⟩
+    rcases hall m' ⟨bound m' hm', hm', hr'⟩ with h | h
+    · rw [← Bool.not_eq_true, ancB_iff ops ho] at h
+      exact absurd hmm' h
+    · exact h
+  · rintro ⟨hm, hr, hmax⟩
+    refine ⟨⟨bound m hm, hm, hr⟩, fun m' ⟨_, hm', hr'⟩ => ?_⟩
+    by_cases hmm' : Anc (par ops) m m'
+    · exact Or.inr (hmax m' hm' hr' hmm')
+    · left
+      cases e : ancB ops m m'
+      · rfl
+      · exact absurd ((ancB_iff ops ho m m').1 e) hmm'
+
+/-- `k`'s name at `x`: the greatest its latest records there give; none where it has recorded
+none, and its name is the one its key embeds. -/
+def nameB (x k : Nat) : Option Nat :=
+  maxList ((latestRecsB ops x k).filterMap (namedB ops · k))
+
+theorem nameB_some (ho : orderedB ops = true) {init : Nat → Nat} {x k n : Nat}
+    (h : nameB ops x k = some n) : (nhist ops).NameIs init x k n := by
+  obtain ⟨hn, hle⟩ := maxList_spec h
+  obtain ⟨m, hm, hmn⟩ := List.mem_filterMap.mp hn
+  refine Or.inl ⟨m, (mem_latestRecsB ops ho x k m).1 hm, hmn, fun m' n' hm' hn' => ?_⟩
+  exact hle n' (List.mem_filterMap.mpr ⟨m', (mem_latestRecsB ops ho x k m').2 hm', hn'⟩)
+
+theorem nameB_none (ho : orderedB ops = true) {init : Nat → Nat} {x k : Nat}
+    (h : nameB ops x k = none) : (nhist ops).NameIs init x k (init k) := by
+  refine Or.inr ⟨fun m hm => ?_, rfl⟩
+  cases e : namedB ops m k with
+  | none => exact e
+  | some n₀ =>
+    exfalso
+    have hlt := parLt ops ho
+    obtain ⟨m₀, ⟨hm₀x, hm₀r⟩, hmax⟩ := Musubi.exists_max_le
+      (Q := fun m => Anc (par ops) m x ∧ (namedB ops m k).isSome)
+      ⟨hm, by rw [e]; rfl⟩ (fun m hm => hm.1.le hlt)
+    have hl := (nhist ops).latest_of_max hlt hm₀x hm₀r (fun m' h₁ h₂ => hmax m' ⟨h₁, h₂⟩)
+    obtain ⟨n, hn⟩ := Option.isSome_iff_exists.mp hm₀r
+    have hmem : n ∈ (latestRecsB ops x k).filterMap (namedB ops · k) :=
+      List.mem_filterMap.mpr ⟨m₀, (mem_latestRecsB ops ho x k m₀).2 hl, hn⟩
+    rw [maxList_none h] at hmem
+    simp at hmem
+
+/-- Generation numbers: one above the largest parent's, and 1 for an operation with none, as
+the hive's operations on its root have. -/
+def genB (x : Nat) : Nat :=
+  1 + (par ops x).foldr (fun p acc => max acc (if p < x then genB p else 0)) 0
+termination_by x
+
+theorem le_foldr_max (f : Nat → Nat) :
+    ∀ {l : List Nat} {p : Nat}, p ∈ l → f p ≤ l.foldr (fun q acc => max acc (f q)) 0
+  | _ :: _, _, .head _ => Nat.le_max_right _ _
+  | _ :: _, _, .tail _ h => Nat.le_trans (le_foldr_max f h) (Nat.le_max_left _ _)
+
+theorem genB_parent (ho : orderedB ops = true) {x p : Nat} (hp : p ∈ par ops x) :
+    genB ops p < genB ops x := by
+  have hpx := parLt ops ho x p hp
+  have := le_foldr_max (fun q => if q < x then genB ops q else 0) hp
+  simp only [hpx, ↓reduceIte] at this
+  rw [genB.eq_1 ops x]
+  omega
+
+theorem genB_mono (ho : orderedB ops = true) : (nhist ops).GenMono (genB ops) := by
+  have hle : ∀ {a x}, Anc (par ops) a x → genB ops a ≤ genB ops x := by
+    intro a x hA
+    induction hA with
+    | refl => exact Nat.le_refl _
+    | step hp _ ih => exact Nat.le_of_lt (Nat.lt_of_le_of_lt ih (genB_parent ops ho hp))
+  intro a x hA hne
+  rcases anc_cases hA with e | ⟨p, hp, hap⟩
+  · exact absurd e hne
+  · exact Nat.lt_of_le_of_lt (hle hap) (genB_parent ops ho hp)
+
+/-- Whether `a` is in the history `e` is made on, below it. -/
+def belowB (e a : Nat) : Bool := (par ops e).any fun p => ancB ops a p
+
+theorem belowB_iff (ho : orderedB ops = true) (e a : Nat) :
+    belowB ops e a = true ↔ (hist ops).Below e a := by
+  simp only [belowB, List.any_eq_true, ancB_iff ops ho]
+  rfl
+
+theorem below_lt (ho : orderedB ops = true) {e a : Nat} (hb : (hist ops).Below e a) : a < e := by
+  obtain ⟨p, hp, hA⟩ := hb
+  exact Nat.lt_of_le_of_lt (hA.le (parLt ops ho)) (parLt ops ho e p hp)
+
+/-- Whether `k` is present in the history `e` is made on. -/
+def presentBelowB (e k : Nat) : Bool :=
+  (List.range e).any fun w => belowB ops e w && workB ops w k &&
+    !(List.range e).any fun f => belowB ops e f && forgetB ops f k && ancB ops w f
+
+theorem presentBelowB_iff (ho : orderedB ops = true) (e k : Nat) :
+    presentBelowB ops e k = true ↔ (hist ops).PresentIn ((hist ops).Below e) k := by
+  have hc : ∀ w, ((List.range e).any fun f => belowB ops e f && forgetB ops f k &&
+      ancB ops w f) = true ↔ (hist ops).Covered ((hist ops).Below e) k w := by
+    intro w
+    simp only [List.any_eq_true, List.mem_range, Bool.and_eq_true, belowB_iff ops ho,
+      ancB_iff ops ho]
+    constructor
+    · rintro ⟨f, -, ⟨hb, hF⟩, hA⟩
+      exact ⟨f, hb, hF, hA⟩
+    · rintro ⟨f, hb, hF, hA⟩
+      exact ⟨f, below_lt ops ho hb, ⟨hb, hF⟩, hA⟩
+  simp only [presentBelowB, List.any_eq_true, List.mem_range, Bool.and_eq_true,
+    Bool.not_eq_true', belowB_iff ops ho]
+  constructor
+  · rintro ⟨w, -, ⟨hb, hW⟩, hn⟩
+    refine ⟨w, hb, hW, fun hcv => ?_⟩
+    rw [← hc w] at hcv
+    simp [hcv] at hn
+  · rintro ⟨w, hb, hW, hn⟩
+    refine ⟨w, below_lt ops ho hb, ⟨hb, hW⟩, ?_⟩
+    cases e : ((List.range e).any fun f => belowB ops e f && forgetB ops f k && ancB ops w f)
+    · rfl
+    · exact absurd ((hc w).1 e) hn
+
+/-- Whether `e` marks when `k` came to its name: a record of it, or a return. -/
+def markB (e k : Nat) : Bool :=
+  (namedB ops e k).isSome || (workB ops e k && !presentBelowB ops e k)
+
+theorem markB_iff (ho : orderedB ops = true) (e k : Nat) :
+    markB ops e k = true ↔ (nhist ops).Mark e k := by
+  have hp := presentBelowB_iff ops ho e k
+  simp only [markB, Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true']
+  show _ ↔ (namedB ops e k).isSome = true ∨ (workB ops e k = true ∧
+    ¬ (hist ops).PresentIn ((hist ops).Below e) k)
+  rw [← hp]
+  simp
+
+/-- How long `k` has held its name at `x`: the largest `gen` of its marks in `anc*(x)`; none
+if it has none there. -/
+def sinceB (gen : Nat → Nat) (x k : Nat) : Option Nat :=
+  maxList (((List.range (x + 1)).filter fun e => ancB ops e x && markB ops e k).map gen)
+
+theorem sinceB_some (ho : orderedB ops = true) {gen : Nat → Nat} {x k s : Nat}
+    (h : sinceB ops gen x k = some s) : (nhist ops).SinceIs gen x k s := by
+  obtain ⟨hs, hle⟩ := maxList_spec h
+  simp only [List.mem_map, List.mem_filter, List.mem_range, Bool.and_eq_true,
+    ancB_iff ops ho, markB_iff ops ho] at hs
+  obtain ⟨e, ⟨-, he, hm⟩, rfl⟩ := hs
+  refine ⟨e, he, hm, rfl, fun e' he' hm' => hle _ ?_⟩
+  simp only [List.mem_map, List.mem_filter, List.mem_range, Bool.and_eq_true,
+    ancB_iff ops ho, markB_iff ops ho]
+  exact ⟨e', ⟨Nat.lt_succ_of_le (he'.le (parLt ops ho)), he', hm'⟩, rfl⟩
+
+/-- A copy present has held its name since some generation. -/
+theorem sinceB_present (ho : orderedB ops = true) {gen : Nat → Nat} {x k : Nat}
+    (hp : (hist ops).Present x k) : (sinceB ops gen x k).isSome := by
+  obtain ⟨e, he, hm⟩ := (nhist ops).mark_of_present (parLt ops ho) hp
+  cases e' : sinceB ops gen x k with
+  | some _ => rfl
+  | none =>
+    have hmem : gen e ∈ ((List.range (x + 1)).filter fun e => ancB ops e x && markB ops e k).map
+        gen := by
+      simp only [List.mem_map, List.mem_filter, List.mem_range, Bool.and_eq_true,
+        ancB_iff ops ho, markB_iff ops ho]
+      exact ⟨e, ⟨Nat.lt_succ_of_le (he.le (parLt ops ho)), he, hm⟩, rfl⟩
+    rw [maxList_none e'] at hmem
+    simp at hmem
+
 /-- The copies an operation of `ops` works for or forgets. -/
 def copies : List Nat :=
   ops.flatMap fun o => o.work.toList ++ o.forgets
@@ -155,6 +379,22 @@ private def scenario : List EOp :=
 #guard (List.range 6).map (presentB scenario · 7) = [true, false, true, true, false, true]
 #guard latestB scenario 3 7 = [2]
 #guard latestB scenario 5 7 = [2]
+
+/-! Copy 7 works (0), records the name 3 (1), is forgotten (2) and returns (3); copy 8, on
+another line, records the name 3 too (4); the two merge (5). Copy 8 has held its name since
+generation 2, copy 7 since its return at generation 4. -/
+
+private def renames : List EOp :=
+  [{ work := some 7 }, { parents := [0], work := some 7, name := some 3 },
+    { parents := [1], forgets := [7] }, { parents := [2], work := some 7 },
+    { parents := [0], work := some 8, name := some 3 }, { parents := [3, 4] }]
+
+#guard orderedB renames
+#guard (List.range 6).map (genB renames) = [1, 2, 3, 4, 2, 5]
+#guard (List.range 6).map (nameB renames · 7) = [none, some 3, some 3, some 3, none, some 3]
+#guard (List.range 6).map (sinceB renames (genB renames) · 7) =
+  [some 1, some 2, some 2, some 4, some 1, some 4]
+#guard sinceB renames (genB renames) 5 8 = some 2
 
 end EHist
 

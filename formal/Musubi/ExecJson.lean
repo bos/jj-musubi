@@ -13,7 +13,7 @@ import Musubi.Exec
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Chunks
-import Musubi.Names
+import Musubi.Identity
 import Musubi.RefsExec
 import Musubi.ExpectedExec
 import Musubi.OpHeadsJson
@@ -260,15 +260,22 @@ def decodeEOp (j : Json) : Except String Presence.EOp := do
   let parents ← getNats j "parents"
   let work ← j.getObjValAs? (Option Nat) "work"
   let forgets ← getNats j "forgets"
-  pure { parents, work, forgets }
+  -- A record of the name of the copy whose work this is; absent or null for none.
+  let name ← match j.getObjVal? "name" with
+    | .error _ | .ok .null => pure none
+    | .ok v => some <$> Lean.FromJson.fromJson? (α := Nat) v
+  pure { parents, work, forgets, name }
 
 /-- For each operation, the copies present there, each with its latest work that no forget
-saw, both in order. -/
+saw, both in order; its name there (`nameB`), null where it has recorded none; and the
+generation since which it has held it (`sinceB`, with `genB`). -/
 def encodePresence (ops : List Presence.EOp) : Json :=
   let copies := sortNats (Presence.EHist.copies ops)
   let atOp (x : Nat) : Json :=
     Json.arr ((copies.filter (Presence.EHist.presentB ops x)).map fun k =>
-      Json.mkObj [("copy", toJson k), ("latest", nats (Presence.EHist.latestB ops x k))]).toArray
+      Json.mkObj [("copy", toJson k), ("latest", nats (Presence.EHist.latestB ops x k)),
+        ("name", toJson (Presence.EHist.nameB ops x k)),
+        ("since", toJson (Presence.EHist.sinceB ops (Presence.EHist.genB ops) x k))]).toArray
   Json.mkObj [("ok", Json.bool true),
     ("presence", Json.arr ((List.range ops.length).map atOp).toArray)]
 
@@ -505,23 +512,30 @@ def attemptsReply (j : Json) : Except String Json := do
   else if sender = "download" then pure (encodeAttempts blob limit true steps)
   else throw s!"no sender {sender}"
 
-/-! ## Workspace names (`Names.lean`) -/
+/-! ## Workspace names (`Identity.lean`, `Names.lean`) -/
 
-def decodeKey (j : Json) : Except String Names.Key := do
-  pure ⟨(← j.getObjValAs? String "name").toList, (← j.getObjValAs? String "suffix").toList⟩
+/-- A copy named: its name now, its key's suffix, and the generation since which it has held
+its name. -/
+def decodeNamed (j : Json) : Except String (String × String × Nat) := do
+  pure (← j.getObjValAs? String "name", ← j.getObjValAs? String "suffix", ← getNat j "since")
 
-/-- Each machine's prefix (`Names.assign`), in the order given, among the machines given and
-the names of this machine's own, `me`; and the name here of each workspace given, the
-`workspace` of the machine at index `machine` (`Names.localName`). -/
-def encodeNames (machines : List Names.Key) (own : List String) (me : Names.Key)
+/-- Each copy's prefix (`Identity.Naming.assign`), in the order given, the copies numbered in
+that order, which is their keys' order, each with priority its since and then its number; and
+the name here of each workspace given, the `workspace` of the copy numbered `machine`, on copy
+`me`, which need not be among those named (`Identity.Naming.localName`). -/
+def encodeNames (copies : List (String × String × Nat)) (own : List String) (me : Nat)
     (workspaces : List (Nat × String)) : Json :=
-  let assigned := Names.assign machines (own.map String.toList)
+  let ms := List.range copies.length
+  let cOf (i : Nat) := copies.getD i ("", "", 0)
+  let assigned := Identity.Naming.assign (fun i => (cOf i).1.toList)
+    (fun i => (cOf i).2.1.toList) (fun i => ((cOf i).2.2, i)) ms (own.map String.toList)
   let name (w : Nat × String) : Json :=
-    match machines[w.1]? with
-    | some k => Json.str (String.ofList (Names.localName me assigned k w.2.toList))
-    | none => Json.null
+    if w.1 < copies.length || w.1 = me then
+      Json.str (String.ofList (Identity.Naming.localName me assigned w.1 w.2.toList))
+    else Json.null
   Json.mkObj [("ok", Json.bool true),
-    ("prefixes", Json.arr (assigned.map fun (_, p) => Json.str (String.ofList p)).toArray),
+    ("prefixes", Json.arr (ms.map fun i =>
+      Json.str (String.ofList (Identity.Naming.prefixOf assigned i))).toArray),
     ("names", Json.arr (workspaces.map name).toArray)]
 
 def decodeWorkspace (j : Json) : Except String (Nat × String) := do
@@ -529,11 +543,11 @@ def decodeWorkspace (j : Json) : Except String (Nat × String) := do
 
 /-- Decode a `names` request and answer it with `encodeNames`. -/
 def namesReply (j : Json) : Except String Json := do
-  let machines ← (← j.getObjValAs? (Array Json) "machines").toList.mapM decodeKey
+  let copies ← (← j.getObjValAs? (Array Json) "machines").toList.mapM decodeNamed
   let own ← j.getObjValAs? (Array String) "own"
-  let me ← j.getObjVal? "me" >>= decodeKey
+  let me ← getNat j "me"
   let workspaces ← (← j.getObjValAs? (Array Json) "workspaces").toList.mapM decodeWorkspace
-  pure (encodeNames machines own.toList me workspaces)
+  pure (encodeNames copies own.toList me workspaces)
 
 /-! ## Per-machine refs (`RefsExec.lean`) -/
 

@@ -657,6 +657,7 @@ mod tests {
                     clone_config: Default::default(),
                     urls: vec![],
                     machines: vec![],
+                    qualified: Default::default(),
                 },
                 head: Some(10),
                 traffic: Traffic {

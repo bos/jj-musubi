@@ -212,6 +212,7 @@ fn detachment_process() {
             clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
+            qualified: Default::default(),
         },
         created: false,
         reason: String::new(),

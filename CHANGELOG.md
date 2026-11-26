@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Rename a machine with `jj config set --user musubi.machine-name <name>`: every repo on it
+  takes the new name at its next sync, and the other machines and `musubi list` show it after
+  theirs. Leaving and joining again is no longer the way to rename a copy. `--machine` on
+  `create`, `join` or `clone` sets `musubi.machine-name` if nothing sets it yet, which names the
+  machine in all its repos, renaming those it has joined already, and is refused, with that
+  command, where it differs from the setting, as is `musubi join --machine` with another name
+  in a repo that has one. Revsets and aliases that name a renamed machine's working copies, as
+  `laptop/default@`, need the new name. Unset, each copy keeps the name it has; `operation.hostname` names only new copies, as
+  before, and changing it renames none.
+
+- Where two machines present in a hive share a name, the one that has had it longer keeps it,
+  and the other is shown with part of its id, as `laptop-1a2b/default@`; before, both were.
+  Machines a hive has forgotten no longer count: a copy deleted without `musubi leave`, once
+  forgotten, no longer makes a new copy of its machine show as `laptop-1a2b` for good, nor does
+  a copy that left and joined again under the same name. `jj op log` shows older operations of
+  a renamed machine under its old name.
+
+- Every machine and hub must upgrade together: a machine and a hub of releases either side of
+  this one refuse each other, saying so, since they disagree on what machines are named. A
+  daemon with [`musubi.upgrade-command`](docs/reference/configuration.md#this-machines) set
+  upgrades to match its hub. The hub rebuilds its index of each hive once, on starting.
+
 - `musubi create --fresh` and `musubi join --fresh` leave out the operation history a repo
   shared with a hive before, which, after `musubi leave` or `musubi hub remove`, they
   otherwise send to the next hive, with everything it holds, even work deleted since. The repo
@@ -34,8 +56,8 @@
   says that instead. Before, the command ended and the daemon carried on, fetching everything
   and merging the hive's history into the repo. A repo that was part of a hive already, as
   one whose hive was removed or one `musubi join --original` joins again, goes on syncing as
-  before. A stopped repo keeps its machine name for joining again; `musubi leave` clears it,
-  so that `musubi join --machine` can name it anew. A sync that takes long now logs what it is
+  before. A stopped repo keeps its machine name for joining again; `musubi leave` clears it.
+  A sync that takes long now logs what it is
   doing every 30 seconds. Commands and the daemon now speak a new version of their local
   protocol: after upgrading, run `musubi daemon restart`, as commands say when they find the
   old daemon.

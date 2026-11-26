@@ -467,7 +467,8 @@ impl NodeRepo {
         };
         let canonical = self.canonical.write_operation(&canonical_op)?;
         let work = Work::of(&self.canonical, &canonical)?;
-        self.remember_presence(canonical.clone(), presence.apply(&work, &kind));
+        let generation = self.canonical.generation(&canonical)?;
+        self.remember_presence(canonical.clone(), presence.apply(&work, &kind, generation));
         Ok(canonical)
     }
 

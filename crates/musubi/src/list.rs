@@ -10,7 +10,6 @@ use std::time::Duration;
 use jj_cli::formatter::FormatterExt as _;
 use musubi_hub::hub_dir::HiveId;
 use musubi_hub::hub_dir::HiveInfo;
-use musubi_jj::workspaces;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
@@ -241,7 +240,7 @@ fn missing_line(hive: &Line, entry: &Entry) -> Line {
     let why = why_missing(entry);
     Line {
         path: Some(entry.path.clone()),
-        machine: listed_as(&hive.machines, &entry.key),
+        machine: listed_as(hive, &entry.key),
         status: format!("not syncing: {why}"),
         problem: why,
         ..hive.clone()
@@ -262,17 +261,11 @@ fn why_missing(entry: &Entry) -> String {
     }
 }
 
-/// The name among `machines`, a hive's as its hub lists them, of the copy whose machine key
-/// is `key`, where that isn't its machine's plain name, as while another copy has that name
-/// too; else empty, as when the hub doesn't list the copy.
-fn listed_as(machines: &[String], key: &str) -> String {
-    let mut listed = machines
-        .iter()
-        .filter(|name| workspaces::could_be_shown_as(key, name));
-    match (listed.next(), listed.next()) {
-        (Some(name), None) if name != workspaces::machine_name(key) => name.clone(),
-        _ => String::new(),
-    }
+/// The name the hub lists the copy whose machine key is `key` under, where that isn't its
+/// machine's name, as while another copy has had that name longer; else empty, as when the
+/// hub doesn't list the copy.
+fn listed_as(hive: &Line, key: &str) -> String {
+    hive.qualified.get(key).cloned().unwrap_or_default()
 }
 
 /// The machines in a hive, as shell completion shows them.
@@ -300,7 +293,7 @@ fn copy_line(hive: &Line, copy: &Copy) -> Line {
     let status = copy.status.as_ref();
     Line {
         path: Some(copy.located.workspace_root.clone()),
-        machine: listed_as(&hive.machines, &copy.key),
+        machine: listed_as(hive, &copy.key),
         status: describe(status),
         problem: status
             .and_then(|status| status.error.clone())

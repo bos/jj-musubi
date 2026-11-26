@@ -1139,6 +1139,63 @@ fn a_first_join_exempts_existing_commits_but_not_uncommitted_additions() {
     compare_model(&mut node, &[]);
 }
 
+/// A record of this copy's name among the pruned operations stays, so the copy keeps its
+/// name, though what it sat on was a merge of divergent operations, pruned too: it takes the
+/// merge of what the pruned merge's parents became, and retains none of the pruned content.
+#[test]
+fn pruning_a_name_record_on_a_merge_keeps_the_name_and_drops_the_content() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = start(&repo);
+    let mut config = node.loader().settings().config().clone();
+    config.add_layer(
+        jj_lib::config::ConfigLayer::parse(
+            jj_lib::config::ConfigSource::User,
+            "musubi.machine-name = \"desk\"",
+        )
+        .unwrap(),
+    );
+    node.set_settings(node.loader().settings().with_new_config(config).unwrap());
+    let basis = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    repo.write_file("junk", "unwanted content");
+    repo.jj(&["status"]);
+    repo.jj(&["--at-op", basis.trim(), "describe", "-m", "Described"]);
+    assert!(node.record_name().unwrap());
+    fs::remove_file(repo.path().join("junk")).unwrap();
+    repo.jj(&["status"]);
+    let selected: Vec<_> = report(&mut node)
+        .operations
+        .into_iter()
+        .map(|op| op.id)
+        .collect();
+    let mut cache = PublicationCache::default();
+    let plan = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    assert!(!plan.after.files.iter().any(|f| f.path == "junk"));
+    node.apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap();
+    let mut node = open(&repo);
+    assert_eq!(node.name_in_history().unwrap(), "desk");
+    assert!(!report(&mut node).files.iter().any(|f| f.path == "junk"));
+    let heads = node.canonical_heads().unwrap();
+    let ops = node.canonical.ancestors_until(&heads, |_| false).unwrap();
+    let record = ops
+        .iter()
+        .map(|id| node.canonical.read_operation(id).unwrap())
+        .find(|op| op.metadata.description == "musubi: name this machine desk")
+        .unwrap();
+    assert_eq!(record.parents.len(), 2, "{record:?}");
+}
+
 #[test]
 fn removing_a_snapshots_parent_does_not_turn_unrelated_work_into_intent() {
     let env = TestEnv::new();

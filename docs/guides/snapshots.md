@@ -56,6 +56,9 @@ $ musubi sync --prune a12b34c56d78
 Discarded 1 unpublished operation; current work is unchanged.
 ```
 
+An operation that records this machine's name (`musubi: name this machine ...`) stays, without
+the files it retained, so that the machine keeps its name.
+
 Pruning runs `jj util snapshot` in the invoking workspace before cleanup, so recent edits and
 deletions are included. This follows jj's normal snapshot behavior, including importing changes
 from colocated Git refs, which can rebase commits and update checkout files. Automatic stale

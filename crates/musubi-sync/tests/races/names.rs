@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use musubi_jj::node::PublicationCache;
+use musubi_jj::node::PublicationHeld;
 use musubi_jj::workspaces::qualified_name;
 use musubi_testutil::TestEnv;
 
@@ -277,6 +279,92 @@ fn a_name_two_merged_operations_give_different_machines_moves_nothing() {
         after.get("beta/default"),
         before.get("gamma/default"),
         "{after:?}"
+    );
+    hive.assert_converged();
+}
+
+/// The machines present as machine `index` names them, by key.
+fn labels(hive: &mut Fixture, index: usize) -> BTreeMap<String, String> {
+    let activity = hive.node(index).activity().unwrap();
+    activity
+        .into_iter()
+        .map(|copy| (copy.key, copy.name))
+        .collect()
+}
+
+/// alpha renames itself `desk` while its sending is held for an accidental file, and beta
+/// renames itself `desk` too: the two are told apart by part of their keys. Pruning the held
+/// snapshots, the record among them, since its view retains the file, takes the file out of
+/// history but carries the name through: once alpha sends its history, every machine and the
+/// hub name the machines as alpha did before pruning.
+#[test]
+fn pruning_held_snapshots_keeps_every_machines_name() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let (alpha, beta, gamma) = (
+        hive.machine_key(0),
+        hive.machine_key(1),
+        hive.machine_key(2),
+    );
+    hive.set_user_config(
+        0,
+        "musubi.publication.max-files = 10\nmusubi.publication.max-bytes = 32\n",
+    );
+    hive.repo(0).write_file("accident", &"x".repeat(64));
+    hive.repo(0).jj(&["status"]);
+    hive.set_machine_name(0, "desk");
+    assert!(hive.node(0).record_name().unwrap());
+    std::fs::remove_file(hive.repo(0).path().join("accident")).unwrap();
+    hive.repo(0).jj(&["status"]);
+    for n in 0..4 {
+        hive.commit(1, &format!("b{n}"), "beta works");
+    }
+    hive.set_machine_name(1, "desk");
+    hive.hive.sync(1).unwrap();
+    let held = hive.hive.sync(0).unwrap_err();
+    assert!(
+        held.chain().any(|cause| cause.is::<PublicationHeld>()),
+        "{held:?}"
+    );
+    hive.hive.sync(2).unwrap();
+    let before = labels(&mut hive, 0);
+    assert_eq!(
+        before,
+        BTreeMap::from([
+            (alpha.clone(), qualified_name("desk", &alpha)),
+            (beta.clone(), qualified_name("desk", &beta)),
+            (gamma.clone(), "gamma".to_owned()),
+        ])
+    );
+
+    let node = hive.node(0);
+    let mut cache = PublicationCache::default();
+    let outgoing = node.outgoing_publication(&mut cache).unwrap();
+    assert!(
+        outgoing
+            .operations
+            .iter()
+            .any(|op| op.description.starts_with("musubi: name this machine")),
+        "{:?}",
+        outgoing.operations
+    );
+    let selected: Vec<String> = outgoing.operations.iter().map(|op| op.id.clone()).collect();
+    let cleanup = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    assert!(!cleanup.after.held());
+    node.apply_publication_cleanup(&selected, &cleanup.token, &mut cache)
+        .unwrap();
+    assert_eq!(labels(&mut hive, 0), before);
+
+    hive.sync();
+    hive.sync();
+    for index in 0..3 {
+        assert_eq!(labels(&mut hive, index), before, "machine {index}");
+    }
+    assert_eq!(hive.hub_names(), before);
+    assert_named_alike(
+        &mut hive,
+        &[(alpha, "alpha"), (beta, "beta"), (gamma, "gamma")],
     );
     hive.assert_converged();
 }

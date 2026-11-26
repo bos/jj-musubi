@@ -238,10 +238,14 @@ impl Fixture {
     /// for its daemon, which reads it at its next sync. Restarting the daemon (`reopen`)
     /// unsets it again.
     pub fn set_machine_name(&mut self, index: usize, name: &str) {
+        self.set_user_config(index, &format!("musubi.machine-name = {name:?}"));
+    }
+
+    /// Sets user-level config `text` on machine `index`'s daemon, as `set_machine_name` does.
+    pub fn set_user_config(&mut self, index: usize, text: &str) {
         let node = self.node(index);
         let mut config = node.loader().settings().config().clone();
-        let text = format!("musubi.machine-name = {name:?}");
-        config.add_layer(ConfigLayer::parse(ConfigSource::User, &text).unwrap());
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, text).unwrap());
         let settings = node.loader().settings().with_new_config(config).unwrap();
         node.set_settings(settings);
     }

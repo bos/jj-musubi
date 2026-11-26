@@ -124,34 +124,32 @@ fn short_id(key: &str) -> &str {
     &id[..id.char_indices().nth(4).map_or(id.len(), |(at, _)| at)]
 }
 
-/// The name under which a machine's workspaces are shown when its plain name isn't free:
-/// `beta-1a2b`, the first of `candidates` after the name.
-pub fn qualified_name(key: &str) -> String {
-    format!("{}-{}", machine_name(key), short_id(key))
+/// The name under which a machine named `name`, with key `key`, has its workspaces shown when
+/// its plain name isn't free: `beta-1a2b`, the first of `candidates` after the name.
+pub fn qualified_name(name: &str, key: &str) -> String {
+    format!("{name}-{}", short_id(key))
 }
 
-/// The names under which a machine's workspaces can be shown, in the order
-/// [`display_names`] tries them: `name`, if `plain`; `name-1a2b`; `name-1a2b3c4d`, with the
-/// whole suffix; then that with ever more dashes, so that one is free however many names are
-/// taken. This is `candidates` in formal/Musubi/Names.lean.
-fn candidates(key: &str, plain: bool) -> impl Iterator<Item = String> {
-    let name = machine_name(key);
+/// The names under which a machine named `name`, with key `key`, can have its workspaces
+/// shown, in the order [`display_names`] tries them: `name`, if `plain`; `name-1a2b`;
+/// `name-1a2b3c4d`, with the whole suffix; then that with ever more dashes, so that one is
+/// free however many names are taken. This is `candidates` in formal/Musubi/Names.lean.
+fn candidates(name: &str, key: &str, plain: bool) -> impl Iterator<Item = String> {
     let full = format!("{name}-{}", suffix(key));
     plain
         .then(|| name.to_owned())
         .into_iter()
-        .chain([qualified_name(key), full.clone()])
+        .chain([qualified_name(name, key), full.clone()])
         .chain((1..).map(move |dashes| format!("{full}{}", "-".repeat(dashes))))
 }
 
-/// Whether a machine's workspaces could be shown under `prefix`, whichever machines it is
-/// shown among: whether `prefix` is one of its `candidates`. Which one it is shown under
-/// changes as other machines come and go.
-pub fn could_be_shown_as(key: &str, prefix: &str) -> bool {
-    let name = machine_name(key);
+/// Whether a machine named `name`, with key `key`, could have its workspaces shown under
+/// `prefix`, whichever machines it is shown among: whether `prefix` is one of its
+/// `candidates`. Which one it is shown under changes as other machines come, go and rename.
+pub fn could_be_shown_as(name: &str, key: &str, prefix: &str) -> bool {
     let full = format!("{name}-{}", suffix(key));
     prefix == name
-        || prefix == qualified_name(key)
+        || prefix == qualified_name(name, key)
         || prefix
             .strip_prefix(full.as_str())
             .is_some_and(|dashes| dashes.chars().all(|c| c == '-'))
@@ -167,29 +165,36 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('/')
 }
 
-/// The names under which machines' workspaces are shown, as `<name>/<workspace>`: each
-/// machine, in order, takes the first of its `candidates` that no machine before it took
-/// and that `taken` doesn't say is in use; its plain name only if no other machine has that
-/// name. So no two machines are shown alike, nor any as a name `taken` holds: formal/Musubi/
-/// Names.lean proves the names injective (`localName_injective`).
+/// The names under which machines' workspaces are shown, as `<name>/<workspace>`, given each
+/// machine's name by its key (`Presence::name`): `Identity.Naming.assign` in
+/// formal/Musubi/Identity.lean. A machine whose name no other has is shown under it plain;
+/// machines that share a name are all shown with part of their keys, so that none of them has
+/// the name over the others. The machines shown plain are named first, in key order, then the
+/// rest, each taking the first of its `candidates` that no machine before it took and that
+/// `taken` doesn't say is in use. So no two machines are shown alike, nor any as a name `taken`
+/// holds (`localName_injective`).
 pub fn display_names(
-    machines: &BTreeSet<String>,
+    machines: &BTreeMap<String, String>,
     taken: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
-    let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
-    for machine in machines {
-        *by_name.entry(machine_name(machine)).or_default() += 1;
+    let mut sharing: BTreeMap<&str, usize> = BTreeMap::new();
+    for name in machines.values() {
+        *sharing.entry(name.as_str()).or_default() += 1;
     }
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    machines
+    let (plain, rest): (Vec<_>, Vec<_>) = machines
         .iter()
-        .map(|machine| {
-            let plain = by_name[machine_name(machine)] == 1;
-            let display = candidates(machine, plain)
+        .partition(|(_, name)| sharing[name.as_str()] == 1);
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    plain
+        .into_iter()
+        .map(|entry| (entry, true))
+        .chain(rest.into_iter().map(|entry| (entry, false)))
+        .map(|((key, name), plain)| {
+            let display = candidates(name, key, plain)
                 .find(|name| !used.contains(name) && !taken(name))
                 .expect("a name longer than every one taken is free");
             used.insert(display.clone());
-            (machine.clone(), display)
+            (key.clone(), display)
         })
         .collect()
 }
@@ -269,17 +274,24 @@ mod tests {
     use super::*;
     use crate::oracle::Oracle;
 
+    /// Machines named as their keys say.
+    fn by_key(keys: &[&str]) -> BTreeMap<String, String> {
+        keys.iter()
+            .map(|key| ((*key).to_owned(), machine_name(key).to_owned()))
+            .collect()
+    }
+
+    /// A name only one machine has is shown plain, unless it is taken; machines that share a
+    /// name are all qualified, the first by key as much as the others.
     #[test]
-    fn names_are_qualified_only_when_ambiguous() {
-        let machines: BTreeSet<String> = [
+    fn names_are_qualified_only_when_shared() {
+        let machines = by_key(&[
             "beta#11112222",
             "mac#aaaa0000",
             "mac#bbbb0000",
             "git#cccc0000",
             "origin#dddd0000",
-        ]
-        .map(str::to_owned)
-        .into();
+        ]);
         let names = display_names(&machines, |name| name == "origin");
         assert_eq!(names["beta#11112222"], "beta");
         assert_eq!(names["mac#aaaa0000"], "mac-aaaa");
@@ -288,34 +300,50 @@ mod tests {
         assert_eq!(names["origin#dddd0000"], "origin-dddd");
     }
 
+    /// No machine keeps a shared name plain, whatever its key: one that renames into another's
+    /// name qualifies both, and when one of them leaves or renames away, the other is plain
+    /// again. Its key, not the name the key embeds, tells it apart.
+    #[test]
+    fn a_shared_name_is_plain_for_none() {
+        let mut machines = BTreeMap::from([
+            ("laptop#aaaa0000".to_owned(), "laptop".to_owned()),
+            ("desk#cccc0000".to_owned(), "laptop".to_owned()),
+        ]);
+        let names = display_names(&machines, |_| false);
+        assert_eq!(names["laptop#aaaa0000"], "laptop-aaaa");
+        assert_eq!(names["desk#cccc0000"], "laptop-cccc");
+        machines.remove("laptop#aaaa0000");
+        let names = display_names(&machines, |_| false);
+        assert_eq!(names["desk#cccc0000"], "laptop");
+    }
+
     /// Where the start of a suffix doesn't tell two machines apart, or a machine's name is
     /// another's longer one, the later machine takes a longer name: the cases in
-    /// formal/Musubi/Names.lean.
+    /// formal/Musubi/Identity.lean.
     #[test]
     fn longer_names_where_shorter_clash() {
-        let machines: BTreeSet<String> = ["mac#aaaa1111", "mac#aaaa2222"].map(str::to_owned).into();
-        let names = display_names(&machines, |_| false);
+        let names = display_names(&by_key(&["mac#aaaa1111", "mac#aaaa2222"]), |_| false);
         assert_eq!(names["mac#aaaa1111"], "mac-aaaa");
         assert_eq!(names["mac#aaaa2222"], "mac-aaaa2222");
-        let machines: BTreeSet<String> = ["mac#aaaa0000", "mac#bbbb0000", "mac-aaaa#12345678"]
-            .map(str::to_owned)
-            .into();
+        let machines = by_key(&["mac#aaaa0000", "mac#bbbb0000", "mac-aaaa#12345678"]);
         let names = display_names(&machines, |_| false);
-        assert_eq!(names["mac#aaaa0000"], "mac-aaaa");
-        assert_eq!(names["mac-aaaa#12345678"], "mac-aaaa-1234");
-        let machines: BTreeSet<String> = ["beta#1a2b3c4d"].map(str::to_owned).into();
+        assert_eq!(names["mac-aaaa#12345678"], "mac-aaaa");
+        assert_eq!(names["mac#aaaa0000"], "mac-aaaa0000");
+        assert_eq!(names["mac#bbbb0000"], "mac-bbbb");
         let own = ["beta/x", "beta-1a2b/default"];
-        let names = display_names(&machines, |prefix| {
+        let names = display_names(&by_key(&["beta#1a2b3c4d"]), |prefix| {
             own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
         });
         assert_eq!(names["beta#1a2b3c4d"], "beta-1a2b3c4d");
     }
 
-    /// `display_names` and `local_name` against `assign` and `localName` in
-    /// formal/Musubi/Names.lean, through the oracle (docs/internals/conformance.md, "Workspace
-    /// names"): each machine's prefix, and the name here of each machine's workspaces, this
-    /// machine's own among them, from machines and names of this machine's own drawn from few,
-    /// so that they clash. The model proves those names distinct (`localName_injective`).
+    /// `display_names` and `local_name` against `Naming.assign` and `Naming.localName` in
+    /// formal/Musubi/Identity.lean, through the oracle (docs/internals/conformance.md,
+    /// "Workspace names"): each machine's prefix, and the name here of each machine's
+    /// workspaces, this machine's own among them, from machines with names, keys and names of
+    /// this machine's own drawn from few, so that they clash, and this machine among
+    /// those named or not. Only the machines given are named, by the names given, not those
+    /// their keys embed. The model proves those names distinct (`localName_injective`).
     #[hegel::test(profile = "slow-cases", test_cases = 300)]
     fn names_conform(tc: TestCase) {
         const NAMES: [&str; 3] = ["mac", "mac-aaaa", "mac-aaaa1111"];
@@ -337,10 +365,26 @@ mod tests {
                     .map(move |suffix| format!("{name}#{suffix}"))
             })
             .collect();
-        // This machine is among the machines named, as `NodeRepo::local_names` names them.
         let me = tc.draw(gs::sampled_from(keys.clone()));
-        let others = tc.draw(gs::vecs(gs::sampled_from(keys)).max_size(4));
-        let machines: BTreeSet<String> = others.into_iter().chain([me.clone()]).collect();
+        let drawn = tc.draw(
+            gs::vecs(gs::tuples2(
+                gs::sampled_from(keys),
+                gs::sampled_from(NAMES.to_vec()),
+            ))
+            .max_size(5),
+        );
+        let mut machines: BTreeMap<String, String> = drawn
+            .into_iter()
+            .map(|(key, name)| (key, name.to_owned()))
+            .collect();
+        // This machine is among those named where it is present, as `NodeRepo::local_names`
+        // names them, and not where it isn't.
+        if tc.draw(gs::booleans()) {
+            let name = tc.draw(gs::sampled_from(NAMES.to_vec()));
+            machines.insert(me.clone(), name.to_owned());
+        } else {
+            machines.remove(&me);
+        }
         let own: BTreeSet<&str> = tc
             .draw(gs::vecs(gs::sampled_from(OWN.to_vec())).max_size(3))
             .into_iter()
@@ -349,28 +393,29 @@ mod tests {
             own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
         });
 
-        let keys: Vec<serde_json::Value> = machines
+        let list: Vec<&String> = machines.keys().collect();
+        let me_index = list
             .iter()
-            .map(|key| serde_json::json!({"name": machine_name(key), "suffix": suffix(key)}))
-            .collect();
+            .position(|key| **key == me)
+            .unwrap_or(list.len());
         // This machine's workspaces are its own names; every other machine has two.
-        let workspaces: Vec<(usize, &str)> = machines
-            .iter()
-            .enumerate()
-            .flat_map(|(index, machine)| {
-                let names: Vec<&str> = if *machine == me {
-                    own.iter().copied().collect()
-                } else {
-                    vec!["default", "x"]
-                };
-                names.into_iter().map(move |name| (index, name))
-            })
-            .collect();
+        let mut workspaces: Vec<(usize, &str)> = own.iter().map(|name| (me_index, *name)).collect();
+        for (index, key) in list.iter().enumerate() {
+            if **key != me {
+                workspaces.extend([(index, "default"), (index, "x")]);
+            }
+        }
         let request = serde_json::json!({
             "op": "names",
-            "machines": keys,
+            "machines": machines
+                .iter()
+                .map(|(key, name)| serde_json::json!({
+                    "name": name,
+                    "suffix": suffix(key),
+                }))
+                .collect::<Vec<_>>(),
             "own": own,
-            "me": {"name": machine_name(&me), "suffix": suffix(&me)},
+            "me": me_index,
             "workspaces": workspaces
                 .iter()
                 .map(|(machine, workspace)| serde_json::json!({"machine": machine, "workspace": workspace}))
@@ -383,7 +428,7 @@ mod tests {
             "the oracle refused the machines: {reply}"
         );
         let shown: Vec<serde_json::Value> = machines
-            .iter()
+            .keys()
             .map(|machine| serde_json::json!(names[machine]))
             .collect();
         assert_eq!(
@@ -391,11 +436,11 @@ mod tests {
             reply["prefixes"],
             "{machines:?}, own {own:?}"
         );
-        let list: Vec<&String> = machines.iter().collect();
         let local: Vec<String> = workspaces
             .iter()
             .map(|(machine, workspace)| {
-                local_name(&me, &format!("{}/{workspace}", list[*machine]), &names).unwrap()
+                let key = list.get(*machine).map_or(me.as_str(), |key| key.as_str());
+                local_name(&me, &format!("{key}/{workspace}"), &names).unwrap()
             })
             .collect();
         assert_eq!(
@@ -414,10 +459,11 @@ mod tests {
     /// characters, not four bytes.
     #[test]
     fn names_qualify_with_any_suffix() {
-        let machines: BTreeSet<String> = ["mac#abcéf", "mac#ü"].map(str::to_owned).into();
-        let names = display_names(&machines, |_| false);
+        let names = display_names(&by_key(&["mac#abcéf", "mac#ü"]), |_| false);
         assert_eq!(names["mac#abcéf"], "mac-abcé");
         assert_eq!(names["mac#ü"], "mac-ü");
+        let names = display_names(&by_key(&["mac#ü", "mac#üabcéf"]), |_| false);
+        assert_eq!(names["mac#üabcéf"], "mac-üabc");
     }
 
     /// jj's RNG, as `debug.randomness-seed = seed` makes it.

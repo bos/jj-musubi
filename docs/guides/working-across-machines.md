@@ -97,8 +97,10 @@ stores triggers on that root.
 Give each agent a workspace with `jj workspace add` so agents don't share files, as
 `jj workspace add --name agent-2 ../agent-2`. If you pass `--name`, leave out `/`: a repo with
 a workspace named like `agents/2` [doesn't sync](../how-it-works.md#other-machines-workspaces).
-Their work appears on every machine as `devbox/default@` or `laptop/agent-2@`. Review it from
-any machine:
+Their work appears on every machine as `devbox/default@` or `laptop/agent-2@`. The name a machine
+shows under can change, when it's renamed or another machine of its name comes or goes, so have
+an agent find the names with `jj workspace list` or `musubi status` rather than reuse ones
+written into its instructions. Review it from any machine:
 
 ```sh
 jj log -r 'working_copies()'   # what every agent on every machine is working on
@@ -127,7 +129,8 @@ ln -s ~/src/jj-musubi/skills/jj-musubi ~/.codex/skills/jj-musubi    # Codex
 
 Workspace names in `jj log` show recorded work; unsnapshotted edits stay on their machine.
 `jj op log` shows each machine's operations with the workspace that made them, such as
-`laptop/default`.
+`laptop/default`, named as that machine was named when the operation arrived: after a
+[rename](setup.md#naming-machines), older operations keep the old name.
 
 `musubi status` reports this copy's last known sync and working copies without contacting the
 hub or recording edits. It exits 0 even when reporting a problem. For all-machine reports,

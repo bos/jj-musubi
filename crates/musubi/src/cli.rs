@@ -152,7 +152,12 @@ pub enum Command {
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
-        /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
+        /// This machine's name, which other machines show its workspaces under, as in
+        /// `laptop/default`.
+        ///
+        /// Sets `musubi.machine-name`, which names the machine in all its repos, if nothing sets it
+        /// yet; refused if it differs from that setting. Defaults to `musubi.machine-name`, or else
+        /// jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,
         /// Forget this copy after this long without a local operation, such as `6h`.
@@ -175,8 +180,8 @@ pub enum Command {
         /// * `id: String`: The hive's id; empty on a hub's line.
         /// * `machines: List<String>`: The machines in the hive, as its hub knows them.
         /// * `path: Option<FsPath>`: Where the copy is; none on a hub's line or a hive's.
-        /// * `machine: String`: The copy's name among `machines` where another copy has its
-        ///   machine's name too, as `laptop-1a2b`; else empty.
+        /// * `machine: String`: The copy's name among `machines` where another machine in the
+        ///   hive has the same name, as `laptop-1a2b`; else empty.
         /// * `status: String`: How the copy's syncing goes; empty on a hub's line or a
         ///   hive's.
         /// * `problem: String`: What's wrong, if anything: why the hub is out of reach, that
@@ -259,7 +264,7 @@ pub enum Command {
     /// It records what changed in the working copy, then tells the hive, with this copy's
     /// last work, so that the other machines stop showing its working copies. The repository
     /// keeps everything it has, its working copy included, and the hive keeps everything it
-    /// sent. The next join makes a new copy, which you can name with `musubi join --machine`.
+    /// sent. The next join makes a new copy, under this machine's name.
     /// If the hive can't be told, `leave` fails and the repository stays part of the hive. A
     /// `/` in a workspace name stops it the same way, before it changes anything.
     Leave {
@@ -286,8 +291,9 @@ pub enum Command {
     Forget {
         /// The machine, as its working copies are named here: `laptop` for `laptop/default@`,
         /// `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is
-        /// another machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name
-        /// `musubi list` gives it will do too, if no other machine could have that name.
+        /// another machine's, its whole id, as in `laptop-1a2b3c4d/default@`. Its machine's
+        /// name, as `laptop` for `laptop-1a2b/default@`, or the name `musubi list` gives it,
+        /// will do too, if no other machine could have that name.
         machine: String,
     },
     /// Sync the repository in the current directory now.
@@ -378,8 +384,12 @@ pub enum Command {
 /// How a repository takes part in a hive, for `create` and `join`.
 #[derive(clap::Args)]
 pub struct Member {
-    /// This machine's name in the hive, which other machines show its workspaces under, as
-    /// in `laptop/default`. Defaults to jj's `operation.hostname`.
+    /// This machine's name, which other machines show its workspaces under, as in
+    /// `laptop/default`.
+    ///
+    /// Sets `musubi.machine-name`, which names the machine in all its repos, if nothing sets it
+    /// yet; refused if it differs from that setting. Defaults to `musubi.machine-name`, or else
+    /// jj's `operation.hostname`.
     #[arg(long)]
     pub machine: Option<String>,
     /// Replicate the whole operation history, not just the current state.

@@ -57,6 +57,33 @@ impl World {
         self.ledger.record(m, &what, &before, &after, false);
     }
 
+    /// Machine `m` sets `musubi.machine-name` to `name`, as `jj config set --user` does,
+    /// and records it in the hive, as its daemon does once idle. Records what changed.
+    pub fn rename(&mut self, m: usize, name: &str) {
+        let before = self.seen(m);
+        self.record(format!(
+            "{}: jj config set --user musubi.machine-name {name}",
+            self.machine(m)
+        ));
+        let node = self.fx.node(m);
+        let mut config = node.loader().settings().config().clone();
+        let text = format!("musubi.machine-name = {name:?}");
+        config.add_layer(
+            jj_lib::config::ConfigLayer::parse(jj_lib::config::ConfigSource::User, &text).unwrap(),
+        );
+        let settings = node.loader().settings().with_new_config(config).unwrap();
+        node.set_settings(settings);
+        if let Err(err) = self.fx.node(m).record_name() {
+            self.fail(&format!(
+                "recording musubi.machine-name failed on {}: {err}",
+                self.machine(m)
+            ));
+        }
+        let after = self.seen(m);
+        let what = self.trace.last().cloned().unwrap_or_default();
+        self.ledger.record(m, &what, &before, &after, false);
+    }
+
     /// Machine `m`'s daemon, two hours on by the environment's clock, forgets every other
     /// copy that has gone unused for longer than its `musubi.forget-after`. Records what
     /// changed.

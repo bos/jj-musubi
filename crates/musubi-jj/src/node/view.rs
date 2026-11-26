@@ -168,9 +168,10 @@ impl LocalParents {
 }
 
 /// The views a `jj` command started from, each with its canonical form: for each, its
-/// workspaces by name, and the canonical form's by key, with their commits. A name stands for
-/// another machine's workspace only where every one of them that has the name has it at a
-/// commit its own canonical form gives that workspace.
+/// workspaces by name, the canonical form's by key, with their commits, and which key each
+/// name of another machine's workspace stood for there. A name stands for another machine's
+/// workspace only where every one of them that has the name named that workspace so, and has
+/// it at a commit its own canonical form gives that workspace.
 struct StartedFrom(Vec<Source>);
 
 /// One of the views of [`StartedFrom`].
@@ -178,6 +179,10 @@ struct StartedFrom(Vec<Source>);
 struct Source {
     here: BTreeMap<WorkspaceNameBuf, BTreeSet<CommitId>>,
     there: BTreeMap<WorkspaceNameBuf, BTreeSet<CommitId>>,
+    /// The key of the other machine's workspace each name stood for in this view, as its
+    /// canonical form named them: labels change as machines rename, come and go, so a view
+    /// brought back is read by the names of the operation it came from, not today's.
+    names: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
 }
 
 impl StartedFrom {
@@ -186,10 +191,21 @@ impl StartedFrom {
         let mut having = self
             .0
             .iter()
-            .filter_map(|source| Some((source.here.get(name)?, source.there.get(key))))
+            .filter_map(|source| {
+                let here = source.here.get(name)?;
+                Some((here, source.names.get(name), source.there.get(key)))
+            })
             .peekable();
         having.peek().is_some()
-            && having.all(|(here, there)| there.is_some_and(|there| !here.is_disjoint(there)))
+            && having.all(|(here, named, there)| {
+                named.is_some_and(|named| **named == *key)
+                    && there.is_some_and(|there| !here.is_disjoint(there))
+            })
+    }
+
+    /// Every name of another machine's workspace in the views, with the key it stood for.
+    fn names(&self) -> impl Iterator<Item = (&WorkspaceNameBuf, &WorkspaceNameBuf)> {
+        self.0.iter().flat_map(|source| &source.names)
     }
 }
 
@@ -363,12 +379,16 @@ impl NodeRepo {
     }
 
     /// What the canonical parents say of an operation's names: each parent's other machines'
-    /// workspaces, named as a realization of it names them (`local_view`).
+    /// workspaces, named as a realization of it names them (`local_view`). A name two parents
+    /// give different workspaces, as when a machine renamed into another's name since one of
+    /// them, stands for neither: jj's merge of the local views can put either's commit under
+    /// it.
     fn inherited_from_parents(
         &self,
         parent_presences: &[(CanonicalOp, Arc<Presence<Work>>)],
     ) -> Result<Inherited, NodeError> {
         let mut inherited = Inherited::default();
+        let mut ambiguous = BTreeSet::new();
         for (parent, presence) in parent_presences {
             if parent == self.canonical.root_operation_id() {
                 continue;
@@ -387,10 +407,15 @@ impl NodeRepo {
                             .or_default()
                             .insert(commit.clone());
                     }
-                    inherited.others.insert(name, key);
+                    if let Some(other) = inherited.others.insert(name.clone(), key.clone())
+                        && other != key
+                    {
+                        ambiguous.insert(name);
+                    }
                 }
             }
         }
+        inherited.others.retain(|name, _| !ambiguous.contains(name));
         Ok(inherited)
     }
 
@@ -403,8 +428,10 @@ impl NodeRepo {
     /// name, which `jj workspace add` moves to its commit in a second operation. Adding changes
     /// nothing of another machine's. A command that goes back to an older operation (`jj
     /// undo`, `jj op restore`, `jj op revert`) starts from the view it brings back, and the
-    /// commits that view's canonical form gives other machines' workspaces: a workspace of this
-    /// machine's by such a name, brought back with it, stands for none of theirs.
+    /// commits that view's canonical form gives other machines' workspaces, by the names that
+    /// canonical form gave them, which may be no parent's, as before a machine renamed: a
+    /// workspace of this machine's by such a name, brought back with it, stands for none of
+    /// theirs.
     /// musubi's own operations add none, but show the others' again under their names.
     fn move_others_here(
         &self,
@@ -414,15 +441,30 @@ impl NodeRepo {
         local: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
         workspaces_by_key: &mut BTreeMap<WorkspaceNameBuf, CommitId>,
     ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
+        // A view brought back may name other machines' workspaces as no parent does, as
+        // before a machine renamed.
+        let goes_back = target_of(&raw.metadata.description).is_some();
         let started_from = if raw.metadata.workspace_name.is_some()
-            && inherited.others.keys().any(|name| local.contains_key(name))
+            && (goes_back || inherited.others.keys().any(|name| local.contains_key(name)))
         {
             Some(self.started_from(raw, local_parents, inherited)?)
         } else {
             None
         };
+        let mut candidates: BTreeSet<(WorkspaceNameBuf, WorkspaceNameBuf)> = inherited
+            .others
+            .iter()
+            .map(|(name, key)| (name.clone(), key.clone()))
+            .collect();
+        if let Some(started_from) = &started_from {
+            candidates.extend(
+                started_from
+                    .names()
+                    .map(|(name, key)| (name.clone(), key.clone())),
+            );
+        }
         let mut moved_here = BTreeSet::new();
-        for (name, key) in &inherited.others {
+        for (name, key) in &candidates {
             let stands_for_it = match &started_from {
                 None => true,
                 Some(started_from) => started_from.stands_for(name, key),
@@ -430,8 +472,8 @@ impl NodeRepo {
             if !stands_for_it {
                 continue;
             }
-            if let Some(commit) = local.remove(name)
-                && let Some(entry) = workspaces_by_key.get_mut(key)
+            if let Some(entry) = workspaces_by_key.get_mut(key)
+                && let Some(commit) = local.remove(name)
             {
                 *entry = commit;
                 moved_here.insert(key.clone());
@@ -575,6 +617,7 @@ impl NodeRepo {
             Ok(Source {
                 here: local_parents.workspaces(self)?,
                 there: inherited.commits.clone(),
+                names: inherited.others.clone(),
             })
         };
         let (mut started_from, sources) = match target {
@@ -595,6 +638,11 @@ impl NodeRepo {
                 && canonical != *self.canonical.root_operation_id()
             {
                 let view = self.canonical.read_operation_view(&canonical)?;
+                for (key, name) in self.local_names(&canonical, &view)? {
+                    if !self.is_own_key(&key) {
+                        from.names.insert(name, key);
+                    }
+                }
                 for (key, commit) in view.wc_commit_ids {
                     from.there.entry(key).or_default().insert(commit);
                 }
@@ -611,12 +659,12 @@ impl NodeRepo {
 
     /// The local name of each workspace in the view of canonical operation `canonical`: this
     /// machine's own keep their names, and another machine's are prefixed with the machine's
-    /// name, as in `beta/default`, or with its name and part or all of its id when two
-    /// machines share a name or the prefix would start a name of this machine's
-    /// (`workspaces::display_names`; `machine_prefixes`). The
-    /// names are chosen among every machine the view's history has known
-    /// (`Presence::known`), so that a machine's name doesn't change as others are forgotten
-    /// and come back, and a forgotten machine's is never another's.
+    /// name there, as in `beta/default`, or with its name and part or all of its id when
+    /// another machine is named alike, or the prefix would start a name of this machine's
+    /// (`workspaces::display_names`; `machine_prefixes`).
+    /// The names are chosen among the machines present there, by their names there
+    /// (`Presence::name`), so that labels are a function of the operation alone: nothing
+    /// remembers a machine forgotten, or a name a machine had before.
     pub(super) fn local_names(
         &self,
         canonical: &CanonicalOp,
@@ -626,14 +674,15 @@ impl NodeRepo {
         Ok(self.names_of(canonical_view, &prefixes))
     }
 
+    /// The prefix of each machine named at a canonical operation with this view and presence,
+    /// clear of the names of this machine's own workspaces there, and of `private`.
     pub(super) fn prefixes_with_own(
         &self,
         canonical_view: &View,
         presence: &Presence<Work>,
         private: &BTreeSet<WorkspaceNameBuf>,
     ) -> Result<BTreeMap<String, String>, NodeError> {
-        let mut machines = self.machines_of(canonical_view, presence.known());
-        machines.insert(self.machine.key().to_owned());
+        let machines = machines_of(canonical_view, presence);
         let mut own = self.own_names_in(canonical_view, presence)?;
         own.extend(private.iter().cloned());
         Ok(workspaces::display_names(&machines, |name| {
@@ -665,19 +714,6 @@ impl NodeRepo {
     ) -> Option<WorkspaceNameBuf> {
         workspaces::local_name(self.machine.key(), key.as_str(), prefixes)
             .map(WorkspaceNameBuf::from)
-    }
-
-    /// The machines a canonical view's history has known: `known`, and those with
-    /// workspaces in the view, as one that joined before joining was recorded as work.
-    pub(super) fn machines_of(&self, view: &View, known: &BTreeSet<String>) -> BTreeSet<String> {
-        let mut machines = known.clone();
-        machines.extend(
-            view.wc_commit_ids
-                .keys()
-                .filter_map(|key| workspaces::split_key(key.as_str()))
-                .map(|(machine, _)| machine.to_owned()),
-        );
-        machines
     }
 
     /// Where every machine's workspaces were, as of the canonical form of this machine's
@@ -856,6 +892,17 @@ impl NodeRepo {
             prefixes,
         })
     }
+}
+
+/// The machines named at a canonical operation with this view and presence
+/// (`Presence::named_with`).
+pub(super) fn machines_of(view: &View, presence: &Presence<Work>) -> BTreeMap<String, String> {
+    presence.named_with(
+        view.wc_commit_ids
+            .keys()
+            .filter_map(|key| workspaces::split_key(key.as_str()))
+            .map(|(machine, _)| machine),
+    )
 }
 
 /// Whether this machine publishes a workspace of its own named `name`: only if the name has no

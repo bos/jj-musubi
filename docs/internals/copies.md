@@ -113,7 +113,7 @@ machine, and the entries across machines.
   record, a first sync stopped by interrupting the `create`, `join` or `clone` that asked for it
   drops the record and the entry, but keeps the key, which the hub took: the repository is then
   as a join that stopped once it kept its key leaves it. Joining again takes up that key, and
-  `musubi leave` retires it, so that `musubi join --machine` can name a new one. `musubi join
+  `musubi leave` retires it, so that the next join makes a new one. `musubi join
   --fresh` and `musubi create --fresh` first clear a removed record, and retire a kept key, as
   `musubi leave` would, since both belong to the history they drop.
 

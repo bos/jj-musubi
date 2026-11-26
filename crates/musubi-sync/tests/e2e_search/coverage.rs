@@ -39,6 +39,7 @@ pub const RULES: &[&str] = &[
     "forget_other_workspace",
     "forget_copy",
     "set_forget_after",
+    "rename",
     "expire_idle",
     "origin_advance",
     "fetch",

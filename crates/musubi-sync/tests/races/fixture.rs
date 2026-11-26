@@ -8,6 +8,8 @@ use std::sync::Arc;
 use futures::TryStreamExt as _;
 use futures::executor::block_on;
 use jj_lib::backend::CommitId;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::ReadonlyRepo;
@@ -230,6 +232,26 @@ impl Fixture {
     /// on to now.
     pub fn node(&mut self, index: usize) -> &mut NodeRepo {
         self.hive.members[index].adapter.repo_mut()
+    }
+
+    /// Sets `musubi.machine-name` on machine `index`, as `jj config set --user` there would
+    /// for its daemon, which reads it at its next sync. Restarting the daemon (`reopen`)
+    /// unsets it again.
+    pub fn set_machine_name(&mut self, index: usize, name: &str) {
+        let node = self.node(index);
+        let mut config = node.loader().settings().config().clone();
+        let text = format!("musubi.machine-name = {name:?}");
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, &text).unwrap());
+        let settings = node.loader().settings().with_new_config(config).unwrap();
+        node.set_settings(settings);
+    }
+
+    /// The machines the hub names at its head, by key, with their names there, as `musubi
+    /// list` lists them.
+    pub fn hub_names(&self) -> BTreeMap<String, String> {
+        let index = musubi_hub::index::HiveIndex::rebuild(self.hive.hub.store()).unwrap();
+        let named = index.machines;
+        musubi_jj::workspaces::display_names(&named, |_| false)
     }
 
     /// Restarts machine `index`'s daemon, as after a crash: it opens the repository again,

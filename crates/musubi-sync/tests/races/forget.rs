@@ -147,7 +147,7 @@ fn a_copy_without_workspaces_can_be_forgotten_by_name() {
     hive.sync();
     assert!(hive.node(0).present_copies().unwrap().1.is_present(&beta));
     assert!(!hive.workspace_names(0).contains("beta/beta"));
-    let qualified = musubi_jj::workspaces::qualified_name(&beta);
+    let qualified = musubi_jj::workspaces::qualified_name("beta", &beta);
     for name in ["beta", qualified.as_str(), beta.as_str()] {
         assert_eq!(
             hive.node(0).machine_named(name).unwrap(),

@@ -917,22 +917,22 @@ fn two_machines_sharing_a_hostname_show_each_other_qualified() {
     let mut hive = Fixture::join(env, repos.into());
     hive.sync();
     hive.assert_converged();
+    let keys = [hive.machine_key(0), hive.machine_key(1)];
+    let label = |key: &str| musubi_jj::workspaces::qualified_name("mac", key);
     for (index, other) in [(0, 1), (1, 0)] {
-        let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(other));
         let others: Vec<String> = names(&hive, index)
             .into_iter()
             .filter(|name| name.contains('/'))
             .collect();
-        assert_eq!(others, vec![format!("{qualified}/default")]);
-        let own = hive.machine_key(index);
-        let own_name = musubi_jj::workspaces::qualified_name(&own);
+        assert_eq!(others, vec![format!("{}/default", label(&keys[other]))]);
+        let own = &keys[index];
         let activity = hive.node(index).activity().unwrap();
         let named: Vec<(&str, &str)> = activity
             .iter()
             .map(|copy| (copy.key.as_str(), copy.name.as_str()))
             .collect();
         assert!(
-            named.contains(&(own.as_str(), own_name.as_str())),
+            named.contains(&(own.as_str(), label(own).as_str())),
             "{named:?}"
         );
     }

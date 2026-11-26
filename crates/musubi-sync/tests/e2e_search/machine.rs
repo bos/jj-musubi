@@ -743,6 +743,17 @@ impl Search<'_> {
         self.note(&tc);
     }
 
+    /// Renames this copy's machine with `musubi.machine-name`, as its daemon records it: to
+    /// another machine's name, so that copies present share it, or to one of its own.
+    #[rule]
+    fn rename(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let name = tc.draw(gs::sampled_from(vec!["alpha", "beta", "mac", "renamed"]));
+        fired("rename");
+        self.world.rename(m, name);
+        self.note(&tc);
+    }
+
     /// A daemon, two hours on, forgets the other copies unused for longer than their
     /// `musubi.forget-after`.
     #[rule]

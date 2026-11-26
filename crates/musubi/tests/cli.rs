@@ -1308,21 +1308,14 @@ fn hub_join_sync_clone_and_list() {
     for key in ["user.name", "user.email", "aliases.pickup"] {
         alpha.jj(&["config", "unset", "--user", key]);
     }
-    // A new machine clones the hive by a prefix of its name.
+    // A second copy on alpha's machine clones the hive by a prefix of its name, under the
+    // machine's name, `musubi.machine-name`, which `musubi create --machine` set.
     let gamma = env.repo_handle_at("gamma", &env.root().join("src/gamma"));
     logs.op_log_of(&gamma);
     let mut clone = alpha.program(musubi());
     // A relative destination, through a parent, lands where it says, in a directory it
     // makes.
-    clone.args([
-        "clone",
-        "proj",
-        "../src/gamma",
-        "--machine",
-        "gamma",
-        "--lease",
-        "6h",
-    ]);
+    clone.args(["clone", "proj", "../src/gamma", "--lease", "6h"]);
     clone.current_dir(env.root().join("home"));
     // This temporary copy explicitly leases six hours, even with a user default of never.
     alpha.jj(&["config", "set", "--user", "musubi.forget-after", "never"]);
@@ -1411,8 +1404,11 @@ fn hub_join_sync_clone_and_list() {
     let out = run(&env, &logs, sync);
     insta::assert_snapshot!(out, @"");
     musubi_in(&env, &logs, &alpha, &["sync"]);
-    let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
-    insta::assert_snapshot!(out, @"Forgot gamma");
+    // Shown by part of its key, as alpha's first copy is, while both have the name.
+    let key = fs::read_to_string(gamma.repo_path().join("musubi/machine")).unwrap();
+    let label = musubi_jj::workspaces::qualified_name("alpha", key.trim());
+    let out = musubi_in(&env, &logs, &alpha, &["forget", &label]);
+    assert_eq!(out, format!("Forgot {label}\n"));
     // The hub counts gamma out once it has the forget, which `musubi forget`'s sync sends.
     wait_for(&logs, "the hub to count gamma out", || {
         musubi_in(&env, &logs, &alpha, &["list"]).contains("project  2 machines: alpha, beta")
@@ -1543,8 +1539,12 @@ fn hub_join_sync_clone_and_list() {
               takes it for a duplicate, and syncs nothing
 
           --machine <MACHINE>
-              This machine's name in the hive, which other machines show its workspaces under, as in
-              `laptop/default`. Defaults to jj's `operation.hostname`
+              This machine's name, which other machines show its workspaces under, as in
+              `laptop/default`.
+              
+              Sets `musubi.machine-name`, which names the machine in all its repos, if nothing sets it
+              yet; refused if it differs from that setting. Defaults to `musubi.machine-name`, or else
+              jj's `operation.hostname`.
 
           --full-history
               Replicate the whole operation history, not just the current state
@@ -1612,7 +1612,12 @@ fn hub_join_sync_clone_and_list() {
               The hub, as `musubi hub` prints it [default: this machine's default hub]
 
           --machine <MACHINE>
-              This machine's name in the hive. Defaults to jj's `operation.hostname`
+              This machine's name, which other machines show its workspaces under, as in
+              `laptop/default`.
+              
+              Sets `musubi.machine-name`, which names the machine in all its repos, if nothing sets it
+              yet; refused if it differs from that setting. Defaults to `musubi.machine-name`, or else
+              jj's `operation.hostname`.
 
           --lease <DURATION>
               Forget this copy after this long without a local operation, such as `6h`. Sets
@@ -2339,7 +2344,7 @@ fn the_daemon_picks_up_new_repositories() {
     alpha
     second
     --hub	The hub, as `musubi hub` prints it [default: this machine's default hub]
-    --machine	This machine's name in the hive. Defaults to jj's `operation.hostname`
+    --machine	This machine's name, which other machines show its workspaces under, as in `laptop/default`
     --lease	Forget this copy after this long without a local operation, such as `6h`. Sets `musubi.forget-after` in repo config, overriding its existing value
     --help	Print help (see more with '--help')
     --socket	The daemon's control socket, in place of the usual one
@@ -2437,8 +2442,9 @@ fn machines_whose_workspaces_are_all_default_can_join() {
       <MACHINE>
               The machine, as its working copies are named here: `laptop` for `laptop/default@`,
               `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is another
-              machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name `musubi list` gives it
-              will do too, if no other machine could have that name
+              machine's, its whole id, as in `laptop-1a2b3c4d/default@`. Its machine's name, as `laptop`
+              for `laptop-1a2b/default@`, or the name `musubi list` gives it, will do too, if no other
+              machine could have that name
     
     Options:
       -h, --help
@@ -2754,7 +2760,9 @@ fn a_copy_can_join_again_after_leaving() {
         // The translation cache is disposable. The old history must reconstruct with the
         // key it had before leaving, even after a join has selected another one.
         fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
-        let mut args = vec!["join", "--machine", new_name];
+        // A new key takes the name the setting gives the machine.
+        repo.jj(&["config", "set", "--user", "musubi.machine-name", new_name]);
+        let mut args = vec!["join"];
         if full_history {
             args.push("--full-history");
         }
@@ -2780,6 +2788,71 @@ fn a_copy_can_join_again_after_leaving() {
         ["alpha", "travel-beta/beta", "work-gamma/gamma"],
         "{list}"
     );
+}
+
+/// `musubi.machine-name` renames a machine in its repos at their next sync: the other
+/// machines show its workspaces under the new name, and the hub lists it so, as `musubi
+/// status` there names it and `musubi forget` takes it. `--machine` sets the setting where
+/// nothing sets it, and is refused, before anything is made, where it names the machine
+/// otherwise, with the command that renames it.
+#[test]
+fn a_machine_is_renamed_by_its_setting() {
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    beta.jj(&["config", "set", "--user", "musubi.machine-name", "desk"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let workspaces = alpha.jj(&["workspace", "list", "-T", NAMES]);
+    insta::assert_snapshot!(workspaces, @"
+    alpha
+    desk/beta
+    ");
+    let machine = musubi_in(&env, &logs, &beta, &["status", "-T", r#"machine ++ "\n""#]);
+    insta::assert_snapshot!(machine, @"desk");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, desk
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    ");
+    let root = env.root();
+    let err = musubi_fails_at(
+        &env,
+        &logs,
+        &beta,
+        root,
+        &["clone", "alpha", "other", "--machine", "laptop"],
+    );
+    insta::assert_snapshot!(err, @"
+    Error: this machine is named desk
+    Hint: `jj config set --user musubi.machine-name laptop` renames this machine in all its repos at their next sync
+    ");
+    assert!(!root.join("other").exists());
+    let gamma = env.init_repo("gamma");
+    logs.daemon_of(&env, &gamma);
+    daemons.of(&gamma);
+    fetch_history(&alpha, &gamma);
+    musubi_in(
+        &env,
+        &logs,
+        &gamma,
+        &["join", "--hub", &hub.url, "--machine", "g1"],
+    );
+    let set = gamma.jj(&["config", "get", "musubi.machine-name"]);
+    insta::assert_snapshot!(set, @"g1");
+    let err = musubi_fails(&env, &logs, &gamma, &["join", "--machine", "g2"]);
+    insta::assert_snapshot!(err, @"
+    Error: this machine is named g1
+    Hint: `jj config set --user musubi.machine-name g2` renames this machine in all its repos at their next sync
+    ");
+    let out = musubi_in(&env, &logs, &alpha, &["forget", "desk"]);
+    insta::assert_snapshot!(out, @"Forgot desk");
 }
 
 fn assert_detached(repo: &TestRepo) {
@@ -2865,7 +2938,8 @@ fn stopping_a_join_during_its_first_sync_leaves_the_hive() {
         "stopping the first sync, as the command waiting on it went away",
     );
     assert_eq!(killed.code(), None);
-    // The key it kept names it: another name takes a `musubi leave` first, which retires it.
+    // The key it kept names it: another name takes the setting, which renames the machine in
+    // every repo.
     let err = musubi_fails(
         &env,
         &logs,
@@ -2873,8 +2947,8 @@ fn stopping_a_join_during_its_first_sync_leaves_the_hive() {
         &["join", "--hive", "alpha", "--machine", "b2"],
     );
     insta::assert_snapshot!(err, @"
-    Error: this repository's machine is already named beta
-    Hint: `musubi leave`, then `musubi join --machine <name>`, joins again under a new name
+    Error: this repository's machine is named beta
+    Hint: `jj config set --user musubi.machine-name b2` renames this machine in all its repos at their next sync
     ");
     let machine_path = beta.repo_path().join("musubi/machine");
     let kept = fs::read(&machine_path).unwrap();
@@ -3910,8 +3984,9 @@ fn moved_copies_sync_again() {
 /// A copy deleted while its daemon runs can be deleted: the daemon writes nothing there,
 /// and stops syncing it until it comes back. `musubi list` says so, and a clone made in its
 /// place, or `musubi leave` with its path, puts an end to it. The hive shows the clone
-/// beside the deleted copy, both of this machine's name, until that is forgotten: told apart
-/// by part of their keys, which `musubi status` and `musubi forget` in the clone take too.
+/// beside the deleted copy, both of this machine's name, until that is forgotten: each by
+/// part of its key, which `musubi status` and `musubi forget` in the clone take too; the plain
+/// name, there, means the deleted copy, and on another machine, either.
 // Moving and deleting a repository whose files the daemon has open is for Unix only
 // (docs/internals/copies.md, "Out of scope").
 #[cfg(unix)]
@@ -3925,18 +4000,18 @@ fn deleted_copies_stop_syncing() {
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     settled(&env, &logs, &alpha, alpha.path());
-    // The start of each copy's key shows in the hive's names for it, where both are alpha.
+    // The start of the clone's key shows in the hive's name for it, where both are alpha.
     let short_key = |repo: &TestRepo| {
         let key = fs::read_to_string(repo.repo_path().join("musubi/machine")).unwrap();
-        musubi_jj::workspaces::qualified_name(key.trim())
+        musubi_jj::workspaces::qualified_name("alpha", key.trim())
     };
-    let deleted = short_key(&alpha);
     let root = env.root();
     let path = alpha.path().to_str().unwrap();
     let missing = format!(
         "{} is missing",
         dunce::canonicalize(alpha.path()).unwrap().display()
     );
+    let deleted = short_key(&alpha);
     fs::remove_dir_all(alpha.path()).unwrap();
     // Work announced while it's gone wakes the daemon, which writes nothing.
     beta.write_file("b", "b");
@@ -3958,8 +4033,8 @@ fn deleted_copies_stop_syncing() {
     insta::assert_snapshot!(out, @"Cloned hive alpha into alpha");
     let clone = short_key(&alpha);
     let mut settings = insta::Settings::clone_current();
-    settings.add_filter(&regex_escape(&deleted), "alpha-DELETED");
     settings.add_filter(&regex_escape(&clone), "alpha-CLONE");
+    settings.add_filter(&regex_escape(&deleted), "alpha-DELETED");
     // Working copies' ids: the clone's commit has the time `musubi clone` made it, and the
     // change ids depend on how many commands the waits above ran.
     settings.add_filter(r"(?m)^(\S+@): [k-z]{8} [0-9a-f]{8} ", "$1: [ids] ");
@@ -3968,13 +4043,19 @@ fn deleted_copies_stop_syncing() {
     // run.
     let either = |list: String| {
         list.lines()
-            .map(|line| {
-                if line.contains("machines:") {
-                    line.replace(&deleted, "alpha-XXXX")
-                        .replace(&clone, "alpha-XXXX")
-                } else {
-                    line.to_owned()
+            .map(|line| match line.split_once("machines: ") {
+                Some((start, machines)) => {
+                    let mut names: Vec<String> = machines
+                        .split(", ")
+                        .map(|name| {
+                            name.replace(&clone, "alpha-CLONE")
+                                .replace(&deleted, "alpha-DELETED")
+                        })
+                        .collect();
+                    names.sort();
+                    format!("{start}machines: {}", names.join(", "))
                 }
+                None => line.to_owned(),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -3982,7 +4063,7 @@ fn deleted_copies_stop_syncing() {
     let list = either(musubi_at(&env, &logs, &alpha, root, &["list"]));
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:
-      alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
+      alpha  3 machines: alpha-CLONE, alpha-DELETED, beta
         here: $ROOT/alpha as alpha-CLONE  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
@@ -4005,8 +4086,12 @@ fn deleted_copies_stop_syncing() {
     ");
     let err = musubi_fails(&env, &logs, &alpha, &["forget", &clone]);
     insta::assert_snapshot!(err, @"Error: alpha-CLONE is this machine; `musubi leave` takes this repository out of hive alpha");
-    // The plain name is the other copy's, the only one it can mean, and the hive then names
-    // the clone plainly, as `musubi status` does.
+    // On another machine, the plain name could mean either copy.
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    let err = musubi_fails(&env, &logs, &beta, &["forget", "alpha"]);
+    insta::assert_snapshot!(err, @"Error: alpha could mean 2 machines in hive alpha; `musubi status` lists their names");
+    // The plain name means the other copy here, and the hive then names the clone plainly, as
+    // `musubi status` does.
     let out = musubi_in(&env, &logs, &alpha, &["forget", "alpha"]);
     insta::assert_snapshot!(out, @"Forgot alpha-DELETED");
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
@@ -4468,12 +4553,11 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
     musubi_in(&env, &logs, &alpha, &["create", "again"]);
     musubi_in(&env, &logs, &beta, &["join", "--hive", "again"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
-    // Each joined as a new copy, under a new key. Its name was the old copy's, which every
-    // machine whose history knew that copy keeps for it, so the new one shows with part of its
-    // key.
+    // Each joined as a new copy, under a new key, with the old copy's name, which, the old
+    // copy having left, it has to itself: no machine remembers the old copy's name.
     for (repo, expected) in [
-        (&alpha, vec!["alpha", "linked", "beta-50bc/beta"]),
-        (&beta, vec!["beta", "alpha-320d/alpha", "alpha-320d/linked"]),
+        (&alpha, vec!["alpha", "linked", "beta/beta"]),
+        (&beta, vec!["beta", "alpha/alpha", "alpha/linked"]),
     ] {
         let names = repo.jj(&["workspace", "list", "-T", NAMES]);
         let actual: std::collections::BTreeSet<_> = names.lines().collect();

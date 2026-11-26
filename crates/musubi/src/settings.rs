@@ -37,6 +37,22 @@ pub fn user_config() -> anyhow::Result<StackedConfig> {
     env.resolve_config(&raw).context("resolving config")
 }
 
+/// Sets `name` to `value` in the user's jj config, as `jj config set --user` does: in the
+/// first file jj reads it from, or a new one where it reads none.
+pub fn set_user_config(name: &str, value: &str) -> anyhow::Result<()> {
+    let (env, raw) = base()?;
+    let name: jj_lib::config::ConfigNamePathBuf = name.parse()?;
+    let mut file = env
+        .user_config_files(&raw)
+        .map_err(|err| anyhow::anyhow!("finding the user config: {err:?}"))?
+        .into_iter()
+        .next()
+        .context("jj has no user config file here")?;
+    file.set_value(&name, value)?;
+    file.save()?;
+    Ok(())
+}
+
 /// Loads settings for the repository at `repo_path` (its `.jj/repo` directory), as seen
 /// from the workspace at `workspace_root`: the system's and the user's config, the
 /// repository's, and the workspace's.

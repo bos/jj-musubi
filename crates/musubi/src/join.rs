@@ -74,6 +74,9 @@ pub fn join(
     } = member;
     let (hub, machine, full_history, fresh) =
         (hub.as_deref(), machine.as_deref(), *full_history, *fresh);
+    let machine_flag = machine;
+    // Before anything is written.
+    configured_machine_name(machine)?;
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
     located.refuse_slashed_workspaces(false)?;
@@ -234,6 +237,7 @@ pub fn join(
     let stoppable = before.is_none().then(Stoppable::catch);
     // The hub took this machine's key: it is the repository's from now on.
     keep_join_key(&located, &machine)?;
+    remember_machine_name(ui, machine_flag)?;
     become_node(
         &located,
         &joined,
@@ -392,28 +396,84 @@ async fn ask_preparing(
 
 /// The machine the repository at `located` joins a hive as: the one its key names, which
 /// `name`, if given, must name, since its key has been part of a hive; else a new one, named
-/// `name` or after the host, whose key [`keep_join_key`] keeps once the hub accepts the join.
+/// `name`, or as `musubi.machine-name` sets, or after the host, whose key [`keep_join_key`]
+/// keeps once the hub accepts the join. `name` must be `musubi.machine-name`, where that is
+/// set: the setting names the machine in every repository on it.
 pub(crate) fn joining_machine(
     located: &Located,
     name: Option<&str>,
     settings: &UserSettings,
 ) -> anyhow::Result<Machine> {
+    let configured = configured_machine_name(name)?;
     let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
-        let name = name.unwrap_or_else(|| settings.operation_hostname());
+        let name = name
+            .or(configured.as_deref())
+            .unwrap_or_else(|| settings.operation_hostname());
         return Ok(NodeRepo::new_machine(&located.repo_path, name, settings)?);
     };
+    // Its key names it, until the setting renames it.
+    let current = configured.unwrap_or_else(|| machine.name().to_owned());
     if let Some(name) = name
-        && machine.name() != musubi_jj::workspaces::sanitize(name)
+        && current != musubi_jj::workspaces::sanitize(name)
     {
-        return Err(crate::ui::with_hint(
-            anyhow::anyhow!(
-                "this repository's machine is already named {}",
-                machine.name()
-            ),
-            "`musubi leave`, then `musubi join --machine <name>`, joins again under a new name",
+        return Err(renaming_hint(
+            anyhow::anyhow!("this repository's machine is named {current}"),
+            name,
         ));
     }
     Ok(machine)
+}
+
+/// This machine's name as `musubi.machine-name` sets it in its jj config, refusing `--machine`,
+/// `given`, if that sets another.
+pub(crate) fn configured_machine_name(given: Option<&str>) -> anyhow::Result<Option<String>> {
+    let configured = musubi_jj::node::configured_machine_name(&settings::user_config()?);
+    if let (Some(given), Some(configured)) = (given, &configured)
+        && musubi_jj::workspaces::sanitize(given) != *configured
+    {
+        return Err(renaming_hint(
+            anyhow::anyhow!("this machine is named {configured}"),
+            given,
+        ));
+    }
+    Ok(configured)
+}
+
+/// `err`, with a hint to rename this machine `name`, which takes a setting, not `--machine`.
+fn renaming_hint(err: anyhow::Error, name: &str) -> anyhow::Error {
+    crate::ui::with_hint(
+        err,
+        format!(
+            "`jj config set --user {} {}` renames this machine in all its repos at their next sync",
+            musubi_jj::node::MACHINE_NAME_KEY,
+            crate::ui::shell_word(name)
+        ),
+    )
+}
+
+/// Sets `musubi.machine-name` to `--machine`, `given`, where nothing sets it yet, so that
+/// this machine's other repositories, and those it joins later, have the name too. The join
+/// has happened by now, so a failure is a warning.
+pub(crate) fn remember_machine_name(ui: &Ui, given: Option<&str>) -> anyhow::Result<()> {
+    let Some(given) = given else {
+        return Ok(());
+    };
+    let set = || -> anyhow::Result<()> {
+        if musubi_jj::node::configured_machine_name(&settings::user_config()?).is_none() {
+            settings::set_user_config(musubi_jj::node::MACHINE_NAME_KEY, given)?;
+        }
+        Ok(())
+    };
+    if let Err(err) = set() {
+        let key = musubi_jj::node::MACHINE_NAME_KEY;
+        writeln!(ui.warning(), "Couldn't set {key} ({err:#}).")?;
+        writeln!(
+            ui.hint(),
+            "`jj config set --user {key} {}` gives this machine the name in its other repos.",
+            crate::ui::shell_word(given)
+        )?;
+    }
+    Ok(())
 }
 
 /// Keeps the machine key accepted by the hub, so retry uses it until membership is saved.
@@ -828,6 +888,7 @@ pub fn clone(
     if let Some(destination) = destination {
         check_clone_destination(destination)?;
     }
+    configured_machine_name(machine)?;
     let hub = UserState::hub(hub)?;
     configured_forget_after(&settings::user_config()?)?;
     let reply = block_on(ask_preparing(
@@ -904,6 +965,7 @@ pub fn clone(
         .with_context(|| format!("making a repository in {}", destination.display()))?;
     let located = Located::find(destination)?;
     clone_config::seed(&located.workspace_root, &info.clone_config)?;
+    let machine_flag = machine;
     let machine = joining_machine(&located, machine, &settings)?;
     let joined = Joined {
         hive: info.clone(),
@@ -913,6 +975,7 @@ pub fn clone(
     };
     let stoppable = Stoppable::catch();
     keep_join_key(&located, &machine)?;
+    remember_machine_name(ui, machine_flag)?;
     become_node(&located, &joined, &hub, false, None, &remotes, lease)?;
     start_serving(ui, &located, socket, Some(stoppable))
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;

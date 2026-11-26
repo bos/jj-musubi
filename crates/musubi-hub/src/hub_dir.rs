@@ -142,8 +142,12 @@ pub struct HiveInfo {
     /// One-time defaults from the copy that created the hive, as TOML values.
     pub clone_config: BTreeMap<String, String>,
     pub urls: Vec<String>,
-    /// Names of the machines with workspaces in the hive.
+    /// The names the hive's machines are shown under, those at its head and any joining it.
     pub machines: Vec<String>,
+    /// The machines shown under a name other than their own, by key: `laptop-1a2b` while
+    /// another machine has been `laptop` for longer.
+    #[serde(default)]
+    pub qualified: BTreeMap<String, String>,
 }
 
 /// The outcome of a join.
@@ -403,18 +407,22 @@ impl HubDir {
 
     pub fn info(&self, id: &HiveId) -> Option<HiveInfo> {
         let hive = self.hives.get(id)?;
-        Some(HiveInfo {
-            id: id.clone(),
-            name: hive.meta.name.clone(),
-            backend: hive.meta.backend,
-            clone_config: hive.meta.clone_config.clone(),
-            urls: hive.index.urls.iter().cloned().collect(),
-            machines: display_names(&hive.index.machines),
-        })
+        Some(
+            HiveInfo {
+                id: id.clone(),
+                name: hive.meta.name.clone(),
+                backend: hive.meta.backend,
+                clone_config: hive.meta.clone_config.clone(),
+                urls: hive.index.urls.iter().cloned().collect(),
+                machines: vec![],
+                qualified: BTreeMap::new(),
+            }
+            .named(&hive.index.machines),
+        )
     }
 
-    /// The keys of the machines with workspaces in hive `id`'s head.
-    pub fn machine_keys(&self, id: &HiveId) -> Option<&BTreeSet<String>> {
+    /// The machines named at hive `id`'s head, by key, with their names there.
+    pub fn machine_keys(&self, id: &HiveId) -> Option<&BTreeMap<String, String>> {
         Some(&self.hives.get(id)?.index.machines)
     }
 
@@ -447,7 +455,7 @@ impl HubDir {
             return Ok(());
         };
         hive.pending
-            .retain(|pending| !index.machines.contains(&pending.machine));
+            .retain(|pending| !index.machines.contains_key(&pending.machine));
         let mut changed = hive.unsaved || hive.index.machines != index.machines;
         for url in index.urls {
             changed |= hive.index.urls.insert(url);
@@ -769,13 +777,19 @@ impl HubDir {
             roots: request.roots.iter().cloned().collect(),
             until: now + self.pending_lifetime,
         });
-        let mut info = self.info(id).expect("chosen or created");
+        let info = self.info(id).expect("chosen or created");
         let hive = &self.hives[id];
         let mut machines = hive.index.machines.clone();
-        machines.extend(hive.pending.iter().map(|pending| pending.machine.clone()));
-        let present = machines.iter().cloned().collect();
-        machines.insert(request.machine.clone());
-        info.machines = display_names(&machines);
+        for pending in &hive.pending {
+            machines
+                .entry(pending.machine.clone())
+                .or_insert_with(|| workspaces::machine_name(&pending.machine).to_owned());
+        }
+        let present = machines.keys().cloned().collect();
+        machines
+            .entry(request.machine.clone())
+            .or_insert_with(|| workspaces::machine_name(&request.machine).to_owned());
+        let info = info.named(&machines);
         Ok(Joined {
             hive: info,
             created,
@@ -843,12 +857,19 @@ impl HubDir {
     }
 }
 
-/// Machines' names, as `musubi list` shows them: told apart by their keys where they are
-/// alike.
-fn display_names(keys: &BTreeSet<String>) -> Vec<String> {
-    workspaces::display_names(keys, |_| false)
-        .into_values()
-        .collect()
+impl HiveInfo {
+    /// This hive with `machines`, by key, shown as `musubi list` shows them: told apart by
+    /// their keys where they are alike, as every copy tells them apart.
+    fn named(mut self, machines: &BTreeMap<String, String>) -> Self {
+        let shown = workspaces::display_names(machines, |_| false);
+        self.qualified = shown
+            .iter()
+            .filter(|(key, label)| machines[*key] != **label)
+            .map(|(key, label)| (key.clone(), label.clone()))
+            .collect();
+        self.machines = shown.into_values().collect();
+        self
+    }
 }
 
 /// What a join request's [`JoinChoice`] comes to among the hub's hives, once checked: the
@@ -1117,7 +1138,7 @@ mod tests {
         assert_eq!(hubs.hives[&id].pending.len(), 1);
         let pushed = HiveIndex {
             remote_bindings: BTreeMap::new(),
-            machines: BTreeSet::from(["alpha#00000000".to_owned()]),
+            machines: BTreeMap::from([("alpha#00000000".to_owned(), "alpha".to_owned())]),
             ..HiveIndex::default()
         };
         hubs.update_index(&id, pushed).unwrap();
@@ -1259,8 +1280,9 @@ mod tests {
         assert_eq!(hubs.join(&named).unwrap_err(), refusal);
     }
 
-    /// Machines of one name, which their keys tell apart, are listed apart, and a joining
-    /// machine is listed as it will be once it has pushed.
+    /// Machines of one name, which their keys tell apart, are all listed with part of their
+    /// keys, and a joining machine is listed by the name its key embeds, as it will be once it
+    /// has pushed.
     #[test]
     fn machines_of_one_name_are_told_apart() {
         let dir = tempfile::tempdir().unwrap();
@@ -1269,19 +1291,22 @@ mod tests {
         let id = hubs.join(&creating(request("mac", url))).unwrap().hive.id;
         let pushed = HiveIndex {
             remote_bindings: BTreeMap::new(),
-            machines: BTreeSet::from(["mac#00000000".to_owned(), "mac#11111111".to_owned()]),
+            machines: BTreeMap::from([
+                ("mac#00000000".to_owned(), "mac".to_owned()),
+                ("desk#11111111".to_owned(), "mac".to_owned()),
+            ]),
             roots: BTreeSet::from(["11".repeat(20)]),
             ..HiveIndex::default()
         };
         hubs.update_index(&id, pushed).unwrap();
-        assert_eq!(hubs.info(&id).unwrap().machines, ["mac-0000", "mac-1111"]);
+        assert_eq!(hubs.info(&id).unwrap().machines, ["mac-1111", "mac-0000"]);
         let third = JoinRequest {
             choice: JoinChoice::Hive(id.to_string()),
             machine: "mac#22222222".to_owned(),
             ..request("mac", url)
         };
         let joined = hubs.join(&third).unwrap();
-        assert_eq!(joined.hive.machines, ["mac-0000", "mac-1111", "mac-2222"]);
+        assert_eq!(joined.hive.machines, ["mac-1111", "mac-0000", "mac-2222"]);
     }
 
     /// A push whose index the hub couldn't save has it saved by the next, though that push
@@ -1297,7 +1322,7 @@ mod tests {
             .id;
         let pushed = HiveIndex {
             remote_bindings: BTreeMap::new(),
-            machines: BTreeSet::from(["alpha#00000000".to_owned()]),
+            machines: BTreeMap::from([("alpha#00000000".to_owned(), "alpha".to_owned())]),
             roots: BTreeSet::from(["11".repeat(20)]),
             urls: BTreeSet::from(["https://example.com/a".to_owned()]),
         };

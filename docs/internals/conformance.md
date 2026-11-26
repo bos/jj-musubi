@@ -17,7 +17,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Chunks.lean`: chunked blobs | `BlobStore::receive`, and `RemoteHub`'s `upload` and `download` | `receive_follows_the_prefix_model` and `transfers_follow_the_attempt_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
 | `Publication.lean`: cumulative snapshot budgets, scoped approval and selected cleanup | `node/publication` and the pre-upload gate | `node::publication::tests` through the oracle, and `musubi-sync` publication fixtures | [Snapshot publication](#snapshot-publication) |
-| `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
+| `Identity.lean`, `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
 ## The claim
 
@@ -587,15 +587,19 @@ three links:
 1. **The incremental rule.** What `Presence` keeps for each copy present, its latest work
    that no forget saw (`UMax`), follows from the parents' alone as the Rust computes it
    (`umax_merge`, `umax_work`, `umax_forget`), and says whether the copy is present
-   (`present_iff_umax`).
+   (`present_iff_umax`). `Presence` keeps each copy's latest `musubi.name` records too, through
+   forgets: what a copy's name is (`Identity.NHist.NameIs`), on which naming depends
+   ([Workspace names](#workspace-names)).
 2. **Relational to executable.** `formal/Musubi/PresenceExec.lean` defines the rule on a
    finite history: `presentB` and `latestB`, proved to compute `Present` and `UMax`
-   (`presentB_iff`, `mem_latestB`). The oracle answers with them.
+   (`presentB_iff`, `mem_latestB`); and `nameB`, proved to compute `NameIs` (`nameB_some`,
+   `nameB_none`). The oracle answers with them.
 3. **Oracle to Rust.** The Hegel test `presence::conformance`, in
    `crates/musubi-jj/tests/it/presence.rs`, makes histories of up to 12 operations and 3
-   copies, each operation work by one copy or a forget of some, never both, as musubi makes
-   them. It computes every operation's presence with `Presence::merge` and `apply`, and
-   requires it to equal the oracle's, copy by copy, latest work included.
+   copies, each operation work by one copy, which may record a name, or a forget of some, never
+   both, as musubi makes them. It computes every operation's presence with `Presence::merge`
+   and `apply`, and requires it to equal the oracle's, copy by copy, latest work and name
+   included.
 
 The test checks the rule, not where it is applied: that `canonical_view` publishes exactly
 the present copies' workspaces, and that realizing keeps a forgotten copy's own, is for the
@@ -604,14 +608,17 @@ race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
 The oracle's presence request and reply:
 
 ```json
-{"op": "presence", "ops": [{"parents": [], "work": 7, "forgets": []}, {"parents": [0], "work": null, "forgets": [7]}]}
-{"ok": true, "presence": [[{"copy": 7, "latest": [0]}], []]}
+{"op": "presence", "ops": [{"parents": [], "work": 7, "forgets": []}, {"parents": [0], "work": 7, "forgets": [], "name": 3}, {"parents": [1], "work": null, "forgets": [7]}, {"parents": [2], "work": 7, "forgets": []}]}
+{"ok": true, "presence": [[{"copy": 7, "latest": [0], "name": null}], [{"copy": 7, "latest": [1], "name": 3}], [], [{"copy": 7, "latest": [3], "name": 3}]]}
 ```
 
 Operation `i` is the `i`th of `ops`, and its parents must come before it. `work` is the copy
-the operation is work by, or `null`, and `forgets` the copies it forgets. The reply has, for
-each operation, the copies present there, ascending, each with its latest work that no
-forget saw. A presence request leaves the oracle's session as it was.
+the operation is work by, or `null`, and `forgets` the copies it forgets. `name`, which may be
+left out, is the name the operation records for the copy whose work it is, as a number ordered
+as the names it stands for, or `null`. The reply has, for each operation, the copies present
+there, ascending, each with its latest work that no forget saw, and its `name` there, `null`
+where it has recorded none and its name is the one in its key. A presence request leaves the
+oracle's session as it was.
 
 ```sh
 cargo nextest run -p musubi-jj -E 'test(/^presence::/)'
@@ -1421,46 +1428,57 @@ writes. Hub behavior and translation of earlier operations have separate tests.
 
 ## Workspace names
 
-`formal/Musubi/Names.lean` proves that the names under which a machine shows a view's
-workspaces are distinct: its own under their own names, and each other machine's as
-`<prefix>/<workspace>` ([design.md, "Which workspaces are this machine's
-own"](design.md#which-workspaces-are-this-machines-own)). Canonicalizing reads the names back as
-machine-qualified keys, so two workspaces shown alike would be taken for one. The chain has two
-links:
+`formal/Musubi/Identity.lean` says which name each copy has at an operation, and proves that the
+names under which a machine shows a view's workspaces are distinct: its own under their own
+names, and each other copy's as `<prefix>/<workspace>` ([design.md, "Which workspaces are this
+machine's own"](design.md#which-workspaces-are-this-machines-own)). Canonicalizing reads the
+names back as machine-qualified keys, so two workspaces shown alike would be taken for one. The
+chain has two links:
 
-1. **The rule.** `assign` gives each machine, in order, this one among them, as the hub names
-   every machine, the first of its candidate prefixes that is free: its name, if no other machine
-   has it, then `name-1a2b`, `name-1a2b3c4d`, and that with ever more dashes. A prefix is free if
-   no machine before took it and no name of this machine's own starts with it and `/`. One is
-   always free (`choose_free`), and so the names are injective, whatever the machines and the
-   names of this machine's own (`localName_injective`).
+1. **The rule.** Only the copies present at an operation are named, each by its name there: the
+   greatest its latest `musubi.name` records give, or the name in its key ([Presence](#presence)
+   checks how musubi keeps those). A copy whose name no other copy named has keeps it plain;
+   copies that share a name all take longer ones (`Naming.unique`). `Naming.assign` names the
+   copies that keep their plain names first, then the rest, in their keys' order, each taking
+   the first of its candidate prefixes (`Names.lean`) that is free: its name, if it keeps it
+   plain, then `name-1a2b`, `name-1a2b3c4d`, and that with ever more dashes. A prefix is free if
+   no copy before took it and no name of this machine's own starts with it and `/`. One is
+   always free (`Names.choose_free`), and so the names are injective, whatever the copies,
+   their names, and the names of this machine's own (`Naming.localName_injective`). A name only
+   one copy has is shown plain, unless a name of this machine's own starts with such a name and
+   `/` (`Naming.unique_label`), and a shared one for none of the copies that have it
+   (`Naming.shared_qualified`).
 2. **The code.** `workspaces::display_names` makes the same choices. The Hegel test
-   `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws up to five
-   machines and three names of this machine's own from names, suffixes and names of its own chosen
-   to clash, this machine among the machines, and requires each machine's prefix to be the one the
-   oracle's `assign` gives it, and the name `workspaces::local_name` gives each machine's
-   workspaces here, this machine's own names among them, to be the oracle's `localName`, and all
-   of them distinct. Letting a machine take a prefix an earlier one took, or one that starts a
-   name of this machine's own, fails it. `longer_names_where_shorter_clash` pins the cases the
-   rule before this one named alike, which `Names.lean` checks with `#guard`.
+   `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws copies with
+   names and suffixes chosen to clash, and names of this machine's own, this machine among the
+   copies named or not, and requires each copy's prefix to be the one the oracle's
+   `Naming.assign` gives it, and the name `workspaces::local_name` gives each copy's workspaces
+   here, this machine's own names among them, to be the oracle's `Naming.localName`, and all of
+   them distinct. Only the copies given are named. Letting a copy take a prefix an earlier one
+   took, or one that starts a name of this machine's own, or giving the plain name to a copy
+   whose name another has, fails it. `Identity.lean` checks the cases where candidates collide
+   with `#guard`.
 
-The test checks the rule, not where musubi applies it: that `local_names`, `canonical_view` and
-`local_view` pass it every machine the history has known, this one included, and all of this
-machine's own names, including those in the op heads a realization is merged with, is for the
-race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
+The test checks the rule, not where musubi applies it: that `local_names`, `canonical_view`,
+`local_view` and the hub's list pass it the copies present at the operation, with their names
+there, and all of this machine's own names, including those in the op heads a realization is
+merged with, is for the race catalogue (`crates/musubi-sync/tests/races/`) and the CLI tests to
+check.
 
 The oracle's names request and reply:
 
 ```json
-{"op": "names", "machines": [{"name": "mac", "suffix": "aaaa1111"}, {"name": "mac", "suffix": "aaaa2222"}], "own": ["mac-aaaa2222/x"], "me": {"name": "mac", "suffix": "aaaa2222"}, "workspaces": [{"machine": 0, "workspace": "default"}, {"machine": 1, "workspace": "mac-aaaa2222/x"}]}
-{"ok": true, "prefixes": ["mac-aaaa", "mac-aaaa2222-"], "names": ["mac-aaaa/default", "mac-aaaa2222/x"]}
+{"op": "names", "machines": [{"name": "mac", "suffix": "aaaa1111"}, {"name": "mac", "suffix": "aaaa2222"}, {"name": "beta", "suffix": "1a2b3c4d"}], "own": ["beta/x", "beta-1a2b/default"], "me": 2, "workspaces": [{"machine": 0, "workspace": "default"}, {"machine": 1, "workspace": "default"}, {"machine": 2, "workspace": "beta-1a2b/default"}]}
+{"names": ["mac-aaaa/default", "mac-aaaa2222/default", "beta-1a2b/default"], "ok": true, "prefixes": ["mac-aaaa", "mac-aaaa2222", "beta-1a2b3c4d"]}
 ```
 
-The machines go in the order `display_names` takes them, their keys' order, each a key's name
-and suffix, this machine, `me`, among them, and `own` holds the names of this machine's own.
-`workspaces` are the workspaces to name, each a machine's index and the workspace's name on
-it. The reply has each machine's prefix, in the same order, and each workspace's name here
-(`localName`). A names request leaves the oracle's session as it was.
+The copies go in their keys' order, numbered so, each with its name at the operation and its
+key's suffix. `me` is this machine's number, which may be past the copies named when this copy
+isn't present, and `own` holds the names of this machine's own. `workspaces` are the workspaces
+to name, each a copy's number and the workspace's name on it. The reply has each copy's prefix,
+in the order given, and each workspace's name here (`Naming.localName`): neither `mac` is plain,
+and the second, whose suffix starts as the first's, takes its whole suffix. A names request
+leaves the oracle's session as it was.
 
 ## Snapshot publication
 

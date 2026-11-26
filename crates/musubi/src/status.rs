@@ -66,6 +66,8 @@ pub struct Hive {
     pub sent: Option<bool>,
     /// Whether the hive has forgotten this copy, until it is next used.
     pub forgotten: bool,
+    /// This copy's name in the hive's history, which it keeps while forgotten.
+    name: Option<String>,
     /// Each machine's working copies, this machine's first.
     pub working_copies: Vec<WorkingCopy>,
     /// Each copy in the hive.
@@ -268,6 +270,7 @@ impl Hive {
             config,
             sent: None,
             forgotten: false,
+            name: None,
             working_copies: vec![],
             copies: vec![],
             slashed: None,
@@ -285,7 +288,9 @@ impl Hive {
 
     /// What the repository says of the hive's copies and working copies.
     fn read(&mut self, node: &mut NodeRepo) -> anyhow::Result<()> {
-        self.forgotten = !node.present_copies()?.1.is_present(node.machine().key());
+        let (_, presence) = node.present_copies()?;
+        self.forgotten = !presence.is_present(node.machine().key());
+        self.name = Some(presence.name(node.machine().key()).to_owned());
         let store = node.loader().store().clone();
         self.working_copies = node
             .machine_workspaces()?
@@ -460,12 +465,14 @@ impl Hive {
 
     /// This machine's name in the hive: as the hive names it among the copies present, which
     /// tells it apart by part of its key from another copy of its name, while the hive has it;
-    /// else as its record names it.
+    /// else its name in the hive's history, or as its record names it.
     fn machine(&self) -> &str {
         self.copies
             .iter()
             .find(|copy| copy.this)
-            .map_or(&self.config.node, |copy| &copy.name)
+            .map(|copy| copy.name.as_str())
+            .or(self.name.as_deref())
+            .unwrap_or(&self.config.node)
     }
 
     /// Whether its last sync failed.

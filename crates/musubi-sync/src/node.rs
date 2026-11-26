@@ -170,9 +170,9 @@ impl NodeAdapter {
     }
 
     /// What a node does once its policy has nothing left to do, having just fetched the
-    /// hive's head: show other machines' workspaces again, give its
-    /// own workspaces new commits where theirs were abandoned elsewhere, record this copy's
-    /// `musubi.forget-after` if it changed, and forget the copies that have gone unused for
+    /// hive's head: show other machines' workspaces again, give its own workspaces new
+    /// commits where theirs were abandoned elsewhere, record this copy's name and
+    /// `musubi.forget-after` if they changed, and forget the copies that have gone unused for
     /// longer than theirs. Each runs; any may write an operation to upload, and then it
     /// returns true, since the policy has more to do.
     ///
@@ -185,10 +185,11 @@ impl NodeAdapter {
         self.clock.tick(&mut self.repo);
         let workspaces = self.show_other_workspaces()?;
         let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
+        let named = self.repo.record_name()?;
         let recorded = self.repo.record_forget_after()?;
         let retired = self.repo.forget_retired_copies()?;
         let forgotten = self.repo.expire_idle(self.clock.now(), EXPIRY_STAGGER)?;
-        Ok(workspaces || replaced || recorded || retired || !forgotten.is_empty())
+        Ok(workspaces || replaced || named || recorded || retired || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it, with its time moved on

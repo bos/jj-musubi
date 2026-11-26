@@ -20,7 +20,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
 | Detach and rejoin conformance | `crates/musubi/src/copy/conformance/detach.rs` | Process exit after each local membership write, followed by a fresh process reading the files and retrying against `Copies.Detach` ([conformance](conformance.md#detach-and-join-write-boundaries)) | Sixteen write boundaries |
 | Chunked blob conformance | `crates/musubi-sync/src/blobs.rs`, `crates/musubi-sync/src/remote.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean`, and the senders from its attempts under a deadline ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
-| Workspace names conformance | `crates/musubi-jj/src/workspaces.rs` | The names under which a machine shows other machines' workspaces departing from `formal/Musubi/Names.lean` ([conformance.md, "Workspace names"](conformance.md#workspace-names)) | A millisecond per case |
+| Workspace names conformance | `crates/musubi-jj/src/workspaces.rs` | The names under which a machine shows other machines' workspaces departing from `Naming` in `formal/Musubi/Identity.lean` ([conformance.md, "Workspace names"](conformance.md#workspace-names)) | A millisecond per case |
 | Per-machine refs conformance | `crates/musubi-jj/tests/it/ref_laws.rs`, `crates/musubi-sync/tests/races/refs.rs` | jj's ref merge, import and export, and musubi's realization, departing from `formal/Musubi/Refs.lean` ([conformance.md, "Per-machine refs"](conformance.md#per-machine-refs)) | ~0.3 s per case |
 | Realization conformance | `crates/musubi-jj/src/node/realize_laws.rs`, `crates/musubi-jj/src/node/realize/concurrent_tests.rs` | jj's merge of op heads departing from the laws `formal/Musubi/Realize.lean` assumes, and a realization racing a `jj` command, or interrupted, ending elsewhere than jj's own merge of the op heads with it ([conformance.md, "Realization"](conformance.md#realization)) | ~0.1 s per law; ~0.5–1.5 s per race |
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior ([races.md](races.md)) | ~0.3 s per test |
@@ -1011,8 +1011,9 @@ stale view, git can move a branch jj hasn't imported, a node can stop halfway th
 - **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused
   past its `musubi.forget-after`; forget one, abandon an operation the hive doesn't have, and
   sync the rest of the hive twice while the forgotten copy is away, as one rule, which a sequence
-  would rarely do by itself; or, with two machines, have a third join, with an empty copy made as
-  `musubi clone` makes one.
+  would rarely do by itself; rename a machine with `musubi.machine-name`, often to another's
+  name; or, with two machines, have a third join, with an empty copy made as `musubi clone`
+  makes one.
 - **The remote**: someone outside the hive advances `origin`; a machine fetches or pushes.
 - **Git-side work**: move or delete a branch with `git`.
 - **Sync**: one node syncs until it is idle, or takes only a few steps of a sync, which may stop

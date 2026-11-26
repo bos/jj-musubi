@@ -115,7 +115,8 @@ including a snapshot. Other machines' rewrites can make its working copy
 
 A copy deleted and cloned again on the same machine shows beside the new one, both under the
 machine's name with part of their ids, as `laptop-1a2b` and `laptop-3c4d`. `musubi list` and
-`musubi status` say which is the new copy; forget the other by its name.
+`musubi status` say which is the new copy; forget the other by its name, as in `musubi forget
+laptop-3c4d`. The new copy then goes back to the machine's name.
 
 Copies are never forgotten by default, whether joined by a person or agent. Give temporary
 copies an inactivity lease with `musubi join`, `create` or `clone`:
@@ -147,10 +148,9 @@ forgotten.
 
 ### Rejoin, or stop using jj-musubi
 
-After leaving, run `musubi join` in the same repo to join as a new copy. To give the new
-copy a different machine name, run `musubi join --machine work-laptop`; under its old name,
-the other machines show it with part of its new key, as `laptop-1a2b/default`. Your files and
-jj history stay in the checkout.
+After leaving, run `musubi join` in the same repo to join as a new copy, under the machine's
+name. Your files and jj history stay in the checkout. To rename the machine, change its
+setting rather than leaving and joining again: see [Naming machines](setup.md#naming-machines).
 
 If you join a different hive, or start one with `musubi create`, the operation history you
 already shared goes with you, with everything it holds, even work you have deleted since. The

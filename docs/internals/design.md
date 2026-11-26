@@ -289,23 +289,54 @@ rename it or forget it (`unrecorded_workspaces`), and then records that it check
 refuses to join with one, since joining on the root forgets it, and so records the check at its
 first join.
 
-Another machine is shown under its name, or, where two machines share a name, this one included,
-or the name would clash with a workspace of this machine's, under its name and the start of its
-key's random suffix (`laptop-1a2b`; `local_names`). Where that clashes too, with another
-machine's name or a workspace of this machine's, it is shown under its name and its whole suffix,
-then that with ever more dashes: each machine in turn takes the first of these that is free, and
-`formal/Musubi/Names.lean` proves that no two workspaces are shown alike. The names are chosen
-among every machine the history has known, present or forgotten (`Presence::known`), so a machine
-keeps its name as others come and go, and a forgotten machine's name is never another's. The hub
-names every machine with workspaces in the hive for `musubi list`, among themselves, so a machine
-shows here as the hub lists it but where a forgotten machine, which only the hub leaves out, or a
-workspace of this machine's makes its name longer here. `musubi status` names this machine among
-the copies present, as the hub names those with workspaces (`name_in_hive`); `musubi list` finds a
-copy here among the hub's names by its key (`listed_as`); and `musubi forget` takes this
-machine's key and that name for this machine's, and any other name it could be shown under, where
-no other machine could be. This machine's own names as of a canonical operation are its
-workspaces in that view, or, where the hive has forgotten it, those as of its latest work, which
-`Presence` keeps through forgets (`own_names`).
+### Machine names
+
+A machine's key keeps the name it joined under (`laptop#1a2b3c4d`), but its name in the hive can
+change. Its daemon records the name `musubi.machine-name` gives it, read from the machine's jj
+config, not a repository's, whenever that differs from the copy's name in the hive: an operation
+that is the copy's work and records `musubi.name` (`record_name`, as `record_forget_after`
+records `musubi.forget-after`). A copy's name at an operation is the greatest of its latest such
+records there, or, with none, the name its key embeds (`Presence::name`; `NameIs` in
+`formal/Musubi/Identity.lean`). Forgets leave the records, so a copy that comes back keeps its
+name. With the setting unset, nothing is recorded: a copy keeps its name, and never follows the
+hostname after its join. `--machine` on `create`, `join` and `clone` sets the setting where
+nothing does, and is refused where it names the machine otherwise, or, in a repository with a
+key, where it isn't that key's name or the setting's.
+
+At a canonical operation, the machines named are the copies present there (and any with
+workspaces in its view, as one that joined before joining was work), by their names there:
+nothing remembers a machine forgotten, or a name a machine had before. A machine whose name no
+other has keeps it plain; machines that share a name are all shown with part of their keys, so
+that none has the name over the others and nothing need say which came to it first, which
+concurrent claims and joins on the root leave undecided (`unique`). The machines shown plain
+are named first, then the rest, each taking the first of its candidates that no machine before
+it took and that starts no name of this machine's own and `/`: its name and the start of its
+key's random suffix (`laptop-1a2b`; `local_names`), its name and the whole suffix, then that
+with ever more dashes. `formal/Musubi/Identity.lean` proves that no two workspaces are shown
+alike (`localName_injective`), that every machine names an operation alike, from its history
+alone (`naming_local`), and that a name only one machine has is shown plain (`unique_label`)
+and a shared one for none of them (`shared_qualified`). The hub names the same machines by the
+same rule for `musubi list`, from its head (`HiveIndex::machines`), so a machine shows here as
+the hub lists it but where a workspace of this machine's makes its name longer here; a copy
+whose join the hub has taken but that hasn't pushed is listed by the name its key embeds, which
+qualifies a machine present of that name in the list already, as its push will everywhere.
+`musubi status` names this machine among the copies present (`name_in_hive`); `musubi list`
+shows a copy here by the name the hub lists it under where that isn't its own (`listed_as`); and
+`musubi forget` takes this machine's key and that name for this machine's, and any other name it
+could be shown under by its name now, where no other machine could be, and refuses a name more
+than one other machine could be shown under (`refuse_ambiguous`). This machine's own names as of
+a canonical operation are its workspaces in that view, or, where the hive has forgotten it,
+those as of its latest work, which `Presence` keeps through forgets (`own_names`).
+
+Labels change over time, so a name is read as of the operation it was made at. Canonicalizing a
+`jj` command reads the names in its local view by its canonical parents' naming
+(`inherited_from_parents`), and a command that goes back to an older operation (`jj undo`, `jj op
+restore`, `jj op revert`) by the naming of the canonical operation the view it brings back came
+from (`started_from`): after a rename, or a forget and a rename into the forgotten machine's
+name, the old name stands for the workspace it stood for then, or for none. A name left in the
+local view at another commit than the hive gives the workspace it names now is shown at the
+hive's commit at the next sync (`show_other_workspaces`), so that it isn't taken later as a move of
+that workspace. `jj op log` keeps the names operations were realized under.
 
 A copy doesn't sync while it has a workspace of its own whose name has a `/`: one in its op
 heads' views that jj's workspace store records a directory for, whether the directory is there or

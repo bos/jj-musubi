@@ -2,6 +2,7 @@
 //! `jj bookmark list`: each hub, each of its hives, and each copy of a hive here, in that
 //! order, all one kind of line, whose template says how to show each.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -29,10 +30,13 @@ pub struct Line {
     pub id: String,
     /// The machines in the hive, as its hub knows them.
     pub machines: Vec<String>,
+    /// The machines its hub shows under a name other than their own, by key.
+    #[serde(skip)]
+    pub qualified: BTreeMap<String, String>,
     /// Where the copy is; none on a hub's line or a hive's.
     pub path: Option<PathBuf>,
     /// The copy's name among `machines`, where it isn't its machine's own, as while another
-    /// copy has that name too; else empty.
+    /// machine in the hive has the same name; else empty.
     pub machine: String,
     /// How the copy's syncing goes; empty on a hub's line or a hive's.
     pub status: String,
@@ -60,6 +64,7 @@ impl Line {
             hive: info.name.clone(),
             id: info.id.to_string(),
             machines: info.machines.clone(),
+            qualified: info.qualified.clone(),
             ..Self::default()
         }
     }

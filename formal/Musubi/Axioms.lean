@@ -19,6 +19,7 @@ import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Names
+import Musubi.Identity
 import Musubi.Contract
 import Musubi.OpHeadsRace
 import Musubi.Realize
@@ -256,7 +257,22 @@ open Musubi
 
 -- Names
 #assert_axioms Names.choose_free
-#assert_axioms Names.localName_injective
+
+-- Names copies record, and naming among the copies present
+#assert_axioms Identity.NHist.nameIs_unique
+#assert_axioms Identity.NHist.nameIs_exists
+#assert_axioms Identity.NHist.nameIs_congr
+#assert_axioms Identity.NHist.nameIs_local
+#assert_axioms Identity.NHist.rename_sticks
+#assert_axioms Identity.NHist.rename_present
+#assert_axioms Identity.Naming.localName_injective
+#assert_axioms Identity.Naming.assign_congr
+#assert_axioms Identity.Naming.naming_local
+#assert_axioms Identity.Naming.resolve_at_origin
+#assert_axioms Identity.Naming.unique_label
+#assert_axioms Identity.Naming.shared_qualified
+#assert_axioms Presence.EHist.nameB_some
+#assert_axioms Presence.EHist.nameB_none
 
 -- Expected values derived from history
 #assert_axioms Refs.Expected.eval_congr_on

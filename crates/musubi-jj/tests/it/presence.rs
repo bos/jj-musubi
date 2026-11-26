@@ -1,7 +1,7 @@
 //! The presence rule as musubi computes it (`musubi_jj::presence`) against the Lean model's
 //! executable form, through the oracle (docs/internals/conformance.md, "Presence"): for
 //! random histories, the copies present at every operation, with each one's latest work that
-//! no forget saw, are what the model says.
+//! no forget saw, and the name it last recorded (`NameIs`), are what the model says.
 
 #![allow(clippy::unwrap_used)]
 
@@ -19,18 +19,25 @@ use serde_json::json;
 use crate::oracle::Oracle;
 
 /// How many copies and operations a history has at most: enough for a copy's work to race
-/// forgets of it from two sides, and for merges of merges.
+/// forgets of it from two sides, and for merges of merges; and how many names copies record,
+/// few, so that records on two lines of history differ and agree.
 const COPIES: u64 = 3;
 const OPS: usize = 12;
+const NAMES: u64 = 3;
 
 /// An operation: its parents, all earlier, and what it is to presence, as musubi makes
-/// operations: work by one copy, or a forget of some, never both.
+/// operations: work by one copy, which may record its name, or a forget of some, never both.
 #[derive(Debug)]
 struct Op {
     parents: Vec<usize>,
     work: Option<u64>,
+    name: Option<u64>,
     forgets: BTreeSet<u64>,
 }
+
+/// What a copy present at an operation is: its latest work that no forget saw, and the name it
+/// last recorded.
+type Copy = (BTreeSet<usize>, Option<u64>);
 
 /// Drawn as one value, so a failure prints the history once, as the operations it has.
 #[hegel::composite]
@@ -50,23 +57,25 @@ fn history(tc: &TestCase) -> Vec<Op> {
             };
             // No work is the ordinary operation: it forgets nothing either, once shrunk.
             let work = tc.draw(gs::optional(copy()));
-            let forgets = if work.is_none() {
-                tc.draw(gs::btree_sets(copy()).max_size(2))
+            let (forgets, name) = if work.is_none() {
+                (tc.draw(gs::btree_sets(copy()).max_size(2)), None)
             } else {
-                BTreeSet::new()
+                let name = gs::integers::<u64>().max_value(NAMES - 1);
+                (BTreeSet::new(), tc.draw(gs::optional(name)))
             };
             Op {
                 parents: parents.into_iter().collect(),
                 work,
+                name,
                 forgets,
             }
         })
         .collect()
 }
 
-/// Each operation's copies with their latest work, as `Presence::merge` and
-/// `Presence::apply` compute them from the parents'.
-fn computed(ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize>>> {
+/// Each operation's copies, as `Presence::merge` and `Presence::apply` compute them from the
+/// parents'.
+fn computed(ops: &[Op]) -> Vec<BTreeMap<u64, Copy>> {
     let is_ancestor = |a: &usize, b: &usize| -> Result<bool, Infallible> {
         let mut stack = vec![*b];
         while let Some(x) = stack.pop() {
@@ -81,9 +90,11 @@ fn computed(ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize>>> {
     for (x, op) in ops.iter().enumerate() {
         let parents: Vec<(usize, &Presence<usize>)> =
             op.parents.iter().map(|&p| (p, &presences[p])).collect();
+        // Names as single digits, which order as the numbers they stand for.
         let kind = Kind {
             work: op.work.map(|k| k.to_string()),
             forgets: op.forgets.iter().map(u64::to_string).collect(),
+            name: op.name.map(|n| n.to_string()),
             ..Kind::default()
         };
         let presence = Presence::merge(&parents, is_ancestor)
@@ -96,17 +107,25 @@ fn computed(ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize>>> {
         .map(|presence| {
             presence
                 .copies()
-                .map(|k| (k.parse().unwrap(), presence.latest(k).unwrap().clone()))
+                .map(|k| {
+                    let copy = (
+                        presence.latest(k).unwrap().clone(),
+                        presence.recorded_name(k).map(|n| n.parse().unwrap()),
+                    );
+                    (k.parse().unwrap(), copy)
+                })
                 .collect()
         })
         .collect()
 }
 
 /// The model's answer for the same history.
-fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize>>> {
+fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, Copy>> {
     let ops: Vec<Value> = ops
         .iter()
-        .map(|op| json!({"parents": op.parents, "work": op.work, "forgets": op.forgets}))
+        .map(|op| {
+            json!({"parents": op.parents, "work": op.work, "forgets": op.forgets, "name": op.name})
+        })
         .collect();
     let reply = oracle.call(&json!({"op": "presence", "ops": ops}));
     assert_eq!(reply["ok"], true, "the oracle refused the history: {reply}");
@@ -121,7 +140,8 @@ fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize
                 .map(|entry| {
                     let latest = entry["latest"].as_array().unwrap();
                     let latest = latest.iter().map(|c| c.as_u64().unwrap() as usize);
-                    (entry["copy"].as_u64().unwrap(), latest.collect())
+                    let copy = (latest.collect(), entry["name"].as_u64());
+                    (entry["copy"].as_u64().unwrap(), copy)
                 })
                 .collect()
         })

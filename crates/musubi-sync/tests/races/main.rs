@@ -21,6 +21,7 @@ mod expiry;
 mod forget;
 mod found;
 mod history;
+mod names;
 mod objects;
 mod refs;
 mod remotes;

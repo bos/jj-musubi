@@ -3,7 +3,6 @@
 //! latest work is older than that.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -205,7 +204,7 @@ impl NodeRepo {
                 names
                     .get(key)
                     .cloned()
-                    .unwrap_or_else(|| workspaces::machine_name(key).to_owned())
+                    .unwrap_or_else(|| presence.name(key).to_owned())
             };
             copies.push(Activity {
                 key: key.to_owned(),
@@ -248,20 +247,23 @@ impl NodeRepo {
             .unwrap_or(operation.metadata.time.end.timestamp.0))
     }
 
-    /// This machine's name in the hive: its plain name, unless another copy present has that
-    /// name too, as when a copy deleted without `musubi leave` is cloned again, and then with
-    /// part of its key, `laptop-1a2b`. It is named among the copies present as the hub names
-    /// those with workspaces for `musubi list` (`workspaces::display_names`), so the two
-    /// differ only where a copy present has no workspaces.
-    /// A workspace of this machine's own never makes it longer, as it can another machine's
-    /// name here: no machine shows those under a prefix.
+    /// This machine's name in the hive, as the hive names it among the copies present: its
+    /// name, unless another copy present has that name too, as when a copy deleted without
+    /// `musubi leave` is cloned again, or one renamed into another's name, and then with part
+    /// of its key, `laptop-1a2b`. It is named as the hub names those
+    /// with workspaces for `musubi list` (`workspaces::display_names`), so the two differ only
+    /// where a copy present has no workspaces. A workspace of this machine's own never makes
+    /// it longer, as it can another machine's name here: no machine shows those under a
+    /// prefix.
     fn name_in_hive(&self, presence: &Presence<Work>) -> String {
         let own = self.machine.key();
-        let mut machines: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
-        machines.insert(own.to_owned());
+        let mut machines = presence.named();
+        machines
+            .entry(own.to_owned())
+            .or_insert_with(|| presence.name(own).to_owned());
         workspaces::display_names(&machines, |_| false)
             .remove(own)
-            .unwrap_or_else(|| self.machine.name().to_owned())
+            .unwrap_or_else(|| presence.name(own).to_owned())
     }
 
     /// The name of each other present copy, by machine key, even with no workspaces.
